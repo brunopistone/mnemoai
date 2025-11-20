@@ -1,0 +1,11 @@
+[Unit]
+Description=Ollama VRAM Cleaner
+After=ollama.service
+
+[Service]
+Type=simple
+ExecStart=<PATH_TO_FOLDER>/ai-assistant/bash/ollama-freeup-vram/ollama_free_vram.sh
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

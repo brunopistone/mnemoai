@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ollama.vramcleaner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string><PATH_TO_FOLDER>/ai-assistant/bash/ollama-freeup-vram/ollama_free_vram.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/bin:/usr/bin</string>
+        <key>HOME</key>
+        <string><PATH_TO_USER_HOME>></string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/ollama_vramcleaner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/ollama_vramcleaner_error.log</string>
+</dict>
+</plist>Copied!   

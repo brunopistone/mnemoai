@@ -1,0 +1,300 @@
+"""Chat interface handling for the application."""
+
+import asyncio
+from client.managers.dpo_collector import DPOCollector
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.key_binding import KeyBindings
+import threading
+import time
+from typing import Any
+from utils.config import config
+from utils.logger import logger
+
+
+class ChatInterface:
+    """Handles chat interface and user interaction."""
+
+    def __init__(self, client: Any) -> None:
+        """Initialize chat interface.
+
+        Args:
+            client: StrandsClient instance
+        """
+        self.client = client
+
+        self.interaction_quality = []  # Track quality per interaction
+        # Initialize DPO collector with session timestamp
+        self.client.dpo_collector = DPOCollector(
+            self.client.session_id.split("_", 1)[1]
+        )
+        # Persistent command history for arrow key navigation
+        self.command_history = InMemoryHistory()
+
+    def get_multiline_input(self) -> str:
+        """Get input with Ctrl+J for new lines, Enter to submit.
+
+        Returns:
+            User input string
+        """
+        bindings = KeyBindings()
+
+        @bindings.add("c-j")
+        def _(event: Any) -> None:
+            """Handle Ctrl+J to insert newline.
+
+            Args:
+                event: Key binding event
+            """
+            event.app.current_buffer.insert_text("\n")
+
+        session = PromptSession(
+            history=self.command_history,
+            key_bindings=bindings,
+            multiline=False,
+        )
+
+        try:
+            return session.prompt(HTML("<ansiblue>></ansiblue> "))
+        except KeyboardInterrupt:
+            raise
+
+    def __welcome_message(self) -> None:
+        """Display welcome message with available commands."""
+        print("\n\033[90m┌" + "─" * 58 + "┐\033[0m")
+        print(
+            "\033[90m│\033[96m"
+            + "Welcome to Personal AI Assistant Application!".center(58)
+            + "\033[90m│\033[0m"
+        )
+        print("\033[90m├" + "─" * 58 + "┤\033[0m")
+        print(
+            "\033[90m│\033[97m Available commands:                                      \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/clear\033[97m - Clear conversation context                    \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/load <path>\033[97m - Load a saved conversation               \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/exit\033[97m or \033[92m/quit\033[97m - Exit the application                  \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/save\033[97m - Save current conversation                      \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/good\033[97m - Mark last response as good (training data)     \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/dpo\033[97m - Toggle DPO collection mode                      \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/reject\033[97m - Generate & save rejected response (DPO)      \033[90m│\033[0m"
+        )
+        print("\033[90m├" + "─" * 58 + "┤\033[0m")
+        print(
+            "\033[90m│\033[97m Use \033[92mCtrl+J\033[97m for new lines, Enter to submit                \033[90m│\033[0m"
+        )
+        print("\033[90m└" + "─" * 58 + "┘\033[0m\n")
+
+    def __generate_alternative_response(self) -> None:
+        """Generate an alternative response based on the query for DPO"""
+        import re
+
+        # Build conversation using DPOCollector
+        conversation = self.client.dpo_collector.build_conversation(
+            self.client.agent.messages
+        )
+
+        if len(conversation) >= 2:
+            chosen = conversation.copy()
+            messages_for_alt = self.client.agent.messages[:-1].copy()
+
+            def save_dpo_pair() -> None:
+                """Generate and save DPO preference pair in background."""
+                rejected_response = asyncio.run(
+                    self.client.dpo_collector.generate_alternative_response(
+                        messages_for_alt,
+                        self.client.model,
+                    )
+                )
+
+                # Parse rejected response for reasoning
+                reasoning = ""
+                thinking_match = re.search(
+                    r"<thinking>(.*?)</thinking>", rejected_response, re.DOTALL
+                )
+                if thinking_match:
+                    reasoning = thinking_match.group(1).strip()
+                    rejected_response = re.sub(
+                        r"<thinking>.*?</thinking>",
+                        "",
+                        rejected_response,
+                        flags=re.DOTALL,
+                    ).strip()
+
+                # Build rejected: same conversation but replace last assistant message
+                rejected = conversation[:-1].copy()
+                rejected_msg = {"role": "assistant", "content": rejected_response}
+                if reasoning:
+                    rejected_msg["reasoning_content"] = reasoning
+                rejected.append(rejected_msg)
+
+                self.client.dpo_collector.save_preference_pair(
+                    system_prompt=self.client.system_prompt,
+                    chosen=chosen,
+                    rejected=rejected,
+                    metadata={"timestamp": self.client.session_id.split("_", 1)[1]},
+                )
+                rejected_response = asyncio.run(
+                    self.client.dpo_collector.generate_alternative_response(
+                        messages_for_alt,
+                        self.client.model,
+                    )
+                )
+                # Build rejected: same conversation but with bad response
+                rejected = conversation[:-1].copy()
+                rejected.append({"role": "assistant", "content": rejected_response})
+
+                self.client.dpo_collector.save_preference_pair(
+                    system_prompt=self.client.system_prompt,
+                    chosen=chosen,
+                    rejected=rejected,
+                    metadata={"timestamp": self.client.session_id.split("_", 1)[1]},
+                )
+
+            # Run in background thread
+            thread = threading.Thread(target=save_dpo_pair, daemon=True)
+            thread.start()
+            print("\033[90m[DPO: generating pair in background...]\033[0m")
+
+    def run_chat_loop(self) -> None:
+        """Run the main chat loop.
+
+        Returns:
+            None
+        """
+        self.__welcome_message()
+
+        interrupt_count = 0
+        last_interrupt_time = 0
+
+        while True:
+            try:
+                query = self.get_multiline_input()
+                interrupt_count = 0
+            except (KeyboardInterrupt, EOFError):
+                current_time = time.time()
+
+                if current_time - last_interrupt_time > 2:
+                    interrupt_count = 0
+
+                interrupt_count += 1
+                last_interrupt_time = current_time
+
+                if interrupt_count == 1:
+                    print("\n> ")
+                    print(
+                        "\033[97m(To exit the CLI, press Ctrl+C or Ctrl+D again or type \033[92m/quit\033[97m)"
+                    )
+                    try:
+                        loop = asyncio.get_event_loop()
+                        pending = asyncio.all_tasks(loop)
+                        for task in pending:
+                            task.cancel()
+                    except:
+                        pass
+                    continue
+                else:
+                    print("\nExiting...")
+                    try:
+                        self.client.clear_context()
+                    except KeyboardInterrupt:
+                        pass  # User interrupted cleanup, just exit
+                    break
+
+            # Handle special commands
+            if query.lower() in ["/exit", "/quit"]:
+                try:
+                    self.client.clear_context()  # This will flush RAG
+                except KeyboardInterrupt:
+                    pass  # User interrupted cleanup, just exit
+                break
+
+            if query.lower() == "/clear":
+                self.client.clear_context()
+                if config.get("ENABLE_RAG", False):
+                    self.client._initialize_rag_session()
+                self.client._initialize_chunk_cache()
+                self.client.dpo_collector = DPOCollector(
+                    self.client.session_id.split("_", 1)[1]
+                )
+                print("Context cleared!")
+                continue
+
+            if query.lower() == "/save":
+                timestamp = self.client.session_id.split("_", 1)[1]
+                self.client.save_conversation_with_quality(
+                    timestamp, self.interaction_quality
+                )
+                continue
+
+            # Handle /load command
+            if query.lower().startswith("/load"):
+                if query.strip() == "/load":
+                    print("Usage: /load <path>")
+                    continue
+                file_path = query[6:].strip()  # Remove "/load " prefix
+                if self.client.load_conversation(file_path):
+                    print("Conversation loaded successfully!")
+                else:
+                    print("Failed to load conversation. Check the file path.")
+                continue
+
+            # Training data commands
+            if query.lower() == "/good":
+                interaction_idx = len(self.interaction_quality) - 1
+                if interaction_idx >= 0:
+                    self.interaction_quality[interaction_idx] = "good"
+                    print("✓ Marked as good")
+                else:
+                    print("No interaction to mark")
+                continue
+
+            if query.lower() == "/dpo":
+                self.client.dpo_mode = not self.client.dpo_mode
+                status = "enabled" if self.client.dpo_mode else "disabled"
+                print(f"DPO collection mode {status}")
+                continue
+
+            if query.lower() == "/reject":
+                if len(self.client.agent.messages) < 2:
+                    print("Need at least one interaction to generate rejection")
+                    continue
+
+                self.__generate_alternative_response()
+                continue
+
+            if not query.strip():
+                print("Input cannot be empty. Please try again.")
+                continue
+
+            try:
+                response = self.client.query(query)
+
+                # Track this interaction (unlabeled by default)
+                self.interaction_quality.append("unlabeled")
+
+                # Auto-generate DPO pair if in DPO mode (async, non-blocking)
+                if self.client.dpo_mode and self.client.visible_content:
+                    self.__generate_alternative_response()
+
+                if response != "Operation was cancelled.":
+                    print("\n")
+            except KeyboardInterrupt:
+                continue
+            except Exception as e:
+                logger.error(f"Error processing query: {str(e)}", exc_info=True)
+                print(f"Error: Unable to process your request. Please try again.")
