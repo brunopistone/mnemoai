@@ -148,22 +148,6 @@ class ChatInterface:
                     rejected=rejected,
                     metadata={"timestamp": self.client.session_id.split("_", 1)[1]},
                 )
-                rejected_response = asyncio.run(
-                    self.client.dpo_collector.generate_alternative_response(
-                        messages_for_alt,
-                        self.client.model,
-                    )
-                )
-                # Build rejected: same conversation but with bad response
-                rejected = conversation[:-1].copy()
-                rejected.append({"role": "assistant", "content": rejected_response})
-
-                self.client.dpo_collector.save_preference_pair(
-                    system_prompt=self.client.system_prompt,
-                    chosen=chosen,
-                    rejected=rejected,
-                    metadata={"timestamp": self.client.session_id.split("_", 1)[1]},
-                )
 
             # Run in background thread
             thread = threading.Thread(target=save_dpo_pair, daemon=True)
