@@ -101,6 +101,15 @@ class StrandsClient:
                 self.spinner.stop()
                 self.first_token_received = True
 
+        # Stop spinner when tool call starts
+        if "message" in kwargs and kwargs["message"].get("role") == "assistant":
+            content = kwargs["message"].get("content", [])
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("toolUse"):
+                        self.spinner.stop()
+                        break
+
         # Restart spinner after tool execution completes
         if (
             "message" in kwargs
@@ -170,6 +179,15 @@ class StrandsClient:
             if "data" in kwargs and kwargs["data"]:
                 self.spinner.stop()
                 self.first_token_received = True
+
+        # Stop spinner when tool call starts
+        if "message" in kwargs and kwargs["message"].get("role") == "assistant":
+            content = kwargs["message"].get("content", [])
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("toolUse"):
+                        self.spinner.stop()
+                        break
 
         # Restart spinner after tool execution completes
         if (

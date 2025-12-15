@@ -290,7 +290,7 @@ Model controllers and custom implementations.
 
 - **Controllers** (centralized model initialization):
   - `base_model_controller.py`: Base class with shared parameter setup
-  - `llm_controller.py`: LLM model initialization (Ollama, Bedrock, SageMaker)
+  - `llm_controller.py`: LLM model initialization (Bedrock, Ollama, OpenAI, SageMaker AI)
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
 - **Custom implementations** (`classes/`):
@@ -346,6 +346,16 @@ Session data is stored in `~/agent-conversations/{profile_name}/`:
 
 The assistant supports three model types:
 
+#### Amazon Bedrock
+
+```yaml
+MODEL_ID:
+  NAME: us.amazon.nova-pro-v1:0
+  TYPE: bedrock
+  REGION: us-east-1
+  TEMPERATURE: 0.1
+```
+
 #### Ollama (Local)
 
 ```yaml
@@ -360,14 +370,16 @@ MODEL_ID:
   TOP_P: 0.95
 ```
 
-#### Amazon Bedrock
+#### OpenAI
 
 ```yaml
 MODEL_ID:
-  NAME: us.amazon.nova-pro-v1:0
-  TYPE: bedrock
-  REGION: us-east-1
-  TEMPERATURE: 0.1
+  NAME: gpt-5-mini-2025-08-07
+  TYPE: openai
+  STREAM: true
+  REASONING_EFFORT: medium
+ENV:
+  OPENAI_API_KEY: your-openai-api-key
 ```
 
 #### Amazon SageMaker AI
@@ -395,16 +407,6 @@ VISION_MODEL_ID:
   TEMPERATURE: 0.3
 ```
 
-For SageMaker:
-
-```yaml
-VISION_MODEL_ID:
-  NAME: your-endpoint-name
-  TYPE: sagemaker
-  REGION: us-east-1
-  TEMPERATURE: 0.3
-```
-
 For Ollama:
 
 ```yaml
@@ -413,6 +415,26 @@ VISION_MODEL_ID:
   TYPE: ollama
   HOST: localhost
   PORT: 11434
+  TEMPERATURE: 0.3
+```
+
+For OpenAI:
+
+```yaml
+VISION_MODEL_ID:
+  NAME: gpt-5-mini-2025-08-07
+  TYPE: openai
+  STREAM: true
+  REASONING_EFFORT: medium
+```
+
+For SageMaker AI:
+
+```yaml
+VISION_MODEL_ID:
+  NAME: your-endpoint-name
+  TYPE: sagemaker
+  REGION: us-east-1
   TEMPERATURE: 0.3
 ```
 
@@ -432,12 +454,22 @@ The system prompt in `config.yaml` defines the assistant's behavior. Key section
 
 ```yaml
 ENABLE_RAG: true
+RAG_MAX_TOKENS: 8192
 DOC_CHUNK_TOKENS: 1024
 VECTOR_STORE:
   TYPE: faiss # or chromadb
 ```
 
 #### Embeddings model
+
+For Bedrock:
+
+```yaml
+EMBED_MODEL_ID:
+  NAME: amazon.titan-embed-text-v2:0
+  TYPE: bedrock
+  REGION: us-east-1 # For bedrock/sagemaker
+```
 
 For Ollama:
 
@@ -449,13 +481,12 @@ EMBED_MODEL_ID:
   PORT: 11434
 ```
 
-For Bedrock:
+For OpenAI:
 
 ```yaml
 EMBED_MODEL_ID:
-  NAME: amazon.titan-embed-text-v2:0
-  TYPE: bedrock
-  REGION: us-east-1 # For bedrock/sagemaker
+  NAME: text-embedding-ada-002
+  TYPE: openai
 ```
 
 For SageMaker:

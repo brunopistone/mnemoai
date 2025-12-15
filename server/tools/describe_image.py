@@ -1,7 +1,6 @@
 """Image description tool using Ollama vision model."""
 
 from . import validate_file_path, vision_model, vision_model_controller
-import base64
 import json
 from mcp.server.fastmcp import FastMCP
 import os
@@ -82,7 +81,6 @@ def register_image_tools(mcp: FastMCP) -> None:
                     "description": description.strip(),
                     "file_path": normalized_path,
                     "question": question,
-                    "model": "qwen2.5vl:3b",
                     "image_format": path.suffix.lower(),
                 }
             )

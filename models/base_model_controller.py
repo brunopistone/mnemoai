@@ -67,6 +67,25 @@ class BaseModelController:
 
         return args, additional_args, options
 
+    def _set_openai_inference_parameters(self) -> Dict[str, Any]:
+        """Set inference parameters for OpenAI models.
+
+        Returns:
+            Dictionary of OpenAI inference parameters
+        """
+        args = {}
+
+        if self.max_tokens:
+            args["max_tokens"] = self.max_tokens
+
+        if self.reasoning_effort:
+            args["reasoning_effort"] = self.reasoning_effort
+
+        if self.stream:
+            args["stream"] = self.stream
+
+        return args
+
     def _set_sagemaker_inference_parameters(self) -> Dict[str, Any]:
         """Set inference parameters for SageMaker models.
 

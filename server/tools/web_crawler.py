@@ -71,7 +71,7 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                 from .readers.chunking_helper import __count_tokens as count_tokens
 
                 tokens = count_tokens(content)
-                if tokens > 1024 * 8:
+                if tokens > config.get("RAG_MAX_TOKENS", 1024 * 8):
                     try:
                         rag = get_rag_session()
                         if rag is not None:

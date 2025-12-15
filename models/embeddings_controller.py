@@ -3,6 +3,7 @@ import hashlib
 import json
 import numpy as np
 import ollama
+from openai import OpenAI
 from typing import List, Any
 from utils.config import config
 from utils.logger import logger
@@ -43,6 +44,8 @@ class EmbeddingsController:
             return self._embed_ollama(texts)
         elif self.embed_model_type == "bedrock":
             return self._embed_bedrock(texts)
+        elif self.embed_model_type == "openai":
+            return self._embed_openai(texts)
         elif self.embed_model_type == "sagemaker":
             return self._embed_sagemaker(texts)
         else:
@@ -93,6 +96,28 @@ class EmbeddingsController:
         except Exception:
             logger.exception(
                 "Bedrock embed failed, falling back to deterministic embeddings"
+            )
+            return self._embed_fallback(texts)
+
+    def _embed_openai(self, texts: List[str]) -> np.ndarray:
+        """Embed using OpenAI.
+
+        Args:
+            texts: List of text strings to embed
+
+        Returns:
+            NumPy array of embeddings
+        """
+        try:
+            client = OpenAI()
+            response = client.embeddings.create(
+                model=self.embed_model_name, input=texts
+            )
+            embeddings = [item.embedding for item in response.data]
+            return np.array(embeddings, dtype=np.float32)
+        except Exception:
+            logger.exception(
+                "OpenAI embed failed, falling back to deterministic embeddings"
             )
             return self._embed_fallback(texts)
 
