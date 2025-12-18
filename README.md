@@ -15,6 +15,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
+- **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
 - **📊 Training Data Collection**: SFT markers and DPO preference pair generation
 - **🔍 Web Search**: Integrated Brave Search API
 - **🌐 Web Crawler**: Extract and index content from web pages
@@ -35,10 +36,14 @@ ai-assistant/
 │   ├── ui/                                 # User interface
 │   │   ├── chat_interface.py               # Chat loop
 │   │   └── spinner.py                      # Loading animations
-│   └── managers/                           # Business logic
-│       ├── agent_conversation_manager.py   # Conversation state and token tracking
-│       ├── user_profile_manager.py         # User profiling and learning
-│       └── dpo_collector.py                # DPO preference pair collection
+│   ├── managers/                           # Business logic
+│   │   ├── agent_conversation_manager.py   # Conversation state and token tracking
+│   │   ├── user_profile_manager.py         # User profiling and learning
+│   │   └── dpo_collector.py                # DPO preference pair collection
+│   └── memory/                             # Memory systems
+│       ├── episodic_memory.py              # Episodic memory manager
+│       ├── faiss_store.py                  # FAISS episodic store
+│       └── chroma_store.py                 # ChromaDB episodic store
 │
 ├── server/                                 # MCP server layer
 │   ├── server.py                           # FastMCP server
@@ -460,6 +465,28 @@ VECTOR_STORE:
   TYPE: faiss # or chromadb
 ```
 
+### Episodic Memory Configuration
+
+```yaml
+ENABLE_EPISODIC_MEMORY: true
+EPISODIC_MEMORY_STORE: chromadb # or faiss
+```
+
+**How it works:**
+
+- Automatically stores successful task completions with full conversation context
+- Uses hybrid search (70% semantic + 30% keyword) to find similar past tasks
+- Retrieves relevant episodes before processing new queries
+- Injects compact context showing: task → tools used → outcome
+- Automatic cleanup: keeps max 1000 episodes, removes entries older than 90 days
+
+**Success detection:**
+
+- User feedback: "thanks", "perfect", "great"
+- No error markers in response
+- All tools executed successfully
+- Filters out simple greetings and short responses
+
 #### Embeddings model
 
 For Bedrock:
@@ -570,6 +597,60 @@ After 5+ interactions, the assistant builds a profile:
 - **Code preferences**: Testing, documentation, type hints
 
 Profile is automatically injected into system prompt for personalization.
+
+### Episodic Memory
+
+The episodic memory system learns from successful task completions and retrieves similar solutions for future queries.
+
+**How it works:**
+
+1. **Automatic Storage**: After each successful interaction, stores:
+
+   - Initial user query
+   - Full conversation context
+   - Tools used with arguments
+   - Final solution
+   - Timestamp
+
+2. **Hybrid Search**: Retrieves similar episodes using:
+
+   - 70% semantic similarity (task intent)
+   - 30% keyword matching (tool names, action verbs)
+
+3. **Context Injection**: Before processing queries, injects compact context:
+
+   ```
+   [Episodic Memory - Similar Past Tasks]
+   1. "read DOCX about ML" → fs_read → success (similarity: 0.85)
+   2. "analyze PDF report" → fs_read, web_search → success (similarity: 0.78)
+   ```
+
+4. **Automatic Cleanup**: Maintains bounded memory:
+   - Max 1000 episodes
+   - Removes entries older than 90 days
+   - Runs on startup
+
+**Success Detection:**
+
+- User feedback: "thanks", "perfect", "great", "worked"
+- No error markers in response
+- All tools executed successfully
+- Filters out greetings and simple acknowledgments (<300 chars, no tools)
+
+**Storage Location:**
+
+- FAISS: `~/agent-conversations/{profile}/episodic_memory/episodic.index`
+- ChromaDB: `~/agent-conversations/{profile}/episodic_memory/`
+
+**Configuration:**
+
+```yaml
+ENABLE_EPISODIC_MEMORY: true
+EPISODIC_MEMORY_STORE: chromadb # or faiss
+EMBED_MODEL_ID: # Required for both stores
+  NAME: mxbai-embed-large
+  TYPE: ollama
+```
 
 ### Training Data Collection
 

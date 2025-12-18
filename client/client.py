@@ -5,7 +5,9 @@ from datetime import date, datetime
 from client.managers.agent_conversation_manager import AgentConversationManager
 from client.managers.user_profile_manager import UserProfileManager
 from client.managers.dpo_collector import DPOCollector
+from client.memory.episodic_memory import EpisodicMemoryManager
 from client.ui.spinner import Spinner
+import os
 import json
 from mcp import StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -80,6 +82,52 @@ class StrandsClient:
         self.spinner = Spinner()
         self.first_token_received = False
         self.visible_content = None
+
+        # Initialize episodic memory if enabled
+        self.episodic_memory = None
+        if config.get("ENABLE_EPISODIC_MEMORY", False):
+            logger.debug("Initializing episodic memory...")
+
+            # Get embeddings configuration
+            embed_model_config = config.get("EMBED_MODEL_ID")
+            if not embed_model_config:
+                raise ValueError(
+                    "EMBED_MODEL_ID must be configured in config.yaml to use episodic memory"
+                )
+
+            user_home = os.path.expanduser("~")
+            profile_name = config.get("PROFILE", {}).get("NAME", "default")
+            episodic_path = os.path.join(
+                user_home, "agent-conversations", profile_name, "episodic_memory"
+            )
+            os.makedirs(episodic_path, exist_ok=True)
+
+            store_type = config.get("EPISODIC_MEMORY_STORE", "chromadb").lower()
+            logger.debug(f"Using {store_type} store for episodic memory")
+            logger.debug(f"Episodic memory path: {episodic_path}")
+
+            # Initialize embeddings controller
+            from models.embeddings_controller import EmbeddingsController
+
+            embeddings_controller = EmbeddingsController(embed_model_config)
+
+            self.episodic_memory = EpisodicMemoryManager(
+                persist_path=episodic_path,
+                store_type=store_type,
+                embeddings_controller=embeddings_controller,
+            )
+
+            # Run automatic cleanup on startup
+            self.episodic_memory.cleanup(max_episodes=1000, max_age_days=90)
+
+            logger.debug(f"✓ {store_type.upper()} episodic memory initialized")
+        else:
+            logger.debug("Episodic memory is disabled")
+
+        # Track previous interaction for episodic memory
+        self.previous_query = None
+        self.previous_response = None
+        self.previous_messages = None
 
     # Custom callback handler to control verbosity
     def __minimal_callback_handler(self, **kwargs) -> None:
@@ -671,6 +719,39 @@ class StrandsClient:
 
             raise e
 
+    def _format_episodic_context(self, episodes: list) -> str:
+        """Format episodic memory episodes as compact context.
+
+        Args:
+            episodes: List of episode dictionaries with task, tools, similarity
+
+        Returns:
+            Formatted context string
+        """
+        context = "[Episodic Memory - Similar Past Tasks]\n"
+        for i, ep in enumerate(episodes, 1):
+            task = ep.get("task", "Unknown task")[:60]  # Truncate long tasks
+            tools = ep.get("tools", "")
+            # Parse tools string back to list
+            if isinstance(tools, str):
+                import ast
+
+                try:
+                    tools_list = ast.literal_eval(tools)
+                    tool_names = [
+                        t.get("name", "") for t in tools_list if isinstance(t, dict)
+                    ]
+                except:
+                    tool_names = []
+            else:
+                tool_names = []
+
+            tools_str = ", ".join(tool_names) if tool_names else "no tools"
+            similarity = ep.get("similarity", 0)
+            context += f'{i}. "{task}" → {tools_str} → success (similarity: {similarity:.2f})\n'
+
+        return context
+
     def query(self, prompt: str) -> str:
         """
         Send a query to the Strands agent.
@@ -691,6 +772,27 @@ class StrandsClient:
         self.spinner.start()
 
         try:
+            # Retrieve similar episodes from episodic memory
+            if self.episodic_memory:
+                logger.debug("Retrieving similar episodes from episodic memory...")
+                similar_episodes = self.episodic_memory.retrieve_similar_episodes(
+                    prompt, top_k=3
+                )
+                logger.debug(f"Found {len(similar_episodes)} similar episodes")
+                logger.debug(f"Similar episodes: {similar_episodes}")
+
+                # Filter by similarity threshold
+                relevant_episodes = [
+                    ep for ep in similar_episodes if ep.get("similarity", 0) > 0.7
+                ]
+
+                if relevant_episodes:
+                    logger.debug(f"Found {len(relevant_episodes)} relevant episodes")
+                    context = self._format_episodic_context(relevant_episodes)
+                    prompt = f"{context}\n\n{prompt}"
+                else:
+                    logger.debug("No relevant episodes found (similarity < 0.7)")
+
             with self.mcp_client:
                 # Call agent with prompt
                 response = self.agent(prompt)
@@ -741,6 +843,16 @@ class StrandsClient:
                 token_count = self.__count_context_tokens()
                 print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
 
+                # Store full conversation for episodic memory evaluation
+                if self.episodic_memory:
+                    logger.debug("Storing interaction for episodic memory evaluation")
+                    self.previous_query = prompt
+                    self.previous_response = response_text
+                    self.previous_messages = self.agent.messages.copy()
+                    logger.debug(
+                        f"Stored {len(self.previous_messages)} messages for evaluation"
+                    )
+
                 return response_text
         except KeyboardInterrupt:
             # Handle Ctrl+C gracefully - cancel all pending tasks
@@ -748,10 +860,18 @@ class StrandsClient:
             self.spinner.stop()
 
             try:
+                # Cancel all async tasks
                 loop = asyncio.get_event_loop()
                 pending = asyncio.all_tasks(loop)
                 for task in pending:
                     task.cancel()
+
+                # Force close MCP client connection
+                if hasattr(self.mcp_client, "_client") and self.mcp_client._client:
+                    try:
+                        asyncio.run(self.mcp_client._client.__aexit__(None, None, None))
+                    except:
+                        pass
             except:
                 pass
 

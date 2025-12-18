@@ -24,7 +24,7 @@ def register_image_tools(mcp: FastMCP) -> None:
     async def describe_image(
         image_path: str, question: str = "Describe this image in detail."
     ) -> str:
-        """Describe an image using AI vision model.
+        """Read the content of an image using AI vision model.
 
         Args:
             image_path: Path to the image file (supports PNG, JPG, JPEG, GIF, BMP, WEBP)

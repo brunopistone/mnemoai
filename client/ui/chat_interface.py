@@ -2,6 +2,10 @@
 
 import asyncio
 from client.managers.dpo_collector import DPOCollector
+from client.memory.episodic_memory import (
+    is_task_successful,
+    extract_tools_from_messages,
+)
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
@@ -154,6 +158,72 @@ class ChatInterface:
             thread.start()
             print("\033[90m[DPO: generating pair in background...]\033[0m")
 
+    def __store_episode_in_episodic_memory(self, query: str) -> None:
+        """Evaluate and store previous interaction in episodic memory if successful.
+        Args:
+            query: Current user query
+        """
+        logger.debug("Episodic memory is enabled")
+        if (
+            self.client.previous_query
+            and self.client.previous_response
+            and self.client.previous_messages
+        ):
+            logger.debug(f"Evaluating previous interaction for episodic storage")
+            logger.debug(f"Previous query: {self.client.previous_query[:100]}...")
+            logger.debug(f"Current query: {query[:100]}...")
+
+            # Extract tools used
+            tools_used = extract_tools_from_messages(self.client.previous_messages)
+
+            # Only store if there was actual work done (tools used or substantial response)
+            if not tools_used and len(self.client.previous_response) < 300:
+                logger.debug(
+                    "✗ Skipping storage - no tools used and response too short (likely greeting/simple response)"
+                )
+            elif is_task_successful(
+                self.client.previous_response,
+                self.client.previous_messages,
+                query,
+            ):
+                logger.debug(
+                    "✓ Previous task marked as successful - storing in episodic memory"
+                )
+                logger.debug(f"Tools used: {[t.get('name') for t in tools_used]}")
+
+                # Find the initial user query (first user message in conversation)
+                initial_query = self.client.previous_query
+                for msg in self.client.previous_messages:
+                    if msg.get("role") == "user":
+                        content = msg.get("content", [])
+                        if isinstance(content, list):
+                            for item in content:
+                                if isinstance(item, dict) and "text" in item:
+                                    initial_query = item["text"]
+                                    break
+                        break
+
+                logger.debug(f"Initial query extracted: {initial_query[:100]}...")
+                logger.debug(
+                    f"Conversation length: {len(self.client.previous_messages)} messages"
+                )
+
+                # Store with full conversation (agent.messages format)
+                self.client.episodic_memory.store_episode(
+                    task=initial_query,
+                    solution=self.client.previous_response,
+                    tools_used=tools_used,
+                    outcome="success",
+                    full_conversation=self.client.previous_messages,
+                )
+                logger.debug("✓ Episode stored successfully")
+            else:
+                logger.debug(
+                    "✗ Previous task not marked as successful - skipping storage"
+                )
+        else:
+            logger.debug("No previous interaction to evaluate")
+
     def run_chat_loop(self) -> None:
         """Run the main chat loop.
 
@@ -264,6 +334,12 @@ class ChatInterface:
             if not query.strip():
                 print("Input cannot be empty. Please try again.")
                 continue
+
+            # Check if previous interaction was successful and store in episodic memory
+            if self.client.episodic_memory:
+                self.__store_episode_in_episodic_memory(query)
+            else:
+                logger.debug("Episodic memory is disabled")
 
             try:
                 response = self.client.query(query)

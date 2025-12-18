@@ -29,6 +29,9 @@ EMBED_MODEL_ID:
 DOC_CHUNK_TOKENS: 1024
 VECTOR_STORE:
   TYPE: chromadb # or faiss
+# Episodic Memory Configuration
+ENABLE_EPISODIC_MEMORY: true
+EPISODIC_MEMORY_STORE: chromadb # or faiss
 # Web search Configuration
 BRAVE_API_KEY: your_brave_api_key_here
 # Web crawl Configuration
