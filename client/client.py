@@ -730,7 +730,11 @@ class StrandsClient:
         """
         context = "[Episodic Memory - Similar Past Tasks]\n"
         for i, ep in enumerate(episodes, 1):
-            task = ep.get("task", "Unknown task")[:60]  # Truncate long tasks
+            task = ep.get("task", "Unknown task")
+            # Truncate at word boundary, not mid-word
+            if len(task) > 70:
+                task = task[:70].rsplit(" ", 1)[0] + "..."
+
             tools = ep.get("tools", "")
             # Parse tools string back to list
             if isinstance(tools, str):
@@ -750,6 +754,8 @@ class StrandsClient:
             similarity = ep.get("similarity", 0)
             context += f'{i}. "{task}" → {tools_str} → success (similarity: {similarity:.2f})\n'
 
+        logger.debug("Formatted episodic memory context for prompt:")
+        logger.debug(context)
         return context
 
     def query(self, prompt: str) -> str:

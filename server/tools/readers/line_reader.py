@@ -15,16 +15,13 @@ from utils.config import config
 from utils.logger import logger
 
 
-async def read_lines(
-    path: str, start_line: int, end_line: int, summarize: bool = False
-) -> str:
+async def read_lines(path: str, start_line: int, end_line: int) -> str:
     """Read specific lines from a file.
 
     Args:
         path: File path
         start_line: Starting line number
         end_line: Ending line number
-        summarize: Whether to summarize content (unused)
 
     Returns:
         JSON string with line data

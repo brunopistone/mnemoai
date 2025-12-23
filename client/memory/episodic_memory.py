@@ -48,6 +48,12 @@ class EpisodicMemoryManager:
             outcome: Success indicator
             full_conversation: Complete conversation messages leading to solution
         """
+        # Check for near-duplicate episodes (similarity > 0.95)
+        similar = self.store.search(query=task, top_k=1)
+        if similar and similar[0].get('similarity', 0) > 0.95:
+            logger.debug(f"Skipping duplicate episode (similarity: {similar[0]['similarity']:.2f})")
+            return
+        
         metadata = {
             "task": task,
             "solution": solution,

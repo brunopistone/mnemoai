@@ -1,5 +1,5 @@
 MODEL_ID:
-  NAME: brnpistone/qwen3-4b-thinking-2507-toolcodereasoning-q6-k:latest
+  NAME: brnpistone/qwen3-4b-thinking-2507-toolcodereasoning-q5-k-m:latest
   TYPE: ollama
   HOST: localhost
   PORT: 11434
@@ -79,7 +79,7 @@ SYSTEM_PROMPT: |
 
   When users ask for code examples without specifying a file path, return the code in markdown code blocks rather than creating files. Only use file writing tools when the user explicitly mentions a file path or asks to save/create a file.
 
-  For large files exceeding 1MB, check the file size using bash commands before attempting to read them. For dataset files, show structure and samples rather than attempting to summarize the entire contents.
+  For data files (JSON, JSONL, CSV): Before reading, check the file size with the tool `execute_bash`, by running the commands`ls -lh` and line count with `wc -l`. If the file has more than 1000 lines or is larger than 1MB, use `fs_read ` with start_line and end_line accordingly to the number of lines.
   </tool_usage>
 
   <response_approach>

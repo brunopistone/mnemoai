@@ -36,13 +36,14 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
         pattern: str = "",
         context_lines: int = 2,
         depth: int = 0,
-        summarize: bool = False,
     ) -> str:
         """Read and analyze file content in various formats.
 
         Use this tool when users ask to read, examine, analyze, view, or check file content.
 
-        Important: For large files (>1MB), check file size first using execute_bash with "ls -lh <path>". For large datasets, use execute_bash with "head -n 3 <path>" to show samples instead of reading the entire file.
+        Important: For data files (JSON, JSONL, CSV): Before reading, check the file size with `ls -lh` and line count with `wc -l`. If the file has more than 1000 lines or is larger than 1MB, For large datasets, use execute_bash with "head -n 3 <path>" to show samples instead of reading the entire file.
+
+        For large files (>1MB), check file size first using execute_bash with "ls -lh <path>".
 
         This tool efficiently reads and processes various file types including text files, code files, CSV data, JSON data, PDF documents, and DOCX documents.
 
@@ -63,7 +64,6 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             pattern: Search text when using Search mode
             context_lines: Lines of context around search matches (default: 2)
             depth: Directory depth for Directory mode (default: 0)
-            summarize: Return summary for very large files (default: false)
 
         USAGE EXAMPLES:
         - Read entire Python file: fs_read(path="~/script.py", mode="Line")
@@ -74,12 +74,10 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
         - Parse JSONL: fs_read(path="~/data.jsonl", mode="JSONL")
         - Parse PDF: fs_read(path="~/data.pdf", mode="PDF")
         - Parse DOCX: fs_read(path="~/data.docx", mode="DOCX")
-        - Get summary of large file: mode="Line", summarize=True
 
         Returns:
             Structured JSON with file content, metadata, and processing information.
             depth: Directory depth for Directory mode (0 = current level only)
-            summarize: If True, return a summary for large files instead of full content
         """
         logger.debug(f"fs_read called with path: {path}")
 
@@ -90,15 +88,13 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             if mode == "Directory":
                 return await read_directory(normalized_path, depth)
             elif mode == "Line":
-                return await read_lines(
-                    normalized_path, start_line, end_line, summarize
-                )
+                return await read_lines(normalized_path, start_line, end_line)
             elif mode == "Search":
                 return await search_file(normalized_path, pattern, context_lines)
             elif mode == "CSV":
                 return await read_csv(normalized_path)
             elif mode in ["JSON", "JSONL"]:
-                return await read_json(normalized_path)
+                return await read_json(normalized_path, start_line, end_line)
             elif mode == "PDF":
                 return await read_pdf(normalized_path)
             elif mode == "DOCX":
