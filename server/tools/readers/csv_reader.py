@@ -13,11 +13,11 @@ sys.path.append(
     )
 )
 from utils.logger import logger
-from .chunking_helper import process_large_content
+from utils.config import config
 
 
 async def read_csv(path: str) -> str:
-    """Read and parse CSV file with automatic chunking for large files.
+    """Read and parse CSV file with token-based truncation.
 
     Args:
         path: Path to CSV file
@@ -50,25 +50,35 @@ async def read_csv(path: str) -> str:
             reader = csv.DictReader(file, delimiter=delimiter)
             columns = reader.fieldnames or []
 
-            # Read all rows
-            rows = list(reader)
+            # Read rows with token limit
+            max_tokens = config.get("DOC_MAX_TOKENS", 1024 * 8)
+            rows = []
+            current_tokens = count_tokens(f"Columns: {', '.join(columns)}\n")
 
-            # Convert to text format for chunking
-            csv_text = f"Columns: {', '.join(columns)}\n\n"
-            for i, row in enumerate(rows):
-                csv_text += f"Row {i+1}: {json.dumps(row)}\n"
+            for row in reader:
+                row_tokens = count_tokens(json.dumps(row))
+                if current_tokens + row_tokens > max_tokens:
+                    break
+                rows.append(row)
+                current_tokens += row_tokens
 
-            # Process with chunking if needed
-            processed_content, metadata = await process_large_content(csv_text)
+            # Count total rows
+            total_rows = len(rows) + sum(1 for _ in reader)
+            was_truncated = total_rows > len(rows)
 
             return json.dumps(
                 {
                     "path": normalized_path,
                     "type": "csv",
                     "columns": columns,
-                    "total_rows": len(rows),
-                    "content": processed_content,
-                    "processing_metadata": metadata,
+                    "delimiter": delimiter,
+                    "total_rows": total_rows,
+                    "rows_returned": len(rows),
+                    "rows": rows,
+                    "tokens": current_tokens,
+                    "max_tokens": max_tokens,
+                    "truncated": was_truncated,
+                    "message": f"Read CSV with {len(columns)} columns. Showing {len(rows)} of {total_rows} rows ({current_tokens} tokens). {'TRUNCATED at token limit.' if was_truncated else ''}",
                 }
             )
 

@@ -3,14 +3,14 @@ MODEL_ID:
   TYPE: ollama
   HOST: localhost
   PORT: 11434
-  MAX_TOKENS: -1
+  MAX_TOKENS: 32768
   TOP_P: 0.95
   TOP_K: 20
   MIN_P: 0
   REPETITION_PENALTY: 1.3
   TEMPERATURE: 0.3
 VISION_MODEL_ID:
-  NAME: qwen3-vl:2b
+  NAME: qwen2.5vl:3b
   TYPE: ollama
   HOST: localhost
   PORT: 11434
@@ -33,7 +33,7 @@ VECTOR_STORE:
 ENABLE_EPISODIC_MEMORY: true
 EPISODIC_MEMORY_STORE: chromadb # or faiss
 # Web search Configuration
-BRAVE_API_KEY: your_brave_api_key_here
+BRAVE_API_KEY: your_brave_api_key
 # Web crawl Configuration
 ENABLE_WEB_CRAWL: true
 # File system paths
@@ -79,7 +79,7 @@ SYSTEM_PROMPT: |
 
   When users ask for code examples without specifying a file path, return the code in markdown code blocks rather than creating files. Only use file writing tools when the user explicitly mentions a file path or asks to save/create a file.
 
-  For data files (JSON, JSONL, CSV): Before reading, check the file size with the tool `execute_bash`, by running the commands`ls -lh` and line count with `wc -l`. If the file has more than 1000 lines or is larger than 1MB, use `fs_read ` with start_line and end_line accordingly to the number of lines.
+  For data files (JSON, JSONL, CSV): Before reading, ALWAYS check the file size with `execute_bash` by running `ls -lh <path>` and line count with `wc -l <path>`. If the file has more than 1000 lines or is larger than 1MB, for JSON/JSONL use `fs_read` with start_line and end_line parameters to read specific ranges. For CSV files, `fs_read` will automatically truncate at the token limit and return metadata showing total_rows vs rows_returned - inform the user of this and ask what specific data they need.
   </tool_usage>
 
   <response_approach>

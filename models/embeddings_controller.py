@@ -22,7 +22,14 @@ class EmbeddingsController:
         self.embed_model_type = self.embed_model_config.get("TYPE", "ollama")
         self.embed_model_name = self.embed_model_config.get("NAME", "mxbai-embed-large")
         self.region = self.embed_model_config.get("REGION", "us-east-1")
-        self.dim = None  # Will be set from first embedding
+        
+        # Set expected dimension based on model
+        model_dims = {
+            "mxbai-embed-large": 1024,
+            "nomic-embed-text": 768,
+            "all-minilm": 384,
+        }
+        self.dim = model_dims.get(self.embed_model_name, 1024)  # Default to 1024
 
     def embed(self, texts: List[str]) -> np.ndarray:
         """Embed texts using configured provider (Ollama, Bedrock, or SageMaker).

@@ -211,10 +211,8 @@ class ChatInterface:
                 # Store with full conversation (agent.messages format)
                 self.client.episodic_memory.store_episode(
                     task=initial_query,
-                    solution=self.client.previous_response,
                     tools_used=tools_used,
                     outcome="success",
-                    full_conversation=self.client.previous_messages,
                 )
                 logger.debug("✓ Episode stored successfully")
             else:

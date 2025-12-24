@@ -3,6 +3,8 @@
 from .chroma_store import ChromaEpisodicStore
 from .faiss_store import FAISSEpisodicStore
 from datetime import datetime
+import re
+import tiktoken
 from typing import List, Dict, Any, Optional
 from utils.logger import logger
 
@@ -26,69 +28,78 @@ class EpisodicMemoryManager:
         if not embeddings_controller:
             raise ValueError("embeddings_controller is required for episodic memory")
 
+        self.encoder = tiktoken.encoding_for_model("gpt-4")  # For token counting
+
         if store_type == "faiss":
             self.store = FAISSEpisodicStore(persist_path, embeddings_controller)
         else:
             self.store = ChromaEpisodicStore(persist_path, embeddings_controller)
 
+    def _truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Truncate text to fit within token limit.
+
+        Args:
+            text: Text to truncate
+            max_tokens: Maximum number of tokens
+
+        Returns:
+            Truncated text
+        """
+        tokens = self.encoder.encode(text)
+        if len(tokens) <= max_tokens:
+            return text
+
+        truncated_tokens = tokens[:max_tokens]
+        truncated_text = self.encoder.decode(truncated_tokens)
+        return truncated_text + "..."
+
     def store_episode(
         self,
         task: str,
-        solution: str,
         tools_used: List[Dict[str, Any]],
         outcome: str = "success",
-        full_conversation: List[Dict[str, Any]] = None,
     ) -> None:
         """Store a task completion pattern.
 
         Args:
             task: User's original query/task
-            solution: Agent's final response/solution
             tools_used: List of tools invoked with args and results
             outcome: Success indicator
-            full_conversation: Complete conversation messages leading to solution
         """
         # Check for near-duplicate episodes (similarity > 0.95)
         similar = self.store.search(query=task, top_k=1)
-        if similar and similar[0].get('similarity', 0) > 0.95:
-            logger.debug(f"Skipping duplicate episode (similarity: {similar[0]['similarity']:.2f})")
+        if similar and similar[0].get("similarity", 0) > 0.95:
+            logger.debug(
+                f"Skipping duplicate episode (similarity: {similar[0]['similarity']:.2f})"
+            )
             return
-        
+
         metadata = {
             "task": task,
-            "solution": solution,
-            "tools": str(tools_used),  # Convert to string for ChromaDB
+            "tools": str(tools_used),
             "outcome": outcome,
             "timestamp": datetime.now().isoformat(),
-            "conversation": str(full_conversation) if full_conversation else "",
         }
 
-        # Create searchable text from full conversation
+        # Create compact searchable text - just task and tool names
         tool_names = [t.get("name", "") for t in tools_used]
+        tool_summary = ", ".join(tool_names) if tool_names else "no tools"
 
-        # Build conversation text from agent.messages format
-        conv_text = ""
-        if full_conversation:
-            for msg in full_conversation:
-                role = msg.get("role", "")
-                content = msg.get("content", [])
+        text = f"Task: {task}\nTools used: {tool_summary}\nOutcome: {outcome}"
 
-                if isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict):
-                            # Extract text content
-                            if "text" in item:
-                                conv_text += f"{role}: {item['text']}\n"
-                            # Note tool usage
-                            elif "toolUse" in item:
-                                tool_name = item["toolUse"].get("name", "unknown")
-                                conv_text += f"{role}: [Used tool: {tool_name}]\n"
-                            elif "toolResult" in item:
-                                conv_text += f"{role}: [Tool result received]\n"
+        # Truncate to fit embedding model context
+        max_tokens = 400
+        token_count = len(self.encoder.encode(text))
 
-        text = f"Task: {task}\nConversation:\n{conv_text}\nSolution: {solution}\nTools: {', '.join(tool_names)}\nOutcome: {outcome}"
+        if token_count > max_tokens:
+            logger.debug(
+                f"Truncating episode from {token_count} to {max_tokens} tokens"
+            )
+            text = self._truncate_to_tokens(text, max_tokens)
 
-        logger.debug(f"Storing episode with full conversation: {task[:50]}...")
+        logger.debug(
+            f"Storing episode: {task[:50]}... ({len(self.encoder.encode(text))} tokens)"
+        )
         self.store.add(text=text, metadata=metadata)
 
     def retrieve_similar_episodes(
