@@ -42,7 +42,7 @@ class BaseModelController:
         options = {}
 
         if self.max_tokens:
-            args["max_tokens"] = self.max_tokens
+            options["num_predict"] = self.max_tokens
 
         if self.top_p:
             args["top_p"] = self.top_p
@@ -56,14 +56,22 @@ class BaseModelController:
         if self.repetition_penalty:
             options["repeat_penalty"] = self.repetition_penalty
 
+        if self.repeat_last_n:
+            options["repeat_last_n"] = self.repeat_last_n
+
         if self.presence_penalty:
             options["presence_penalty"] = self.presence_penalty
 
         if self.stop:
-            args["stop_sequences"] = self.stop
+            options["stop"] = self.stop
 
-        if not self.verbose_mode:
-            additional_args["think"] = self.verbose_mode
+        # Set max conversation tokens for Ollama
+        options["num_ctx"] = self.max_conversation_tokens
+
+        # Always set think parameter based on verbose_mode
+        # verbose_mode=True -> think=True (show thinking)
+        # verbose_mode=False -> think=False (hide thinking)
+        additional_args["think"] = self.verbose_mode
 
         return args, additional_args, options
 

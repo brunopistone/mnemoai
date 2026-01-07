@@ -19,10 +19,12 @@ class VisionModelController(BaseModelController):
         self.verbose_mode = verbose
         self.model_id = config.get("VISION_MODEL_ID")
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
+        self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
         self.min_p = self.model_id.get("MIN_P", None)
         self.presence_penalty = self.model_id.get("PRESENCE_PENALTY", None)
         self.reasoning_effort = self.model_id.get("REASONING_EFFORT", None)
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
+        self.repeat_last_n = self.model_id.get("REPEAT_LAST_N", None)
         self.stream = self.model_id.get("STREAM", False)
         self.stop = self.model_id.get("STOP", None)
         self.temperature = self.model_id.get("TEMPERATURE", 0.1)

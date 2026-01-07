@@ -22,7 +22,7 @@ class EmbeddingsController:
         self.embed_model_type = self.embed_model_config.get("TYPE", "ollama")
         self.embed_model_name = self.embed_model_config.get("NAME", "mxbai-embed-large")
         self.region = self.embed_model_config.get("REGION", "us-east-1")
-        
+
         # Set expected dimension based on model
         model_dims = {
             "mxbai-embed-large": 1024,
@@ -31,8 +31,52 @@ class EmbeddingsController:
         }
         self.dim = model_dims.get(self.embed_model_name, 1024)  # Default to 1024
 
+        # Initialize embedding cache for performance
+        embeddings_config = config.get("EMBEDDINGS", {})
+        self.cache_enabled = embeddings_config.get("CACHE_ENABLED", True)
+        self.cache_size = embeddings_config.get("CACHE_SIZE", 1000)
+        self._embedding_cache = {}  # {cache_key: embedding_vector}
+        self._cache_order = []  # List of keys for LRU tracking
+
+        if self.cache_enabled:
+            logger.debug(f"Embedding cache enabled with max size: {self.cache_size}")
+
+    def _cache_key(self, text: str) -> str:
+        """Generate cache key for text using MD5 hash.
+
+        Args:
+            text: Text to generate key for
+
+        Returns:
+            MD5 hash of text
+        """
+        return hashlib.md5(text.encode()).hexdigest()
+
+    def _update_cache(self, text: str, embedding: np.ndarray) -> None:
+        """Add embedding to cache with LRU eviction.
+
+        Args:
+            text: Text that was embedded
+            embedding: Embedding vector
+        """
+        key = self._cache_key(text)
+
+        # Add to cache
+        self._embedding_cache[key] = embedding
+
+        # Update LRU order
+        if key in self._cache_order:
+            self._cache_order.remove(key)
+        self._cache_order.append(key)
+
+        # Evict oldest if cache is full
+        while len(self._embedding_cache) > self.cache_size:
+            oldest_key = self._cache_order.pop(0)
+            if oldest_key in self._embedding_cache:
+                del self._embedding_cache[oldest_key]
+
     def embed(self, texts: List[str]) -> np.ndarray:
-        """Embed texts using configured provider (Ollama, Bedrock, or SageMaker).
+        """Embed texts using configured provider with optional caching.
 
         Args:
             texts: List of text strings to embed
@@ -47,6 +91,64 @@ class EmbeddingsController:
             logger.warning("Empty text list provided to embed()")
             return np.array([], dtype=np.float32).reshape(0, self.dim or 768)
 
+        # Check cache if enabled
+        if self.cache_enabled:
+            cached_embeddings = []
+            uncached_texts = []
+            uncached_indices = []
+
+            for i, text in enumerate(texts):
+                key = self._cache_key(text)
+                if key in self._embedding_cache:
+                    # Cache hit
+                    cached_embeddings.append((i, self._embedding_cache[key]))
+                    # Update LRU order
+                    if key in self._cache_order:
+                        self._cache_order.remove(key)
+                        self._cache_order.append(key)
+                else:
+                    # Cache miss
+                    uncached_texts.append(text)
+                    uncached_indices.append(i)
+
+            # Log cache performance
+            if cached_embeddings:
+                logger.debug(
+                    f"Cache hit: {len(cached_embeddings)}/{len(texts)} embeddings"
+                )
+
+            # If all cached, return immediately
+            if not uncached_texts:
+                return np.vstack([emb for _, emb in sorted(cached_embeddings)])
+
+            # Embed uncached texts
+            new_embeddings = self._embed_uncached(uncached_texts)
+
+            # Cache the new embeddings
+            for text, embedding in zip(uncached_texts, new_embeddings):
+                self._update_cache(text, embedding)
+
+            # Reconstruct full result in original order
+            results = [None] * len(texts)
+            for i, embedding in cached_embeddings:
+                results[i] = embedding
+            for i, idx in enumerate(uncached_indices):
+                results[idx] = new_embeddings[i]
+
+            return np.vstack(results)
+        else:
+            # Cache disabled, embed directly
+            return self._embed_uncached(texts)
+
+    def _embed_uncached(self, texts: List[str]) -> np.ndarray:
+        """Embed texts without caching (internal method).
+
+        Args:
+            texts: List of text strings to embed
+
+        Returns:
+            NumPy array of embeddings
+        """
         if self.embed_model_type == "ollama":
             return self._embed_ollama(texts)
         elif self.embed_model_type == "bedrock":
@@ -156,7 +258,7 @@ class EmbeddingsController:
             return self._embed_fallback(texts)
 
     def _embed_fallback(self, texts: List[str]) -> np.ndarray:
-        """Fallback to deterministic SHA256-based embeddings.
+        """Fallback to deterministic SHA256-based embeddings with warning.
 
         Args:
             texts: List of text strings to embed
@@ -164,6 +266,17 @@ class EmbeddingsController:
         Returns:
             NumPy array of deterministic embeddings
         """
+        # Get fallback configuration
+        fallback_config = config.get("EMBEDDINGS", {})
+        fallback_type = fallback_config.get("FALLBACK_TYPE", "sha256")
+
+        # Prominent warning about degraded functionality
+        logger.warning(
+            f"⚠️  Using fallback embeddings ({fallback_type}) - semantic search will be DEGRADED. "
+            f"Embeddings will not capture semantic meaning. "
+            f"Please check embedding model availability (Ollama/OpenAI/Bedrock)."
+        )
+
         out = []
         for t in texts:
             h = hashlib.sha256(t.encode("utf-8")).digest()

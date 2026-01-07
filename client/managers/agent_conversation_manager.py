@@ -39,15 +39,31 @@ class AgentConversationManager:
         logger.info(f"Initialized conversation manager with max_tokens={max_tokens}")
 
     def count_tokens(self, messages: List[Dict]) -> int:
-        """Count tokens in messages by converting to JSON string.
+        """Count tokens with model-specific approximation.
+
+        For Ollama models, uses character-based approximation.
+        For OpenAI/Bedrock models, uses tiktoken encoder.
 
         Args:
             messages: List of message dictionaries
 
         Returns:
-            Token count
+            Estimated token count
         """
-        return len(self.encoder.encode(json.dumps(messages, default=str)))
+        text = json.dumps(messages, default=str)
+        model_type = config.get("MODEL_ID", {}).get("TYPE", "ollama")
+
+        if model_type == "ollama":
+            # Ollama approximation: ~1.3 chars per token (configurable)
+            multiplier = (
+                config.get("LLM", {})
+                .get("TOKEN_COUNTING", {})
+                .get("OLLAMA_APPROXIMATION", 1.3)
+            )
+            return int(len(text) / multiplier)
+        else:
+            # Use tiktoken for OpenAI/Bedrock/SageMaker
+            return len(self.encoder.encode(text))
 
     async def generate_summary(self, messages: List[Dict], model: Any) -> str:
         """Use the model to generate a natural language summary.
@@ -81,9 +97,10 @@ class AgentConversationManager:
         try:
             summary_response = ""
 
-            # Use the model to generate summary
+            # Use the model to generate summary with configurable think parameter
+            think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
             async for event in model.stream(
-                messages, system_prompt=self.previous_summary, think=False
+                messages, system_prompt=self.previous_summary, think=think_param
             ):
                 if (
                     "contentBlockDelta" in event

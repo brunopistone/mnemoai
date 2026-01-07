@@ -20,6 +20,7 @@ import sqlite3
 from strands import Agent
 from strands.tools.mcp import MCPClient
 import sys
+import threading
 import traceback
 from utils.formatting.code_formatter import CodeFormatter
 from utils.config import config
@@ -80,6 +81,7 @@ class StrandsClient:
         self.dpo_collector = DPOCollector()
         self.dpo_mode = False  # Toggle for DPO collection
         self.spinner = Spinner()
+        self.spinner_lock = threading.Lock()  # Thread safety for spinner operations
         self.first_token_received = False
         self.visible_content = None
 
@@ -143,30 +145,34 @@ class StrandsClient:
             if hasattr(self, "_code_formatter_verbose"):
                 self._code_formatter_verbose = CodeFormatter()
 
-        # Stop spinner only when first actual data arrives
+        # Stop spinner only when first actual data arrives (thread-safe)
         if not self.first_token_received:
             if "data" in kwargs and kwargs["data"]:
-                self.spinner.stop()
-                self.first_token_received = True
+                with self.spinner_lock:
+                    if not self.first_token_received:  # Double-check inside lock
+                        self.spinner.stop()
+                        self.first_token_received = True
 
-        # Stop spinner when tool call starts
+        # Stop spinner when tool call starts (thread-safe)
         if "message" in kwargs and kwargs["message"].get("role") == "assistant":
             content = kwargs["message"].get("content", [])
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("toolUse"):
-                        self.spinner.stop()
+                        with self.spinner_lock:
+                            self.spinner.stop()
                         break
 
-        # Restart spinner after tool execution completes
+        # Restart spinner after tool execution completes (thread-safe)
         if (
             "message" in kwargs
             and kwargs["message"].get("role") == "user"
             and "toolResult" in str(kwargs["message"].get("content", ""))
         ):
             # Tool result received, restart spinner for final response
-            self.first_token_received = False
-            self.spinner.start()
+            with self.spinner_lock:
+                self.first_token_received = False
+                self.spinner.start()
 
         if "data" in kwargs:
             data = kwargs["data"]
@@ -222,30 +228,34 @@ class StrandsClient:
             if hasattr(self, "_code_formatter_verbose"):
                 self._code_formatter_verbose = CodeFormatter()
 
-        # Stop spinner only when first actual data arrives
+        # Stop spinner only when first actual data arrives (thread-safe)
         if not self.first_token_received:
             if "data" in kwargs and kwargs["data"]:
-                self.spinner.stop()
-                self.first_token_received = True
+                with self.spinner_lock:
+                    if not self.first_token_received:  # Double-check inside lock
+                        self.spinner.stop()
+                        self.first_token_received = True
 
-        # Stop spinner when tool call starts
+        # Stop spinner when tool call starts (thread-safe)
         if "message" in kwargs and kwargs["message"].get("role") == "assistant":
             content = kwargs["message"].get("content", [])
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and item.get("toolUse"):
-                        self.spinner.stop()
+                        with self.spinner_lock:
+                            self.spinner.stop()
                         break
 
-        # Restart spinner after tool execution completes
+        # Restart spinner after tool execution completes (thread-safe)
         if (
             "message" in kwargs
             and kwargs["message"].get("role") == "user"
             and "toolResult" in str(kwargs["message"].get("content", ""))
         ):
             # Tool result received, restart spinner for final response
-            self.first_token_received = False
-            self.spinner.start()
+            with self.spinner_lock:
+                self.first_token_received = False
+                self.spinner.start()
 
         if "data" in kwargs:
             data = kwargs["data"]
@@ -773,9 +783,10 @@ class StrandsClient:
                 "Client not started. Call start() or use with-statement first."
             )
 
-        # Reset first token flag and start spinner
-        self.first_token_received = False
-        self.spinner.start()
+        # Reset first token flag and start spinner (thread-safe)
+        with self.spinner_lock:
+            self.first_token_received = False
+            self.spinner.start()
 
         try:
             # Retrieve similar episodes from episodic memory
@@ -787,9 +798,14 @@ class StrandsClient:
                 logger.debug(f"Found {len(similar_episodes)} similar episodes")
                 logger.debug(f"Similar episodes: {similar_episodes}")
 
-                # Filter by similarity threshold
+                # Filter by configurable similarity threshold
+                retrieval_threshold = config.get("EPISODIC_MEMORY", {}).get(
+                    "RETRIEVAL_THRESHOLD", 0.7
+                )
                 relevant_episodes = [
-                    ep for ep in similar_episodes if ep.get("similarity", 0) > 0.7
+                    ep
+                    for ep in similar_episodes
+                    if ep.get("similarity", 0) > retrieval_threshold
                 ]
 
                 if relevant_episodes:
@@ -797,7 +813,9 @@ class StrandsClient:
                     context = self._format_episodic_context(relevant_episodes)
                     prompt = f"{context}\n\n{prompt}"
                 else:
-                    logger.debug("No relevant episodes found (similarity < 0.7)")
+                    logger.debug(
+                        f"No relevant episodes found (similarity < {retrieval_threshold})"
+                    )
 
             with self.mcp_client:
                 # Call agent with prompt
@@ -862,8 +880,9 @@ class StrandsClient:
                 return response_text
         except KeyboardInterrupt:
             # Handle Ctrl+C gracefully - cancel all pending tasks
-            self.first_token_received = False
-            self.spinner.stop()
+            with self.spinner_lock:
+                self.first_token_received = False
+                self.spinner.stop()
 
             try:
                 # Cancel all async tasks
@@ -890,10 +909,12 @@ class StrandsClient:
             return "Operation was cancelled."
         except Exception as e:
             # Handle other exceptions - MCP client will be closed by context manager
-            self.first_token_received = False
-            self.spinner.stop()
+            with self.spinner_lock:
+                self.first_token_received = False
+                self.spinner.stop()
             raise e
         finally:
-            # Ensure spinner is stopped
-            self.first_token_received = False
-            self.spinner.stop()
+            # Ensure spinner is stopped (thread-safe)
+            with self.spinner_lock:
+                self.first_token_received = False
+                self.spinner.stop()

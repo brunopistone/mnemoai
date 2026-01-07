@@ -1,5 +1,6 @@
 """Custom Ollama model that preserves thinking content."""
 
+import asyncio
 import ollama
 import os
 from strands.models.ollama import OllamaModel
@@ -10,6 +11,7 @@ from typing import AsyncGenerator, Optional, Any
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+from utils.config import config
 from utils.logger import logger
 
 
@@ -31,6 +33,52 @@ class ThinkingOllamaModel(OllamaModel):
         self.thinking_close_tags = ["</thinking>", "</think>"]
         logger.debug(f"Think: {self.return_thinking}")
         super().__init__(*args, **kwargs)
+
+    async def _chat_with_retry(self, client, request):
+        """Execute chat request with retry logic for connection failures.
+
+        Args:
+            client: Ollama async client
+            request: Chat request parameters
+
+        Returns:
+            Async generator from client.chat
+
+        Raises:
+            Exception: After all retries exhausted
+        """
+        llm_config = config.get("LLM", {})
+        max_retries = llm_config.get("MAX_RETRIES", 3)
+        retry_delay = llm_config.get("RETRY_DELAY", 1.0)
+        backoff_multiplier = llm_config.get("RETRY_BACKOFF", 2.0)
+
+        current_delay = retry_delay
+        last_exception = None
+
+        for attempt in range(max_retries):
+            try:
+                return await client.chat(**request)
+            except (ConnectionError, TimeoutError, Exception) as e:
+                last_exception = e
+                error_type = type(e).__name__
+
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Ollama connection failed (attempt {attempt + 1}/{max_retries}, "
+                        f"error: {error_type}). Retrying in {current_delay:.1f}s..."
+                    )
+                    await asyncio.sleep(current_delay)
+                    current_delay *= backoff_multiplier
+                else:
+                    logger.error(
+                        f"Ollama connection failed after {max_retries} attempts. "
+                        f"Last error: {error_type}: {str(e)}"
+                    )
+                    raise
+
+        # Should never reach here, but just in case
+        if last_exception:
+            raise last_exception
 
     async def stream(
         self,
@@ -79,7 +127,8 @@ class ThinkingOllamaModel(OllamaModel):
         tool_requested = False
         last_chunk = None
 
-        async for chunk in await client.chat(**request):
+        # Use retry wrapper for connection reliability
+        async for chunk in await self._chat_with_retry(client, request):
             last_chunk = chunk
 
             if hasattr(chunk, "message"):

@@ -3,6 +3,7 @@ import faiss
 import json
 import os
 from typing import Any, Dict, List
+from utils.config import config
 from utils.logger import logger
 
 
@@ -22,6 +23,11 @@ class FAISSEpisodicStore:
         self.embeddings = embeddings_controller
         self.index_path = os.path.join(persist_path, "episodic.index")
         self.metadata_path = os.path.join(persist_path, "episodic_metadata.json")
+
+        # Load hybrid search weights from config
+        episodic_config = config.get("EPISODIC_MEMORY", {})
+        self.semantic_weight = episodic_config.get("SEMANTIC_WEIGHT", 0.7)
+        self.keyword_weight = episodic_config.get("KEYWORD_WEIGHT", 0.3)
 
         # Load or create index
         if os.path.exists(self.index_path):
@@ -88,9 +94,14 @@ class FAISSEpisodicStore:
         # Generate query embedding
         query_embedding = self.embeddings.embed([query])
 
-        # Get all results for hybrid ranking
-        all_k = len(self.metadata)
-        scores, indices = self.index.search(query_embedding, all_k)
+        # Optimize: retrieve only top_k * 3 for hybrid re-ranking (not all episodes)
+        # This reduces O(n) to O(k log n) where k is much smaller than n
+        retrieval_k = min(top_k * 3, len(self.metadata))
+        logger.debug(
+            f"FAISS search: retrieving top {retrieval_k} of {len(self.metadata)} episodes for hybrid ranking"
+        )
+
+        scores, indices = self.index.search(query_embedding, retrieval_k)
 
         # Hybrid search: combine semantic + keyword matching
         query_lower = query.lower()
@@ -133,8 +144,11 @@ class FAISSEpisodicStore:
 
                 keyword_score = min(keyword_score, 1.0)  # Cap at 1.0
 
-                # Hybrid: 70% semantic, 30% keyword
-                hybrid_score = 0.7 * semantic_score + 0.3 * keyword_score
+                # Hybrid: configurable semantic + keyword weights
+                hybrid_score = (
+                    self.semantic_weight * semantic_score
+                    + self.keyword_weight * keyword_score
+                )
 
                 meta["similarity"] = hybrid_score
                 hybrid_results.append((hybrid_score, meta))

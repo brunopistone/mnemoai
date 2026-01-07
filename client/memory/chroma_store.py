@@ -2,6 +2,7 @@ import chromadb
 from datetime import datetime
 import os
 from typing import Any, Dict, List
+from utils.config import config
 from utils.logger import logger
 
 
@@ -19,6 +20,11 @@ class ChromaEpisodicStore:
         os.makedirs(self.persist_path, exist_ok=True)
 
         self.embeddings = embeddings_controller
+
+        # Load hybrid search weights from config
+        episodic_config = config.get("EPISODIC_MEMORY", {})
+        self.semantic_weight = episodic_config.get("SEMANTIC_WEIGHT", 0.7)
+        self.keyword_weight = episodic_config.get("KEYWORD_WEIGHT", 0.3)
 
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(path=self.persist_path)
@@ -91,10 +97,15 @@ class ChromaEpisodicStore:
         # Generate query embedding
         query_embedding = self.embeddings.embed([query])
 
-        # Get all results for hybrid ranking
-        all_k = len(self.metadatas)
+        # Optimize: retrieve only top_k * 3 for hybrid re-ranking (not all episodes)
+        # This reduces O(n) to O(k log n) where k is much smaller than n
+        retrieval_k = min(top_k * 3, len(self.metadatas))
+        logger.debug(
+            f"ChromaDB search: retrieving top {retrieval_k} of {len(self.metadatas)} episodes for hybrid ranking"
+        )
+
         results = self.collection.query(
-            query_embeddings=query_embedding.tolist(), n_results=all_k
+            query_embeddings=query_embedding.tolist(), n_results=retrieval_k
         )
 
         if not results["metadatas"] or not results["metadatas"][0]:
@@ -141,8 +152,11 @@ class ChromaEpisodicStore:
 
             keyword_score = min(keyword_score, 1.0)  # Cap at 1.0
 
-            # Hybrid: 70% semantic, 30% keyword
-            hybrid_score = 0.7 * semantic_score + 0.3 * keyword_score
+            # Hybrid: configurable semantic + keyword weights
+            hybrid_score = (
+                self.semantic_weight * semantic_score
+                + self.keyword_weight * keyword_score
+            )
 
             episode = metadata.copy()
             episode["similarity"] = hybrid_score

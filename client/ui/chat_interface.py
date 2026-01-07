@@ -222,6 +222,48 @@ class ChatInterface:
         else:
             logger.debug("No previous interaction to evaluate")
 
+    def __store_current_episode_immediately(self, query: str, response: str) -> None:
+        """Store CURRENT interaction in episodic memory immediately after response.
+
+        This is the new immediate storage mode that doesn't wait for the next query.
+
+        Args:
+            query: Current user query
+            response: Agent's response
+        """
+        if not self.client.agent or not self.client.agent.messages:
+            logger.debug("No agent messages to evaluate")
+            return
+
+        messages = self.client.agent.messages.copy()
+
+        # Extract tools used
+        tools_used = extract_tools_from_messages(messages)
+
+        # Get minimum length threshold from config
+        min_length = config.get("EPISODIC_MEMORY", {}).get("MIN_TOOLS_OR_LENGTH", 300)
+
+        # Quality filter: skip if no tools and response too short
+        if not tools_used and len(response) < min_length:
+            logger.debug(
+                f"✗ Skipping storage - no tools used and response too short "
+                f"({len(response)} < {min_length} chars)"
+            )
+            return
+
+        # Check success (no next_user_message since this is immediate)
+        if is_task_successful(response, messages, next_user_message=None):
+            logger.debug("✓ Task marked as successful - storing immediately")
+            logger.debug(f"Tools used: {[t.get('name') for t in tools_used]}")
+
+            # Use the query as-is (no need to extract from messages)
+            self.client.episodic_memory.store_episode(
+                task=query, tools_used=tools_used, outcome="success"
+            )
+            logger.debug("✓ Episode stored successfully (immediate mode)")
+        else:
+            logger.debug("✗ Task not marked as successful - skipping storage")
+
     def run_chat_loop(self) -> None:
         """Run the main chat loop.
 
@@ -333,10 +375,15 @@ class ChatInterface:
                 print("Input cannot be empty. Please try again.")
                 continue
 
-            # Check if previous interaction was successful and store in episodic memory
-            if self.client.episodic_memory:
+            # Store previous interaction if using delayed mode (legacy)
+            use_immediate_storage = config.get("EPISODIC_MEMORY", {}).get(
+                "IMMEDIATE_STORAGE", True
+            )
+
+            if self.client.episodic_memory and not use_immediate_storage:
+                # Legacy mode: store previous interaction before current query
                 self.__store_episode_in_episodic_memory(query)
-            else:
+            elif not self.client.episodic_memory:
                 logger.debug("Episodic memory is disabled")
 
             try:
@@ -344,6 +391,10 @@ class ChatInterface:
 
                 # Track this interaction (unlabeled by default)
                 self.interaction_quality.append("unlabeled")
+
+                # Store CURRENT interaction immediately after response (new mode)
+                if self.client.episodic_memory and use_immediate_storage:
+                    self.__store_current_episode_immediately(query, response)
 
                 # Auto-generate DPO pair if in DPO mode (async, non-blocking)
                 if self.client.dpo_mode and self.client.visible_content:

@@ -6,6 +6,7 @@ from datetime import datetime
 import re
 import tiktoken
 from typing import List, Dict, Any, Optional
+from utils.config import config
 from utils.logger import logger
 
 
@@ -30,10 +31,49 @@ class EpisodicMemoryManager:
 
         self.encoder = tiktoken.encoding_for_model("gpt-4")  # For token counting
 
+        # Load configuration
+        self.config = config.get("EPISODIC_MEMORY", {})
+        self.duplicate_threshold = self.config.get("DUPLICATE_THRESHOLD", 0.95)
+        self.retrieval_threshold = self.config.get("RETRIEVAL_THRESHOLD", 0.7)
+        self.max_tokens = self.config.get("MAX_TOKENS_PER_EPISODE", 400)
+        self.semantic_weight = self.config.get("SEMANTIC_WEIGHT", 0.7)
+        self.keyword_weight = self.config.get("KEYWORD_WEIGHT", 0.3)
+
+        logger.debug(
+            f"Episodic memory initialized with duplicate_threshold={self.duplicate_threshold}, "
+            f"retrieval_threshold={self.retrieval_threshold}, max_tokens={self.max_tokens}"
+        )
+
         if store_type == "faiss":
             self.store = FAISSEpisodicStore(persist_path, embeddings_controller)
         else:
             self.store = ChromaEpisodicStore(persist_path, embeddings_controller)
+
+    def count_tokens(self, text: str) -> int:
+        """Count tokens with model-specific approximation.
+
+        For Ollama models, uses character-based approximation.
+        For OpenAI/Bedrock models, uses tiktoken encoder.
+
+        Args:
+            text: Text to count tokens for
+
+        Returns:
+            Estimated token count
+        """
+        model_type = config.get("MODEL_ID", {}).get("TYPE", "ollama")
+
+        if model_type == "ollama":
+            # Ollama approximation: ~1.3 chars per token (configurable)
+            multiplier = (
+                config.get("LLM", {})
+                .get("TOKEN_COUNTING", {})
+                .get("OLLAMA_APPROXIMATION", 1.3)
+            )
+            return int(len(text) / multiplier)
+        else:
+            # Use tiktoken for OpenAI/Bedrock/SageMaker
+            return len(self.encoder.encode(text))
 
     def _truncate_to_tokens(self, text: str, max_tokens: int) -> str:
         """Truncate text to fit within token limit.
@@ -66,11 +106,12 @@ class EpisodicMemoryManager:
             tools_used: List of tools invoked with args and results
             outcome: Success indicator
         """
-        # Check for near-duplicate episodes (similarity > 0.95)
+        # Check for near-duplicate episodes (configurable threshold)
         similar = self.store.search(query=task, top_k=1)
-        if similar and similar[0].get("similarity", 0) > 0.95:
+        if similar and similar[0].get("similarity", 0) > self.duplicate_threshold:
             logger.debug(
-                f"Skipping duplicate episode (similarity: {similar[0]['similarity']:.2f})"
+                f"Skipping duplicate episode (similarity: {similar[0]['similarity']:.2f}, "
+                f"threshold: {self.duplicate_threshold})"
             )
             return
 
@@ -87,25 +128,69 @@ class EpisodicMemoryManager:
 
         text = f"Task: {task}\nTools used: {tool_summary}\nOutcome: {outcome}"
 
-        # Truncate to fit embedding model context
-        max_tokens = 400
-        token_count = len(self.encoder.encode(text))
+        # Truncate to fit embedding model context (configurable)
+        token_count = self.count_tokens(text)
 
-        if token_count > max_tokens:
+        if token_count > self.max_tokens:
             logger.debug(
-                f"Truncating episode from {token_count} to {max_tokens} tokens"
+                f"Truncating episode from {token_count} to {self.max_tokens} tokens"
             )
-            text = self._truncate_to_tokens(text, max_tokens)
+            text = self._truncate_to_tokens(text, self.max_tokens)
 
         logger.debug(
-            f"Storing episode: {task[:50]}... ({len(self.encoder.encode(text))} tokens)"
+            f"Storing episode: {task[:50]}... ({self.count_tokens(text)} tokens)"
         )
         self.store.add(text=text, metadata=metadata)
+
+    def _expand_query(self, query: str) -> str:
+        """Expand query with synonyms for better retrieval.
+
+        Args:
+            query: Original query
+
+        Returns:
+            Expanded query with synonyms
+        """
+        if not self.config.get("ENABLE_QUERY_EXPANSION", True):
+            return query
+
+        # Simple synonym mapping for common actions
+        synonyms = {
+            "create": ["make", "generate"],
+            "delete": ["remove", "clear"],
+            "search": ["find", "locate"],
+            "update": ["modify", "edit"],
+            "fix": ["repair", "resolve"],
+            "install": ["setup", "add"],
+            "run": ["execute", "start"],
+            "read": ["view", "show"],
+            "write": ["save", "store"],
+            "list": ["show", "display"],
+        }
+
+        query_lower = query.lower()
+        expanded_terms = []
+        max_terms = self.config.get("QUERY_EXPANSION_TERMS", 3)
+
+        # Find matching words and add their synonyms
+        for word, variants in synonyms.items():
+            if word in query_lower and len(expanded_terms) < max_terms:
+                # Add first variant only
+                expanded_terms.append(variants[0])
+
+        if expanded_terms:
+            expanded_query = f"{query} {' '.join(expanded_terms)}"
+            logger.debug(
+                f"Query expansion: '{query[:50]}...' -> '{expanded_query[:80]}...'"
+            )
+            return expanded_query
+
+        return query
 
     def retrieve_similar_episodes(
         self, task: str, top_k: int = 3
     ) -> List[Dict[str, Any]]:
-        """Find similar past task solutions.
+        """Find similar past task solutions with query expansion.
 
         Args:
             task: Current task to find similar episodes for
@@ -115,7 +200,11 @@ class EpisodicMemoryManager:
             List of similar episodes with metadata
         """
         logger.debug(f"Retrieving similar episodes for: {task[:50]}...")
-        return self.store.search(query=task, top_k=top_k)
+
+        # Apply query expansion if enabled
+        expanded_task = self._expand_query(task)
+
+        return self.store.search(query=expanded_task, top_k=top_k)
 
     def cleanup(self, max_episodes: int = 1000, max_age_days: int = 90) -> None:
         """Remove old episodes and enforce size limit.
@@ -144,17 +233,30 @@ def is_task_successful(
     """
     logger.debug("Evaluating task success...")
 
+    # Load configurable markers
+    episodic_config = config.get("EPISODIC_MEMORY", {})
+    success_markers = episodic_config.get(
+        "SUCCESS_MARKERS", ["thanks", "thank you", "perfect", "great", "worked", "good"]
+    )
+    correction_markers = episodic_config.get(
+        "CORRECTION_MARKERS",
+        ["wrong", "error", "fix", "actually", "instead", "incorrect"],
+    )
+    error_patterns = episodic_config.get(
+        "ERROR_PATTERNS", ["error:", "failed:", "exception:", "could not", "unable to"]
+    )
+
     # 1. Check for explicit success markers
     if next_user_message:
         next_lower = next_user_message.lower()
 
         # Check for success markers (whole words)
-        success_markers = ["thanks", "thank you", "perfect", "great", "worked", "good"]
+        success_markers_lower = [m.lower() for m in success_markers]
         if any(
             f" {marker} " in f" {next_lower} "
             or next_lower.startswith(marker + " ")
             or next_lower.endswith(" " + marker)
-            for marker in success_markers
+            for marker in success_markers_lower
         ):
             logger.debug(
                 f"✓ Success marker found in user message: {next_user_message[:50]}"
@@ -162,19 +264,12 @@ def is_task_successful(
             return True
 
         # Check for correction requests (whole words only)
-        correction_markers = [
-            "wrong",
-            "error",
-            "fix",
-            "actually",
-            "instead",
-            "incorrect",
-        ]
+        correction_markers_lower = [m.lower() for m in correction_markers]
         if any(
             f" {marker} " in f" {next_lower} "
             or next_lower.startswith(marker + " ")
             or next_lower.endswith(" " + marker)
-            for marker in correction_markers
+            for marker in correction_markers_lower
         ):
             logger.debug(f"✗ Correction marker found: {next_user_message[:50]}")
             return False
@@ -184,20 +279,10 @@ def is_task_successful(
             logger.debug(f"✗ Correction marker found: {next_user_message[:50]}")
             return False
 
-    # 2. Check for error markers in response (only at sentence start or after punctuation)
-    error_patterns = [
-        "error:",
-        "failed:",
-        "exception:",
-        "could not",
-        "unable to",
-        "error occurred",
-        "failed to",
-        "an error",
-        "the error",
-    ]
+    # 2. Check for error markers in response (configurable)
     response_lower = agent_response.lower()
-    if any(pattern in response_lower for pattern in error_patterns):
+    error_patterns_lower = [p.lower() for p in error_patterns]
+    if any(pattern in response_lower for pattern in error_patterns_lower):
         logger.debug(f"✗ Error marker found in response")
         return False
 

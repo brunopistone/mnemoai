@@ -61,15 +61,30 @@ class ToolManager:
         return self.vision_model
 
     def count_tokens(self, text: str) -> int:
-        """Count number of tokens in a string.
+        """Count tokens with model-specific approximation.
+
+        For Ollama models, uses character-based approximation.
+        For OpenAI/Bedrock models, uses tiktoken encoder.
 
         Args:
             text: Text to count tokens for
 
         Returns:
-            Token count
+            Estimated token count
         """
-        return len(self.encoder.encode(text))
+        model_type = config.get("MODEL_ID", {}).get("TYPE", "ollama")
+
+        if model_type == "ollama":
+            # Ollama approximation: ~1.3 chars per token (configurable)
+            multiplier = (
+                config.get("LLM", {})
+                .get("TOKEN_COUNTING", {})
+                .get("OLLAMA_APPROXIMATION", 1.3)
+            )
+            return int(len(text) / multiplier)
+        else:
+            # Use tiktoken for OpenAI/Bedrock/SageMaker
+            return len(self.encoder.encode(text))
 
     def register_tools(self, mcp: Any) -> None:
         """Register all tools with the MCP server.

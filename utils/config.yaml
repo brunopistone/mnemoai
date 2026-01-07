@@ -4,11 +4,14 @@ MODEL_ID:
   HOST: localhost
   PORT: 11434
   MAX_TOKENS: 32768
-  TOP_P: 0.95
-  TOP_K: 20
-  MIN_P: 0
+  PRESENCE_PENALTY: 0.1
   REPETITION_PENALTY: 1.3
+  REPEAT_LAST_N: 128
   TEMPERATURE: 0.3
+  TOP_P: 0.95
+  STOP:
+    - "<|im_start|>"
+    - "<|im_end|>"
 VISION_MODEL_ID:
   NAME: qwen2.5vl:3b
   TYPE: ollama
@@ -29,9 +32,78 @@ EMBED_MODEL_ID:
 DOC_CHUNK_TOKENS: 1024
 VECTOR_STORE:
   TYPE: chromadb # or faiss
-# Episodic Memory Configuration
+# Episodic Memory Configuration (Enhanced)
 ENABLE_EPISODIC_MEMORY: true
 EPISODIC_MEMORY_STORE: chromadb # or faiss
+EPISODIC_MEMORY:
+  ENABLED: true
+  STORE_TYPE: chromadb # or faiss
+  # Similarity Thresholds
+  DUPLICATE_THRESHOLD: 0.95 # Higher = stricter duplicate detection
+  RETRIEVAL_THRESHOLD: 0.7 # Higher = more strict retrieval
+  # Hybrid Search Weights
+  SEMANTIC_WEIGHT: 0.7 # Semantic similarity weight (0-1)
+  KEYWORD_WEIGHT: 0.3 # Keyword matching weight (0-1)
+  # Token and Size Limits
+  MAX_TOKENS_PER_EPISODE: 400 # Max tokens for episode text
+  MAX_EPISODES: 1000 # Maximum stored episodes
+  MAX_AGE_DAYS: 90 # Maximum episode age
+  # Success Detection (configurable markers)
+  SUCCESS_MARKERS:
+    - thanks
+    - thank you
+    - perfect
+    - great
+    - worked
+    - good
+    - excellent
+    - awesome
+  CORRECTION_MARKERS:
+    - wrong
+    - error
+    - fix
+    - actually
+    - instead
+    - incorrect
+    - no
+    - not right
+  ERROR_PATTERNS:
+    - "error:"
+    - "failed:"
+    - "exception:"
+    - "could not"
+    - "unable to"
+    - "error occurred"
+    - "failed to"
+    - "an error"
+    - "the error"
+  # Storage Behavior
+  IMMEDIATE_STORAGE: true # Store episodes immediately (not delayed)
+  MIN_TOOLS_OR_LENGTH: 300 # Minimum response length if no tools used
+  # Query Enhancement
+  ENABLE_QUERY_EXPANSION: true # Expand queries with synonyms
+  QUERY_EXPANSION_TERMS: 3 # Max terms to add per query
+# LLM Interaction Configuration (Enhanced)
+LLM:
+  # Thinking/Reasoning
+  ENABLE_THINKING: true # Enable thinking tags (verbose mode)
+  # Retry Logic
+  RETRY_ENABLED: true
+  MAX_RETRIES: 3
+  RETRY_DELAY: 1.0 # Seconds between retries
+  RETRY_BACKOFF: 2.0 # Exponential backoff multiplier
+  # Token Counting (Model-specific)
+  TOKEN_COUNTING:
+    OLLAMA_APPROXIMATION: 1.3 # Multiplier for Ollama (chars to tokens)
+    FALLBACK_MODEL: "gpt-4" # Tiktoken model for fallback
+  # Context Management
+  SUMMARIZATION_THINK: false
+# Embedding Configuration (Enhanced)
+EMBEDDINGS:
+  FALLBACK_ENABLED: true
+  FALLBACK_TYPE: "sha256" # or "random", "zeros"
+  CACHE_ENABLED: true
+  CACHE_SIZE: 1000 # LRU cache size for embeddings
 # Web search Configuration
 BRAVE_API_KEY: your_brave_api_key
 # Web crawl Configuration
@@ -45,6 +117,10 @@ SYSTEM_PROMPT: |
 
   The current date is {current_date}.
   </identity>
+
+  <reasoning_constraint>
+  Keep internal reasoning to 2-3 sentences maximum. Be decisive - don't repeat the same consideration multiple times.
+  </reasoning_constraint>
 
   <critical_response_requirement>
   You MUST NOT output in the final answer <thinking> tags, reasoning blocks, chain-of-thought, or analysis content. You MUST only output the final answer. All internal reasoning MUST remain private and MUST never appear in your output. 
