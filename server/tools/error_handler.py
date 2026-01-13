@@ -1,4 +1,5 @@
 """Standardized error handling for tools with helpful troubleshooting guidance."""
+
 import json
 import os
 import sys
@@ -181,9 +182,11 @@ def tool_error_handler(func: Callable) -> Callable:
                         "Validate JSON at: https://jsonlint.com",
                     ],
                     "original_error": str(e),
-                    "error_location": f"Line {e.lineno}, Column {e.colno}"
-                    if hasattr(e, "lineno")
-                    else "Unknown",
+                    "error_location": (
+                        f"Line {e.lineno}, Column {e.colno}"
+                        if hasattr(e, "lineno")
+                        else "Unknown"
+                    ),
                 },
                 indent=2,
             )

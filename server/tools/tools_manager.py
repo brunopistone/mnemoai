@@ -92,22 +92,28 @@ class ToolManager:
         Args:
             mcp: MCP server instance
         """
+        from .background_tasks import register_background_tasks_tools
         from .describe_image import register_image_tools
-        from .edit import register_edit_tools
         from .execute_bash import register_execute_bash_tools
+        from .file_edit import register_edit_tools
+        from .file_search import register_search_tools
         from .fs_read import register_fs_read_tools
         from .fs_write import register_fs_write_tools
+        from .git_safety import register_git_safety_tools
+        from .plan_mode import register_plan_mode_tools
         from .rag import register_rag_tools
-        from .search import register_search_tools
-        from .todo import register_todo_tools
+        from .todo_manager import register_todo_tools
         from .web_crawler import register_web_crawler_tools
         from .web_search import register_web_search_tools
 
         # Register all tool categories
+        register_background_tasks_tools(mcp)
         register_execute_bash_tools(mcp)
         register_edit_tools(mcp)
         register_fs_read_tools(mcp)
         register_fs_write_tools(mcp)
+        register_git_safety_tools(mcp)
+        register_plan_mode_tools(mcp)
         register_search_tools(mcp)
         register_todo_tools(mcp)
 

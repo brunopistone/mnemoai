@@ -25,6 +25,9 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **🔎 Fast Search Tools**: Glob pattern matching and ripgrep content search (10-100x faster)
 - **📋 Todo Tracking**: Multi-step task management with real-time progress updates
 - **⚡ Bash Execution**: Direct shell command execution with intelligent error handling
+- **🛡️ Git Safety**: Protection against dangerous git operations with smart warnings
+- **📝 Plan Mode**: Implementation planning workflow for complex tasks
+- **🔄 Background Tasks**: Run long operations in parallel without blocking
 
 ## 📖 Project Structure
 
@@ -54,11 +57,14 @@ ai-assistant/
 │       ├── tools_manager.py                # Tool registration
 │       ├── fs_read.py                      # File reading
 │       ├── fs_write.py                     # File writing (with confirmation)
-│       ├── edit.py                         # Precise file editing
+│       ├── file_edit.py                    # Precise file editing
 │       ├── execute_bash.py                 # Bash execution
-│       ├── search.py                       # Fast glob and grep search
-│       ├── todo.py                         # Todo list management
+│       ├── file_search.py                  # Fast glob and grep search
+│       ├── todo_manager.py                 # Todo list management
 │       ├── error_handler.py                # Standardized error handling
+│       ├── git_safety.py                   # Git operations with safety checks
+│       ├── plan_mode.py                    # Implementation planning workflow
+│       ├── background_tasks.py             # Background task execution
 │       ├── web_crawler.py                  # Web crawler
 │       ├── web_search.py                   # Web search
 │       ├── describe_image.py               # Image analysis
@@ -549,6 +555,97 @@ All tools now provide intelligent error messages with troubleshooting guidance:
 
 This prevents accidental file overwrites and gives users control over file system modifications.
 
+### 🛡️ Git Safety
+
+Safe git operations with protection against common mistakes:
+
+**Tools:**
+
+- `git_safe(command="...")` - Execute git commands with safety checks
+- `git_status_safe()` - Comprehensive status with warnings
+- `git_commit_safe(message="...", add_all=True)` - Safe commits with staging
+
+**Protected Operations:**
+
+| Operation | Protection |
+|-----------|------------|
+| Force push to main/master | Blocked |
+| `git reset --hard` | Warning + confirmation required |
+| `git push --force` | Warning (use `--force-with-lease`) |
+| `git commit --amend` | Checks if already pushed |
+| Skip hooks (`--no-verify`) | Warning |
+| Force delete branch (`-D`) | Warning |
+
+**Example:**
+
+```python
+# Safe - uses git_safe with protections
+git_safe(command="push origin feature-branch")
+
+# Dangerous - requires confirmation
+git_safe(command="reset --hard HEAD~1", allow_dangerous=True, reason="Discarding failed experiment")
+```
+
+### 📝 Plan Mode
+
+Implementation planning workflow for complex tasks:
+
+**Workflow:**
+
+1. `enter_plan_mode(task_description="Add user authentication")`
+2. Explore codebase with search tools
+3. `add_plan_step(step_number=1, title="Create user model", description="...")`
+4. `add_plan_file(file_path="models/user.py", action="create")`
+5. `add_plan_risk(risk="Migration needed", mitigation="Add migration script")`
+6. `present_plan()` - Show user for approval
+7. `approve_plan()` + `exit_plan_mode()` - Start implementing
+
+**When to Use:**
+
+- New feature with multiple files
+- Architectural decisions needed
+- Multi-step refactoring
+- Unclear requirements
+
+**Plan Storage:** `~/.claude/current_plan.json`
+
+### 🔄 Background Tasks
+
+Run long operations in parallel without blocking:
+
+**Tools:**
+
+- `start_background_task(command="...", description="...")` - Start task
+- `get_task_status(task_id="...")` - Check progress
+- `get_task_output(task_id="...")` - Get output
+- `list_background_tasks()` - See all tasks
+- `cancel_background_task(task_id="...")` - Stop task
+- `wait_for_task(task_id="...", timeout_seconds=300)` - Wait for completion
+
+**When to Use:**
+
+- Running full test suites
+- Building large projects
+- Installing dependencies
+- Running linters on entire codebase
+- Any command > 30 seconds
+
+**Example:**
+
+```python
+# Start tests in background
+result = start_background_task(command="pytest", description="Running tests")
+# Returns: {"task_id": "abc123", ...}
+
+# Check status later
+get_task_status(task_id="abc123")
+
+# Get output when done
+get_task_output(task_id="abc123", tail_lines=50)
+```
+
+**Task Storage:** Output logs saved to `~/.claude/tasks/`
+
 ## 🔧 Configuration
 
 ### Model Configuration
@@ -887,13 +984,16 @@ See `bash/dpo-collection/DPO_COLLECTION.md` for details.
 
 All Python dependencies are listed in `requirements.txt`. The new productivity tools use only standard library features:
 
-| Tool          | Python Packages                 | External Tools     |
-| ------------- | ------------------------------- | ------------------ |
-| TodoWrite     | Standard library only           | None               |
-| Edit Tool     | Standard library only           | None               |
-| Glob Search   | Standard library (`glob`)       | None               |
-| Grep Search   | Standard library (`subprocess`) | ripgrep (optional) |
-| Error Handler | Standard library (`functools`)  | None               |
+| Tool             | Python Packages                    | External Tools     |
+| ---------------- | ---------------------------------- | ------------------ |
+| TodoWrite        | Standard library only              | None               |
+| Edit Tool        | Standard library only              | None               |
+| Glob Search      | Standard library (`glob`)          | None               |
+| Grep Search      | Standard library (`subprocess`)    | ripgrep (optional) |
+| Error Handler    | Standard library (`functools`)     | None               |
+| Git Safety       | Standard library (`subprocess`)    | git                |
+| Plan Mode        | Standard library (`json`, `os`)    | None               |
+| Background Tasks | Standard library (`threading`)     | None               |
 
 **External Tools:**
 
