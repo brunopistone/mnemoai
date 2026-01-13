@@ -9,6 +9,7 @@ from .readers import (
     read_pdf,
     read_docx,
 )
+from .error_handler import tool_error_handler
 import json
 import os
 from mcp.server.fastmcp import FastMCP
@@ -28,6 +29,7 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
+    @tool_error_handler
     async def fs_read(
         path: str,
         mode: str = "Line",

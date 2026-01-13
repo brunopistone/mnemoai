@@ -10,6 +10,7 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 from utils.logger import logger
+from .error_handler import tool_error_handler
 
 
 def _resolve_path(path: str) -> str:
@@ -79,6 +80,7 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
+    @tool_error_handler
     async def fs_write(
         path: str,
         command: str,

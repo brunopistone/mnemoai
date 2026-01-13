@@ -20,8 +20,11 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **🔍 Web Search**: Integrated Brave Search API
 - **🌐 Web Crawler**: Extract and index content from web pages
 - **🖼️ Vision Support**: Image analysis with vision models
-- **📁 File Operations**: Read/write with support for text, CSV, JSON, PDF, DOCX
-- **⚡ Bash Execution**: Direct shell command execution
+- **📁 File Operations**: Read/write/edit with support for text, CSV, JSON, PDF, DOCX
+- **✏️ Precise File Editing**: Safe string replacement with validation and uniqueness checking
+- **🔎 Fast Search Tools**: Glob pattern matching and ripgrep content search (10-100x faster)
+- **📋 Todo Tracking**: Multi-step task management with real-time progress updates
+- **⚡ Bash Execution**: Direct shell command execution with intelligent error handling
 
 ## 📖 Project Structure
 
@@ -50,8 +53,12 @@ ai-assistant/
 │   └── tools/                              # Tool implementations
 │       ├── tools_manager.py                # Tool registration
 │       ├── fs_read.py                      # File reading
-│       ├── fs_write.py                     # File writing
+│       ├── fs_write.py                     # File writing (with confirmation)
+│       ├── edit.py                         # Precise file editing
 │       ├── execute_bash.py                 # Bash execution
+│       ├── search.py                       # Fast glob and grep search
+│       ├── todo.py                         # Todo list management
+│       ├── error_handler.py                # Standardized error handling
 │       ├── web_crawler.py                  # Web crawler
 │       ├── web_search.py                   # Web search
 │       ├── describe_image.py               # Image analysis
@@ -134,6 +141,7 @@ ai-assistant/
 - Python 3.8+
 - (Optional) Ollama installed for local models
 - (Optional) AWS credentials for Bedrock/SageMaker
+- (Optional) ripgrep for fast content search
 
 ### Installation
 
@@ -169,7 +177,49 @@ conda activate personal-ai-assistant
 pip install -r requirements.txt
 ```
 
-3. **Configure the application**:
+3. **Install ripgrep (optional but recommended for fast search)**:
+
+Ripgrep provides 10-100x faster content search than traditional grep. Required for `grep_search` tool.
+
+**macOS:**
+
+```bash
+brew install ripgrep
+```
+
+**Ubuntu/Debian:**
+
+```bash
+sudo apt install ripgrep
+```
+
+**Fedora/RHEL:**
+
+```bash
+sudo dnf install ripgrep
+```
+
+**Windows (via Chocolatey):**
+
+```bash
+choco install ripgrep
+```
+
+**From source:**
+
+```bash
+cargo install ripgrep
+```
+
+**Verify installation:**
+
+```bash
+rg --version  # Should show ripgrep version
+```
+
+If ripgrep is not installed, the assistant will automatically fall back to using `execute_bash` with standard `grep`, but performance will be significantly slower.
+
+4. **Configure the application**:
 
 Edit `utils/config.yaml`:
 
@@ -181,7 +231,7 @@ MODEL_ID:
   PORT: 11434
 ```
 
-4. **Run the assistant**:
+5. **Run the assistant**:
 
 ```bash
 python main.py
@@ -272,8 +322,12 @@ MCP server that provides tools to the LLM.
 - **`tools/`**: Tool implementations
   - `tools_manager.py`: Centralized tool registration and utilities
   - `fs_read.py`: File reading (text, CSV, JSON, PDF, DOCX)
-  - `fs_write.py`: File writing/editing
-  - `execute_bash.py`: Shell command execution
+  - `fs_write.py`: File writing with mandatory user confirmation (dry-run preview)
+  - `edit.py`: Precise string replacement with validation and uniqueness checking
+  - `execute_bash.py`: Shell command execution with intelligent error handling
+  - `search.py`: Fast file/content search (glob patterns + ripgrep)
+  - `todo.py`: Todo list management for multi-step tasks
+  - `error_handler.py`: Standardized error handling decorator for all tools
   - `web_search.py`: Brave Search integration
   - `web_crawler.py`: Web page content extraction with RAG integration
   - `describe_image.py`: Vision model image analysis
@@ -344,6 +398,156 @@ Session data is stored in `~/agent-conversations/{profile_name}/`:
     ├── rag_store_*.faiss       # FAISS vector index
     └── chunk_cache_*.db        # SQLite chunk cache
 ```
+
+## 🚀 Productivity Tools
+
+The assistant includes specialized tools for efficient code and file manipulation:
+
+### 📋 Todo List Management
+
+Track multi-step tasks with automatic status management:
+
+**Tools:**
+
+- `todo_write(todos)`: Update the todo list
+- `todo_read()`: View current todos
+- `todo_clear()`: Clear all todos
+
+**Features:**
+
+- Three states: `pending`, `in_progress`, `completed`
+- Enforces exactly ONE task in progress at a time
+- Real-time progress tracking
+- Stored in `~/.claude/{profile}/current_todos.json`
+
+**Usage Example:**
+
+```
+You: Implement user authentication
+Assistant: [Creates todos for: database setup, API endpoints, frontend integration, testing]
+Assistant: [Marks first todo as in_progress]
+Assistant: [Completes each step, updating todos in real-time]
+```
+
+### 🔎 Fast Search Tools
+
+High-performance file and content searching:
+
+#### Glob Search (File Names)
+
+Find files by name patterns:
+
+```python
+glob_search(pattern="**/*.py")  # All Python files recursively
+glob_search(pattern="src/**/*.ts", max_results=100)  # TypeScript in src/
+glob_search(pattern="test_*.py", sort_by_mtime=False)  # Unsorted for speed
+```
+
+**Parameters:**
+
+- `pattern`: Glob pattern (e.g., `**/*.py`, `*.{yaml,json}`)
+- `path`: Directory to search (default: current directory)
+- `max_results`: Limit results (default: 1000, use 0 for unlimited)
+- `sort_by_mtime`: Sort by modification time (default: True)
+
+**Performance:** Best for project/codebase searches. For system-wide searches (entire home directory), the assistant automatically uses `find` command instead.
+
+#### Grep Search (File Content)
+
+Search within file contents using ripgrep:
+
+```python
+grep_search(pattern="class Foo")  # Find class definitions
+grep_search(pattern="TODO|FIXME", file_pattern="*.py", case_insensitive=True)
+grep_search(pattern="import React", output_mode="content")  # Show matched lines
+```
+
+**Parameters:**
+
+- `pattern`: Regex pattern to search for
+- `path`: Directory to search (default: current directory)
+- `file_pattern`: Filter by file type (e.g., `*.py`, `*.{ts,tsx}`)
+- `case_insensitive`: Case-insensitive search (default: False)
+- `output_mode`: `files_with_matches` (default), `content`, or `count`
+- `context_lines`: Lines of context around matches
+- `max_results`: Maximum matches per file (default: 100)
+
+**Requirements:** Requires `ripgrep` installed (see Installation section)
+
+**Performance:** 10-100x faster than traditional grep for large codebases.
+
+### ✏️ Precise File Editing
+
+Safe string replacement with validation:
+
+```python
+file_edit(
+    file_path="/path/to/file.py",
+    old_string="def old_function():\n    pass",
+    new_string="def new_function():\n    return True",
+    replace_all=False  # Requires uniqueness (default)
+)
+```
+
+**Safety Features:**
+
+- Validates file exists before editing
+- Checks that `old_string` exists in file
+- Enforces uniqueness (prevents accidental multiple replacements)
+- Provides detailed error messages with troubleshooting steps
+- Returns line count changes
+
+**Best Practice Workflow:**
+
+1. Read the file first with `fs_read`
+2. Copy the EXACT text you want to replace (including whitespace)
+3. Create the new version with your changes
+4. Call `file_edit` with exact strings
+
+**Error Handling:** If the string isn't unique, the tool provides the line numbers where it appears so you can add more context.
+
+### 🛡️ Enhanced Error Handling
+
+All tools now provide intelligent error messages with troubleshooting guidance:
+
+**Example Error Response:**
+
+```json
+{
+  "error": true,
+  "error_type": "FileNotFoundError",
+  "message": "File or directory not found: /path/to/file.txt",
+  "next_steps": [
+    "Verify the file path is correct",
+    "Use glob_search to find files by pattern",
+    "Check with execute_bash('ls -la /parent/dir')",
+    "Ensure you have read permissions"
+  ],
+  "original_error": "..."
+}
+```
+
+**Handled Error Types:**
+
+- FileNotFoundError
+- PermissionError
+- IsADirectoryError
+- JSONDecodeError
+- Encoding errors
+- Command execution errors
+- Timeout errors
+
+### 📁 File Write Confirmation
+
+`fs_write` now requires mandatory user confirmation:
+
+**Two-Step Process:**
+
+1. **Preview (dry_run=True)**: Shows what will happen
+2. **Confirm**: User explicitly approves
+3. **Execute (confirmed=True)**: Actually performs the operation
+
+This prevents accidental file overwrites and gives users control over file system modifications.
 
 ## 🔧 Configuration
 
@@ -678,6 +882,37 @@ EMBED_MODEL_ID: # Required for both stores
 ```
 
 See `bash/dpo-collection/DPO_COLLECTION.md` for details.
+
+## 📦 Dependencies
+
+All Python dependencies are listed in `requirements.txt`. The new productivity tools use only standard library features:
+
+| Tool          | Python Packages                 | External Tools     |
+| ------------- | ------------------------------- | ------------------ |
+| TodoWrite     | Standard library only           | None               |
+| Edit Tool     | Standard library only           | None               |
+| Glob Search   | Standard library (`glob`)       | None               |
+| Grep Search   | Standard library (`subprocess`) | ripgrep (optional) |
+| Error Handler | Standard library (`functools`)  | None               |
+
+**External Tools:**
+
+- **ripgrep**: Required for `grep_search` tool. Install via system package manager (see Installation section). If not installed, the assistant automatically falls back to slower alternatives.
+
+**Core Python Packages:**
+
+- `strands-agents`: Agent framework
+- `mcp`, `mcp[cli]`: Model Context Protocol
+- `litellm`: Multi-provider LLM support
+- `ollama`: Local LLM support
+- `boto3`: AWS Bedrock/SageMaker
+- `tiktoken`: Token counting
+- `chromadb`, `faiss-cpu`: Vector stores for RAG
+- `PyPDF2`, `python-docx`: Document readers
+- `Pygments`: Code syntax highlighting
+- `prompt_toolkit`: Interactive CLI
+- `brave-search-python-client`: Web search
+- `crawl4ai`: Web crawling
 
 ## 🛠️ Development
 

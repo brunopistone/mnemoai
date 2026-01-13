@@ -10,6 +10,7 @@ sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 from utils.logger import logger
+from .error_handler import tool_error_handler
 
 
 def register_execute_bash_tools(mcp: FastMCP) -> None:
@@ -20,6 +21,7 @@ def register_execute_bash_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
+    @tool_error_handler
     async def execute_bash(command: str, timeout: int = 30) -> str:
         """Execute bash/shell commands and return the output.
 
