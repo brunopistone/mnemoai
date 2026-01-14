@@ -16,7 +16,7 @@ from utils.config import config
 # Load configuration from centralized config
 BRAVE_API_KEY = config.get("BRAVE_API_KEY", None)
 
-if BRAVE_API_KEY:
+if config.get("ENABLE_WEB_SEARCH", None) and BRAVE_API_KEY:
     os.environ["BRAVE_API_KEY"] = BRAVE_API_KEY
 
 # Tiktoken parameters
@@ -126,7 +126,7 @@ class ToolManager:
         if config.get("ENABLE_WEB_CRAWL", None):
             register_web_crawler_tools(mcp)
 
-        if BRAVE_API_KEY:
+        if config.get("ENABLE_WEB_SEARCH", None) and BRAVE_API_KEY:
             register_web_search_tools(mcp)
 
     def validate_file_path(self, file_path: str) -> tuple[bool, str, dict]:

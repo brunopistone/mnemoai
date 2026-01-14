@@ -122,7 +122,6 @@ class ThinkingOllamaModel(OllamaModel):
 
         thinking_opened = False
         thinking_closed = False
-        thinking_ended = False
         in_thinking_tag = False
         tool_requested = False
         last_chunk = None
@@ -171,7 +170,7 @@ class ThinkingOllamaModel(OllamaModel):
 
                     # Filter thinking tags from content when return_thinking=False
                     # This handles cases where LLM outputs thinking tags in content field
-                    if not return_thinking and not thinking_ended:
+                    if not return_thinking:
                         # Check if any closing tag (</think>, </thinking>) appears in this chunk
                         closing_tag = next(
                             (tag for tag in self.thinking_close_tags if tag in content),
@@ -183,20 +182,28 @@ class ThinkingOllamaModel(OllamaModel):
                             None,
                         )
 
-                        if closing_tag:
-                            # Found closing tag - keep only content AFTER it
+                        if closing_tag and in_thinking_tag:
+                            # Found closing tag while inside thinking - keep only content AFTER it
                             # Example: "reasoning</think>answer" -> "answer"
                             content = content.split(closing_tag, 1)[1]
-                            thinking_ended = True  # Stop filtering future chunks
                             in_thinking_tag = False
                         elif opening_tag:
                             # Found opening tag - keep only content BEFORE it
                             # Example: "text<think>reasoning" -> "text"
-                            content = content.split(opening_tag)[0]
-                            in_thinking_tag = True  # Start skipping chunks
-                        elif in_thinking_tag or not thinking_ended:
-                            # We're inside thinking tags OR haven't seen closing tag yet
-                            # Skip this entire chunk
+                            before_tag = content.split(opening_tag)[0]
+                            after_tag = content.split(opening_tag, 1)[1]
+
+                            # Check if closing tag is in the same chunk
+                            if closing_tag and closing_tag in after_tag:
+                                # Both open and close in same chunk - strip thinking entirely
+                                after_close = after_tag.split(closing_tag, 1)[1]
+                                content = before_tag + after_close
+                            else:
+                                # Only opening tag - keep before, start skipping
+                                content = before_tag
+                                in_thinking_tag = True
+                        elif in_thinking_tag:
+                            # We're inside thinking tags - skip this chunk
                             content = ""
 
                     if content:

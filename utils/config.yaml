@@ -29,7 +29,7 @@ EMBED_MODEL_ID:
   TYPE: ollama
   HOST: localhost
   PORT: 11434
-DOC_CHUNK_TOKENS: 1024
+DOC_CHUNK_TOKENS: 512
 VECTOR_STORE:
   TYPE: chromadb # or faiss
 # Episodic Memory Configuration (Enhanced)
@@ -105,6 +105,7 @@ EMBEDDINGS:
   CACHE_ENABLED: true
   CACHE_SIZE: 1000 # LRU cache size for embeddings
 # Web search Configuration
+ENABLE_WEB_SEARCH: true
 BRAVE_API_KEY: your_brave_api_key
 # Web crawl Configuration
 ENABLE_WEB_CRAWL: true
