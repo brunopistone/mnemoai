@@ -567,14 +567,14 @@ Safe git operations with protection against common mistakes:
 
 **Protected Operations:**
 
-| Operation | Protection |
-|-----------|------------|
-| Force push to main/master | Blocked |
-| `git reset --hard` | Warning + confirmation required |
-| `git push --force` | Warning (use `--force-with-lease`) |
-| `git commit --amend` | Checks if already pushed |
-| Skip hooks (`--no-verify`) | Warning |
-| Force delete branch (`-D`) | Warning |
+| Operation                  | Protection                         |
+| -------------------------- | ---------------------------------- |
+| Force push to main/master  | Blocked                            |
+| `git reset --hard`         | Warning + confirmation required    |
+| `git push --force`         | Warning (use `--force-with-lease`) |
+| `git commit --amend`       | Checks if already pushed           |
+| Skip hooks (`--no-verify`) | Warning                            |
+| Force delete branch (`-D`) | Warning                            |
 
 **Example:**
 
@@ -984,16 +984,16 @@ See `bash/dpo-collection/DPO_COLLECTION.md` for details.
 
 All Python dependencies are listed in `requirements.txt`. The new productivity tools use only standard library features:
 
-| Tool             | Python Packages                    | External Tools     |
-| ---------------- | ---------------------------------- | ------------------ |
-| TodoWrite        | Standard library only              | None               |
-| Edit Tool        | Standard library only              | None               |
-| Glob Search      | Standard library (`glob`)          | None               |
-| Grep Search      | Standard library (`subprocess`)    | ripgrep (optional) |
-| Error Handler    | Standard library (`functools`)     | None               |
-| Git Safety       | Standard library (`subprocess`)    | git                |
-| Plan Mode        | Standard library (`json`, `os`)    | None               |
-| Background Tasks | Standard library (`threading`)     | None               |
+| Tool             | Python Packages                 | External Tools     |
+| ---------------- | ------------------------------- | ------------------ |
+| TodoWrite        | Standard library only           | None               |
+| Edit Tool        | Standard library only           | None               |
+| Glob Search      | Standard library (`glob`)       | None               |
+| Grep Search      | Standard library (`subprocess`) | ripgrep (optional) |
+| Error Handler    | Standard library (`functools`)  | None               |
+| Git Safety       | Standard library (`subprocess`) | git                |
+| Plan Mode        | Standard library (`json`, `os`) | None               |
+| Background Tasks | Standard library (`threading`)  | None               |
 
 **External Tools:**
 

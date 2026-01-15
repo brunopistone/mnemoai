@@ -80,6 +80,67 @@ class ThinkingOllamaModel(OllamaModel):
         if last_exception:
             raise last_exception
 
+    def _process_buffered_content(self, buffer: str, in_tag: bool) -> tuple:
+        """Process buffered content, handling thinking tags that may span chunks.
+
+        Returns: (content_to_emit, remaining_buffer, new_in_tag_state)
+        """
+        import re
+
+        # Pattern to match complete thinking tags (case-insensitive)
+        open_pattern = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
+        close_pattern = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
+
+        result = ""
+        remaining = buffer
+        current_in_tag = in_tag
+
+        while remaining:
+            if current_in_tag:
+                # Looking for closing tag
+                match = close_pattern.search(remaining)
+                if match:
+                    # Found closing tag - discard thinking content, keep after
+                    remaining = remaining[match.end() :]
+                    current_in_tag = False
+                else:
+                    # No complete closing tag - check for partial
+                    # Keep potential partial tag (anything starting with <)
+                    last_lt = remaining.rfind("<")
+                    if (
+                        last_lt >= 0 and last_lt > len(remaining) - 12
+                    ):  # Max tag length is </thinking> = 11
+                        # Potential partial tag at end - keep in buffer
+                        remaining = remaining[last_lt:]
+                    else:
+                        # No partial tag - discard all (it's thinking content)
+                        remaining = ""
+                    break
+            else:
+                # Looking for opening tag
+                match = open_pattern.search(remaining)
+                if match:
+                    # Found opening tag - emit content before, then process rest
+                    result += remaining[: match.start()]
+                    remaining = remaining[match.end() :]
+                    current_in_tag = True
+                else:
+                    # No complete opening tag - check for partial at end
+                    last_lt = remaining.rfind("<")
+                    if (
+                        last_lt >= 0 and last_lt > len(remaining) - 11
+                    ):  # Max tag length is <thinking> = 10
+                        # Potential partial tag at end - emit before, keep partial
+                        result += remaining[:last_lt]
+                        remaining = remaining[last_lt:]
+                    else:
+                        # No partial tag - emit all
+                        result += remaining
+                        remaining = ""
+                    break
+
+        return result, remaining, current_in_tag
+
     async def stream(
         self,
         messages: Any,
@@ -125,6 +186,8 @@ class ThinkingOllamaModel(OllamaModel):
         in_thinking_tag = False
         tool_requested = False
         last_chunk = None
+        # Buffer for handling tags split across chunks
+        content_buffer = ""
 
         # Use retry wrapper for connection reliability
         async for chunk in await self._chat_with_retry(client, request):
@@ -169,42 +232,15 @@ class ThinkingOllamaModel(OllamaModel):
                         thinking_closed = True
 
                     # Filter thinking tags from content when return_thinking=False
-                    # This handles cases where LLM outputs thinking tags in content field
                     if not return_thinking:
-                        # Check if any closing tag (</think>, </thinking>) appears in this chunk
-                        closing_tag = next(
-                            (tag for tag in self.thinking_close_tags if tag in content),
-                            None,
+                        # Add to buffer and process
+                        content_buffer += content
+                        to_emit, content_buffer, in_thinking_tag = (
+                            self._process_buffered_content(
+                                content_buffer, in_thinking_tag
+                            )
                         )
-                        # Check if any opening tag (<think>, <thinking>) appears in this chunk
-                        opening_tag = next(
-                            (tag for tag in self.thinking_open_tags if tag in content),
-                            None,
-                        )
-
-                        if closing_tag and in_thinking_tag:
-                            # Found closing tag while inside thinking - keep only content AFTER it
-                            # Example: "reasoning</think>answer" -> "answer"
-                            content = content.split(closing_tag, 1)[1]
-                            in_thinking_tag = False
-                        elif opening_tag:
-                            # Found opening tag - keep only content BEFORE it
-                            # Example: "text<think>reasoning" -> "text"
-                            before_tag = content.split(opening_tag)[0]
-                            after_tag = content.split(opening_tag, 1)[1]
-
-                            # Check if closing tag is in the same chunk
-                            if closing_tag and closing_tag in after_tag:
-                                # Both open and close in same chunk - strip thinking entirely
-                                after_close = after_tag.split(closing_tag, 1)[1]
-                                content = before_tag + after_close
-                            else:
-                                # Only opening tag - keep before, start skipping
-                                content = before_tag
-                                in_thinking_tag = True
-                        elif in_thinking_tag:
-                            # We're inside thinking tags - skip this chunk
-                            content = ""
+                        content = to_emit
 
                     if content:
                         yield self.format_chunk(
@@ -215,7 +251,7 @@ class ThinkingOllamaModel(OllamaModel):
                             }
                         )
 
-                # Handle tool calls
+                # Handle tool calls (inside the streaming loop)
                 if hasattr(chunk.message, "tool_calls") and chunk.message.tool_calls:
                     for tool_call in chunk.message.tool_calls:
                         yield self.format_chunk(
@@ -240,6 +276,18 @@ class ThinkingOllamaModel(OllamaModel):
                             }
                         )
                         tool_requested = True
+
+        # Emit any remaining buffer content at the end
+        if not return_thinking and content_buffer:
+            # Final processing - emit remaining non-thinking content
+            if not in_thinking_tag:
+                yield self.format_chunk(
+                    {
+                        "chunk_type": "content_delta",
+                        "data_type": "text",
+                        "data": content_buffer,
+                    }
+                )
 
         yield self.format_chunk({"chunk_type": "content_stop", "data_type": "text"})
         yield self.format_chunk(

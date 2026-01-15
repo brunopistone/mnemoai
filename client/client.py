@@ -56,6 +56,12 @@ class StrandsClient:
         if self.system_prompt:
             current_date = date.today().strftime("%Y-%m-%d")
             self.system_prompt = self.system_prompt.format(current_date=current_date)
+        else:
+            self.system_prompt = ""
+
+        if config.get("PROFILE", {}).get("USE_PROFILING", False):
+            # Initialize profile manager first
+            self.profile_manager = UserProfileManager()
 
             # Add user profile to system prompt
             profile_summary = self.profile_manager.get_profile_summary()
@@ -131,6 +137,112 @@ class StrandsClient:
         self.previous_response = None
         self.previous_messages = None
 
+    def _process_thinking_buffer(self, buffer: str, in_tag: bool) -> tuple:
+        """Process buffered content, handling thinking tags that may span chunks.
+
+        Args:
+            buffer: Accumulated content buffer
+            in_tag: Whether currently inside thinking tags
+
+        Returns:
+            Tuple of (content_to_emit, remaining_buffer, new_in_tag_state)
+        """
+        open_pattern = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
+        close_pattern = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
+
+        result = ""
+        remaining = buffer
+        current_in_tag = in_tag
+
+        while remaining:
+            if current_in_tag:
+                # Looking for closing tag
+                match = close_pattern.search(remaining)
+                if match:
+                    # Found closing tag - discard thinking content, keep after
+                    remaining = remaining[match.end() :]
+                    current_in_tag = False
+                else:
+                    # No complete closing tag - check for partial
+                    last_lt = remaining.rfind("<")
+                    if last_lt >= 0 and last_lt > len(remaining) - 12:
+                        remaining = remaining[last_lt:]
+                    else:
+                        remaining = ""
+                    break
+            else:
+                # Looking for opening tag
+                match = open_pattern.search(remaining)
+                if match:
+                    # Found opening tag - emit content before
+                    result += remaining[: match.start()]
+                    remaining = remaining[match.end() :]
+                    current_in_tag = True
+                else:
+                    # No complete opening tag - check for partial at end
+                    last_lt = remaining.rfind("<")
+                    if last_lt >= 0 and last_lt > len(remaining) - 11:
+                        result += remaining[:last_lt]
+                        remaining = remaining[last_lt:]
+                    else:
+                        result += remaining
+                        remaining = ""
+                    break
+
+        return result, remaining, current_in_tag
+
+    def _process_thinking_buffer_verbose(self, buffer: str, in_tag: bool) -> tuple:
+        """Process buffered content for verbose mode, extracting thinking content separately.
+
+        Args:
+            buffer: Accumulated content buffer
+            in_tag: Whether currently inside thinking tags
+
+        Returns:
+            Tuple of (regular_content, thinking_content, remaining_buffer, new_in_tag_state)
+        """
+        open_pattern = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
+        close_pattern = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
+
+        regular = ""
+        thinking = ""
+        remaining = buffer
+        current_in_tag = in_tag
+
+        while remaining:
+            if current_in_tag:
+                match = close_pattern.search(remaining)
+                if match:
+                    thinking += remaining[: match.start()]
+                    remaining = remaining[match.end() :]
+                    current_in_tag = False
+                else:
+                    last_lt = remaining.rfind("<")
+                    if last_lt >= 0 and last_lt > len(remaining) - 12:
+                        thinking += remaining[:last_lt]
+                        remaining = remaining[last_lt:]
+                    else:
+                        thinking += remaining
+                        remaining = ""
+                    break
+            else:
+                match = open_pattern.search(remaining)
+                if match:
+                    regular += remaining[: match.start()]
+                    remaining = remaining[match.end() :]
+                    current_in_tag = True
+                else:
+                    last_lt = remaining.rfind("<")
+                    if last_lt >= 0 and last_lt > len(remaining) - 11:
+                        regular += remaining[:last_lt]
+                        remaining = remaining[last_lt:]
+                    else:
+                        regular += remaining
+                        remaining = ""
+                    break
+
+        return regular, thinking, remaining, current_in_tag
+
     # Custom callback handler to control verbosity
     def __minimal_callback_handler(self, **kwargs) -> None:
         """Handle streaming events without showing thinking content.
@@ -178,41 +290,69 @@ class StrandsClient:
             data = kwargs["data"]
 
             # Initialize state if not exists
-            if not hasattr(self, "_in_thinking_minimal"):
-                self._in_thinking_minimal = False
+            if not hasattr(self, "_code_formatter_minimal"):
                 self._code_formatter_minimal = CodeFormatter()
+                self._tag_buffer_minimal = ""
+                self._in_thinking_minimal = False
 
-            # Check for thinking tags
-            if "<thinking>" in data:
-                self._in_thinking_minimal = True
-                before_thinking = data.split("<thinking>")[0]
-                if before_thinking:
-                    self._code_formatter_minimal.process_chunk(before_thinking)
+            # Buffer for handling tags split across chunks
+            self._tag_buffer_minimal += data
 
-                after_thinking = (
-                    data.split("<thinking>", 1)[1] if "<thinking>" in data else ""
+            # Check for potential partial tags at end (any < within 12 chars of end)
+            last_lt = self._tag_buffer_minimal.rfind("<")
+            if last_lt >= 0 and last_lt > len(self._tag_buffer_minimal) - 12:
+                # Potential partial tag - process up to it, keep rest in buffer
+                to_process = self._tag_buffer_minimal[:last_lt]
+                self._tag_buffer_minimal = self._tag_buffer_minimal[last_lt:]
+            else:
+                # No partial tag - process all
+                to_process = self._tag_buffer_minimal
+                self._tag_buffer_minimal = ""
+
+            if to_process:
+                # Strip thinking tags AND content inside them (minimal hides thinking)
+                # First, remove complete <thinking>...</thinking> blocks
+                cleaned = re.sub(
+                    r"<think(?:ing)?>(.*?)</think(?:ing)?>",
+                    "",
+                    to_process,
+                    flags=re.IGNORECASE | re.DOTALL,
                 )
 
-                if "</thinking>" in after_thinking:
-                    # Skip thinking content, only process after
-                    after_thinking_end = after_thinking.split("</thinking>", 1)[1]
-                    if after_thinking_end:
-                        self._code_formatter_minimal.process_chunk(after_thinking_end)
-                    self._in_thinking_minimal = False
+                # Handle orphan closing tags (content before </think> without opening tag)
+                # This happens when model outputs thinking then </think> without <think>
+                if not self._in_thinking_minimal and re.search(
+                    r"</think(?:ing)?>", cleaned, re.IGNORECASE
+                ):
+                    # Found closing tag while not in thinking - strip everything before it
+                    parts = re.split(r"</think(?:ing)?>", cleaned, flags=re.IGNORECASE)
+                    cleaned = parts[-1]  # Keep only content after closing tag
 
-            elif "</thinking>" in data and self._in_thinking_minimal:
-                # Skip thinking content, only process after
-                after_thinking = data.split("</thinking>", 1)[1]
-                if after_thinking:
-                    self._code_formatter_minimal.process_chunk(after_thinking)
-                self._in_thinking_minimal = False
+                # Handle state for incomplete tags (opening without closing)
+                elif re.search(
+                    r"<think(?:ing)?>(?!.*</think(?:ing)?>)",
+                    cleaned,
+                    re.IGNORECASE | re.DOTALL,
+                ):
+                    # Found opening tag without closing - we're entering thinking
+                    parts = re.split(r"<think(?:ing)?>", cleaned, flags=re.IGNORECASE)
+                    cleaned = parts[0]  # Keep only content before opening tag
+                    self._in_thinking_minimal = True
+                elif self._in_thinking_minimal:
+                    # We're inside thinking, look for closing tag
+                    if re.search(r"</think(?:ing)?>", cleaned, re.IGNORECASE):
+                        # Found closing tag - extract content after it
+                        parts = re.split(
+                            r"</think(?:ing)?>", cleaned, flags=re.IGNORECASE
+                        )
+                        cleaned = parts[-1]  # Keep only content after closing tag
+                        self._in_thinking_minimal = False
+                    else:
+                        # Still inside thinking - discard all
+                        cleaned = ""
 
-            elif self._in_thinking_minimal:
-                # Inside thinking, skip this chunk
-                pass
-
-            else:
-                self._code_formatter_minimal.process_chunk(data)
+                if cleaned:
+                    self._code_formatter_minimal.process_chunk(cleaned)
 
     # Custom callback handler that shows all content including reasoning
     def __verbose_callback_handler(self, **kwargs) -> None:
@@ -261,56 +401,64 @@ class StrandsClient:
             data = kwargs["data"]
 
             # Initialize state if not exists
-            if not hasattr(self, "_in_thinking_verbose"):
-                self._in_thinking_verbose = False
+            if not hasattr(self, "_code_formatter_verbose"):
                 self._code_formatter_verbose = CodeFormatter()
-
-            # Check for thinking tags
-            if "<thinking>" in data:
-                self._in_thinking_verbose = True
-                before_thinking = data.split("<thinking>")[0]
-                if before_thinking:
-                    self._code_formatter_verbose.process_chunk(before_thinking)
-
-                after_thinking = (
-                    data.split("<thinking>", 1)[1] if "<thinking>" in data else ""
-                )
-
-                if "</thinking>" in after_thinking:
-                    thinking_content = after_thinking.split("</thinking>")[0]
-                    after_thinking_end = after_thinking.split("</thinking>", 1)[1]
-
-                    if thinking_content:
-                        print(f"\033[90m{thinking_content}\033[0m", end="", flush=True)
-
-                    if after_thinking_end:
-                        self._code_formatter_verbose.process_chunk(after_thinking_end)
-
-                    self._in_thinking_verbose = False
-                else:
-                    if after_thinking:
-                        print(f"\033[90m{after_thinking}\033[0m", end="", flush=True)
-
-            elif "</thinking>" in data and self._in_thinking_verbose:
-                thinking_content = data.split("</thinking>")[0]
-                after_thinking = data.split("</thinking>", 1)[1]
-
-                if thinking_content:
-                    print(f"\033[90m{thinking_content}\033[0m", end="", flush=True)
-
-                # Ensure color is fully reset and add newline for clean state
-                print("\033[0m\n", end="", flush=True)
-
-                if after_thinking:
-                    self._code_formatter_verbose.process_chunk(after_thinking)
-
+                self._tag_buffer_verbose = ""
                 self._in_thinking_verbose = False
 
-            elif self._in_thinking_verbose:
-                print(f"\033[90m{data}\033[0m", end="", flush=True)
+            # Buffer for handling tags split across chunks
+            self._tag_buffer_verbose += data
 
+            # Check for potential partial tags at end (any < within 12 chars of end)
+            last_lt = self._tag_buffer_verbose.rfind("<")
+            if last_lt >= 0 and last_lt > len(self._tag_buffer_verbose) - 12:
+                # Potential partial tag - process up to it, keep rest in buffer
+                to_process = self._tag_buffer_verbose[:last_lt]
+                self._tag_buffer_verbose = self._tag_buffer_verbose[last_lt:]
             else:
-                self._code_formatter_verbose.process_chunk(data)
+                # No partial tag - process all
+                to_process = self._tag_buffer_verbose
+                self._tag_buffer_verbose = ""
+
+            if to_process:
+                # Process content, showing thinking in gray and regular content normally
+                remaining = to_process
+
+                while remaining:
+                    if self._in_thinking_verbose:
+                        # Inside thinking - look for closing tag
+                        match = re.search(r"</think(?:ing)?>", remaining, re.IGNORECASE)
+                        if match:
+                            # Print thinking content in gray (before closing tag)
+                            thinking_content = remaining[: match.start()]
+                            if thinking_content:
+                                print(
+                                    f"\033[90m{thinking_content}\033[0m",
+                                    end="",
+                                    flush=True,
+                                )
+                            remaining = remaining[match.end() :]
+                            self._in_thinking_verbose = False
+                        else:
+                            # No closing tag - all is thinking content
+                            print(f"\033[90m{remaining}\033[0m", end="", flush=True)
+                            remaining = ""
+                    else:
+                        # Outside thinking - look for opening tag
+                        match = re.search(r"<think(?:ing)?>", remaining, re.IGNORECASE)
+                        if match:
+                            # Print regular content normally (before opening tag)
+                            regular_content = remaining[: match.start()]
+                            if regular_content:
+                                self._code_formatter_verbose.process_chunk(
+                                    regular_content
+                                )
+                            remaining = remaining[match.end() :]
+                            self._in_thinking_verbose = True
+                        else:
+                            # No opening tag - all is regular content
+                            self._code_formatter_verbose.process_chunk(remaining)
+                            remaining = ""
 
     def __count_context_tokens(self) -> int:
         """Count total tokens in the current conversation context.
@@ -833,8 +981,9 @@ class StrandsClient:
                     )
                 )
 
-                # Update user profile with conversation
-                self.profile_manager.analyze_conversation(self.agent.messages)
+                if config.get("PROFILE", {}).get("USE_PROFILING", False):
+                    # Update user profile with conversation
+                    self.profile_manager.analyze_conversation(self.agent.messages)
 
                 # Check if response is only thinking tags (no visible content)
                 response_text = str(response)  # Convert AgentResult to string
