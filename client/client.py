@@ -439,6 +439,8 @@ class StrandsClient:
                                 )
                             remaining = remaining[match.end() :]
                             self._in_thinking_verbose = False
+                            # Add newline to separate reasoning from answer
+                            print("\n", end="", flush=True)
                         else:
                             # No closing tag - all is thinking content
                             print(f"\033[90m{remaining}\033[0m", end="", flush=True)
