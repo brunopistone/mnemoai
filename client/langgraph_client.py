@@ -18,19 +18,10 @@ import json
 from mcp import StdioServerParameters
 import re
 from server.tools import count_tokens
-import shutil
-import sqlite3
 import sys
 import threading
 import traceback
-from typing import Any, Dict, List, Optional
-from langchain_core.messages import (
-    AIMessage,
-    BaseMessage,
-    HumanMessage,
-    SystemMessage,
-    AIMessageChunk,
-)
+from typing import Optional
 from langchain_core.callbacks import BaseCallbackHandler
 from utils.formatting.code_formatter import CodeFormatter
 from utils.config import config
@@ -68,6 +59,11 @@ class StreamingCallbackHandler(BaseCallbackHandler):
             token: The new token
             **kwargs: Additional arguments
         """
+        # Debug: print to stderr to verify callback is triggered
+        import sys
+        print(f"[DEBUG CALLBACK] token={repr(token)}", file=sys.stderr)
+        logger.debug(f"on_llm_new_token called: {repr(token[:50] if len(token) > 50 else token)}")
+
         # Stop spinner on first token
         if not self.first_token_received and self.spinner:
             with self.spinner_lock:
@@ -108,8 +104,10 @@ class StreamingCallbackHandler(BaseCallbackHandler):
                     if match:
                         thinking_content = remaining[: match.start()]
                         if thinking_content:
-                            print(f"\033[90m{thinking_content}\033[0m", end="", flush=True)
-                        remaining = remaining[match.end():]
+                            print(
+                                f"\033[90m{thinking_content}\033[0m", end="", flush=True
+                            )
+                        remaining = remaining[match.end() :]
                         self._in_thinking = False
                         print("\n", end="", flush=True)
                     else:
@@ -122,7 +120,7 @@ class StreamingCallbackHandler(BaseCallbackHandler):
                         regular_content = remaining[: match.start()]
                         if regular_content:
                             self.code_formatter.process_chunk(regular_content)
-                        remaining = remaining[match.end():]
+                        remaining = remaining[match.end() :]
                         self._in_thinking = True
                     else:
                         self.code_formatter.process_chunk(remaining)
@@ -161,7 +159,9 @@ class StreamingCallbackHandler(BaseCallbackHandler):
             # Handle orphan opening tags (start of thinking)
             if re.search(r"<think(?:ing)?>", cleaned, re.IGNORECASE):
                 self._in_thinking = True
-                cleaned = re.sub(r"<think(?:ing)?>.*$", "", cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(
+                    r"<think(?:ing)?>.*$", "", cleaned, flags=re.IGNORECASE
+                )
 
             # If we're inside a thinking block, skip the content
             if self._in_thinking:
@@ -270,6 +270,7 @@ class LangGraphClient:
 
         # Initialize LLM controller
         from models.langchain_llm_controller import LangChainLLMController
+
         self.llm_controller = LangChainLLMController(verbose=self.verbose_mode)
 
         # Managers
@@ -324,6 +325,7 @@ class LangGraphClient:
         logger.debug(f"Episodic memory path: {episodic_path}")
 
         from models.embeddings_controller import EmbeddingsController
+
         embeddings_controller = EmbeddingsController(embed_model_config)
 
         self.episodic_memory = EpisodicMemoryManager(
@@ -367,6 +369,7 @@ class LangGraphClient:
                     tools=self.tools,
                     system_prompt=self.system_prompt,
                     verbose=self.verbose_mode,
+                    callbacks=[self.callback_handler],
                 )
 
                 logger.info("LangGraph agent initialized successfully")
@@ -508,6 +511,7 @@ class LangGraphClient:
             tools = ep.get("tools", "")
             if isinstance(tools, str):
                 import ast
+
                 try:
                     tools_list = ast.literal_eval(tools)
                     tool_names = [
@@ -537,8 +541,7 @@ class LangGraphClient:
 
         if self.agent and self.agent.messages:
             messages_str = json.dumps(
-                [{"content": str(m.content)} for m in self.agent.messages],
-                default=str
+                [{"content": str(m.content)} for m in self.agent.messages], default=str
             )
             total_tokens += count_tokens(messages_str)
 
@@ -596,8 +599,13 @@ class LangGraphClient:
             conversation_data = {
                 "messages": [
                     {"role": "system", "content": [{"text": self.system_prompt}]}
-                ] + strands_messages,
-                "tools": [{"name": t.name, "description": t.description} for t in self.tools] if self.tools else [],
+                ]
+                + strands_messages,
+                "tools": (
+                    [{"name": t.name, "description": t.description} for t in self.tools]
+                    if self.tools
+                    else []
+                ),
             }
 
             with open(filepath, "w") as f:
@@ -632,9 +640,7 @@ class LangGraphClient:
                 messages = conversation_data.get("messages", [])
 
             # Filter out system messages
-            conversation_messages = [
-                m for m in messages if m.get("role") != "system"
-            ]
+            conversation_messages = [m for m in messages if m.get("role") != "system"]
 
             # Convert to LangChain messages
             langchain_messages = convert_strands_messages_to_langchain(

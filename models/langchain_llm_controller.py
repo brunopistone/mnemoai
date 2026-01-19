@@ -119,12 +119,20 @@ class LangChainLLMController(BaseModelController):
         if self.repetition_penalty is not None:
             kwargs["repeat_penalty"] = self.repetition_penalty
 
-        # Enable thinking for models that support it
-        if self.verbose_mode:
-            kwargs["think"] = True
-
         # Set context window
         kwargs["num_ctx"] = self.max_conversation_tokens
+
+        # Enable reasoning/thinking for models that support it
+        # When reasoning=None (default), thinking appears as <think> tags in content
+        # When reasoning=True, thinking goes to additional_kwargs["reasoning_content"]
+        # We use None to let thinking stream as <think> tags which our callback handles
+        if self.verbose_mode:
+            # For qwen3 models, we can add /think to system prompt or leave reasoning=None
+            # The model will include thinking in the response
+            kwargs["reasoning"] = None  # Let thinking come through as tags
+        else:
+            # Disable reasoning output
+            kwargs["reasoning"] = False
 
         self.model = ChatOllama(**kwargs)
 

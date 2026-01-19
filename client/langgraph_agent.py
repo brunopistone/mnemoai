@@ -2,7 +2,7 @@
 
 import json
 import operator
-from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict, Union
+from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -33,6 +33,7 @@ class LangGraphAgent:
         tools: List[BaseTool],
         system_prompt: str = "",
         verbose: bool = False,
+        callbacks: List[Any] = None,
     ) -> None:
         """Initialize the LangGraph agent.
 
@@ -41,11 +42,13 @@ class LangGraphAgent:
             tools: List of LangChain tools
             system_prompt: System prompt for the agent
             verbose: Enable verbose mode for thinking display
+            callbacks: Optional list of callback handlers for streaming
         """
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
         self.verbose = verbose
+        self.callbacks = callbacks or []
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
 
@@ -101,7 +104,7 @@ class LangGraphAgent:
         return workflow.compile()
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
-        """Call the model with current state.
+        """Call the model with current state using streaming for real-time output.
 
         Args:
             state: Current agent state
@@ -117,15 +120,36 @@ class LangGraphAgent:
         ):
             messages = [SystemMessage(content=self.system_prompt)] + messages
 
-        # Call the model
-        response = self.model_with_tools.invoke(messages)
+        # Build config with callbacks for streaming
+        config = {}
+        if self.callbacks:
+            config["callbacks"] = self.callbacks
+
+        # Stream the model response to trigger callbacks for real-time output
+        response = None
+        for chunk in self.model_with_tools.stream(messages, config=config):
+            logger.debug(f"Received chunk: content={repr(chunk.content[:50] if chunk.content and len(chunk.content) > 50 else chunk.content)}")
+            if response is None:
+                response = chunk
+            else:
+                response = response + chunk
+
+        # If no chunks received, fall back to invoke
+        if response is None:
+            response = self.model_with_tools.invoke(messages, config=config)
 
         # Extract thinking content if present (for Claude extended thinking)
         thinking = None
         if hasattr(response, "additional_kwargs"):
+            logger.debug(f"Response additional_kwargs: {response.additional_kwargs}")
             thinking_data = response.additional_kwargs.get("thinking")
             if thinking_data:
                 thinking = thinking_data.get("thinking", "")
+            # Also check for reasoning_content (LangChain Ollama format)
+            reasoning = response.additional_kwargs.get("reasoning_content")
+            if reasoning:
+                thinking = reasoning
+                logger.debug(f"Found reasoning_content: {reasoning[:100] if len(reasoning) > 100 else reasoning}")
 
         return {
             "messages": [response],
@@ -253,7 +277,8 @@ class LangGraphAgent:
 
         # Update internal message history with new messages (excluding system)
         new_messages = [
-            m for m in final_messages
+            m
+            for m in final_messages
             if not isinstance(m, SystemMessage) and m not in self._messages
         ]
         self._messages.extend(new_messages)
@@ -303,7 +328,8 @@ class LangGraphAgent:
         if event:
             final_messages = event.get("messages", [])
             new_messages = [
-                m for m in final_messages
+                m
+                for m in final_messages
                 if not isinstance(m, SystemMessage) and m not in self._messages
             ]
             self._messages.extend(new_messages)
@@ -351,7 +377,7 @@ class LangGraphAgent:
 
 
 def convert_strands_messages_to_langchain(
-    messages: List[Dict[str, Any]]
+    messages: List[Dict[str, Any]],
 ) -> List[BaseMessage]:
     """Convert Strands message format to LangChain messages.
 
@@ -446,23 +472,27 @@ def convert_langchain_messages_to_strands(
 
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    content_blocks.append({
-                        "toolUse": {
-                            "toolUseId": tc.get("id", ""),
-                            "name": tc.get("name", ""),
-                            "input": tc.get("args", {}),
+                    content_blocks.append(
+                        {
+                            "toolUse": {
+                                "toolUseId": tc.get("id", ""),
+                                "name": tc.get("name", ""),
+                                "input": tc.get("args", {}),
+                            }
                         }
-                    })
+                    )
 
             strands_messages.append({"role": "assistant", "content": content_blocks})
 
         elif isinstance(msg, ToolMessage):
-            content_blocks.append({
-                "toolResult": {
-                    "toolUseId": msg.tool_call_id,
-                    "content": [{"text": str(msg.content)}],
+            content_blocks.append(
+                {
+                    "toolResult": {
+                        "toolUseId": msg.tool_call_id,
+                        "content": [{"text": str(msg.content)}],
+                    }
                 }
-            })
+            )
             strands_messages.append({"role": "user", "content": content_blocks})
 
         elif isinstance(msg, SystemMessage):
