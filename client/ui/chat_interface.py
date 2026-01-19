@@ -215,6 +215,13 @@ class ChatInterface:
                     outcome="success",
                 )
                 logger.debug("✓ Episode stored successfully")
+
+                # Record tool outcome for profile learning
+                if config.get("PROFILE", {}).get("USE_PROFILING", False):
+                    intent = self.client.profile_manager.classify_intent(initial_query)
+                    self.client.profile_manager.record_tool_outcome(
+                        intent, tools_used, True
+                    )
             else:
                 logger.debug(
                     "✗ Previous task not marked as successful - skipping storage"
@@ -261,6 +268,13 @@ class ChatInterface:
                 task=query, tools_used=tools_used, outcome="success"
             )
             logger.debug("✓ Episode stored successfully (immediate mode)")
+
+            # Record tool outcome for profile learning
+            if config.get("PROFILE", {}).get("USE_PROFILING", False):
+                intent = self.client.profile_manager.classify_intent(query)
+                self.client.profile_manager.record_tool_outcome(
+                    intent, tools_used, True
+                )
         else:
             logger.debug("✗ Task not marked as successful - skipping storage")
 

@@ -250,12 +250,13 @@ class StrandsClient:
         Args:
             **kwargs: Event data from streaming response
         """
-        # Initialize code formatter on messageStart
+        # Reset state on new content block (important after tool execution)
         if "event" in kwargs and (
             "contentBlockStart" in kwargs["event"] or "messageStart" in kwargs["event"]
         ):
-            if hasattr(self, "_code_formatter_verbose"):
-                self._code_formatter_verbose = CodeFormatter()
+            self._code_formatter_minimal = CodeFormatter()
+            self._tag_buffer_minimal = ""
+            self._in_thinking_minimal = False
 
         # Stop spinner only when first actual data arrives (thread-safe)
         if not self.first_token_received:
@@ -361,12 +362,13 @@ class StrandsClient:
         Args:
             **kwargs: Event data from streaming response
         """
-        # Initialize code formatter on messageStart
+        # Reset state on new content block (important after tool execution)
         if "event" in kwargs and (
             "contentBlockStart" in kwargs["event"] or "messageStart" in kwargs["event"]
         ):
-            if hasattr(self, "_code_formatter_verbose"):
-                self._code_formatter_verbose = CodeFormatter()
+            self._code_formatter_verbose = CodeFormatter()
+            self._tag_buffer_verbose = ""
+            self._in_thinking_verbose = False
 
         # Stop spinner only when first actual data arrives (thread-safe)
         if not self.first_token_received:

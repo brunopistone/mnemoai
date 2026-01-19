@@ -1,24 +1,63 @@
-"""Automatic user profile learning system."""
+"""Simplified user profile learning system with EMA-based tracking."""
 
 from datetime import datetime
 import json
 import os
-from utils.logger import logger
 import re
-import sys
-from typing import Dict, List
-
-# Add parent directory to path to allow imports from root
-sys.path.append(
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    )
-)
+import textwrap
+from typing import Dict, List, Any, Optional
+from utils.logger import logger
 from utils.config import config
 
 
 class UserProfileManager:
-    """Manages and learns user interaction patterns automatically."""
+    """Manages user interaction patterns with efficient EMA-based learning."""
+
+    # Intent patterns for classification
+    INTENT_PATTERNS = {
+        "debug": r"\b(error|bug|issue|problem|not working|broken|fail|debug|fix)\b",
+        "learn": r"\b(how|what|why|explain|understand|learn|teach|documentation)\b",
+        "implement": r"\b(create|build|implement|make|write|develop|code|add)\b",
+        "optimize": r"\b(improve|optimize|faster|better|performance|refactor|efficient)\b",
+        "review": r"\b(review|check|look at|analyze|examine|audit)\b",
+        "configure": r"\b(setup|configure|install|deploy|set up|initialize)\b",
+        "search": r"\b(find|search|locate|where|look for)\b",
+        "read": r"\b(read|show|display|get|fetch|retrieve)\b",
+    }
+
+    # Domain keywords for detection
+    DOMAIN_KEYWORDS = {
+        "python": ["python", "pip", "pytest", "django", "flask", "pandas", "numpy"],
+        "javascript": ["javascript", "node", "npm", "react", "vue", "typescript"],
+        "devops": ["docker", "kubernetes", "ci/cd", "jenkins", "terraform", "ansible"],
+        "aws": ["aws", "ec2", "s3", "lambda", "sagemaker", "bedrock", "cloudformation"],
+        "databases": ["sql", "postgres", "mysql", "mongodb", "redis", "database"],
+    }
+
+    # Technical terms for level detection
+    TECHNICAL_TERMS = [
+        "api",
+        "async",
+        "callback",
+        "closure",
+        "decorator",
+        "dependency",
+        "endpoint",
+        "framework",
+        "middleware",
+        "microservice",
+        "oauth",
+        "polymorphism",
+        "refactor",
+        "repository",
+        "scalability",
+        "schema",
+        "singleton",
+        "threading",
+        "validation",
+        "webpack",
+        "websocket",
+    ]
 
     def __init__(self, profile_path: str = None) -> None:
         """Initialize user profile manager.
@@ -27,18 +66,19 @@ class UserProfileManager:
             profile_path: Optional path to profile file
         """
         if profile_path is None:
-            # Use profile-based directory structure
             profile_config = config.get("PROFILE", {})
             profile_name = profile_config.get("NAME", "default")
-
             user_home = os.path.expanduser("~")
             profile_dir = os.path.join(user_home, "agent-conversations", profile_name)
             os.makedirs(profile_dir, exist_ok=True)
-
             profile_path = os.path.join(profile_dir, f"{profile_name}.json")
 
         self.profile_path = profile_path
         self.profile = self._load_profile()
+
+        # Migrate legacy profile if needed
+        if not self.profile.get("_legacy_migrated", False):
+            self._migrate_profile()
 
     def _load_profile(self) -> Dict:
         """Load existing profile or create new one.
@@ -53,58 +93,104 @@ class UserProfileManager:
             except Exception as e:
                 logger.error(f"Failed to load profile: {e}")
 
-        # Default profile structure
+        # New simplified profile structure
         return {
             "created_at": datetime.now().isoformat(),
             "last_updated": datetime.now().isoformat(),
             "interaction_count": 0,
-            "common_phrases": {},
-            "frequent_topics": {},
-            "preferred_response_style": "technical",
-            "average_query_length": 0,
-            "common_commands": {},
-            "tool_usage_patterns": {},
-            "communication_patterns": {
-                "uses_technical_terms": False,
-                "prefers_concise": True,
-                "asks_follow_ups": False,
-            },
+            # EMA-based metrics (0-1 scale)
+            "verbosity": 0.5,  # 0=concise, 1=detailed
+            "directness": 0.5,  # 0=conversational, 1=direct
+            "technical_level": 0.5,  # 0=beginner, 1=expert
+            "abstraction": 0.5,  # 0=examples, 1=concepts
+            # Domain tracking
+            "top_domains": [],  # [{name, score, last_seen}]
+            # Tool success patterns
+            "tool_patterns": {},  # intent -> tool -> {success, total}
+            # Migration flag
+            "_legacy_migrated": True,
         }
 
+    def _migrate_profile(self) -> None:
+        """Migrate legacy profile to new simplified schema."""
+        logger.info("Migrating legacy profile to new schema...")
+
+        # Initialize new fields if missing
+        for field, default in [
+            ("verbosity", 0.5),
+            ("directness", 0.5),
+            ("technical_level", 0.5),
+            ("abstraction", 0.5),
+            ("top_domains", []),
+            ("tool_patterns", {}),
+        ]:
+            if field not in self.profile:
+                self.profile[field] = default
+
+        # Migrate from legacy complexity_preference
+        complexity = self.profile.get("complexity_preference", {})
+        simple = complexity.get("simple", 0)
+        detailed = complexity.get("detailed", 0)
+        if simple + detailed > 0:
+            self.profile["verbosity"] = detailed / (simple + detailed)
+
+        # Migrate from legacy sentiment
+        sentiment = self.profile.get("sentiment", {})
+        direct = sentiment.get("direct", 0)
+        polite = sentiment.get("polite", 0) + sentiment.get("exploratory", 0)
+        if direct + polite > 0:
+            self.profile["directness"] = direct / (direct + polite)
+
+        # Migrate from legacy communication_patterns
+        comm = self.profile.get("communication_patterns", {})
+        tech_depth = comm.get("technical_depth", 0)
+        if tech_depth > 0:
+            # Normalize: 0-5 = beginner, 5-10 = intermediate, 10+ = expert
+            self.profile["technical_level"] = min(1.0, tech_depth / 15)
+
+        # Migrate from legacy abstraction_level
+        abstraction = self.profile.get("abstraction_level", {})
+        concrete = abstraction.get("concrete", 0)
+        abstract = abstraction.get("abstract", 0)
+        if concrete + abstract > 0:
+            self.profile["abstraction"] = abstract / (concrete + abstract)
+
+        # Migrate from legacy domain_expertise
+        domains = self.profile.get("domain_expertise", {})
+        if domains:
+            sorted_domains = sorted(domains.items(), key=lambda x: x[1], reverse=True)[
+                :3
+            ]
+            max_score = max(d[1] for d in sorted_domains) if sorted_domains else 1
+            self.profile["top_domains"] = [
+                {
+                    "name": name,
+                    "score": score / max_score,  # Normalize to 0-1
+                    "last_seen": datetime.now().isoformat(),
+                }
+                for name, score in sorted_domains
+            ]
+
+        self.profile["_legacy_migrated"] = True
+        self._save_profile()
+        logger.info("Profile migration complete")
+
     def _save_profile(self) -> None:
-        """Save profile to disk with size limits."""
+        """Save profile to disk."""
         os.makedirs(os.path.dirname(self.profile_path), exist_ok=True)
         self.profile["last_updated"] = datetime.now().isoformat()
 
-        # Prune large dictionaries to prevent unbounded growth
-        MAX_PHRASES = 100
-        MAX_TOPICS = 50
-        MAX_COMMANDS = 50
-
-        # Keep only top N phrases by frequency
-        if len(self.profile.get("common_phrases", {})) > MAX_PHRASES:
-            top_phrases = sorted(
-                self.profile["common_phrases"].items(), key=lambda x: x[1], reverse=True
-            )[:MAX_PHRASES]
-            self.profile["common_phrases"] = dict(top_phrases)
-
-        # Keep only top N topics
-        if len(self.profile.get("frequent_topics", {})) > MAX_TOPICS:
-            top_topics = sorted(
-                self.profile["frequent_topics"].items(),
-                key=lambda x: x[1],
-                reverse=True,
-            )[:MAX_TOPICS]
-            self.profile["frequent_topics"] = dict(top_topics)
-
-        # Keep only top N commands
-        if len(self.profile.get("common_commands", {})) > MAX_COMMANDS:
-            top_commands = sorted(
-                self.profile["common_commands"].items(),
-                key=lambda x: x[1],
-                reverse=True,
-            )[:MAX_COMMANDS]
-            self.profile["common_commands"] = dict(top_commands)
+        # Prune tool_patterns to prevent unbounded growth
+        MAX_TOOLS_PER_INTENT = 10
+        for intent, tools in self.profile.get("tool_patterns", {}).items():
+            if len(tools) > MAX_TOOLS_PER_INTENT:
+                # Keep top tools by success rate
+                sorted_tools = sorted(
+                    tools.items(),
+                    key=lambda x: x[1]["success"] / max(x[1]["total"], 1),
+                    reverse=True,
+                )[:MAX_TOOLS_PER_INTENT]
+                self.profile["tool_patterns"][intent] = dict(sorted_tools)
 
         try:
             with open(self.profile_path, "w") as f:
@@ -112,8 +198,84 @@ class UserProfileManager:
         except Exception as e:
             logger.error(f"Failed to save profile: {e}")
 
+    def _update_ema(
+        self, current: float, observation: float, alpha: float = 0.15
+    ) -> float:
+        """Update value using exponential moving average.
+
+        Args:
+            current: Current EMA value (0-1)
+            observation: New observation (0 or 1)
+            alpha: Smoothing factor (higher = more weight to recent)
+
+        Returns:
+            Updated EMA value
+        """
+        return alpha * observation + (1 - alpha) * current
+
+    def classify_intent(self, query: str) -> str:
+        """Classify query intent for tool pattern tracking.
+
+        Args:
+            query: User query text
+
+        Returns:
+            Intent classification string
+        """
+        query_lower = query.lower()
+
+        # Check patterns in priority order
+        for intent, pattern in self.INTENT_PATTERNS.items():
+            if re.search(pattern, query_lower):
+                return intent
+
+        return "general"
+
+    def record_tool_outcome(
+        self,
+        intent: str,
+        tools_used: List[Dict[str, Any]],
+        success: bool = True,
+    ) -> None:
+        """Update tool success patterns from task outcomes.
+
+        Args:
+            intent: Classified intent (debug, implement, etc.)
+            tools_used: List of tools from extract_tools_from_messages()
+            success: Whether task was successful
+        """
+        if not tools_used:
+            return
+
+        if "tool_patterns" not in self.profile:
+            self.profile["tool_patterns"] = {}
+
+        if intent not in self.profile["tool_patterns"]:
+            self.profile["tool_patterns"][intent] = {}
+
+        for tool in tools_used:
+            tool_name = tool.get("name", "unknown")
+            if tool_name == "unknown":
+                continue
+
+            if tool_name not in self.profile["tool_patterns"][intent]:
+                self.profile["tool_patterns"][intent][tool_name] = {
+                    "success": 0,
+                    "total": 0,
+                }
+
+            stats = self.profile["tool_patterns"][intent][tool_name]
+            stats["total"] += 1
+            if success:
+                stats["success"] += 1
+
+        self._save_profile()
+        logger.debug(
+            f"Recorded tool outcome: intent={intent}, success={success}, tools={[t.get('name') for t in tools_used]}"
+        )
+
     def analyze_conversation(self, messages: List[Dict]) -> None:
-        """Analyze conversation and update profile.
+        """Analyze conversation and update profile with EMA.
 
         Args:
             messages: List of conversation messages
@@ -122,7 +284,6 @@ class UserProfileManager:
             return
 
         user_messages = [msg for msg in messages if msg.get("role") == "user"]
-
         if not user_messages:
             return
 
@@ -135,7 +296,6 @@ class UserProfileManager:
             if content:
                 self._analyze_message(content)
 
-        # Save updated profile
         self._save_profile()
 
     def _extract_text_content(self, message: Dict) -> str:
@@ -156,841 +316,245 @@ class UserProfileManager:
         return ""
 
     def _analyze_message(self, content: str) -> None:
-        """Analyze individual message for patterns.
+        """Analyze message and update EMA metrics.
 
         Args:
             content: Message content text
         """
-
-        current_avg = self.profile["average_query_length"]
-        count = self.profile["interaction_count"]
-        self.profile["average_query_length"] = (
-            current_avg * (count - 1) + len(content)
-        ) / count
-
         content_lower = content.lower()
-        sentences = re.split(r"[.!?]+", content)
         words = re.findall(r"\b\w+\b", content_lower)
 
-        # Initialize new profile dimensions
-        for key in [
-            "sentiment",
-            "domain_expertise",
-            "intent_patterns",
-            "code_preferences",
-            "complexity_preference",
-            "cognitive_style",
-            "error_patterns",
-            "workflow_patterns",
-            "abstraction_level",
-            "communication_efficiency",
-            "learning_indicators",
-        ]:
-            if key not in self.profile:
-                self.profile[key] = {}
+        # === VERBOSITY ===
+        # Short messages (< 50 chars) = concise, long (> 200) = detailed
+        verbosity_signal = 0.0
+        if len(content) < 50:
+            verbosity_signal = 0.0
+        elif len(content) > 200:
+            verbosity_signal = 1.0
+        else:
+            verbosity_signal = (len(content) - 50) / 150  # Linear interpolation
 
-        # Cognitive style analysis - Enhanced keywords
-        analytical_markers = [
-            "analyze",
-            "compare",
-            "evaluate",
-            "assess",
-            "examine",
-            "investigate",
-            "breakdown",
-            "optimize",
-            "refactor",
-            "algorithm",
-            "complexity",
-            "pattern",
-            "abstraction",
-        ]
-        creative_markers = [
-            "design",
-            "architect",
-            "innovate",
-            "alternative",
-            "different approach",
-            "creative",
-            "experiment",
-            "explore",
-            "brainstorm",
-        ]
-        pragmatic_markers = [
-            "works",
-            "practical",
-            "simple",
-            "quick",
-            "just need",
-            "get it done",
-            "working solution",
-            "straightforward",
-            "minimal",
-            "basic",
-        ]
-        systematic_markers = [
-            "step by step",
-            "methodical",
-            "structured",
-            "organized",
-            "systematic",
-            "process",
-            "sequential",
-            "ordered",
-            "planned",
+        # Explicit markers
+        concise_markers = ["brief", "short", "quick", "just", "simply", "only"]
+        detailed_markers = [
+            "detailed",
+            "comprehensive",
+            "thorough",
+            "explain fully",
+            "in depth",
         ]
 
-        self.profile["cognitive_style"]["analytical"] = self.profile[
-            "cognitive_style"
-        ].get("analytical", 0) + sum(
-            1 for m in analytical_markers if m in content_lower
-        )
-        self.profile["cognitive_style"]["creative"] = self.profile[
-            "cognitive_style"
-        ].get("creative", 0) + sum(1 for m in creative_markers if m in content_lower)
-        self.profile["cognitive_style"]["pragmatic"] = self.profile[
-            "cognitive_style"
-        ].get("pragmatic", 0) + sum(1 for m in pragmatic_markers if m in content_lower)
-        self.profile["cognitive_style"]["systematic"] = self.profile[
-            "cognitive_style"
-        ].get("systematic", 0) + sum(
-            1 for m in systematic_markers if m in content_lower
+        if any(m in content_lower for m in concise_markers):
+            verbosity_signal = 0.0
+        elif any(m in content_lower for m in detailed_markers):
+            verbosity_signal = 1.0
+
+        self.profile["verbosity"] = self._update_ema(
+            self.profile.get("verbosity", 0.5), verbosity_signal
         )
 
-        # Error pattern analysis
-        error_contexts = {
-            "syntax": r"(syntax error|indentation|unexpected token|parse error)",
-            "runtime": r"(runtime error|exception|crash|fails when|breaks)",
-            "logic": r"(wrong result|incorrect output|not behaving|unexpected behavior)",
-            "performance": r"(slow|timeout|memory|inefficient|bottleneck)",
-            "integration": r"(api.*fail|connection|authentication|permission denied)",
-        }
+        # === DIRECTNESS ===
+        # Imperatives = direct, questions/politeness = conversational
+        directness_signal = 0.5
 
-        for error_type, pattern in error_contexts.items():
-            if re.search(pattern, content_lower):
-                self.profile["error_patterns"][error_type] = (
-                    self.profile["error_patterns"].get(error_type, 0) + 1
-                )
-
-        # Workflow pattern detection
-        workflow_indicators = {
-            "iterative": r"(try|attempt|iterate|refine|improve|adjust)",
-            "exploratory": r"(explore|investigate|research|understand|learn about)",
-            "goal_oriented": r"(need to|must|have to|goal|objective|accomplish)",
-            "experimental": r"(test|experiment|see if|what happens|try out)",
-            "maintenance": r"(fix|repair|debug|resolve|troubleshoot)",
-            "greenfield": r"(create|build|start|new project|from scratch)",
-        }
-
-        for workflow, pattern in workflow_indicators.items():
-            if re.search(pattern, content_lower):
-                self.profile["workflow_patterns"][workflow] = (
-                    self.profile["workflow_patterns"].get(workflow, 0) + 1
-                )
-
-        # Abstraction level preference
-        concrete_markers = [
-            "example",
-            "show me",
-            "specific",
-            "actual code",
-            "real",
-            "concrete",
-        ]
-        abstract_markers = [
-            "concept",
-            "theory",
-            "principle",
-            "pattern",
-            "architecture",
-            "design",
-            "approach",
-        ]
-
-        concrete_score = sum(1 for m in concrete_markers if m in content_lower)
-        abstract_score = sum(1 for m in abstract_markers if m in content_lower)
-
-        self.profile["abstraction_level"]["concrete"] = (
-            self.profile["abstraction_level"].get("concrete", 0) + concrete_score
-        )
-        self.profile["abstraction_level"]["abstract"] = (
-            self.profile["abstraction_level"].get("abstract", 0) + abstract_score
-        )
-
-        # Communication efficiency metrics
-        question_density = content.count("?") / max(len(sentences), 1)
-        imperative_count = len(
-            re.findall(
-                r"^(show|give|create|make|write|explain|help|tell)",
-                content_lower,
-                re.MULTILINE,
-            )
-        )
-
-        self.profile["communication_efficiency"]["question_density"] = (
-            self.profile["communication_efficiency"].get("question_density", 0) * 0.7
-            + question_density * 0.3
-        )
-        self.profile["communication_efficiency"]["uses_imperatives"] = (
-            self.profile["communication_efficiency"].get("uses_imperatives", 0)
-            + imperative_count
-        )
-        self.profile["communication_efficiency"]["avg_sentence_length"] = len(
-            words
-        ) / max(len(sentences), 1)
-
-        # Learning style indicators - Enhanced keywords
-        visual_learner = [
-            "diagram",
-            "chart",
-            "visualize",
+        imperative_starters = [
             "show",
-            "see",
-            "picture",
-            "graph",
-            "illustration",
-            "screenshot",
-            "image",
-            "visual",
+            "give",
+            "create",
+            "make",
+            "write",
+            "fix",
+            "add",
+            "remove",
+            "delete",
         ]
-        hands_on_learner = [
-            "try",
-            "practice",
-            "example",
-            "demo",
-            "hands on",
-            "interactive",
-            "experiment",
-            "test",
-            "run",
-            "execute",
-        ]
-        theoretical_learner = [
-            "why",
-            "how it works",
-            "explain",
-            "understand",
-            "theory",
-            "concept",
-            "principle",
-            "reasoning",
-            "logic",
-            "foundation",
-        ]
-
-        self.profile["learning_indicators"]["visual"] = self.profile[
-            "learning_indicators"
-        ].get("visual", 0) + sum(1 for m in visual_learner if m in content_lower)
-        self.profile["learning_indicators"]["hands_on"] = self.profile[
-            "learning_indicators"
-        ].get("hands_on", 0) + sum(1 for m in hands_on_learner if m in content_lower)
-        self.profile["learning_indicators"]["theoretical"] = self.profile[
-            "learning_indicators"
-        ].get("theoretical", 0) + sum(
-            1 for m in theoretical_learner if m in content_lower
-        )
-
-        # Sentiment & tone - Enhanced with positive/negative/humor
         polite_markers = [
             "please",
             "could you",
-            "would you mind",
-            "if possible",
+            "would you",
+            "can you",
             "thanks",
             "thank you",
-            "appreciate",
         ]
-        direct_markers = ["show me", "give me", "i need", "i want", "do this", "just"]
-        frustrated_markers = [
-            "still",
-            "not working",
-            "broken",
-            "issue",
-            "problem",
-            "error",
-            "wrong",
-            "confused",
-            "fail",
-            "doesn't work",
-        ]
-        exploratory_markers = [
-            "what if",
-            "how about",
-            "could we",
-            "is it possible",
-            "wondering",
-            "curious",
-            "interested",
-        ]
-        confident_markers = [
-            "i think",
-            "should be",
-            "probably",
-            "likely",
-            "seems like",
-            "i believe",
-        ]
-        positive_markers = [
-            "great",
-            "good",
-            "excellent",
-            "perfect",
-            "awesome",
-            "love",
-            "nice",
-        ]
-        negative_markers = ["bad", "terrible", "awful", "hate", "worst", "useless"]
-        humor_markers = ["lol", "haha", "hehe", "funny", "joke"]
-        exploratory_markers = [
-            "what if",
-            "how about",
-            "could we",
-            "is it possible",
-            "wondering",
-            "curious",
-            "interested",
-        ]
-        confident_markers = [
-            "i think",
-            "should be",
-            "probably",
-            "likely",
-            "seems like",
-            "i believe",
-        ]
+        question_markers = ["?", "how do", "what is", "why does", "can i"]
 
-        self.profile["sentiment"]["polite"] = self.profile["sentiment"].get(
-            "polite", 0
-        ) + sum(1 for m in polite_markers if m in content_lower)
-        self.profile["sentiment"]["direct"] = self.profile["sentiment"].get(
-            "direct", 0
-        ) + sum(1 for m in direct_markers if m in content_lower)
-        self.profile["sentiment"]["frustrated"] = self.profile["sentiment"].get(
-            "frustrated", 0
-        ) + sum(1 for m in frustrated_markers if m in content_lower)
-        self.profile["sentiment"]["exploratory"] = self.profile["sentiment"].get(
-            "exploratory", 0
-        ) + sum(1 for m in exploratory_markers if m in content_lower)
-        self.profile["sentiment"]["confident"] = self.profile["sentiment"].get(
-            "confident", 0
-        ) + sum(1 for m in confident_markers if m in content_lower)
-        self.profile["sentiment"]["positive"] = self.profile["sentiment"].get(
-            "positive", 0
-        ) + sum(1 for m in positive_markers if m in content_lower)
-        self.profile["sentiment"]["negative"] = self.profile["sentiment"].get(
-            "negative", 0
-        ) + sum(1 for m in negative_markers if m in content_lower)
-        self.profile["sentiment"]["humor"] = self.profile["sentiment"].get(
-            "humor", 0
-        ) + sum(1 for m in humor_markers if m in content_lower)
-
-        # Domain expertise with depth scoring
-        domains = {
-            "python": (
-                ["python", "pip", "virtualenv", "pytest", "django", "flask"],
-                ["decorator", "metaclass", "generator", "async", "gil", "descriptor"],
-            ),
-            "javascript": (
-                ["javascript", "node", "npm", "react", "vue"],
-                ["closure", "prototype", "promise", "async/await", "event loop"],
-            ),
-            "devops": (
-                ["docker", "kubernetes", "ci/cd", "jenkins"],
-                ["helm", "istio", "gitops", "canary", "blue-green"],
-            ),
-            "aws": (
-                ["aws", "ec2", "s3", "lambda"],
-                [
-                    "vpc",
-                    "iam policy",
-                    "cloudformation",
-                    "step functions",
-                    "eventbridge",
-                ],
-            ),
-            "databases": (
-                ["sql", "postgres", "mysql", "mongodb"],
-                ["index optimization", "query plan", "sharding", "replication", "acid"],
-            ),
-            "ml_ai": (
-                ["model", "training", "inference"],
-                [
-                    "transformer",
-                    "embedding",
-                    "fine-tuning",
-                    "rag",
-                    "prompt engineering",
-                ],
-            ),
-            "architecture": (
-                ["api", "rest", "microservices"],
-                ["saga pattern", "cqrs", "event sourcing", "ddd", "hexagonal"],
-            ),
-            "security": (
-                ["security", "authentication", "encryption"],
-                ["oauth2", "jwt", "zero trust", "principle of least privilege"],
-            ),
-        }
-
-        for domain, (basic_kw, advanced_kw) in domains.items():
-            basic_matches = sum(1 for kw in basic_kw if kw in content_lower)
-            advanced_matches = sum(1 for kw in advanced_kw if kw in content_lower)
-            score = basic_matches + (advanced_matches * 2)
-            if score > 0:
-                self.profile["domain_expertise"][domain] = (
-                    self.profile["domain_expertise"].get(domain, 0) + score
-                )
-
-        # Intent classification with context
-        intents = {
-            "debug": r"\b(error|bug|issue|problem|not working|broken|fail|debug)\b",
-            "learn": r"\b(how|what|why|explain|understand|learn|teach|documentation)\b",
-            "implement": r"\b(create|build|implement|make|write|develop|code)\b",
-            "optimize": r"\b(improve|optimize|faster|better|performance|refactor|efficient)\b",
-            "review": r"\b(review|check|look at|analyze|examine|audit)\b",
-            "configure": r"\b(setup|configure|install|deploy|set up|initialize)\b",
-            "integrate": r"\b(integrate|connect|combine|merge|api|interface)\b",
-            "migrate": r"\b(migrate|upgrade|convert|port|transition)\b",
-        }
-
-        for intent, pattern in intents.items():
-            matches = len(re.findall(pattern, content_lower))
-            if matches > 0:
-                self.profile["intent_patterns"][intent] = (
-                    self.profile["intent_patterns"].get(intent, 0) + matches
-                )
-
-        # Code quality preferences
-        quality_indicators = {
-            "testing": ["test", "testing", "unittest", "pytest", "coverage", "tdd"],
-            "documentation": [
-                "comment",
-                "documentation",
-                "docstring",
-                "readme",
-                "docs",
-            ],
-            "typing": ["type", "typing", "annotation", "interface", "generic"],
-            "error_handling": [
-                "error handling",
-                "exception",
-                "try catch",
-                "validation",
-                "robust",
-            ],
-            "clean_code": [
-                "clean",
-                "readable",
-                "maintainable",
-                "solid",
-                "dry",
-                "refactor",
-            ],
-            "performance": [
-                "performance",
-                "optimize",
-                "efficient",
-                "fast",
-                "benchmark",
-            ],
-            "security": ["secure", "security", "sanitize", "validate", "injection"],
-        }
-
-        for pref, keywords in quality_indicators.items():
-            matches = sum(1 for kw in keywords if kw in content_lower)
-            if matches > 0:
-                self.profile["code_preferences"][pref] = (
-                    self.profile["code_preferences"].get(pref, 0) + matches
-                )
-
-        # Complexity preference with nuance
-        simplicity_markers = [
-            "simple",
-            "basic",
-            "quick",
-            "just",
-            "minimal",
-            "straightforward",
-            "easy",
-        ]
-        detail_markers = [
-            "detailed",
-            "comprehensive",
-            "complete",
-            "full",
-            "thorough",
-            "in-depth",
-            "elaborate",
-        ]
-
-        simplicity_score = sum(1 for m in simplicity_markers if m in content_lower)
-        detail_score = sum(1 for m in detail_markers if m in content_lower)
-
-        if len(content) < 80:
-            simplicity_score += 1
-        elif len(content) > 250:
-            detail_score += 1
-
-        self.profile["complexity_preference"]["simple"] = (
-            self.profile["complexity_preference"].get("simple", 0) + simplicity_score
+        has_imperative = any(
+            content_lower.startswith(imp) for imp in imperative_starters
         )
-        self.profile["complexity_preference"]["detailed"] = (
-            self.profile["complexity_preference"].get("detailed", 0) + detail_score
+        has_polite = any(m in content_lower for m in polite_markers)
+        has_question = any(m in content_lower for m in question_markers)
+
+        if has_imperative and not has_polite:
+            directness_signal = 1.0
+        elif has_polite or has_question:
+            directness_signal = 0.2
+
+        self.profile["directness"] = self._update_ema(
+            self.profile.get("directness", 0.5), directness_signal
         )
 
-        # Semantic phrase extraction with TF-IDF-like scoring
-        stop_words = {
-            "the",
-            "a",
-            "an",
-            "and",
-            "or",
-            "but",
-            "in",
-            "on",
-            "at",
-            "to",
-            "for",
-            "of",
-            "with",
-            "is",
-            "are",
-            "was",
-            "were",
-            "be",
-            "been",
-            "being",
-            "have",
-            "has",
-            "had",
-            "do",
-            "does",
-            "did",
-            "will",
-            "would",
-            "should",
-            "could",
-            "can",
-            "may",
-            "might",
-            "must",
-            "i",
-            "you",
-            "he",
-            "she",
-            "it",
-            "we",
-            "they",
-            "this",
-            "that",
-            "these",
-            "those",
-            "my",
-            "your",
-            "his",
-            "her",
-            "its",
-            "our",
-            "their",
-            "me",
-            "him",
-            "them",
-            "what",
-            "which",
-            "who",
-            "when",
-            "where",
-            "how",
-        }
+        # === TECHNICAL LEVEL ===
+        tech_count = sum(1 for term in self.TECHNICAL_TERMS if term in content_lower)
+        tech_signal = min(1.0, tech_count / 3)  # 3+ technical terms = expert level
 
-        for n in [2, 3, 4]:
-            for i in range(len(words) - n + 1):
-                ngram = words[i : i + n]
-                meaningful_words = [
-                    w for w in ngram if w not in stop_words and len(w) > 2
-                ]
-                if len(meaningful_words) >= max(1, n - 2):
-                    phrase = " ".join(ngram)
-                    if len(phrase) > 6 and not phrase.isdigit():
-                        self.profile["common_phrases"][phrase] = (
-                            self.profile["common_phrases"].get(phrase, 0) + 1
-                        )
+        self.profile["technical_level"] = self._update_ema(
+            self.profile.get("technical_level", 0.5), tech_signal
+        )
 
-        # Question taxonomy
-        question_patterns = {
-            "how_to": r"^how (do|can|to|would|should)",
-            "what_is": r"^what (is|are|does|would|should)",
-            "why": r"^why",
-            "when": r"^when",
-            "where": r"^where",
-            "can_you": r"^(can|could|would|will) you",
-            "imperative": r"^(show|give|create|make|write|explain|help|tell|list)",
-            "comparative": r"(better|worse|difference|compare|versus|vs)",
-            "troubleshooting": r"(why.*not|how.*fix|what.*wrong)",
-        }
-
-        for pattern_name, pattern in question_patterns.items():
-            if re.search(pattern, content_lower):
-                self.profile["common_commands"][pattern_name] = (
-                    self.profile["common_commands"].get(pattern_name, 0) + 1
-                )
-
-        # Context and memory usage
-        context_markers = [
-            "still",
-            "also",
-            "additionally",
-            "furthermore",
-            "previous",
-            "earlier",
-            "before",
-            "last time",
-            "remember",
-            "you said",
-            "as mentioned",
-            "like before",
+        # === ABSTRACTION ===
+        concrete_markers = [
+            "example",
+            "show me",
+            "sample",
+            "demo",
+            "code for",
+            "how to",
         ]
-        if any(marker in content_lower for marker in context_markers):
-            self.profile["communication_patterns"]["asks_follow_ups"] = True
-            self.profile["communication_patterns"]["context_references"] = (
-                self.profile["communication_patterns"].get("context_references", 0) + 1
-            )
-
-        # Technical sophistication scoring
-        advanced_terms = [
-            "refactor",
-            "architecture",
-            "scalability",
-            "async",
-            "concurrency",
-            "optimization",
-            "algorithm",
-            "complexity",
-            "pattern",
-            "abstraction",
-            "polymorphism",
-            "encapsulation",
-            "cohesion",
-            "coupling",
+        abstract_markers = [
+            "explain",
+            "why",
+            "concept",
+            "theory",
+            "principle",
+            "understand",
         ]
-        tech_score = sum(1 for term in advanced_terms if term in content_lower)
-        if tech_score >= 1:
-            self.profile["communication_patterns"]["uses_technical_terms"] = True
-            self.profile["communication_patterns"]["technical_depth"] = (
-                self.profile["communication_patterns"].get("technical_depth", 0)
-                + tech_score
-            )
 
-        # Topic tracking with weighted scoring
-        topic_keywords = {
-            "coding": [
-                "code",
-                "function",
-                "class",
-                "method",
-                "programming",
-                "script",
-                "debug",
-                "syntax",
-            ],
-            "files": [
-                "file",
-                "directory",
-                "folder",
-                "path",
-                "read",
-                "write",
-                "save",
-                "load",
-            ],
-            "aws": [
-                "aws",
-                "ec2",
-                "s3",
-                "lambda",
-                "sagemaker",
-                "bedrock",
-                "cloudformation",
-            ],
-            "data": ["data", "json", "csv", "database", "query", "pandas", "dataframe"],
-            "system": [
-                "install",
-                "run",
-                "execute",
-                "command",
-                "bash",
-                "terminal",
-                "shell",
-            ],
-        }
+        wants_concrete = any(m in content_lower for m in concrete_markers)
+        wants_abstract = any(m in content_lower for m in abstract_markers)
 
-        for topic, keywords in topic_keywords.items():
+        if wants_concrete and not wants_abstract:
+            abstraction_signal = 0.0
+        elif wants_abstract and not wants_concrete:
+            abstraction_signal = 1.0
+        else:
+            abstraction_signal = 0.5
+
+        self.profile["abstraction"] = self._update_ema(
+            self.profile.get("abstraction", 0.5), abstraction_signal
+        )
+
+        # === DOMAINS ===
+        detected_domains = {}
+        for domain, keywords in self.DOMAIN_KEYWORDS.items():
             matches = sum(1 for kw in keywords if kw in content_lower)
             if matches > 0:
-                self.profile["frequent_topics"][topic] = (
-                    self.profile["frequent_topics"].get(topic, 0) + matches
+                detected_domains[domain] = matches
+
+        if detected_domains:
+            self._update_domains(detected_domains)
+
+    def _update_domains(self, detected: Dict[str, int]) -> None:
+        """Update top domains with decay.
+
+        Args:
+            detected: Dict of domain -> match count
+        """
+        current_domains = {d["name"]: d for d in self.profile.get("top_domains", [])}
+
+        # Decay existing scores
+        for domain in current_domains.values():
+            domain["score"] = domain["score"] * 0.95  # 5% decay per interaction
+
+        # Add/update detected domains
+        for name, count in detected.items():
+            boost = min(0.3, count * 0.1)  # Up to 0.3 boost per detection
+            if name in current_domains:
+                current_domains[name]["score"] = min(
+                    1.0, current_domains[name]["score"] + boost
                 )
+                current_domains[name]["last_seen"] = datetime.now().isoformat()
+            else:
+                current_domains[name] = {
+                    "name": name,
+                    "score": boost,
+                    "last_seen": datetime.now().isoformat(),
+                }
+
+        # Keep top 5 domains
+        sorted_domains = sorted(
+            current_domains.values(),
+            key=lambda x: x["score"],
+            reverse=True,
+        )[:5]
+
+        # Filter out very low scores
+        self.profile["top_domains"] = [d for d in sorted_domains if d["score"] > 0.05]
 
     def get_profile_summary(self) -> str:
-        """Generate profile summary for system prompt.
+        """Generate compact profile summary for system prompt.
 
         Returns:
-            Formatted profile summary string
+            Formatted profile summary (~100 tokens)
         """
-        # Check if profile has meaningful data to use (not empty dicts)
-        has_data = (
-            (
-                self.profile.get("cognitive_style")
-                and len(self.profile["cognitive_style"]) > 0
-            )
-            or (
-                self.profile.get("domain_expertise")
-                and len(self.profile["domain_expertise"]) > 0
-            )
-            or (self.profile.get("sentiment") and len(self.profile["sentiment"]) > 0)
-            or (
-                self.profile.get("learning_indicators")
-                and len(self.profile["learning_indicators"]) > 0
-            )
-            or self.profile["interaction_count"] >= 5
+        if self.profile.get("interaction_count", 0) < 5:
+            return ""  # Not enough data
+
+        # Determine style labels from EMA values
+        verbosity = self.profile.get("verbosity", 0.5)
+        directness = self.profile.get("directness", 0.5)
+        tech_level = self.profile.get("technical_level", 0.5)
+        abstraction = self.profile.get("abstraction", 0.5)
+
+        verbosity_label = (
+            "concise"
+            if verbosity < 0.4
+            else "detailed" if verbosity > 0.6 else "balanced"
+        )
+        style_label = (
+            "direct"
+            if directness > 0.6
+            else "conversational" if directness < 0.4 else "balanced"
+        )
+        tech_label = (
+            "expert"
+            if tech_level > 0.7
+            else "intermediate" if tech_level > 0.4 else "beginner"
+        )
+        abstraction_label = (
+            "examples"
+            if abstraction < 0.4
+            else "concepts" if abstraction > 0.6 else "mixed"
         )
 
-        if not has_data:
-            return ""
-
-        # Cognitive style
-        cognitive = self.profile.get("cognitive_style", {})
-        dominant_cognitive = (
-            max(cognitive.items(), key=lambda x: x[1])[0] if cognitive else "balanced"
+        # Top domains
+        top_domains = self.profile.get("top_domains", [])[:3]
+        domains_str = (
+            ", ".join(d["name"] for d in top_domains) if top_domains else "general"
         )
 
-        # Sentiment
-        sentiment = self.profile.get("sentiment", {})
-        dominant_tone = (
-            max(sentiment.items(), key=lambda x: x[1])[0] if sentiment else "neutral"
-        )
+        # Best tools per intent (top 3 intents with best tools)
+        tool_hints = []
+        tool_patterns = self.profile.get("tool_patterns", {})
 
-        # Domain expertise with depth
-        domains = self.profile.get("domain_expertise", {})
-        top_domains = sorted(domains.items(), key=lambda x: x[1], reverse=True)[:3]
+        # Sort intents by total usage
+        sorted_intents = sorted(
+            tool_patterns.items(),
+            key=lambda x: sum(t["total"] for t in x[1].values()),
+            reverse=True,
+        )[:3]
 
-        # Classify expertise level based on depth scores
-        expertise_levels = []
-        for domain, score in top_domains:
-            if score > 10:
-                level = "Expert"
-            elif score > 5:
-                level = "Advanced"
-            elif score > 2:
-                level = "Intermediate"
-            else:
-                level = "Novice"
-            expertise_levels.append(f"{domain} ({level})")
+        for intent, tools in sorted_intents:
+            if not tools:
+                continue
+            # Get best tool by success rate (min 3 uses)
+            qualified_tools = [
+                (name, stats) for name, stats in tools.items() if stats["total"] >= 3
+            ]
+            if qualified_tools:
+                best_tool = max(
+                    qualified_tools, key=lambda x: x[1]["success"] / x[1]["total"]
+                )
+                tool_hints.append(f"{intent}: {best_tool[0]}")
 
-        expertise_text = ", ".join(expertise_levels) if expertise_levels else "general"
+        tools_str = "; ".join(tool_hints) if tool_hints else "learning"
 
-        # Intent patterns
-        intents = self.profile.get("intent_patterns", {})
-        top_intents = sorted(intents.items(), key=lambda x: x[1], reverse=True)[:3]
-        intent_text = (
-            ", ".join([i for i, _ in top_intents]) if top_intents else "varied"
-        )
-
-        # Workflow patterns
-        workflows = self.profile.get("workflow_patterns", {})
-        top_workflows = sorted(workflows.items(), key=lambda x: x[1], reverse=True)[:2]
-        workflow_text = (
-            ", ".join([w for w, _ in top_workflows]) if top_workflows else "standard"
-        )
-
-        # Error patterns
-        errors = self.profile.get("error_patterns", {})
-        common_errors = sorted(errors.items(), key=lambda x: x[1], reverse=True)[:2]
-        error_text = (
-            ", ".join([e for e, _ in common_errors])
-            if common_errors
-            else "none identified"
-        )
-
-        # Code quality preferences
-        code_prefs = self.profile.get("code_preferences", {})
-        top_prefs = sorted(code_prefs.items(), key=lambda x: x[1], reverse=True)[:3]
-        code_pref_text = (
-            ", ".join([p.replace("_", " ") for p, _ in top_prefs])
-            if top_prefs
-            else "standard"
-        )
-
-        # Abstraction level
-        abstraction = self.profile.get("abstraction_level", {})
-        prefers_concrete = abstraction.get("concrete", 0) > abstraction.get(
-            "abstract", 0
-        )
-
-        # Learning style
-        learning = self.profile.get("learning_indicators", {})
-        learning_style = (
-            max(learning.items(), key=lambda x: x[1])[0] if learning else "mixed"
-        )
-
-        # Complexity preference
-        complexity = self.profile.get("complexity_preference", {})
-        prefers_simple = complexity.get("simple", 0) > complexity.get("detailed", 0)
-
-        # Communication efficiency
-        comm_eff = self.profile.get("communication_efficiency", {})
-        question_density = comm_eff.get("question_density", 0)
-        uses_imperatives = comm_eff.get("uses_imperatives", 0) > 3
-
-        # Technical depth
-        tech_depth = self.profile["communication_patterns"].get("technical_depth", 0)
-        tech_level = (
-            "Expert"
-            if tech_depth > 10
-            else "Advanced" if tech_depth > 5 else "Intermediate"
-        )
-
-        # Context awareness
-        context_refs = self.profile["communication_patterns"].get(
-            "context_references", 0
-        )
-
-        summary = f"""
-<user_profile>
-Based on {self.profile['interaction_count']} interactions:
-
-COGNITIVE PROFILE:
-- Thinking style: {dominant_cognitive}
-- Learning preference: {learning_style}
-- Abstraction level: {'Concrete examples' if prefers_concrete else 'Abstract concepts'}
-- Communication tone: {dominant_tone}
-
-TECHNICAL PROFILE:
-- Expertise level: {tech_level}
-- Primary domains: {expertise_text}
-- Common workflows: {workflow_text}
-- Typical error contexts: {error_text}
-
-INTERACTION PATTERNS:
-- Primary intents: {intent_text}
-- Response preference: {'Concise and actionable' if prefers_simple else 'Detailed and comprehensive'}
-- Code quality focus: {code_pref_text}
-- Question density: {question_density:.2f}
-- Communication style: {'Direct/imperative' if uses_imperatives else 'Conversational'}
-- Context awareness: {'High - frequently references previous work' if context_refs > 3 else 'Moderate' if context_refs > 0 else 'Low'}
-
-ADAPTATION STRATEGY:
-⚠️ CRITICAL: You MUST adapt your responses to match this user's profile.
-
-- Use {dominant_cognitive} thinking style (not generic responses)
-- Provide {learning_style} learning materials ({'show examples and demos' if learning_style == 'hands_on' else 'explain concepts and theory' if learning_style == 'theoretical' else 'use diagrams and visuals'})
-- Give {'concrete code examples' if prefers_concrete else 'conceptual explanations with principles'}
-- Assume {tech_level.lower()} technical knowledge (adjust complexity accordingly)
-- Emphasize {code_pref_text} in all code suggestions
-- Keep responses {'brief and actionable' if prefers_simple else 'detailed with thorough explanations'}
-- Match their {'direct, imperative' if uses_imperatives else 'conversational'} communication style
-
-This is NOT optional - personalize every response based on this profile.
-</user_profile>
-"""
-        return summary.strip()
+        return textwrap.dedent(
+            f"""
+                <profile>
+                Style: {verbosity_label}, {style_label}, {tech_label}-level
+                Domains: {domains_str}
+                Prefers: {abstraction_label}
+                Tools: {tools_str}
+                </profile>
+            """
+        ).strip()

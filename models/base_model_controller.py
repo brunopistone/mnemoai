@@ -11,6 +11,7 @@ class BaseModelController:
             Dictionary of Bedrock inference parameters
         """
         args = {}
+        additional_request_fields = {}
 
         if self.max_tokens:
             args["max_tokens"] = self.max_tokens
@@ -27,7 +28,16 @@ class BaseModelController:
         # Bedrock does not support streaming for vision requests
         args["streaming"] = False
 
-        return args
+        # if self.verbose_mode:
+        #     args["temperature"] = 1.0
+        #     additional_request_fields["additional_request_fields"] = {
+        #         "thinking": {
+        #             "type": "enabled",
+        #             "budget_tokens": self.thinking_tokens,  # Minimum of 1,024
+        #         }
+        #     }
+
+        return args, additional_request_fields
 
     def _set_ollama_inference_parameters(
         self,

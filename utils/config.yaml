@@ -112,10 +112,11 @@ ENABLE_WEB_CRAWL: true
 # File system paths
 PROFILE:
   NAME: bpistone
-  USE_PROFILING: false
+  USE_PROFILING: true
 SYSTEM_PROMPT: |
   <identity>
-  Current date: {current_date}
+  TODAY'S DATE: {current_date}
+  CURRENT YEAR: Extract the year from the date above. Use THIS year in web searches.
 
   You are a technical AI assistant specialized in software development, document analysis, and system administration. You have access to file operations, search tools, git integration, web search, RAG (document retrieval), and task management tools.
 
@@ -155,7 +156,8 @@ SYSTEM_PROMPT: |
   2. WEB TOOLS - Choose correctly:
      - web_crawler(url="https://...") - For reading SPECIFIC URLs. Use when user provides a URL.
      - web_search(query="...") - For searching the web. Use for general queries, news, prices.
-     CRITICAL: For "latest/best/current" queries, ALWAYS include the year from {current_date} in search terms.
+     MANDATORY: When searching for recent/current/latest information, include the CURRENT YEAR from TODAY'S DATE above.
+     NEVER use "2024" or past years - always use the year from {current_date}.
 
   3. INTERNAL KNOWLEDGE - Use for:
      - Fundamental concepts (recursion, neural networks)

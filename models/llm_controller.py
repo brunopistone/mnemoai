@@ -20,6 +20,7 @@ class LLMController(BaseModelController):
         self.model_name = self.model_id["NAME"]
         self.model_type = self.model_id["TYPE"]
         self.region = self.model_id.get("REGION", "us-east-1")
+        self.thinking_tokens = self.model_id.get("THINKING_TOKENS", 1024 * 2)
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
         self.min_p = self.model_id.get("MIN_P", None)
@@ -40,11 +41,12 @@ class LLMController(BaseModelController):
         if self.model_type == "bedrock":
             logger.info("Initializing Bedrock model...")
 
-            args = self._set_bedrock_inference_parameters()
+            args, additional_request_fields = self._set_bedrock_inference_parameters()
 
             self.model = BedrockModel(
                 model_id=self.model_name,
                 **args,
+                **additional_request_fields,
             )
         elif self.model_type == "ollama":
             logger.info("Initializing Ollama model...")
