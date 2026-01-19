@@ -18,7 +18,10 @@ Pygments
 PyPDF2
 python-docx
 qdrant-client
-strands-agents
-strands-agents-tools
+langgraph>=0.2.0
+langchain-core>=0.3.0
+langchain-aws>=0.2.0
+langchain-openai>=0.2.0
+langchain-ollama>=0.2.0
 tiktoken
 uv

@@ -4,9 +4,16 @@ from datetime import date
 import json
 import textwrap
 import tiktoken
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Union
 from utils.logger import logger
 from utils.config import config
+
+# Try to import LangChain message types for compatibility
+try:
+    from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+    LANGCHAIN_AVAILABLE = True
+except ImportError:
+    LANGCHAIN_AVAILABLE = False
 
 MODEL_ID = "gpt-4"  # Default model for token counting
 
@@ -24,6 +31,44 @@ def log_green(message: str, level: str = "info") -> None:
     """
     colored_message = f"{GREEN}{message}{RESET}"
     getattr(logger, level)(colored_message)
+
+
+def messages_to_dict_list(messages: List[Any]) -> List[Dict]:
+    """Convert messages to list of dictionaries.
+
+    Handles both Strands format (dict) and LangChain format (BaseMessage).
+
+    Args:
+        messages: List of messages in either format
+
+    Returns:
+        List of message dictionaries
+    """
+    result = []
+    for msg in messages:
+        if isinstance(msg, dict):
+            result.append(msg)
+        elif LANGCHAIN_AVAILABLE and isinstance(msg, BaseMessage):
+            # Convert LangChain message to dict
+            role = "assistant" if isinstance(msg, AIMessage) else "user"
+            if hasattr(msg, '_message_type'):
+                if msg._message_type == "human":
+                    role = "user"
+                elif msg._message_type == "ai":
+                    role = "assistant"
+                elif msg._message_type == "system":
+                    role = "system"
+            result.append({
+                "role": role,
+                "content": [{"text": str(msg.content)}]
+            })
+        else:
+            # Fallback: try to convert to string
+            result.append({
+                "role": "user",
+                "content": [{"text": str(msg)}]
+            })
+    return result
 
 
 class AgentConversationManager:
@@ -70,7 +115,7 @@ class AgentConversationManager:
 
         Args:
             messages: List of conversation messages
-            model: Model instance for generating summary
+            model: Model instance for generating summary (LangChain or Strands)
 
         Returns:
             Summary text
@@ -79,35 +124,67 @@ class AgentConversationManager:
 
         summary_prompt = f"""
         Create a detailed summary of this conversation that preserves important information for future reference. Include:
-        
+
         1. Specific topics, requests, and questions discussed
         2. Key facts, data, or findings that were discovered
         3. Important decisions, solutions, or conclusions reached
         4. Any specific tools, commands, or technical details mentioned
         5. Context that would be valuable for continuing this conversation later
-        
+
         Write in a structured format that maintains the essential details while being concise. Focus on preserving actionable information and specific context rather than just high-level themes.
         """
 
         summary_prompt = textwrap.dedent(summary_prompt).strip()
 
-        # Create clean messages for summarization
-        messages.append({"role": "user", "content": [{"text": summary_prompt}]})
-
         try:
             summary_response = ""
 
-            # Use the model to generate summary with configurable think parameter
-            think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
-            async for event in model.stream(
-                messages, system_prompt=self.previous_summary, think=think_param
-            ):
-                if (
-                    "contentBlockDelta" in event
-                    and "delta" in event["contentBlockDelta"]
-                    and "text" in event["contentBlockDelta"]["delta"]
+            # Check if this is a LangChain model
+            if LANGCHAIN_AVAILABLE and hasattr(model, 'ainvoke'):
+                # LangChain model - use ainvoke
+                from langchain_core.messages import HumanMessage, SystemMessage
+
+                # Build LangChain messages
+                lc_messages = []
+                if self.previous_summary:
+                    lc_messages.append(SystemMessage(content=self.previous_summary))
+
+                # Add conversation context
+                for msg in messages:
+                    content = ""
+                    if isinstance(msg.get("content"), list):
+                        for item in msg["content"]:
+                            if isinstance(item, dict) and "text" in item:
+                                content += item["text"]
+                    elif isinstance(msg.get("content"), str):
+                        content = msg["content"]
+
+                    if msg.get("role") == "user":
+                        lc_messages.append(HumanMessage(content=content))
+                    elif msg.get("role") == "assistant":
+                        lc_messages.append(AIMessage(content=content))
+
+                # Add summary prompt
+                lc_messages.append(HumanMessage(content=summary_prompt))
+
+                # Generate summary
+                response = await model.ainvoke(lc_messages)
+                summary_response = str(response.content)
+
+            else:
+                # Strands model - use stream
+                messages.append({"role": "user", "content": [{"text": summary_prompt}]})
+                think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
+
+                async for event in model.stream(
+                    messages, system_prompt=self.previous_summary, think=think_param
                 ):
-                    summary_response += event["contentBlockDelta"]["delta"]["text"]
+                    if (
+                        "contentBlockDelta" in event
+                        and "delta" in event["contentBlockDelta"]
+                        and "text" in event["contentBlockDelta"]["delta"]
+                    ):
+                        summary_response += event["contentBlockDelta"]["delta"]["text"]
 
             # Clean the response
             clean_summary = summary_response.strip()
@@ -125,7 +202,9 @@ class AgentConversationManager:
             model: Model instance for generating summary
             agent: Agent instance with messages
         """
-        messages = agent.messages.copy()
+        # Get messages and convert to dict format if needed
+        raw_messages = agent.messages.copy() if hasattr(agent, 'messages') else []
+        messages = messages_to_dict_list(raw_messages)
 
         current_tokens = self.count_tokens(messages)
 

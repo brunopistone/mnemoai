@@ -1,13 +1,13 @@
-"""Main entry point for the Strands chat application."""
+"""Main entry point for the LangGraph chat application."""
 
 import argparse
 import os
 from typing import Optional
-from client.client import StrandsClient
+from client.langgraph_client import LangGraphClient
 from client.ui.chat_interface import ChatInterface
 
 # Global client reference for cleanup
-_client: Optional[StrandsClient] = None
+_client: Optional[LangGraphClient] = None
 
 
 def main(verbose: bool = False) -> None:
@@ -25,8 +25,8 @@ def main(verbose: bool = False) -> None:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     server_path = os.path.join(current_dir, "server", "server.py")
 
-    # Initialize Strands client
-    _client = StrandsClient(server_path=server_path, verbose=verbose)
+    # Initialize LangGraph client
+    _client = LangGraphClient(server_path=server_path, verbose=verbose)
 
     # Start client
     _client.start(verbose)
