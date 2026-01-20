@@ -276,22 +276,6 @@ class LangGraphClient:
                     )
                     self.profile_manager.analyze_conversation(messages_for_profile)
 
-                # response_text = str(response)
-                # visible_content = re.sub(
-                #     r"<think(?:ing)?>.*?</think(?:ing)?>",
-                #     "",
-                #     response_text,
-                #     flags=re.DOTALL | re.IGNORECASE,
-                # ).strip()
-
-                # if not visible_content:
-                #     response_text += (
-                #         "\n\nI apologize, but I need to provide a visible response."
-                #     )
-                #     print(
-                #         "\n\033[91m⚠️  Model provided only thinking without visible response\033[0m"
-                #     )
-
                 token_count = self._count_context_tokens()
                 print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
 

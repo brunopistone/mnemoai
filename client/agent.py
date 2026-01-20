@@ -14,6 +14,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 
+from utils.formatting.code_formatter import CodeFormatter
 from utils.logger import logger
 
 
@@ -51,6 +52,7 @@ class LangGraphAgent:
         self.callbacks = callbacks or []
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
+        self._code_formatter = CodeFormatter()
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
         self.graph = self._build_graph()
@@ -109,6 +111,9 @@ class LangGraphAgent:
 
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
+        # Reset code formatter for new response
+        self._code_formatter = CodeFormatter()
+        
         first_token = True
         had_reasoning = False
         response = None
@@ -130,12 +135,12 @@ class LangGraphAgent:
                 print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
                 had_reasoning = True
 
-            # Print content with newline after reasoning
+            # Print content with syntax highlighting
             if chunk_content:
                 if had_reasoning:
                     print("\n", end="", flush=True)
                     had_reasoning = False
-                print(chunk_content, end="", flush=True)
+                self._code_formatter.process_chunk(chunk_content)
 
             response = chunk if response is None else response + chunk
 
