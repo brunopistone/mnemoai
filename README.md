@@ -365,8 +365,7 @@ Model controllers and custom implementations.
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
 - **Custom implementations** (`classes/`):
-  - `thinking_ollama.py`: Ollama model with thinking tag support
-  - `sagemaker_vision_model.py`: SageMaker vision model wrapper
+  - `sagemaker_chat.py`: SageMaker Handler class for Langchain
 
 #### 4. **Utils Layer** (`utils/`)
 

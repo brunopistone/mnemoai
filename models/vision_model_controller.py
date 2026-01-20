@@ -158,7 +158,9 @@ class VisionModelController(BaseModelController):
 
         return HumanMessage(content=content)
 
-    def describe_image(self, question: str, image_data: bytes, image_ext: str = "png") -> str:
+    def describe_image(
+        self, question: str, image_data: bytes, image_ext: str = "png"
+    ) -> str:
         """Describe an image using the vision model.
 
         Args:
@@ -175,4 +177,4 @@ class VisionModelController(BaseModelController):
         message = self.format_request(question, image_data, image_ext)
         response = self.model.invoke([message])
 
-        return response.content if hasattr(response, 'content') else str(response)
+        return response.content if hasattr(response, "content") else str(response)

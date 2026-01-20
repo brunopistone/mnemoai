@@ -1,9 +1,10 @@
 """LangChain-based LLM controller for multi-provider support."""
 
-from typing import Union, Optional, Any
+from typing import Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.callbacks import BaseCallbackHandler
 from models.base_model_controller import BaseModelController
+from models.classes.sagemaker_chat import ChatSageMaker
 from utils.config import config
 from utils.logger import logger
 
@@ -22,6 +23,7 @@ class LangChainLLMController(BaseModelController):
         self.model_name = self.model_id["NAME"]
         self.model_type = self.model_id["TYPE"]
         self.region = self.model_id.get("REGION", "us-east-1")
+        self.reasoning_model = self.model_id.get("REASONING", False)
         self.thinking_tokens = self.model_id.get("THINKING_TOKENS", 1024 * 2)
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
@@ -73,11 +75,7 @@ class LangChainLLMController(BaseModelController):
             model_kwargs["stop_sequences"] = self.stop
 
         # Enable thinking/reasoning for Claude models if verbose
-        if (
-            self.verbose_mode
-            and "claude" in self.model_name.lower()
-            or "deepseek" in self.model_name.lower()
-        ):
+        if self.reasoning_model:
             model_kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": self.thinking_tokens,
@@ -160,24 +158,32 @@ class LangChainLLMController(BaseModelController):
         self.model = ChatOpenAI(**kwargs)
 
     def _initialize_sagemaker_model(self, callbacks: list = None) -> None:
-        """Initialize SageMaker model.
-
-        Note: LangChain doesn't have native SageMaker chat support,
-        so we use a custom implementation or LiteLLM.
-        """
-        from langchain_aws import ChatBedrock
+        """Initialize SageMaker model using ChatSageMaker wrapper."""
 
         logger.info("Initializing SageMaker model...")
-        logger.warning(
-            "SageMaker support via LangChain is limited. Consider using Bedrock."
-        )
 
-        # For now, fall back to using LiteLLM via ChatOpenAI-compatible interface
-        # or implement custom SageMaker integration
-        raise NotImplementedError(
-            "SageMaker support requires custom implementation. "
-            "Consider using Bedrock or implementing a custom LangChain chat model."
-        )
+        endpoint_name = self.model_name
+        input_format = self.model_id.get("INPUT_FORMAT", "openai_chat")
+
+        kwargs = {
+            "endpoint_name": endpoint_name,
+            "region_name": self.region,
+            "input_format": input_format,
+            "callbacks": callbacks,
+        }
+
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.top_k is not None:
+            kwargs["top_k"] = self.top_k
+        if self.stop:
+            kwargs["stop"] = self.stop
+
+        self.model = ChatSageMaker(**kwargs)
 
     def get_model(self) -> BaseChatModel:
         """Get the initialized LLM model instance, initializing if needed.
