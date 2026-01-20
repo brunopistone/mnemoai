@@ -113,7 +113,7 @@ class LangGraphAgent:
 
         # Reset code formatter for new response
         self._code_formatter = CodeFormatter()
-        
+
         first_token = True
         had_reasoning = False
         response = None
@@ -121,14 +121,19 @@ class LangGraphAgent:
         for chunk in self.model_with_tools.stream(messages, config=config):
             chunk_content, reasoning_content = self._extract_content(chunk)
 
-            # Stop spinner on first token
+            # Stop spinner on first token (thread-safe)
             if first_token and (chunk_content or reasoning_content) and self.callbacks:
                 first_token = False
                 for cb in self.callbacks:
                     if hasattr(cb, "first_token_received"):
                         cb.first_token_received = True
                     if hasattr(cb, "spinner") and cb.spinner:
-                        cb.spinner.stop()
+                        lock = getattr(cb, "spinner_lock", None)
+                        if lock:
+                            with lock:
+                                cb.spinner.stop()
+                        else:
+                            cb.spinner.stop()
 
             # Print reasoning in gray
             if reasoning_content and self.verbose:
@@ -203,6 +208,16 @@ class LangGraphAgent:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return {"messages": []}
 
+        # Stop spinner during tool execution
+        for cb in self.callbacks:
+            if hasattr(cb, "spinner") and cb.spinner:
+                lock = getattr(cb, "spinner_lock", None)
+                if lock:
+                    with lock:
+                        cb.spinner.stop()
+                else:
+                    cb.spinner.stop()
+
         tool_results = []
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
@@ -216,18 +231,43 @@ class LangGraphAgent:
                     logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
                     result = tool.invoke(tool_args)
                     tool_results.append(
-                        ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
+                        ToolMessage(
+                            content=str(result), tool_call_id=tool_id, name=tool_name
+                        )
                     )
                 except Exception as e:
                     logger.error(f"Tool execution error: {e}")
                     tool_results.append(
-                        ToolMessage(content=f"Error: {e}", tool_call_id=tool_id, name=tool_name)
+                        ToolMessage(
+                            content=f"Error: {e}", tool_call_id=tool_id, name=tool_name
+                        )
                     )
             else:
                 logger.warning(f"Tool not found: {tool_name}")
                 tool_results.append(
-                    ToolMessage(content=f"Tool not found: {tool_name}", tool_call_id=tool_id, name=tool_name)
+                    ToolMessage(
+                        content=f"Tool not found: {tool_name}",
+                        tool_call_id=tool_id,
+                        name=tool_name,
+                    )
                 )
+
+        # Restart spinner for model response after tools
+        for cb in self.callbacks:
+            if hasattr(cb, "spinner") and cb.spinner:
+                lock = getattr(cb, "spinner_lock", None)
+                if lock:
+                    with lock:
+                        cb.spinner.start()
+                        if hasattr(cb, "first_token_received"):
+                            cb.first_token_received = False
+                else:
+                    cb.spinner.start()
+                    if hasattr(cb, "first_token_received"):
+                        cb.first_token_received = False
+
+        # Reset code formatter for new response
+        self._code_formatter = CodeFormatter()
 
         return {"messages": tool_results}
 
@@ -284,7 +324,8 @@ class LangGraphAgent:
         self._thinking = result.get("thinking")
 
         new_messages = [
-            m for m in final_messages
+            m
+            for m in final_messages
             if not isinstance(m, SystemMessage) and m not in self._messages
         ]
         self._messages.extend(new_messages)
@@ -309,7 +350,9 @@ class LangGraphAgent:
         self._thinking = None
 
 
-def convert_strands_messages_to_langchain(messages: List[Dict[str, Any]]) -> List[BaseMessage]:
+def convert_strands_messages_to_langchain(
+    messages: List[Dict[str, Any]],
+) -> List[BaseMessage]:
     """Convert Strands message format to LangChain messages.
 
     Args:
@@ -356,10 +399,16 @@ def convert_strands_messages_to_langchain(messages: List[Dict[str, Any]]) -> Lis
         elif role == "assistant":
             if tool_calls:
                 formatted_tool_calls = [
-                    {"id": tc.get("toolUseId", ""), "name": tc.get("name", ""), "args": tc.get("input", {})}
+                    {
+                        "id": tc.get("toolUseId", ""),
+                        "name": tc.get("name", ""),
+                        "args": tc.get("input", {}),
+                    }
                     for tc in tool_calls
                 ]
-                langchain_messages.append(AIMessage(content=text_content, tool_calls=formatted_tool_calls))
+                langchain_messages.append(
+                    AIMessage(content=text_content, tool_calls=formatted_tool_calls)
+                )
             else:
                 langchain_messages.append(AIMessage(content=text_content))
         elif role == "system":
@@ -368,7 +417,9 @@ def convert_strands_messages_to_langchain(messages: List[Dict[str, Any]]) -> Lis
     return langchain_messages
 
 
-def convert_langchain_messages_to_strands(messages: List[BaseMessage]) -> List[Dict[str, Any]]:
+def convert_langchain_messages_to_strands(
+    messages: List[BaseMessage],
+) -> List[Dict[str, Any]]:
     """Convert LangChain messages to Strands format.
 
     Args:
@@ -391,22 +442,26 @@ def convert_langchain_messages_to_strands(messages: List[BaseMessage]) -> List[D
                 content_blocks.append({"text": str(msg.content)})
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    content_blocks.append({
-                        "toolUse": {
-                            "toolUseId": tc.get("id", ""),
-                            "name": tc.get("name", ""),
-                            "input": tc.get("args", {}),
+                    content_blocks.append(
+                        {
+                            "toolUse": {
+                                "toolUseId": tc.get("id", ""),
+                                "name": tc.get("name", ""),
+                                "input": tc.get("args", {}),
+                            }
                         }
-                    })
+                    )
             strands_messages.append({"role": "assistant", "content": content_blocks})
 
         elif isinstance(msg, ToolMessage):
-            content_blocks.append({
-                "toolResult": {
-                    "toolUseId": msg.tool_call_id,
-                    "content": [{"text": str(msg.content)}],
+            content_blocks.append(
+                {
+                    "toolResult": {
+                        "toolUseId": msg.tool_call_id,
+                        "content": [{"text": str(msg.content)}],
+                    }
                 }
-            })
+            )
             strands_messages.append({"role": "user", "content": content_blocks})
 
         elif isinstance(msg, SystemMessage):

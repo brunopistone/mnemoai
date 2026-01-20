@@ -97,7 +97,7 @@ class LangChainLLMController(BaseModelController):
         """Initialize Ollama model using LangChain."""
         from langchain_ollama import ChatOllama
 
-        logger.info("Initializing Ollama model via LangChain...")
+        logger.info("Initializing Ollama model...")
 
         host = self.model_id.get("HOST", "localhost")
         port = self.model_id.get("PORT", 11434)
@@ -136,7 +136,7 @@ class LangChainLLMController(BaseModelController):
         """Initialize OpenAI model using LangChain."""
         from langchain_openai import ChatOpenAI
 
-        logger.info("Initializing OpenAI model via LangChain...")
+        logger.info("Initializing OpenAI model...")
 
         kwargs = {
             "model": self.model_name,
