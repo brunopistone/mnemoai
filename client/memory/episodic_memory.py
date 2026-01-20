@@ -288,8 +288,18 @@ def is_task_successful(
 
     # 3. Check if tools succeeded
     for msg in agent_messages:
-        if msg.get("role") == "user":
+        # Handle both dict format and LangChain message objects
+        if isinstance(msg, dict):
+            role = msg.get("role")
             content = msg.get("content", [])
+        else:
+            # LangChain message object
+            role = getattr(msg, "type", None)
+            if role == "human":
+                role = "user"
+            content = getattr(msg, "content", "")
+        
+        if role == "user":
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and "toolResult" in item:

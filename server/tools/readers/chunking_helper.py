@@ -20,7 +20,7 @@ sys.path.append(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
 )
-from models.langchain_llm_controller import LangChainLLMController
+from models.llm_controller import LangChainLLMController
 from utils.config import config
 from utils.logger import logger
 
@@ -150,6 +150,26 @@ def __split_into_chunks(content: str, chunk_size: int = 1024 * 8) -> list[str]:
     # Split by hierarchical separators: paragraphs, then sentences
     separators = ["\n\n", "\n", ". ", "! ", "? "]
 
+    def hard_split(text: str, max_tokens: int) -> list[str]:
+        """Hard split text by character count when no separators work.
+
+        Args:
+            text: Text to split
+            max_tokens: Maximum tokens per chunk
+
+        Returns:
+            List of text chunks
+        """
+        # Approximate 4 chars per token
+        max_chars = max_tokens * 4
+        chunks = []
+        while len(text) > max_chars:
+            chunks.append(text[:max_chars])
+            text = text[max_chars:]
+        if text.strip():
+            chunks.append(text)
+        return chunks
+
     def recursive_split(text: str, sep_index: int = 0) -> list[str]:
         """Recursively split text using hierarchical separators.
 
@@ -161,7 +181,9 @@ def __split_into_chunks(content: str, chunk_size: int = 1024 * 8) -> list[str]:
             List of text chunks
         """
         if sep_index >= len(separators):
-            # No more separators, return as-is
+            # No more separators, hard split by character count
+            if __count_tokens(text) > chunk_size:
+                return hard_split(text, chunk_size)
             return [text] if text.strip() else []
 
         separator = separators[sep_index]

@@ -1,5 +1,5 @@
 """Client package initialization."""
 
-from .client import LangGraphClient, StrandsClient
+from .client import LangGraphClient
 
-__all__ = ["LangGraphClient", "StrandsClient"]
+__all__ = ["LangGraphClient"]

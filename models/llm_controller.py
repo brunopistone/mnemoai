@@ -73,7 +73,11 @@ class LangChainLLMController(BaseModelController):
             model_kwargs["stop_sequences"] = self.stop
 
         # Enable thinking/reasoning for Claude models if verbose
-        if self.verbose_mode and "claude" in self.model_name.lower():
+        if (
+            self.verbose_mode
+            and "claude" in self.model_name.lower()
+            or "deepseek" in self.model_name.lower()
+        ):
             model_kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": self.thinking_tokens,
@@ -122,17 +126,9 @@ class LangChainLLMController(BaseModelController):
         # Set context window
         kwargs["num_ctx"] = self.max_conversation_tokens
 
-        # Enable reasoning/thinking for models that support it
-        # When reasoning=None (default), thinking appears as <think> tags in content
-        # When reasoning=True, thinking goes to additional_kwargs["reasoning_content"]
-        # We use None to let thinking stream as <think> tags which our callback handles
+        # Enable reasoning output for thinking models when verbose
         if self.verbose_mode:
-            # For qwen3 models, we can add /think to system prompt or leave reasoning=None
-            # The model will include thinking in the response
-            kwargs["reasoning"] = None  # Let thinking come through as tags
-        else:
-            # Disable reasoning output
-            kwargs["reasoning"] = False
+            kwargs["reasoning"] = True
 
         self.model = ChatOllama(**kwargs)
 
@@ -172,7 +168,9 @@ class LangChainLLMController(BaseModelController):
         from langchain_aws import ChatBedrock
 
         logger.info("Initializing SageMaker model...")
-        logger.warning("SageMaker support via LangChain is limited. Consider using Bedrock.")
+        logger.warning(
+            "SageMaker support via LangChain is limited. Consider using Bedrock."
+        )
 
         # For now, fall back to using LiteLLM via ChatOpenAI-compatible interface
         # or implement custom SageMaker integration

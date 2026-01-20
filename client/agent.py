@@ -1,8 +1,8 @@
 """LangGraph-based agent implementation."""
 
-import json
 import operator
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
+
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -13,7 +13,7 @@ from langchain_core.messages import (
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import ToolNode
+
 from utils.logger import logger
 
 
@@ -21,11 +21,11 @@ class AgentState(TypedDict):
     """State schema for the LangGraph agent."""
 
     messages: Annotated[Sequence[BaseMessage], operator.add]
-    thinking: Optional[str]  # For reasoning/thinking content
+    thinking: Optional[str]
 
 
 class LangGraphAgent:
-    """LangGraph-based agent that replaces Strands Agent."""
+    """LangGraph-based agent with streaming support."""
 
     def __init__(
         self,
@@ -52,23 +52,25 @@ class LangGraphAgent:
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
 
-        # Bind tools to model
-        if tools:
-            self.model_with_tools = model.bind_tools(tools)
-        else:
-            self.model_with_tools = model
-
-        # Build the graph
+        self.model_with_tools = model.bind_tools(tools) if tools else model
         self.graph = self._build_graph()
 
     @property
     def messages(self) -> List[BaseMessage]:
-        """Get the message history (compatible with Strands agent.messages)."""
+        """Get the message history.
+
+        Returns:
+            List of messages
+        """
         return self._messages
 
     @messages.setter
     def messages(self, value: List[BaseMessage]) -> None:
-        """Set the message history."""
+        """Set the message history.
+
+        Args:
+            value: List of messages to set
+        """
         self._messages = value
 
     def _build_graph(self) -> StateGraph:
@@ -77,34 +79,20 @@ class LangGraphAgent:
         Returns:
             Compiled state graph
         """
-        # Create the graph
         workflow = StateGraph(AgentState)
-
-        # Add nodes
         workflow.add_node("agent", self._call_model)
         workflow.add_node("tools", self._execute_tools)
-
-        # Set entry point
         workflow.set_entry_point("agent")
-
-        # Add conditional edges
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
-            {
-                "continue": "tools",
-                "end": END,
-            },
+            {"continue": "tools", "end": END},
         )
-
-        # Tools always go back to agent
         workflow.add_edge("tools", "agent")
-
-        # Compile
         return workflow.compile()
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
-        """Call the model with current state using streaming for real-time output.
+        """Call the model with current state using streaming.
 
         Args:
             state: Current agent state
@@ -112,70 +100,24 @@ class LangGraphAgent:
         Returns:
             Updated state with model response
         """
-        import re
-        import sys
-
         messages = list(state["messages"])
 
-        # Add system prompt if not already present
         if self.system_prompt and (
             not messages or not isinstance(messages[0], SystemMessage)
         ):
             messages = [SystemMessage(content=self.system_prompt)] + messages
 
-        # Build config with callbacks for streaming
-        config = {}
-        if self.callbacks:
-            config["callbacks"] = self.callbacks
+        config = {"callbacks": self.callbacks} if self.callbacks else {}
 
-        # Stream state for handling think tags
-        in_thinking = False
-        tag_buffer = ""
         first_token = True
-
-        # Stream the model response and process output directly
+        had_reasoning = False
         response = None
-        chunk_count = 0
+
         for chunk in self.model_with_tools.stream(messages, config=config):
-            # Handle different content formats:
-            # - Ollama/OpenAI: string content
-            # - Bedrock: list of dicts [{'type': 'text', 'text': '...'}]
-            raw_content = chunk.content if chunk.content else ""
+            chunk_content, reasoning_content = self._extract_content(chunk)
 
-            if isinstance(raw_content, list):
-                # Bedrock format - extract text from list of content blocks
-                chunk_content = ""
-                for block in raw_content:
-                    if isinstance(block, dict):
-                        if block.get("type") == "text":
-                            chunk_content += block.get("text", "")
-                        elif "text" in block:
-                            chunk_content += block["text"]
-            else:
-                # Ollama/OpenAI format - string content
-                chunk_content = str(raw_content) if raw_content else ""
-
-            chunk_count += 1
-
-            # Debug first few chunks to understand what's being received
-            if chunk_count <= 3:
-                import sys
-
-                debug_content = repr(
-                    chunk_content[:200] if len(chunk_content) > 200 else chunk_content
-                )
-                logger.debug(
-                    f"[STREAM DEBUG] chunk #{chunk_count}: {debug_content}",
-                    file=sys.stderr,
-                )
-                if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
-                    logger.debug(
-                        f"[STREAM DEBUG] additional_kwargs: {chunk.additional_kwargs}",
-                        file=sys.stderr,
-                    )
-
-            # Notify callbacks about first token (for spinner)
-            if first_token and chunk_content and self.callbacks:
+            # Stop spinner on first token
+            if first_token and (chunk_content or reasoning_content) and self.callbacks:
                 first_token = False
                 for cb in self.callbacks:
                     if hasattr(cb, "first_token_received"):
@@ -183,98 +125,64 @@ class LangGraphAgent:
                     if hasattr(cb, "spinner") and cb.spinner:
                         cb.spinner.stop()
 
-            # Process streaming content for thinking tags
+            # Print reasoning in gray
+            if reasoning_content and self.verbose:
+                print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
+                had_reasoning = True
+
+            # Print content with newline after reasoning
             if chunk_content:
-                tag_buffer += chunk_content
+                if had_reasoning:
+                    print("\n", end="", flush=True)
+                    had_reasoning = False
+                print(chunk_content, end="", flush=True)
 
-                # Check for potential partial tags at end
-                last_lt = tag_buffer.rfind("<")
-                if last_lt >= 0 and last_lt > len(tag_buffer) - 12:
-                    to_process = tag_buffer[:last_lt]
-                    tag_buffer = tag_buffer[last_lt:]
-                else:
-                    to_process = tag_buffer
-                    tag_buffer = ""
+            response = chunk if response is None else response + chunk
 
-                if to_process:
-                    remaining = to_process
-
-                    while remaining:
-                        if in_thinking:
-                            # Inside thinking - look for closing tag
-                            match = re.search(
-                                r"</think(?:ing)?>", remaining, re.IGNORECASE
-                            )
-                            if match:
-                                thinking_content = remaining[: match.start()]
-                                if thinking_content and self.verbose:
-                                    # Print thinking in gray
-                                    print(
-                                        f"\033[90m{thinking_content}\033[0m",
-                                        end="",
-                                        flush=True,
-                                    )
-                                remaining = remaining[match.end() :]
-                                in_thinking = False
-                                if self.verbose:
-                                    print("\n", end="", flush=True)
-                            else:
-                                if self.verbose:
-                                    print(
-                                        f"\033[90m{remaining}\033[0m",
-                                        end="",
-                                        flush=True,
-                                    )
-                                remaining = ""
-                        else:
-                            # Outside thinking - look for opening tag
-                            match = re.search(
-                                r"<think(?:ing)?>", remaining, re.IGNORECASE
-                            )
-                            if match:
-                                regular_content = remaining[: match.start()]
-                                if regular_content:
-                                    print(regular_content, end="", flush=True)
-                                remaining = remaining[match.end() :]
-                                in_thinking = True
-                            else:
-                                # No opening tag - print normally
-                                print(remaining, end="", flush=True)
-                                remaining = ""
-
-            if response is None:
-                response = chunk
-            else:
-                response = response + chunk
-
-        # Flush any remaining buffer
-        if tag_buffer:
-            if not in_thinking:
-                print(tag_buffer, end="", flush=True)
-
-        # If no chunks received, fall back to invoke
         if response is None:
             response = self.model_with_tools.invoke(messages, config=config)
 
-        # Extract thinking content if present (for Claude extended thinking)
+        # Extract final thinking content
         thinking = None
         if hasattr(response, "additional_kwargs"):
-            logger.debug(f"Response additional_kwargs: {response.additional_kwargs}")
-            thinking_data = response.additional_kwargs.get("thinking")
-            if thinking_data:
-                thinking = thinking_data.get("thinking", "")
-            # Also check for reasoning_content (LangChain Ollama format)
-            reasoning = response.additional_kwargs.get("reasoning_content")
-            if reasoning:
-                thinking = reasoning
-                logger.debug(
-                    f"Found reasoning_content: {reasoning[:100] if len(reasoning) > 100 else reasoning}"
-                )
+            thinking = response.additional_kwargs.get("reasoning_content")
 
-        return {
-            "messages": [response],
-            "thinking": thinking,
-        }
+        return {"messages": [response], "thinking": thinking}
+
+    def _extract_content(self, chunk) -> tuple[str, str]:
+        """Extract content and reasoning from a chunk.
+
+        Args:
+            chunk: Streaming chunk from the model
+
+        Returns:
+            Tuple of (content, reasoning_content)
+        """
+        raw_content = chunk.content if chunk.content else ""
+        chunk_content = ""
+        reasoning_content = ""
+
+        if isinstance(raw_content, list):
+            # Bedrock format
+            for block in raw_content:
+                if isinstance(block, dict):
+                    block_type = block.get("type", "")
+                    if block_type == "thinking":
+                        reasoning_content += block.get("thinking", "")
+                    elif block_type == "text":
+                        chunk_content += block.get("text", "")
+                    elif "text" in block:
+                        chunk_content += block["text"]
+        else:
+            chunk_content = str(raw_content) if raw_content else ""
+
+        # Ollama reasoning from additional_kwargs
+        if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
+            ollama_reasoning = chunk.additional_kwargs.get("reasoning_content", "")
+            if ollama_reasoning:
+                reasoning_content = ollama_reasoning
+
+        return chunk_content, reasoning_content
 
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
         """Execute tools based on the last AI message.
@@ -285,20 +193,17 @@ class LangGraphAgent:
         Returns:
             Updated state with tool results
         """
-        messages = state["messages"]
-        last_message = messages[-1]
+        last_message = state["messages"][-1]
 
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return {"messages": []}
 
         tool_results = []
-
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             tool_id = tool_call["id"]
 
-            # Find and execute the tool
             tool = next((t for t in self.tools if t.name == tool_name), None)
 
             if tool:
@@ -306,29 +211,17 @@ class LangGraphAgent:
                     logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
                     result = tool.invoke(tool_args)
                     tool_results.append(
-                        ToolMessage(
-                            content=str(result),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
+                        ToolMessage(content=str(result), tool_call_id=tool_id, name=tool_name)
                     )
                 except Exception as e:
                     logger.error(f"Tool execution error: {e}")
                     tool_results.append(
-                        ToolMessage(
-                            content=f"Error executing tool: {str(e)}",
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
+                        ToolMessage(content=f"Error: {e}", tool_call_id=tool_id, name=tool_name)
                     )
             else:
                 logger.warning(f"Tool not found: {tool_name}")
                 tool_results.append(
-                    ToolMessage(
-                        content=f"Tool not found: {tool_name}",
-                        tool_call_id=tool_id,
-                        name=tool_name,
-                    )
+                    ToolMessage(content=f"Tool not found: {tool_name}", tool_call_id=tool_id, name=tool_name)
                 )
 
         return {"messages": tool_results}
@@ -342,18 +235,13 @@ class LangGraphAgent:
         Returns:
             "continue" if tools should be executed, "end" otherwise
         """
-        messages = state["messages"]
-        last_message = messages[-1]
-
-        # If the last message has tool calls, continue to execute them
+        last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             return "continue"
-
-        # Otherwise, end the conversation turn
         return "end"
 
     def __call__(self, prompt: str) -> str:
-        """Invoke the agent with a prompt (Strands-compatible interface).
+        """Invoke the agent with a prompt.
 
         Args:
             prompt: User prompt
@@ -372,115 +260,35 @@ class LangGraphAgent:
         Returns:
             Agent response as string
         """
-        # Add the user message to history
         user_message = HumanMessage(content=prompt)
         self._messages.append(user_message)
 
-        # Build initial state
         initial_state: AgentState = {
             "messages": self._messages.copy(),
             "thinking": None,
         }
 
-        # Add system message if present
         if self.system_prompt:
             initial_state["messages"] = [
                 SystemMessage(content=self.system_prompt)
             ] + list(initial_state["messages"])
 
-        # Run the graph
         result = self.graph.invoke(initial_state)
 
-        # Extract the final response
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
 
-        # Update internal message history with new messages (excluding system)
         new_messages = [
-            m
-            for m in final_messages
+            m for m in final_messages
             if not isinstance(m, SystemMessage) and m not in self._messages
         ]
         self._messages.extend(new_messages)
 
-        # Find the last AI message for the response
-        last_ai_message = None
         for msg in reversed(final_messages):
             if isinstance(msg, AIMessage) and not msg.tool_calls:
-                last_ai_message = msg
-                break
-
-        if last_ai_message:
-            return str(last_ai_message.content)
+                return str(msg.content)
 
         return ""
-
-    def stream(self, prompt: str):
-        """Stream the agent response.
-
-        Args:
-            prompt: User prompt
-
-        Yields:
-            Stream events from the graph
-        """
-        # Add the user message to history
-        user_message = HumanMessage(content=prompt)
-        self._messages.append(user_message)
-
-        # Build initial state
-        initial_state: AgentState = {
-            "messages": self._messages.copy(),
-            "thinking": None,
-        }
-
-        # Add system message if present
-        if self.system_prompt:
-            initial_state["messages"] = [
-                SystemMessage(content=self.system_prompt)
-            ] + list(initial_state["messages"])
-
-        # Stream the graph execution
-        for event in self.graph.stream(initial_state, stream_mode="values"):
-            yield event
-
-        # Update message history from final state
-        if event:
-            final_messages = event.get("messages", [])
-            new_messages = [
-                m
-                for m in final_messages
-                if not isinstance(m, SystemMessage) and m not in self._messages
-            ]
-            self._messages.extend(new_messages)
-
-    def astream(self, prompt: str):
-        """Async stream the agent response.
-
-        Args:
-            prompt: User prompt
-
-        Yields:
-            Stream events from the graph
-        """
-        # Add the user message to history
-        user_message = HumanMessage(content=prompt)
-        self._messages.append(user_message)
-
-        # Build initial state
-        initial_state: AgentState = {
-            "messages": self._messages.copy(),
-            "thinking": None,
-        }
-
-        # Add system message if present
-        if self.system_prompt:
-            initial_state["messages"] = [
-                SystemMessage(content=self.system_prompt)
-            ] + list(initial_state["messages"])
-
-        # Return async generator
-        return self.graph.astream(initial_state, stream_mode="values")
 
     def get_thinking(self) -> Optional[str]:
         """Get the thinking content from the last response.
@@ -496,9 +304,7 @@ class LangGraphAgent:
         self._thinking = None
 
 
-def convert_strands_messages_to_langchain(
-    messages: List[Dict[str, Any]],
-) -> List[BaseMessage]:
+def convert_strands_messages_to_langchain(messages: List[Dict[str, Any]]) -> List[BaseMessage]:
     """Convert Strands message format to LangChain messages.
 
     Args:
@@ -513,7 +319,6 @@ def convert_strands_messages_to_langchain(
         role = msg.get("role", "")
         content = msg.get("content", [])
 
-        # Extract text content
         text_content = ""
         tool_calls = []
         tool_results = []
@@ -534,7 +339,6 @@ def convert_strands_messages_to_langchain(
 
         if role == "user":
             if tool_results:
-                # This is a tool result message
                 for result in tool_results:
                     langchain_messages.append(
                         ToolMessage(
@@ -546,18 +350,11 @@ def convert_strands_messages_to_langchain(
                 langchain_messages.append(HumanMessage(content=text_content))
         elif role == "assistant":
             if tool_calls:
-                # AI message with tool calls
                 formatted_tool_calls = [
-                    {
-                        "id": tc.get("toolUseId", ""),
-                        "name": tc.get("name", ""),
-                        "args": tc.get("input", {}),
-                    }
+                    {"id": tc.get("toolUseId", ""), "name": tc.get("name", ""), "args": tc.get("input", {})}
                     for tc in tool_calls
                 ]
-                langchain_messages.append(
-                    AIMessage(content=text_content, tool_calls=formatted_tool_calls)
-                )
+                langchain_messages.append(AIMessage(content=text_content, tool_calls=formatted_tool_calls))
             else:
                 langchain_messages.append(AIMessage(content=text_content))
         elif role == "system":
@@ -566,9 +363,7 @@ def convert_strands_messages_to_langchain(
     return langchain_messages
 
 
-def convert_langchain_messages_to_strands(
-    messages: List[BaseMessage],
-) -> List[Dict[str, Any]]:
+def convert_langchain_messages_to_strands(messages: List[BaseMessage]) -> List[Dict[str, Any]]:
     """Convert LangChain messages to Strands format.
 
     Args:
@@ -589,30 +384,24 @@ def convert_langchain_messages_to_strands(
         elif isinstance(msg, AIMessage):
             if msg.content:
                 content_blocks.append({"text": str(msg.content)})
-
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    content_blocks.append(
-                        {
-                            "toolUse": {
-                                "toolUseId": tc.get("id", ""),
-                                "name": tc.get("name", ""),
-                                "input": tc.get("args", {}),
-                            }
+                    content_blocks.append({
+                        "toolUse": {
+                            "toolUseId": tc.get("id", ""),
+                            "name": tc.get("name", ""),
+                            "input": tc.get("args", {}),
                         }
-                    )
-
+                    })
             strands_messages.append({"role": "assistant", "content": content_blocks})
 
         elif isinstance(msg, ToolMessage):
-            content_blocks.append(
-                {
-                    "toolResult": {
-                        "toolUseId": msg.tool_call_id,
-                        "content": [{"text": str(msg.content)}],
-                    }
+            content_blocks.append({
+                "toolResult": {
+                    "toolUseId": msg.tool_call_id,
+                    "content": [{"text": str(msg.content)}],
                 }
-            )
+            })
             strands_messages.append({"role": "user", "content": content_blocks})
 
         elif isinstance(msg, SystemMessage):

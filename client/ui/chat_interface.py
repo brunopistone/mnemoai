@@ -24,7 +24,7 @@ class ChatInterface:
         """Initialize chat interface.
 
         Args:
-            client: StrandsClient instance
+            client: LangGraphClient instance
         """
         self.client = client
 

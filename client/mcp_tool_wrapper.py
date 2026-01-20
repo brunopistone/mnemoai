@@ -1,15 +1,18 @@
 """MCP Tool wrapper for LangChain/LangGraph integration."""
 
 import asyncio
+import atexit
 import json
 import threading
 from typing import Any, Dict, List, Optional, Type
+
 from langchain_core.tools import BaseTool, ToolException
 from langchain_core.callbacks import CallbackManagerForToolRun
 from pydantic import BaseModel, Field, create_model
 from mcp import StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool as MCPTool
+
 from utils.logger import logger
 
 
@@ -25,21 +28,15 @@ class MCPToolWrapper(BaseTool):
     class Config:
         arbitrary_types_allowed = True
 
-    def __init__(
-        self,
-        mcp_tool: MCPTool,
-        mcp_client: Any,
-        **kwargs,
-    ):
+    def __init__(self, mcp_tool: MCPTool, mcp_client: Any, **kwargs) -> None:
         """Initialize MCP tool wrapper.
 
         Args:
             mcp_tool: The MCP tool definition
             mcp_client: The MCP client for executing tools
+            **kwargs: Additional arguments
         """
-        # Build args schema from MCP tool input schema
         args_schema = self._build_args_schema(mcp_tool)
-
         super().__init__(
             name=mcp_tool.name,
             description=mcp_tool.description or f"Tool: {mcp_tool.name}",
@@ -62,35 +59,29 @@ class MCPToolWrapper(BaseTool):
         properties = input_schema.get("properties", {})
         required = input_schema.get("required", [])
 
-        # Build field definitions
+        type_mapping = {
+            "string": str,
+            "integer": int,
+            "number": float,
+            "boolean": bool,
+            "array": list,
+            "object": dict,
+        }
+
         fields = {}
         for prop_name, prop_def in properties.items():
-            prop_type = prop_def.get("type", "string")
+            python_type = type_mapping.get(prop_def.get("type", "string"), str)
             prop_desc = prop_def.get("description", "")
-            prop_default = prop_def.get("default")
 
-            # Map JSON schema types to Python types
-            type_mapping = {
-                "string": str,
-                "integer": int,
-                "number": float,
-                "boolean": bool,
-                "array": list,
-                "object": dict,
-            }
-            python_type = type_mapping.get(prop_type, str)
-
-            # Set field with or without default
             if prop_name in required:
                 fields[prop_name] = (python_type, Field(description=prop_desc))
             else:
-                default_value = prop_default if prop_default is not None else None
+                default_value = prop_def.get("default")
                 fields[prop_name] = (
                     Optional[python_type],
                     Field(default=default_value, description=prop_desc),
                 )
 
-        # Create dynamic Pydantic model
         model_name = f"{mcp_tool.name.replace('-', '_').replace(' ', '_').title()}Args"
         return create_model(model_name, **fields)
 
@@ -109,11 +100,10 @@ class MCPToolWrapper(BaseTool):
             Tool execution result as string
         """
         try:
-            # Use the MCP client's synchronous call method
             return self.mcp_client.call_tool_sync(self.name, kwargs)
         except Exception as e:
             logger.error(f"Tool execution error: {e}")
-            raise ToolException(f"Error executing tool {self.name}: {str(e)}")
+            raise ToolException(f"Error executing tool {self.name}: {e}")
 
     async def _arun(
         self,
@@ -133,17 +123,13 @@ class MCPToolWrapper(BaseTool):
             return await self.mcp_client.call_tool(self.name, kwargs)
         except Exception as e:
             logger.error(f"Async tool execution error: {e}")
-            raise ToolException(f"Error executing tool {self.name}: {str(e)}")
+            raise ToolException(f"Error executing tool {self.name}: {e}")
 
 
 class MCPClientWrapper:
-    """Wrapper for MCP client that provides LangChain-compatible tools.
+    """Wrapper for MCP client with background event loop."""
 
-    This wrapper runs the MCP client in a dedicated background thread with
-    its own event loop to handle the async MCP protocol properly.
-    """
-
-    def __init__(self, server_params: StdioServerParameters):
+    def __init__(self, server_params: StdioServerParameters) -> None:
         """Initialize MCP client wrapper.
 
         Args:
@@ -151,17 +137,15 @@ class MCPClientWrapper:
         """
         self.server_params = server_params
         self._tools: List[MCPToolWrapper] = []
-        self._mcp_tools: List[MCPTool] = []
         self._connected = False
         self._context_depth = 0
 
-        # Background thread and event loop for MCP communication
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._session = None
         self._client_cm = None
-        self._read = None
-        self._write = None
+
+        atexit.register(self.shutdown)
 
     def __enter__(self):
         """Sync context manager entry."""
@@ -174,52 +158,53 @@ class MCPClientWrapper:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Sync context manager exit."""
         self._context_depth -= 1
-        # Keep connection alive for reuse during the session
 
-    def _start_background_loop(self):
+    def _start_background_loop(self) -> None:
         """Start a background thread with its own event loop."""
         if self._loop is not None:
             return
-
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
-    def _run_loop(self):
+    def _run_loop(self) -> None:
         """Run the event loop in the background thread."""
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
     def _run_coroutine(self, coro):
-        """Run a coroutine in the background event loop and wait for result."""
+        """Run a coroutine in the background event loop and wait for result.
+
+        Args:
+            coro: Coroutine to run
+
+        Returns:
+            Result of the coroutine
+        """
         if self._loop is None:
             raise RuntimeError("Background loop not started")
-
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=60)  # 60 second timeout
+        return future.result(timeout=60)
 
-    async def _connect(self):
-        """Connect to the MCP server (runs in background loop)."""
+    async def _connect(self) -> None:
+        """Connect to the MCP server."""
         if self._connected:
             return
 
-        # Create the stdio client
         self._client_cm = stdio_client(self.server_params)
-        self._read, self._write = await self._client_cm.__aenter__()
+        read, write = await self._client_cm.__aenter__()
 
-        # Create and initialize session
         from mcp import ClientSession
 
-        self._session = ClientSession(self._read, self._write)
+        self._session = ClientSession(read, write)
         await self._session.__aenter__()
         await self._session.initialize()
         self._connected = True
 
-    async def _disconnect(self):
-        """Disconnect from the MCP server (runs in background loop)."""
+    async def _disconnect(self) -> None:
+        """Disconnect from the MCP server."""
         if not self._connected:
             return
-
         try:
             if self._session:
                 await self._session.__aexit__(None, None, None)
@@ -248,13 +233,9 @@ class MCPClientWrapper:
             raise RuntimeError("Not connected to MCP server")
 
         result = await self._session.list_tools()
-        self._mcp_tools = result.tools
-
-        # Convert to LangChain tools
         self._tools = [
-            MCPToolWrapper(mcp_tool=tool, mcp_client=self) for tool in self._mcp_tools
+            MCPToolWrapper(mcp_tool=tool, mcp_client=self) for tool in result.tools
         ]
-
         return self._tools
 
     def call_tool_sync(self, name: str, arguments: Dict[str, Any]) -> str:
@@ -283,14 +264,11 @@ class MCPClientWrapper:
             raise RuntimeError("Not connected to MCP server")
 
         logger.debug(f"Executing MCP tool: {name} with args: {arguments}")
-
         result = await self._session.call_tool(name, arguments)
 
-        # Handle result
         if hasattr(result, "content"):
             content = result.content
             if isinstance(content, list):
-                # Extract text from content blocks
                 text_parts = []
                 for block in content:
                     if hasattr(block, "text"):
@@ -301,10 +279,7 @@ class MCPClientWrapper:
                         text_parts.append(str(block))
                 return "\n".join(text_parts)
             return str(content)
-        elif isinstance(result, str):
-            return result
-        else:
-            return json.dumps(result, default=str)
+        return json.dumps(result, default=str) if not isinstance(result, str) else result
 
     def get_tools(self) -> List[MCPToolWrapper]:
         """Get the cached list of tools.
@@ -314,37 +289,14 @@ class MCPClientWrapper:
         """
         return self._tools
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         """Shutdown the background loop and disconnect."""
-        if self._loop and self._connected:
-            try:
-                self._run_coroutine(self._disconnect())
-            except Exception as e:
-                logger.warning(f"Error during MCP disconnect: {e}")
-
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
             if self._thread:
                 self._thread.join(timeout=5)
             self._loop = None
             self._thread = None
-
-
-def create_mcp_client(server_path: str) -> MCPClientWrapper:
-    """Create an MCP client wrapper for the given server.
-
-    Args:
-        server_path: Path to the MCP server script
-
-    Returns:
-        MCPClientWrapper instance
-    """
-    import sys
-
-    server_params = StdioServerParameters(
-        command=sys.executable,
-        args=[server_path],
-        env=None,
-    )
-
-    return MCPClientWrapper(server_params)
+            self._connected = False
+            self._session = None
+            self._client_cm = None
