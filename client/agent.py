@@ -137,7 +137,24 @@ class LangGraphAgent:
         response = None
         chunk_count = 0
         for chunk in self.model_with_tools.stream(messages, config=config):
-            chunk_content = chunk.content if chunk.content else ""
+            # Handle different content formats:
+            # - Ollama/OpenAI: string content
+            # - Bedrock: list of dicts [{'type': 'text', 'text': '...'}]
+            raw_content = chunk.content if chunk.content else ""
+
+            if isinstance(raw_content, list):
+                # Bedrock format - extract text from list of content blocks
+                chunk_content = ""
+                for block in raw_content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            chunk_content += block.get("text", "")
+                        elif "text" in block:
+                            chunk_content += block["text"]
+            else:
+                # Ollama/OpenAI format - string content
+                chunk_content = str(raw_content) if raw_content else ""
+
             chunk_count += 1
 
             # Debug first few chunks to understand what's being received
@@ -147,12 +164,12 @@ class LangGraphAgent:
                 debug_content = repr(
                     chunk_content[:200] if len(chunk_content) > 200 else chunk_content
                 )
-                print(
+                logger.debug(
                     f"[STREAM DEBUG] chunk #{chunk_count}: {debug_content}",
                     file=sys.stderr,
                 )
                 if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
-                    print(
+                    logger.debug(
                         f"[STREAM DEBUG] additional_kwargs: {chunk.additional_kwargs}",
                         file=sys.stderr,
                     )
