@@ -21,7 +21,6 @@ from client.agent import (
     convert_langchain_messages_to_strands,
 )
 from client.managers.agent_conversation_manager import AgentConversationManager
-from client.managers.dpo_collector import DPOCollector
 from client.managers.user_profile_manager import UserProfileManager
 from client.mcp_tool_wrapper import MCPClientWrapper
 from client.memory.episodic_memory import EpisodicMemoryManager
@@ -138,8 +137,6 @@ class LangGraphClient:
         self.conversation_manager = AgentConversationManager(
             max_tokens=config.get("MAX_CONVERSATION_TOKENS", 1024 * 4)
         )
-        self.dpo_collector = DPOCollector()
-        self.dpo_mode = False
 
         # UI
         self.spinner = Spinner()
