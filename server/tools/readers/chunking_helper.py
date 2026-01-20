@@ -137,58 +137,44 @@ def __count_tokens(text: str) -> int:
         return len(text) // 4  # Rough estimate
 
 
-def __split_into_chunks(content: str, chunk_size: int = 1024 * 8) -> list[str]:
+def __split_into_chunks(content: str, chunk_size: int = 512) -> list[str]:
     """Split content into overlapping chunks by token count.
 
     Args:
         content: Text content to split
-        chunk_size: Target tokens per chunk (default 8000)
+        chunk_size: Target tokens per chunk
 
     Returns:
         List of text chunks with 10% overlap
     """
-    # Split by hierarchical separators: paragraphs, then sentences
-    separators = ["\n\n", "\n", ". ", "! ", "? "]
+    separators = ["\n\n", "\n", ". ", "! ", "? ", " "]
 
     def hard_split(text: str, max_tokens: int) -> list[str]:
-        """Hard split text by character count when no separators work.
-
-        Args:
-            text: Text to split
-            max_tokens: Maximum tokens per chunk
-
-        Returns:
-            List of text chunks
-        """
-        # Approximate 4 chars per token
-        max_chars = max_tokens * 4
+        """Hard split by words when no separators work."""
+        words = text.split()
         chunks = []
-        while len(text) > max_chars:
-            chunks.append(text[:max_chars])
-            text = text[max_chars:]
-        if text.strip():
-            chunks.append(text)
+        current_words = []
+        for word in words:
+            current_words.append(word)
+            if __count_tokens(" ".join(current_words)) >= max_tokens:
+                current_words.pop()
+                if current_words:
+                    chunks.append(" ".join(current_words))
+                current_words = [word]
+        if current_words:
+            chunks.append(" ".join(current_words))
         return chunks
 
     def recursive_split(text: str, sep_index: int = 0) -> list[str]:
-        """Recursively split text using hierarchical separators.
-
-        Args:
-            text: Text to split
-            sep_index: Current separator index
-
-        Returns:
-            List of text chunks
-        """
-        if sep_index >= len(separators):
-            # No more separators, hard split by character count
-            if __count_tokens(text) > chunk_size:
-                return hard_split(text, chunk_size)
+        """Recursively split text using hierarchical separators."""
+        if __count_tokens(text) <= chunk_size:
             return [text] if text.strip() else []
+
+        if sep_index >= len(separators):
+            return hard_split(text, chunk_size)
 
         separator = separators[sep_index]
         parts = text.split(separator)
-
         chunks = []
         current = ""
 
@@ -196,51 +182,52 @@ def __split_into_chunks(content: str, chunk_size: int = 1024 * 8) -> list[str]:
             if not part.strip():
                 continue
 
-            # Reconstruct with separator
             test = current + separator + part if current else part
 
             if __count_tokens(test) > chunk_size:
                 if current:
                     chunks.append(current.strip())
-                    current = part
+                # Recursively split part if too large
+                if __count_tokens(part) > chunk_size:
+                    chunks.extend(recursive_split(part, sep_index + 1))
+                    current = ""
                 else:
-                    # Single part too large, try next separator
-                    sub_chunks = recursive_split(part, sep_index + 1)
-                    chunks.extend(sub_chunks)
+                    current = part
             else:
                 current = test
 
         if current.strip():
-            chunks.append(current.strip())
+            if __count_tokens(current) > chunk_size:
+                chunks.extend(recursive_split(current, sep_index + 1))
+            else:
+                chunks.append(current.strip())
 
         return chunks
 
     base_chunks = recursive_split(content)
 
-    # Add 10% overlap between chunks
     if len(base_chunks) <= 1:
         return base_chunks
 
+    # Add 10% overlap
     overlap_tokens = int(chunk_size * 0.1)
-    overlapped = []
-    for i, chunk in enumerate(base_chunks):
-        if i == 0:
-            overlapped.append(chunk)
-        else:
-            # Get last ~overlap_tokens from previous chunk
-            prev_chunk = base_chunks[i - 1]
-            sentences = prev_chunk.replace("! ", ". ").replace("? ", ". ").split(". ")
+    overlapped = [base_chunks[0]]
+    for i in range(1, len(base_chunks)):
+        prev = base_chunks[i - 1]
+        sentences = prev.replace("! ", ". ").replace("? ", ". ").split(". ")
+        overlap_text = ""
+        for sentence in reversed(sentences):
+            test = sentence + ". " + overlap_text if overlap_text else sentence
+            if __count_tokens(test) > overlap_tokens:
+                break
+            overlap_text = test
+        overlapped.append(
+            f"{overlap_text}\n\n{base_chunks[i]}" if overlap_text else base_chunks[i]
+        )
 
-            # Collect sentences until we reach overlap token count
-            overlap_text = ""
-            for sentence in reversed(sentences):
-                test = sentence + ". " + overlap_text if overlap_text else sentence
-                if __count_tokens(test) > overlap_tokens:
-                    break
-                overlap_text = test
-
-            overlapped.append(f"{overlap_text}\n\n{chunk}")
-
+    logger.debug(
+        f"Split {len(content)} chars into {len(overlapped)} chunks of max {chunk_size} tokens"
+    )
     return overlapped
 
 
@@ -293,7 +280,9 @@ async def __summarize_with_model(text: str, context: str = "") -> str:
         messages = [HumanMessage(content=prompt)]
         response = model.invoke(messages)
 
-        response_text = response.content if hasattr(response, 'content') else str(response)
+        response_text = (
+            response.content if hasattr(response, "content") else str(response)
+        )
 
         return (
             response_text.strip() if response_text else text[:2000] + "...[no response]"

@@ -112,7 +112,7 @@ class LangGraphClient:
         self.server_params = StdioServerParameters(
             command=sys.executable,
             args=[server_path],
-            env=None,
+            env=os.environ.copy(),
         )
         self.mcp_client = MCPClientWrapper(self.server_params)
 
@@ -236,7 +236,6 @@ class LangGraphClient:
                     verbose=self.verbose_mode,
                     callbacks=[self.callback_handler],
                 )
-                logger.info("LangGraph agent initialized successfully")
 
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -277,30 +276,30 @@ class LangGraphClient:
                     )
                     self.profile_manager.analyze_conversation(messages_for_profile)
 
-                response_text = str(response)
-                visible_content = re.sub(
-                    r"<think(?:ing)?>.*?</think(?:ing)?>",
-                    "",
-                    response_text,
-                    flags=re.DOTALL | re.IGNORECASE,
-                ).strip()
+                # response_text = str(response)
+                # visible_content = re.sub(
+                #     r"<think(?:ing)?>.*?</think(?:ing)?>",
+                #     "",
+                #     response_text,
+                #     flags=re.DOTALL | re.IGNORECASE,
+                # ).strip()
 
-                if not visible_content:
-                    response_text += (
-                        "\n\nI apologize, but I need to provide a visible response."
-                    )
-                    print(
-                        "\n\033[91m⚠️  Model provided only thinking without visible response\033[0m"
-                    )
+                # if not visible_content:
+                #     response_text += (
+                #         "\n\nI apologize, but I need to provide a visible response."
+                #     )
+                #     print(
+                #         "\n\033[91m⚠️  Model provided only thinking without visible response\033[0m"
+                #     )
 
                 token_count = self._count_context_tokens()
                 print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
 
                 self.previous_query = prompt
-                self.previous_response = response_text
+                self.previous_response = response
                 self.previous_messages = self.agent.messages.copy()
 
-                return response_text
+                return response
 
         finally:
             with self.spinner_lock:

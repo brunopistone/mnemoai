@@ -189,8 +189,14 @@ class SessionRAG:
         Returns:
             Number of chunks created and indexed
         """
+        logger.debug(
+            f"RAG ingest: doc_id={doc_id}, content_len={len(content)}, chunk_size_tokens={chunk_size_tokens}"
+        )
         try:
             chunks = split_into_chunks(content, chunk_size_tokens)
+            logger.debug(f"RAG ingest: split into {len(chunks)} chunks")
+            for i, c in enumerate(chunks[:3]):
+                logger.debug(f"  Chunk {i}: {len(c)} chars")
         except Exception as e:
             logger.warning(f"Failed to import chunking_helper: {e}, using fallback")
             chunks = _fallback_chunker(content, chunk_size_tokens)
