@@ -279,7 +279,9 @@ class MCPClientWrapper:
                         text_parts.append(str(block))
                 return "\n".join(text_parts)
             return str(content)
-        return json.dumps(result, default=str) if not isinstance(result, str) else result
+        return (
+            json.dumps(result, default=str) if not isinstance(result, str) else result
+        )
 
     def get_tools(self) -> List[MCPToolWrapper]:
         """Get the cached list of tools.

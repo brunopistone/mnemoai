@@ -264,6 +264,10 @@ class LangGraphClient:
             with self.mcp_client:
                 response = self.agent(prompt)
 
+                # Flush any remaining buffered code
+                if hasattr(self.agent, "_code_formatter"):
+                    self.agent._code_formatter.flush()
+
                 asyncio.run(
                     self.conversation_manager.manage_messages(
                         self, self.model, self.agent
@@ -279,11 +283,18 @@ class LangGraphClient:
                 token_count = self._count_context_tokens()
                 print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
 
-                self.previous_query = prompt
-                self.previous_response = response
-                self.previous_messages = self.agent.messages.copy()
+                # Store for episodic memory evaluation
+                if self.episodic_memory:
+                    self.previous_query = prompt
+                    self.previous_response = response
+                    self.previous_messages = self.agent.messages.copy()
 
                 return response
+
+        except KeyboardInterrupt:
+            with self.spinner_lock:
+                self.spinner.stop()
+            return "Operation was cancelled."
 
         finally:
             with self.spinner_lock:
@@ -361,6 +372,12 @@ class LangGraphClient:
         self.system_prompt = self._build_system_prompt()
         if self.agent:
             self.agent.system_prompt = self.system_prompt
+
+        # Flush RAG database when clearing context
+        if config.get("ENABLE_RAG", False):
+            self._flush_rag_store()
+
+        self._flush_chunk_cache_store()
 
         # Flush RAG database if enabled
         if config.get("ENABLE_RAG", False):
@@ -508,7 +525,54 @@ class LangGraphClient:
             with open(filepath, "w") as f:
                 json.dump(conversation_data, f, indent=2, default=str)
 
-            logger.info(f"Conversation saved to {filepath}")
+            print(f"Conversation saved to {filepath}")
+
+        except Exception as e:
+            logger.error(f"Failed to save conversation: {e}")
+
+    def save_conversation_with_quality(
+        self, timestamp: str = None, quality_markers: list = None
+    ) -> None:
+        """Save conversation with quality markers for training data.
+
+        Args:
+            timestamp: Optional timestamp for filename
+            quality_markers: List of quality labels for each message
+        """
+        if not self.agent:
+            return
+
+        try:
+            user_home = os.path.expanduser("~")
+            profile_name = config.get("PROFILE", {}).get("NAME", "default")
+            save_dir = os.path.join(
+                user_home, "agent-conversations", profile_name, "conversations"
+            )
+            os.makedirs(save_dir, exist_ok=True)
+
+            timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
+            filepath = os.path.join(save_dir, f"conversation_{timestamp}.json")
+
+            strands_messages = convert_langchain_messages_to_strands(
+                self.agent.messages
+            )
+            conversation_data = {
+                "messages": [
+                    {"role": "system", "content": [{"text": self.system_prompt}]}
+                ]
+                + strands_messages,
+                "tools": (
+                    [{"name": t.name, "description": t.description} for t in self.tools]
+                    if self.tools
+                    else []
+                ),
+                "quality_markers": quality_markers or [],
+            }
+
+            with open(filepath, "w") as f:
+                json.dump(conversation_data, f, indent=2, default=str)
+
+            print(f"Conversation saved to {filepath}")
 
         except Exception as e:
             logger.error(f"Failed to save conversation: {e}")

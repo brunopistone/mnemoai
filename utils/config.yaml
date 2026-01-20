@@ -25,7 +25,7 @@ DOC_MAX_TOKENS: 16384
 ENABLE_RAG: true
 RAG_MAX_TOKENS: 8192
 EMBED_MODEL_ID:
-  NAME: mxbai-embed-large
+  NAME: MXBAI-Embed-Large:latest
   TYPE: ollama
   HOST: localhost
   PORT: 11434
