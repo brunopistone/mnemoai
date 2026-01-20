@@ -4,7 +4,6 @@ import asyncio
 from datetime import date, datetime
 from client.managers.agent_conversation_manager import AgentConversationManager
 from client.managers.user_profile_manager import UserProfileManager
-from client.managers.dpo_collector import DPOCollector
 from client.memory.episodic_memory import EpisodicMemoryManager
 from client.ui.spinner import Spinner
 import os
@@ -84,8 +83,6 @@ class StrandsClient:
         self.conversation_manager = AgentConversationManager(
             max_tokens=config.get("MAX_CONVERSATION_TOKENS", 1024 * 4)
         )
-        self.dpo_collector = DPOCollector()
-        self.dpo_mode = False  # Toggle for DPO collection
         self.spinner = Spinner()
         self.spinner_lock = threading.Lock()  # Thread safety for spinner operations
         self.first_token_received = False

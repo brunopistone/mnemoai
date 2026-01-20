@@ -16,7 +16,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
-- **📊 Training Data Collection**: SFT markers and DPO preference pair generation
+- **📊 Training Data Collection**: SFT markers for quality training data
 - **🔍 Web Search**: Integrated Brave Search API
 - **🌐 Web Crawler**: Extract and index content from web pages
 - **🖼️ Vision Support**: Image analysis with vision models
@@ -44,8 +44,7 @@ ai-assistant/
 │   │   └── spinner.py                      # Loading animations
 │   ├── managers/                           # Business logic
 │   │   ├── agent_conversation_manager.py   # Conversation state and token tracking
-│   │   ├── user_profile_manager.py         # User profiling and learning
-│   │   └── dpo_collector.py                # DPO preference pair collection
+│   │   └── user_profile_manager.py         # User profiling and learning
 │   └── memory/                             # Memory systems
 │       ├── episodic_memory.py              # Episodic memory manager
 │       ├── faiss_store.py                  # FAISS episodic store
@@ -276,15 +275,13 @@ Assistant: [Uses fs_read tool and displays content]
 
 ### Commands
 
-| Command            | Description                                      |
-| ------------------ | ------------------------------------------------ |
-| `/exit` or `/quit` | Exit the application                             |
-| `/clear`           | Clear conversation history and RAG index         |
-| `/save`            | Save current conversation                        |
-| `/load <path>`     | Load a saved conversation                        |
-| `/good`            | Mark last response as good (for SFT training)    |
-| `/dpo`             | Toggle DPO auto-collection mode                  |
-| `/reject`          | Generate alternative response (creates DPO pair) |
+| Command            | Description                                   |
+| ------------------ | --------------------------------------------- |
+| `/exit` or `/quit` | Exit the application                          |
+| `/clear`           | Clear conversation history and RAG index      |
+| `/save`            | Save current conversation                     |
+| `/load <path>`     | Load a saved conversation                     |
+| `/good`            | Mark last response as good (for SFT training) |
 
 ### Keyboard Shortcuts
 
@@ -311,14 +308,13 @@ The client manages the conversation flow and user interaction.
   - Initializes MCP connection
   - Manages conversation state
   - Handles model configuration
-  - Coordinates managers (profile, DPO, conversation)
+  - Coordinates managers (profile, conversation)
 - **`ui/`**: User interface components
   - `chat_interface.py`: Interactive chat loop with command handling
   - `spinner.py`: Loading animations
 - **`managers/`**: Business logic
   - `agent_conversation_manager.py`: Conversation state and token tracking
   - `user_profile_manager.py`: Automatic user profiling and learning
-  - `dpo_collector.py`: DPO preference pair collection
 
 #### 2. **Server Layer** (`server/`)
 
@@ -906,7 +902,6 @@ The episodic memory system learns from successful task completions and retrieves
 **How it works:**
 
 1. **Automatic Storage**: After each successful interaction, stores:
-
    - Initial user query
    - Full conversation context
    - Tools used with arguments
@@ -914,7 +909,6 @@ The episodic memory system learns from successful task completions and retrieves
    - Timestamp
 
 2. **Hybrid Search**: Retrieves similar episodes using:
-
    - 70% semantic similarity (task intent)
    - 30% keyword matching (tool names, action verbs)
 

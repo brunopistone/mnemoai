@@ -1,7 +1,6 @@
 """Chat interface handling for the application."""
 
 import asyncio
-from client.managers.dpo_collector import DPOCollector
 from client.memory.episodic_memory import (
     is_task_successful,
     extract_tools_from_messages,
@@ -10,7 +9,6 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-import threading
 import time
 from typing import Any
 from utils.config import config
@@ -29,10 +27,6 @@ class ChatInterface:
         self.client = client
 
         self.interaction_quality = []  # Track quality per interaction
-        # Initialize DPO collector with session timestamp
-        self.client.dpo_collector = DPOCollector(
-            self.client.session_id.split("_", 1)[1]
-        )
         # Persistent command history for arrow key navigation
         self.command_history = InMemoryHistory()
 
@@ -91,72 +85,11 @@ class ChatInterface:
         print(
             "\033[90m│\033[97m   \033[92m/good\033[97m - Mark last response as good (training data)     \033[90m│\033[0m"
         )
-        print(
-            "\033[90m│\033[97m   \033[92m/dpo\033[97m - Toggle DPO collection mode                      \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/reject\033[97m - Generate & save rejected response (DPO)      \033[90m│\033[0m"
-        )
         print("\033[90m├" + "─" * 58 + "┤\033[0m")
         print(
             "\033[90m│\033[97m Use \033[92mCtrl+J\033[97m for new lines, Enter to submit                \033[90m│\033[0m"
         )
         print("\033[90m└" + "─" * 58 + "┘\033[0m\n")
-
-    def __generate_alternative_response(self) -> None:
-        """Generate an alternative response based on the query for DPO"""
-        import re
-
-        # Build conversation using DPOCollector
-        conversation = self.client.dpo_collector.build_conversation(
-            self.client.agent.messages
-        )
-
-        if len(conversation) >= 2:
-            chosen = conversation.copy()
-            messages_for_alt = self.client.agent.messages[:-1].copy()
-
-            def save_dpo_pair() -> None:
-                """Generate and save DPO preference pair in background."""
-                rejected_response = asyncio.run(
-                    self.client.dpo_collector.generate_alternative_response(
-                        messages_for_alt,
-                        self.client.model,
-                    )
-                )
-
-                # Parse rejected response for reasoning
-                reasoning = ""
-                thinking_match = re.search(
-                    r"<thinking>(.*?)</thinking>", rejected_response, re.DOTALL
-                )
-                if thinking_match:
-                    reasoning = thinking_match.group(1).strip()
-                    rejected_response = re.sub(
-                        r"<thinking>.*?</thinking>",
-                        "",
-                        rejected_response,
-                        flags=re.DOTALL,
-                    ).strip()
-
-                # Build rejected: same conversation but replace last assistant message
-                rejected = conversation[:-1].copy()
-                rejected_msg = {"role": "assistant", "content": rejected_response}
-                if reasoning:
-                    rejected_msg["reasoning_content"] = reasoning
-                rejected.append(rejected_msg)
-
-                self.client.dpo_collector.save_preference_pair(
-                    system_prompt=self.client.system_prompt,
-                    chosen=chosen,
-                    rejected=rejected,
-                    metadata={"timestamp": self.client.session_id.split("_", 1)[1]},
-                )
-
-            # Run in background thread
-            thread = threading.Thread(target=save_dpo_pair, daemon=True)
-            thread.start()
-            print("\033[90m[DPO: generating pair in background...]\033[0m")
 
     def __store_episode_in_episodic_memory(self, query: str) -> None:
         """Evaluate and store previous interaction in episodic memory if successful.
@@ -336,9 +269,6 @@ class ChatInterface:
                 if config.get("ENABLE_RAG", False):
                     self.client._initialize_rag_session()
                 self.client._initialize_chunk_cache()
-                self.client.dpo_collector = DPOCollector(
-                    self.client.session_id.split("_", 1)[1]
-                )
                 print("Context cleared!")
                 continue
 
@@ -371,20 +301,6 @@ class ChatInterface:
                     print("No interaction to mark")
                 continue
 
-            if query.lower() == "/dpo":
-                self.client.dpo_mode = not self.client.dpo_mode
-                status = "enabled" if self.client.dpo_mode else "disabled"
-                print(f"DPO collection mode {status}")
-                continue
-
-            if query.lower() == "/reject":
-                if len(self.client.agent.messages) < 2:
-                    print("Need at least one interaction to generate rejection")
-                    continue
-
-                self.__generate_alternative_response()
-                continue
-
             if not query.strip():
                 print("Input cannot be empty. Please try again.")
                 continue
@@ -409,10 +325,6 @@ class ChatInterface:
                 # Store CURRENT interaction immediately after response (new mode)
                 if self.client.episodic_memory and use_immediate_storage:
                     self.__store_current_episode_immediately(query, response)
-
-                # Auto-generate DPO pair if in DPO mode (async, non-blocking)
-                if self.client.dpo_mode and self.client.visible_content:
-                    self.__generate_alternative_response()
 
                 if response != "Operation was cancelled.":
                     print("\n")
