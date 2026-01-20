@@ -209,6 +209,7 @@ class MCPClientWrapper:
 
         # Create and initialize session
         from mcp import ClientSession
+
         self._session = ClientSession(self._read, self._write)
         await self._session.__aenter__()
         await self._session.initialize()
@@ -251,8 +252,7 @@ class MCPClientWrapper:
 
         # Convert to LangChain tools
         self._tools = [
-            MCPToolWrapper(mcp_tool=tool, mcp_client=self)
-            for tool in self._mcp_tools
+            MCPToolWrapper(mcp_tool=tool, mcp_client=self) for tool in self._mcp_tools
         ]
 
         return self._tools

@@ -3,7 +3,7 @@
 import argparse
 import os
 from typing import Optional
-from client.langgraph_client import LangGraphClient
+from client.client import LangGraphClient
 from client.ui.chat_interface import ChatInterface
 
 # Global client reference for cleanup

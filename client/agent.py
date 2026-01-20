@@ -112,6 +112,9 @@ class LangGraphAgent:
         Returns:
             Updated state with model response
         """
+        import re
+        import sys
+
         messages = list(state["messages"])
 
         # Add system prompt if not already present
@@ -125,14 +128,112 @@ class LangGraphAgent:
         if self.callbacks:
             config["callbacks"] = self.callbacks
 
-        # Stream the model response to trigger callbacks for real-time output
+        # Stream state for handling think tags
+        in_thinking = False
+        tag_buffer = ""
+        first_token = True
+
+        # Stream the model response and process output directly
         response = None
+        chunk_count = 0
         for chunk in self.model_with_tools.stream(messages, config=config):
-            logger.debug(f"Received chunk: content={repr(chunk.content[:50] if chunk.content and len(chunk.content) > 50 else chunk.content)}")
+            chunk_content = chunk.content if chunk.content else ""
+            chunk_count += 1
+
+            # Debug first few chunks to understand what's being received
+            if chunk_count <= 3:
+                import sys
+
+                debug_content = repr(
+                    chunk_content[:200] if len(chunk_content) > 200 else chunk_content
+                )
+                print(
+                    f"[STREAM DEBUG] chunk #{chunk_count}: {debug_content}",
+                    file=sys.stderr,
+                )
+                if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
+                    print(
+                        f"[STREAM DEBUG] additional_kwargs: {chunk.additional_kwargs}",
+                        file=sys.stderr,
+                    )
+
+            # Notify callbacks about first token (for spinner)
+            if first_token and chunk_content and self.callbacks:
+                first_token = False
+                for cb in self.callbacks:
+                    if hasattr(cb, "first_token_received"):
+                        cb.first_token_received = True
+                    if hasattr(cb, "spinner") and cb.spinner:
+                        cb.spinner.stop()
+
+            # Process streaming content for thinking tags
+            if chunk_content:
+                tag_buffer += chunk_content
+
+                # Check for potential partial tags at end
+                last_lt = tag_buffer.rfind("<")
+                if last_lt >= 0 and last_lt > len(tag_buffer) - 12:
+                    to_process = tag_buffer[:last_lt]
+                    tag_buffer = tag_buffer[last_lt:]
+                else:
+                    to_process = tag_buffer
+                    tag_buffer = ""
+
+                if to_process:
+                    remaining = to_process
+
+                    while remaining:
+                        if in_thinking:
+                            # Inside thinking - look for closing tag
+                            match = re.search(
+                                r"</think(?:ing)?>", remaining, re.IGNORECASE
+                            )
+                            if match:
+                                thinking_content = remaining[: match.start()]
+                                if thinking_content and self.verbose:
+                                    # Print thinking in gray
+                                    print(
+                                        f"\033[90m{thinking_content}\033[0m",
+                                        end="",
+                                        flush=True,
+                                    )
+                                remaining = remaining[match.end() :]
+                                in_thinking = False
+                                if self.verbose:
+                                    print("\n", end="", flush=True)
+                            else:
+                                if self.verbose:
+                                    print(
+                                        f"\033[90m{remaining}\033[0m",
+                                        end="",
+                                        flush=True,
+                                    )
+                                remaining = ""
+                        else:
+                            # Outside thinking - look for opening tag
+                            match = re.search(
+                                r"<think(?:ing)?>", remaining, re.IGNORECASE
+                            )
+                            if match:
+                                regular_content = remaining[: match.start()]
+                                if regular_content:
+                                    print(regular_content, end="", flush=True)
+                                remaining = remaining[match.end() :]
+                                in_thinking = True
+                            else:
+                                # No opening tag - print normally
+                                print(remaining, end="", flush=True)
+                                remaining = ""
+
             if response is None:
                 response = chunk
             else:
                 response = response + chunk
+
+        # Flush any remaining buffer
+        if tag_buffer:
+            if not in_thinking:
+                print(tag_buffer, end="", flush=True)
 
         # If no chunks received, fall back to invoke
         if response is None:
@@ -149,7 +250,9 @@ class LangGraphAgent:
             reasoning = response.additional_kwargs.get("reasoning_content")
             if reasoning:
                 thinking = reasoning
-                logger.debug(f"Found reasoning_content: {reasoning[:100] if len(reasoning) > 100 else reasoning}")
+                logger.debug(
+                    f"Found reasoning_content: {reasoning[:100] if len(reasoning) > 100 else reasoning}"
+                )
 
         return {
             "messages": [response],

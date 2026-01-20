@@ -1,4 +1,4 @@
-"""Strands client implementation."""
+"""LangGraph-based client implementation."""
 
 import asyncio
 from datetime import date, datetime
@@ -7,835 +7,328 @@ from client.managers.user_profile_manager import UserProfileManager
 from client.managers.dpo_collector import DPOCollector
 from client.memory.episodic_memory import EpisodicMemoryManager
 from client.ui.spinner import Spinner
+from client.agent import (
+    LangGraphAgent,
+    convert_strands_messages_to_langchain,
+    convert_langchain_messages_to_strands,
+)
+from client.mcp_tool_wrapper import MCPClientWrapper
 import os
 import json
 from mcp import StdioServerParameters
-from mcp.client.stdio import stdio_client
-from models.llm_controller import LLMController
-import os
 import re
 from server.tools import count_tokens
-import shutil
-import sqlite3
-from strands import Agent
-from strands.tools.mcp import MCPClient
 import sys
 import threading
 import traceback
+from typing import Optional
+from langchain_core.callbacks import BaseCallbackHandler
 from utils.formatting.code_formatter import CodeFormatter
 from utils.config import config
 from utils.logger import logger
 
 
-class StrandsClient:
+class StreamingCallbackHandler(BaseCallbackHandler):
+    """Callback handler for streaming LLM responses."""
+
+    def __init__(
+        self,
+        verbose: bool = False,
+        spinner: Optional[Spinner] = None,
+        spinner_lock: Optional[threading.Lock] = None,
+    ):
+        """Initialize the streaming callback handler.
+
+        Args:
+            verbose: Show thinking content
+            spinner: Spinner instance for UI feedback
+            spinner_lock: Thread lock for spinner operations
+        """
+        self.verbose = verbose
+        self.spinner = spinner
+        self.spinner_lock = spinner_lock or threading.Lock()
+        self.first_token_received = False
+        self.code_formatter = CodeFormatter()
+        self._in_thinking = False
+        self._tag_buffer = ""
+
+    def on_llm_new_token(self, token: str, **kwargs) -> None:
+        """Handle new tokens from the LLM.
+
+        Note: Token printing is now handled directly in the agent's streaming loop.
+        This callback only handles spinner control.
+
+        Args:
+            token: The new token
+            **kwargs: Additional arguments
+        """
+        # Stop spinner on first token
+        if not self.first_token_received and self.spinner:
+            with self.spinner_lock:
+                if not self.first_token_received:
+                    self.spinner.stop()
+                    self.first_token_received = True
+
+    def _handle_verbose_token(self, token: str) -> None:
+        """Handle token in verbose mode (show thinking).
+
+        Args:
+            token: The token to process
+        """
+        # Buffer for handling tags split across chunks
+        self._tag_buffer += token
+
+        # Check for potential partial tags at end
+        last_lt = self._tag_buffer.rfind("<")
+        if last_lt >= 0 and last_lt > len(self._tag_buffer) - 12:
+            to_process = self._tag_buffer[:last_lt]
+            self._tag_buffer = self._tag_buffer[last_lt:]
+        else:
+            to_process = self._tag_buffer
+            self._tag_buffer = ""
+
+        if to_process:
+            remaining = to_process
+
+            while remaining:
+                if self._in_thinking:
+                    # Inside thinking - look for closing tag
+                    match = re.search(r"</think(?:ing)?>", remaining, re.IGNORECASE)
+                    if match:
+                        thinking_content = remaining[: match.start()]
+                        if thinking_content:
+                            print(
+                                f"\033[90m{thinking_content}\033[0m", end="", flush=True
+                            )
+                        remaining = remaining[match.end() :]
+                        self._in_thinking = False
+                        print("\n", end="", flush=True)
+                    else:
+                        print(f"\033[90m{remaining}\033[0m", end="", flush=True)
+                        remaining = ""
+                else:
+                    # Outside thinking - look for opening tag
+                    match = re.search(r"<think(?:ing)?>", remaining, re.IGNORECASE)
+                    if match:
+                        regular_content = remaining[: match.start()]
+                        if regular_content:
+                            self.code_formatter.process_chunk(regular_content)
+                        remaining = remaining[match.end() :]
+                        self._in_thinking = True
+                    else:
+                        self.code_formatter.process_chunk(remaining)
+                        remaining = ""
+
+    def _handle_minimal_token(self, token: str) -> None:
+        """Handle token in minimal mode (hide thinking).
+
+        Args:
+            token: The token to process
+        """
+        # Buffer for handling tags split across chunks
+        self._tag_buffer += token
+
+        # Check for potential partial tags at end
+        last_lt = self._tag_buffer.rfind("<")
+        if last_lt >= 0 and last_lt > len(self._tag_buffer) - 12:
+            to_process = self._tag_buffer[:last_lt]
+            self._tag_buffer = self._tag_buffer[last_lt:]
+        else:
+            to_process = self._tag_buffer
+            self._tag_buffer = ""
+
+        if to_process:
+            # Remove complete thinking blocks
+            cleaned = re.sub(
+                r"<think(?:ing)?>.*?</think(?:ing)?>",
+                "",
+                to_process,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+
+            # Handle orphan closing tags
+            cleaned = re.sub(r"</think(?:ing)?>", "", cleaned, flags=re.IGNORECASE)
+
+            # Handle orphan opening tags (start of thinking)
+            if re.search(r"<think(?:ing)?>", cleaned, re.IGNORECASE):
+                self._in_thinking = True
+                cleaned = re.sub(
+                    r"<think(?:ing)?>.*$", "", cleaned, flags=re.IGNORECASE
+                )
+
+            # If we're inside a thinking block, skip the content
+            if self._in_thinking:
+                close_match = re.search(r"</think(?:ing)?>", to_process, re.IGNORECASE)
+                if close_match:
+                    self._in_thinking = False
+                return
+
+            if cleaned:
+                self.code_formatter.process_chunk(cleaned)
+
+    def on_llm_end(self, response, **kwargs) -> None:
+        """Handle LLM completion.
+
+        Args:
+            response: The LLM response
+            **kwargs: Additional arguments
+        """
+        # Flush any remaining buffer
+        if self._tag_buffer:
+            if not self._in_thinking:
+                self.code_formatter.process_chunk(self._tag_buffer)
+            self._tag_buffer = ""
+
+        self.code_formatter.flush()
+
+    def on_tool_start(self, serialized, input_str, **kwargs) -> None:
+        """Handle tool execution start.
+
+        Args:
+            serialized: Serialized tool info
+            input_str: Tool input
+            **kwargs: Additional arguments
+        """
+        if self.spinner:
+            with self.spinner_lock:
+                self.spinner.stop()
+
+    def on_tool_end(self, output, **kwargs) -> None:
+        """Handle tool execution end.
+
+        Args:
+            output: Tool output
+            **kwargs: Additional arguments
+        """
+        if self.spinner:
+            with self.spinner_lock:
+                self.first_token_received = False
+                self.spinner.start()
+
+    def reset(self) -> None:
+        """Reset the callback handler state."""
+        self.first_token_received = False
+        self.code_formatter = CodeFormatter()
+        self._in_thinking = False
+        self._tag_buffer = ""
+
+
+class LangGraphClient:
+    """LangGraph-based client that replaces StrandsClient."""
 
     def __init__(
         self,
         server_path: str = "server/server.py",
         verbose: bool = False,
     ) -> None:
-        """
-        Initialize the Strands client with a server configuration.
+        """Initialize the LangGraph client.
 
         Args:
-            messages: Initial conversation messages
-            server_path: Path to the server.py file to run the MCP server
+            server_path: Path to the MCP server script
+            verbose: Enable verbose mode to show thinking process
         """
-        self.verbose_mode = verbose  # Track verbose mode
+        self.verbose_mode = verbose
+        self.server_path = server_path
+
+        # Initialize MCP client
         self.server_params = StdioServerParameters(
             command=sys.executable,
             args=[server_path],
             env=None,
         )
+        self.mcp_client = MCPClientWrapper(self.server_params)
 
-        # Initialize profile manager first
+        # Initialize profile manager
         self.profile_manager = UserProfileManager()
 
-        self.system_prompt = config.system_prompt
-
+        # Build system prompt
+        self.system_prompt = config.system_prompt or ""
         if self.system_prompt:
             current_date = date.today().strftime("%Y-%m-%d")
             self.system_prompt = self.system_prompt.format(current_date=current_date)
-        else:
-            self.system_prompt = ""
 
         if config.get("PROFILE", {}).get("USE_PROFILING", False):
-            # Initialize profile manager first
-            self.profile_manager = UserProfileManager()
-
-            # Add user profile to system prompt
             profile_summary = self.profile_manager.get_profile_summary()
             if profile_summary:
                 self.system_prompt = f"{self.system_prompt}\n\n{profile_summary}"
 
-        # Initialize MCP client
-        self.mcp_client = MCPClient(lambda: stdio_client(self.server_params))
-
-        # Initialize session ID (used by RAG and chat interface)
+        # Initialize session ID
         profile_name = config.get("PROFILE", {}).get("NAME", "default")
         self.session_id = f"{profile_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        self.agent = None
+        # Components
+        self.agent: Optional[LangGraphAgent] = None
         self.tools = None
-        self.llm_controller = LLMController(verbose=self.verbose_mode)
-        self.llm_controller.initialize_model()
         self.model = None
 
+        # Initialize LLM controller
+        from models.langchain_llm_controller import LangChainLLMController
+
+        self.llm_controller = LangChainLLMController(verbose=self.verbose_mode)
+
+        # Managers
         self.conversation_manager = AgentConversationManager(
             max_tokens=config.get("MAX_CONVERSATION_TOKENS", 1024 * 4)
         )
         self.dpo_collector = DPOCollector()
-        self.dpo_mode = False  # Toggle for DPO collection
+        self.dpo_mode = False
+
+        # UI
         self.spinner = Spinner()
-        self.spinner_lock = threading.Lock()  # Thread safety for spinner operations
+        self.spinner_lock = threading.Lock()
         self.first_token_received = False
         self.visible_content = None
 
-        # Initialize episodic memory if enabled
+        # Streaming callback
+        self.callback_handler = StreamingCallbackHandler(
+            verbose=self.verbose_mode,
+            spinner=self.spinner,
+            spinner_lock=self.spinner_lock,
+        )
+
+        # Episodic memory
         self.episodic_memory = None
         if config.get("ENABLE_EPISODIC_MEMORY", False):
-            logger.debug("Initializing episodic memory...")
-
-            # Get embeddings configuration
-            embed_model_config = config.get("EMBED_MODEL_ID")
-            if not embed_model_config:
-                raise ValueError(
-                    "EMBED_MODEL_ID must be configured in config.yaml to use episodic memory"
-                )
-
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            episodic_path = os.path.join(
-                user_home, "agent-conversations", profile_name, "episodic_memory"
-            )
-            os.makedirs(episodic_path, exist_ok=True)
-
-            store_type = config.get("EPISODIC_MEMORY_STORE", "chromadb").lower()
-            logger.debug(f"Using {store_type} store for episodic memory")
-            logger.debug(f"Episodic memory path: {episodic_path}")
-
-            # Initialize embeddings controller
-            from models.embeddings_controller import EmbeddingsController
-
-            embeddings_controller = EmbeddingsController(embed_model_config)
-
-            self.episodic_memory = EpisodicMemoryManager(
-                persist_path=episodic_path,
-                store_type=store_type,
-                embeddings_controller=embeddings_controller,
-            )
-
-            # Run automatic cleanup on startup
-            self.episodic_memory.cleanup(max_episodes=1000, max_age_days=90)
-
-            logger.debug(f"✓ {store_type.upper()} episodic memory initialized")
-        else:
-            logger.debug("Episodic memory is disabled")
+            self._initialize_episodic_memory()
 
         # Track previous interaction for episodic memory
         self.previous_query = None
         self.previous_response = None
         self.previous_messages = None
 
-    def _process_thinking_buffer(self, buffer: str, in_tag: bool) -> tuple:
-        """Process buffered content, handling thinking tags that may span chunks.
+    def _initialize_episodic_memory(self) -> None:
+        """Initialize episodic memory if enabled."""
+        logger.debug("Initializing episodic memory...")
 
-        Args:
-            buffer: Accumulated content buffer
-            in_tag: Whether currently inside thinking tags
+        embed_model_config = config.get("EMBED_MODEL_ID")
+        if not embed_model_config:
+            raise ValueError(
+                "EMBED_MODEL_ID must be configured in config.yaml to use episodic memory"
+            )
 
-        Returns:
-            Tuple of (content_to_emit, remaining_buffer, new_in_tag_state)
-        """
-        open_pattern = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
-        close_pattern = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
-
-        result = ""
-        remaining = buffer
-        current_in_tag = in_tag
-
-        while remaining:
-            if current_in_tag:
-                # Looking for closing tag
-                match = close_pattern.search(remaining)
-                if match:
-                    # Found closing tag - discard thinking content, keep after
-                    remaining = remaining[match.end() :]
-                    current_in_tag = False
-                else:
-                    # No complete closing tag - check for partial
-                    last_lt = remaining.rfind("<")
-                    if last_lt >= 0 and last_lt > len(remaining) - 12:
-                        remaining = remaining[last_lt:]
-                    else:
-                        remaining = ""
-                    break
-            else:
-                # Looking for opening tag
-                match = open_pattern.search(remaining)
-                if match:
-                    # Found opening tag - emit content before
-                    result += remaining[: match.start()]
-                    remaining = remaining[match.end() :]
-                    current_in_tag = True
-                else:
-                    # No complete opening tag - check for partial at end
-                    last_lt = remaining.rfind("<")
-                    if last_lt >= 0 and last_lt > len(remaining) - 11:
-                        result += remaining[:last_lt]
-                        remaining = remaining[last_lt:]
-                    else:
-                        result += remaining
-                        remaining = ""
-                    break
-
-        return result, remaining, current_in_tag
-
-    def _process_thinking_buffer_verbose(self, buffer: str, in_tag: bool) -> tuple:
-        """Process buffered content for verbose mode, extracting thinking content separately.
-
-        Args:
-            buffer: Accumulated content buffer
-            in_tag: Whether currently inside thinking tags
-
-        Returns:
-            Tuple of (regular_content, thinking_content, remaining_buffer, new_in_tag_state)
-        """
-        open_pattern = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
-        close_pattern = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
-
-        regular = ""
-        thinking = ""
-        remaining = buffer
-        current_in_tag = in_tag
-
-        while remaining:
-            if current_in_tag:
-                match = close_pattern.search(remaining)
-                if match:
-                    thinking += remaining[: match.start()]
-                    remaining = remaining[match.end() :]
-                    current_in_tag = False
-                else:
-                    last_lt = remaining.rfind("<")
-                    if last_lt >= 0 and last_lt > len(remaining) - 12:
-                        thinking += remaining[:last_lt]
-                        remaining = remaining[last_lt:]
-                    else:
-                        thinking += remaining
-                        remaining = ""
-                    break
-            else:
-                match = open_pattern.search(remaining)
-                if match:
-                    regular += remaining[: match.start()]
-                    remaining = remaining[match.end() :]
-                    current_in_tag = True
-                else:
-                    last_lt = remaining.rfind("<")
-                    if last_lt >= 0 and last_lt > len(remaining) - 11:
-                        regular += remaining[:last_lt]
-                        remaining = remaining[last_lt:]
-                    else:
-                        regular += remaining
-                        remaining = ""
-                    break
-
-        return regular, thinking, remaining, current_in_tag
-
-    # Custom callback handler to control verbosity
-    def __minimal_callback_handler(self, **kwargs) -> None:
-        """Handle streaming events without showing thinking content.
-
-        Args:
-            **kwargs: Event data from streaming response
-        """
-        # Reset state on new content block (important after tool execution)
-        if "event" in kwargs and (
-            "contentBlockStart" in kwargs["event"] or "messageStart" in kwargs["event"]
-        ):
-            self._code_formatter_minimal = CodeFormatter()
-            self._tag_buffer_minimal = ""
-            self._in_thinking_minimal = False
-
-        # Stop spinner only when first actual data arrives (thread-safe)
-        if not self.first_token_received:
-            if "data" in kwargs and kwargs["data"]:
-                with self.spinner_lock:
-                    if not self.first_token_received:  # Double-check inside lock
-                        self.spinner.stop()
-                        self.first_token_received = True
-
-        # Stop spinner when tool call starts (thread-safe)
-        if "message" in kwargs and kwargs["message"].get("role") == "assistant":
-            content = kwargs["message"].get("content", [])
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("toolUse"):
-                        with self.spinner_lock:
-                            self.spinner.stop()
-                        break
-
-        # Restart spinner after tool execution completes (thread-safe)
-        if (
-            "message" in kwargs
-            and kwargs["message"].get("role") == "user"
-            and "toolResult" in str(kwargs["message"].get("content", ""))
-        ):
-            # Tool result received, restart spinner for final response
-            with self.spinner_lock:
-                self.first_token_received = False
-                self.spinner.start()
-
-        if "data" in kwargs:
-            data = kwargs["data"]
-
-            # Initialize state if not exists
-            if not hasattr(self, "_code_formatter_minimal"):
-                self._code_formatter_minimal = CodeFormatter()
-                self._tag_buffer_minimal = ""
-                self._in_thinking_minimal = False
-
-            # Buffer for handling tags split across chunks
-            self._tag_buffer_minimal += data
-
-            # Check for potential partial tags at end (any < within 12 chars of end)
-            last_lt = self._tag_buffer_minimal.rfind("<")
-            if last_lt >= 0 and last_lt > len(self._tag_buffer_minimal) - 12:
-                # Potential partial tag - process up to it, keep rest in buffer
-                to_process = self._tag_buffer_minimal[:last_lt]
-                self._tag_buffer_minimal = self._tag_buffer_minimal[last_lt:]
-            else:
-                # No partial tag - process all
-                to_process = self._tag_buffer_minimal
-                self._tag_buffer_minimal = ""
-
-            if to_process:
-                # Strip thinking tags AND content inside them (minimal hides thinking)
-                # First, remove complete <thinking>...</thinking> blocks
-                cleaned = re.sub(
-                    r"<think(?:ing)?>(.*?)</think(?:ing)?>",
-                    "",
-                    to_process,
-                    flags=re.IGNORECASE | re.DOTALL,
-                )
-
-                # Handle orphan closing tags (content before </think> without opening tag)
-                # This happens when model outputs thinking then </think> without <think>
-                if not self._in_thinking_minimal and re.search(
-                    r"</think(?:ing)?>", cleaned, re.IGNORECASE
-                ):
-                    # Found closing tag while not in thinking - strip everything before it
-                    parts = re.split(r"</think(?:ing)?>", cleaned, flags=re.IGNORECASE)
-                    cleaned = parts[-1]  # Keep only content after closing tag
-
-                # Handle state for incomplete tags (opening without closing)
-                elif re.search(
-                    r"<think(?:ing)?>(?!.*</think(?:ing)?>)",
-                    cleaned,
-                    re.IGNORECASE | re.DOTALL,
-                ):
-                    # Found opening tag without closing - we're entering thinking
-                    parts = re.split(r"<think(?:ing)?>", cleaned, flags=re.IGNORECASE)
-                    cleaned = parts[0]  # Keep only content before opening tag
-                    self._in_thinking_minimal = True
-                elif self._in_thinking_minimal:
-                    # We're inside thinking, look for closing tag
-                    if re.search(r"</think(?:ing)?>", cleaned, re.IGNORECASE):
-                        # Found closing tag - extract content after it
-                        parts = re.split(
-                            r"</think(?:ing)?>", cleaned, flags=re.IGNORECASE
-                        )
-                        cleaned = parts[-1]  # Keep only content after closing tag
-                        self._in_thinking_minimal = False
-                    else:
-                        # Still inside thinking - discard all
-                        cleaned = ""
-
-                if cleaned:
-                    self._code_formatter_minimal.process_chunk(cleaned)
-
-    # Custom callback handler that shows all content including reasoning
-    def __verbose_callback_handler(self, **kwargs) -> None:
-        """Handle streaming events showing all content including thinking.
-
-        Args:
-            **kwargs: Event data from streaming response
-        """
-        # Reset state on new content block (important after tool execution)
-        if "event" in kwargs and (
-            "contentBlockStart" in kwargs["event"] or "messageStart" in kwargs["event"]
-        ):
-            self._code_formatter_verbose = CodeFormatter()
-            self._tag_buffer_verbose = ""
-            self._in_thinking_verbose = False
-
-        # Stop spinner only when first actual data arrives (thread-safe)
-        if not self.first_token_received:
-            if "data" in kwargs and kwargs["data"]:
-                with self.spinner_lock:
-                    if not self.first_token_received:  # Double-check inside lock
-                        self.spinner.stop()
-                        self.first_token_received = True
-
-        # Stop spinner when tool call starts (thread-safe)
-        if "message" in kwargs and kwargs["message"].get("role") == "assistant":
-            content = kwargs["message"].get("content", [])
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and item.get("toolUse"):
-                        with self.spinner_lock:
-                            self.spinner.stop()
-                        break
-
-        # Restart spinner after tool execution completes (thread-safe)
-        if (
-            "message" in kwargs
-            and kwargs["message"].get("role") == "user"
-            and "toolResult" in str(kwargs["message"].get("content", ""))
-        ):
-            # Tool result received, restart spinner for final response
-            with self.spinner_lock:
-                self.first_token_received = False
-                self.spinner.start()
-
-        if "data" in kwargs:
-            data = kwargs["data"]
-
-            # Initialize state if not exists
-            if not hasattr(self, "_code_formatter_verbose"):
-                self._code_formatter_verbose = CodeFormatter()
-                self._tag_buffer_verbose = ""
-                self._in_thinking_verbose = False
-
-            # Buffer for handling tags split across chunks
-            self._tag_buffer_verbose += data
-
-            # Check for potential partial tags at end (any < within 12 chars of end)
-            last_lt = self._tag_buffer_verbose.rfind("<")
-            if last_lt >= 0 and last_lt > len(self._tag_buffer_verbose) - 12:
-                # Potential partial tag - process up to it, keep rest in buffer
-                to_process = self._tag_buffer_verbose[:last_lt]
-                self._tag_buffer_verbose = self._tag_buffer_verbose[last_lt:]
-            else:
-                # No partial tag - process all
-                to_process = self._tag_buffer_verbose
-                self._tag_buffer_verbose = ""
-
-            if to_process:
-                # Process content, showing thinking in gray and regular content normally
-                remaining = to_process
-
-                while remaining:
-                    if self._in_thinking_verbose:
-                        # Inside thinking - look for closing tag
-                        match = re.search(r"</think(?:ing)?>", remaining, re.IGNORECASE)
-                        if match:
-                            # Print thinking content in gray (before closing tag)
-                            thinking_content = remaining[: match.start()]
-                            if thinking_content:
-                                print(
-                                    f"\033[90m{thinking_content}\033[0m",
-                                    end="",
-                                    flush=True,
-                                )
-                            remaining = remaining[match.end() :]
-                            self._in_thinking_verbose = False
-                            # Add newline to separate reasoning from answer
-                            print("\n", end="", flush=True)
-                        else:
-                            # No closing tag - all is thinking content
-                            print(f"\033[90m{remaining}\033[0m", end="", flush=True)
-                            remaining = ""
-                    else:
-                        # Outside thinking - look for opening tag
-                        match = re.search(r"<think(?:ing)?>", remaining, re.IGNORECASE)
-                        if match:
-                            # Print regular content normally (before opening tag)
-                            regular_content = remaining[: match.start()]
-                            if regular_content:
-                                self._code_formatter_verbose.process_chunk(
-                                    regular_content
-                                )
-                            remaining = remaining[match.end() :]
-                            self._in_thinking_verbose = True
-                        else:
-                            # No opening tag - all is regular content
-                            self._code_formatter_verbose.process_chunk(remaining)
-                            remaining = ""
-
-    def __count_context_tokens(self) -> int:
-        """Count total tokens in the current conversation context.
-
-        Returns:
-            Total token count
-        """
-        total_tokens = 0
-
-        # Count system prompt tokens
-        if self.system_prompt:
-            total_tokens += count_tokens(self.system_prompt)
-
-        # Count conversation messages tokens by converting to JSON string
-        if self.agent and hasattr(self.agent, "messages"):
-            total_tokens += count_tokens(json.dumps(self.agent.messages, default=str))
-
-        return total_tokens
-
-    def clear_context(self) -> None:
-        """Clear conversation history but keep system prompt."""
-        system_msg = config.get("SYSTEM_PROMPT")
+        user_home = os.path.expanduser("~")
         profile_name = config.get("PROFILE", {}).get("NAME", "default")
+        episodic_path = os.path.join(
+            user_home, "agent-conversations", profile_name, "episodic_memory"
+        )
+        os.makedirs(episodic_path, exist_ok=True)
 
-        self.agent.messages.clear()
-        self.session_id = f"{profile_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        store_type = config.get("EPISODIC_MEMORY_STORE", "chromadb").lower()
+        logger.debug(f"Using {store_type} store for episodic memory")
+        logger.debug(f"Episodic memory path: {episodic_path}")
 
-        if system_msg:
-            current_date = date.today().strftime("%Y-%m-%d")
-            system_msg = system_msg.format(current_date=current_date)
-            self.system_prompt = system_msg
-            self.agent.system_prompt = system_msg
+        from models.embeddings_controller import EmbeddingsController
 
-        # Flush RAG database when clearing context
-        if config.get("ENABLE_RAG", False):
-            self._flush_rag_store()
+        embeddings_controller = EmbeddingsController(embed_model_config)
 
-        self._flush_chunk_cache_store()
+        self.episodic_memory = EpisodicMemoryManager(
+            persist_path=episodic_path,
+            store_type=store_type,
+            embeddings_controller=embeddings_controller,
+        )
 
-    def _initialize_rag_session(self) -> None:
-        """Initialize RAG session at application startup."""
-        try:
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
-            os.makedirs(rag_dir, exist_ok=True)
-
-            session_file = os.path.join(rag_dir, "rag_session_id.txt")
-            with open(session_file, "w") as f:
-                f.write(self.session_id)
-
-            logger.debug(f"RAG session initialized: {self.session_id}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize RAG session: {e}")
-
-    def _initialize_chunk_cache(self) -> None:
-        """Initialize chunk cache DB at application startup."""
-        try:
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
-            os.makedirs(rag_dir, exist_ok=True)
-
-            # Write session_id to file for MCP subprocess to read (same as RAG)
-            session_file = os.path.join(rag_dir, "chunk_session_id.txt")
-            with open(session_file, "w") as f:
-                f.write(self.session_id)
-
-            # Create session-specific DB
-            db_path = os.path.join(rag_dir, f"chunk_cache_{self.session_id}.db")
-            conn = sqlite3.connect(db_path)
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                CREATE TABLE IF NOT EXISTS chunk_cache (
-                    key TEXT PRIMARY KEY,
-                    summary TEXT,
-                    updated_at TEXT
-                )
-                """
-                )
-                conn.commit()
-                logger.debug(f"Chunk cache initialized: {os.path.basename(db_path)}")
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.warning(f"Failed to initialize chunk cache: {e}")
-
-    def _flush_chunk_cache_store(self) -> None:
-        """Flush the RAG database and session-specific chunk cache."""
-        try:
-            from server.tools.readers.chunking_helper import reset_session_chunk_cache
-
-            reset_session_chunk_cache()
-
-            # Delete persisted session files
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
-
-            # Remove session-specific files (rag_store and chunk_cache with session_id)
-            if os.path.exists(rag_dir):
-                for file in os.listdir(rag_dir):
-                    # Delete RAG store files and session-specific chunk cache
-                    if file.startswith("chunk_cache_"):
-                        file_path = os.path.join(rag_dir, file)
-                        try:
-                            os.remove(file_path)
-                            logger.debug(f"Deleted session file: {file}")
-                        except Exception as e:
-                            logger.debug(f"Failed to delete {file}: {e}")
-
-            logger.debug("Session reset - Chunk cache store and chunk cache cleared")
-        except Exception as e:
-            logger.warning(f"Failed to reset session: {e}")
-
-    def _flush_rag_store(self) -> None:
-        """Flush the RAG database and session-specific chunk cache."""
-        try:
-            if config.get("ENABLE_RAG", False):
-                from server.tools.rag import reset_session_rag
-
-                reset_session_rag()
-
-            # Delete persisted session files
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
-
-            # Remove session-specific files (rag_store and chunk_cache with session_id)
-            if os.path.exists(rag_dir):
-                for file in os.listdir(rag_dir):
-                    # Delete RAG store files/directories and session-specific chunk cache
-                    if file.startswith("rag_store_"):
-                        file_path = os.path.join(rag_dir, file)
-                        try:
-                            if os.path.isdir(file_path):
-                                shutil.rmtree(file_path)
-                                logger.debug(f"Deleted session directory: {file}")
-                            else:
-                                os.remove(file_path)
-                                logger.debug(f"Deleted session file: {file}")
-                        except Exception as e:
-                            logger.debug(f"Failed to delete {file}: {e}")
-
-            logger.debug("Session reset - RAG store and chunk cache cleared")
-        except Exception as e:
-            logger.warning(f"Failed to reset session: {e}")
-
-    def save_conversation(self, timestamp: str = None) -> None:
-        """Save conversation to file.
-
-        Args:
-            timestamp: Optional timestamp for filename (default: current time)
-        """
-        if self.agent and self.agent.messages:
-            # Use profile-based path with conversations subdirectory
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            save_dir = os.path.join(
-                user_home, "agent-conversations", profile_name, "conversations"
-            )
-            os.makedirs(save_dir, exist_ok=True)
-
-            if not timestamp:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            filename = f"conversation_{timestamp}.json"
-            filepath = os.path.join(save_dir, filename)
-
-            try:
-                # Create conversation data with metadata
-                conversation_data = {"messages": [], "tools": []}
-
-                # Add system prompt as first message if it exists
-                if self.system_prompt:
-                    system_message = {
-                        "role": "system",
-                        "content": [{"text": self.system_prompt}],
-                    }
-                    conversation_data["messages"].append(system_message)
-
-                # Add all conversation messages
-                conversation_data["messages"].extend(self.agent.messages)
-
-                # Add tools information if available
-                if self.tools:
-                    for tool in self.tools:
-                        tool_info = {}
-
-                        # Try different possible attribute names
-                        if hasattr(tool, "name"):
-                            tool_info["name"] = tool.name
-                        elif hasattr(tool, "tool_name"):
-                            tool_info["name"] = tool.tool_name
-                        elif hasattr(tool, "__name__"):
-                            tool_info["name"] = tool.__name__
-                        else:
-                            tool_info["name"] = str(tool)
-
-                        # Try to get description
-                        if hasattr(tool, "description"):
-                            tool_info["description"] = tool.description
-                        elif hasattr(tool, "__doc__"):
-                            tool_info["description"] = tool.__doc__
-
-                        # Try to get arguments/parameters
-                        if hasattr(tool, "input_schema"):
-                            tool_info["arguments"] = tool.input_schema
-                        elif hasattr(tool, "parameters"):
-                            tool_info["arguments"] = tool.parameters
-                        elif hasattr(tool, "args"):
-                            tool_info["arguments"] = tool.args
-                        elif hasattr(tool, "schema"):
-                            tool_info["arguments"] = tool.schema
-
-                        conversation_data["tools"].append(tool_info)
-
-                with open(filepath, "w") as f:
-                    json.dump(conversation_data, f, indent=2, default=str)
-                print(f"Conversation saved to {filepath}")
-            except Exception as e:
-                logger.error(f"Failed to save conversation: {e}")
-
-    def save_conversation_with_quality(
-        self, timestamp: str = None, quality_markers: list = None
-    ) -> None:
-        """Save conversation with quality markers for training data.
-
-        Args:
-            timestamp: Optional timestamp for filename (default: current time)
-            quality_markers: List of quality labels for each message (e.g., ['good', 'unlabeled'])
-        """
-        if self.agent and self.agent.messages:
-            # Use profile-based path with conversations subdirectory
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            save_dir = os.path.join(
-                user_home, "agent-conversations", profile_name, "conversations"
-            )
-            os.makedirs(save_dir, exist_ok=True)
-
-            if not timestamp:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            filename = f"conversation_{timestamp}.json"
-            filepath = os.path.join(save_dir, filename)
-
-            try:
-                conversation_data = {
-                    "messages": [],
-                    "tools": [],
-                    "quality_markers": quality_markers or [],
-                }
-
-                if self.system_prompt:
-                    system_message = {
-                        "role": "system",
-                        "content": [{" text": self.system_prompt}],
-                    }
-                    conversation_data["messages"].append(system_message)
-
-                conversation_data["messages"].extend(self.agent.messages)
-
-                # Get tools metadata from self.tools
-                if self.tools:
-                    for tool in self.tools:
-                        try:
-                            # Access the underlying MCP tool
-                            mcp_tool = (
-                                tool.mcp_tool if hasattr(tool, "mcp_tool") else tool
-                            )
-
-                            # Get parameters with better formatting
-                            parameters = {}
-                            if hasattr(mcp_tool, "inputSchema"):
-                                schema = mcp_tool.inputSchema
-                                properties = schema.get("properties", {})
-
-                                # Clean up parameter descriptions
-                                for param_name, param_info in properties.items():
-                                    # Use description from schema if available, otherwise use title
-                                    desc = param_info.get("description", "")
-                                    if desc.startswith("Property "):
-                                        # Generic description, try to get from title or just use param name
-                                        desc = f"{param_name}: {param_info.get('type', 'any')}"
-
-                                    parameters[param_name] = {
-                                        "type": param_info.get("type", "string"),
-                                        "description": desc,
-                                        "default": (
-                                            param_info.get("default")
-                                            if "default" in param_info
-                                            else None
-                                        ),
-                                    }
-
-                            tool_info = {
-                                "name": (
-                                    mcp_tool.name
-                                    if hasattr(mcp_tool, "name")
-                                    else tool.tool_name
-                                ),
-                                "description": (
-                                    mcp_tool.description
-                                    if hasattr(mcp_tool, "description")
-                                    else ""
-                                ),
-                                "parameters": parameters,
-                            }
-                            conversation_data["tools"].append(tool_info)
-                        except Exception as e:
-                            logger.error(f"Error extracting tool info: {e}")
-                            continue
-
-                with open(filepath, "w") as f:
-                    json.dump(conversation_data, f, indent=2, default=str)
-                print(f"Conversation saved to {filepath}")
-            except Exception as e:
-                logger.error(f"Failed to save conversation: {e}")
-
-    def load_conversation(self, file_path: str) -> bool:
-        """Load conversation from file, excluding system prompt and tools.
-
-        Args:
-            file_path: Path to the conversation JSON file
-
-        Returns:
-            True if loaded successfully, False otherwise
-        """
-        try:
-            # Expand user path and check if file exists
-            normalized_path = os.path.expanduser(file_path.strip())
-            if not os.path.exists(normalized_path):
-                logger.error(f"File not found: {normalized_path}")
-                return False
-
-            # Load conversation data
-            with open(normalized_path, "r") as f:
-                conversation_data = json.load(f)
-
-            # Handle both old format (list) and new format (dict)
-            if isinstance(conversation_data, list):
-                messages = conversation_data
-            else:
-                messages = conversation_data.get("messages", [])
-
-            # Filter out system messages and load only user/assistant messages
-            conversation_messages = []
-            for message in messages:
-                if message.get("role") != "system":
-                    conversation_messages.append(message)
-
-            # Clear current conversation and load the saved one
-            if self.agent:
-                self.agent.messages.clear()
-                self.agent.messages.extend(conversation_messages)
-                logger.info(
-                    f"Loaded {len(conversation_messages)} messages from {normalized_path}"
-                )
-
-                token_count = self.__count_context_tokens()
-                print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
-
-                return True
-            else:
-                logger.error("Agent not initialized")
-                return False
-
-        except Exception as e:
-            logger.error(f"Failed to load conversation: {e}")
-            return False
+        self.episodic_memory.cleanup(max_episodes=1000, max_age_days=90)
+        logger.debug(f"✓ {store_type.upper()} episodic memory initialized")
 
     def start(self, verbose: bool = False) -> None:
         """Start the client and initialize the agent.
@@ -844,48 +337,160 @@ class StrandsClient:
             verbose: Enable verbose mode to show thinking process
         """
         try:
-            self.verbose_mode = verbose  # Store verbose mode
+            self.verbose_mode = verbose
+            self.callback_handler.verbose = verbose
 
+            # Connect to MCP server and get tools
             with self.mcp_client:
-                # Get tools from MCP server
                 self.tools = self.mcp_client.list_tools_sync()
+                logger.info(f"Loaded {len(self.tools)} tools from MCP server")
 
-                # Initialize RAG session after MCP server is ready (if enabled)
+                # Initialize RAG session if enabled
                 if config.get("ENABLE_RAG", False):
                     self._initialize_rag_session()
 
-                # Initialize chunk cache DB
+                # Initialize chunk cache
                 self._initialize_chunk_cache()
 
+                # Initialize model with callbacks
+                self.llm_controller.initialize_model(callbacks=[self.callback_handler])
                 self.model = self.llm_controller.get_model()
 
-                if not verbose:
-                    additional_params = {
-                        "callback_handler": self.__minimal_callback_handler
-                    }
-                else:
-                    additional_params = {
-                        "callback_handler": self.__verbose_callback_handler
-                    }
-
-                # Create agent with tools
-                self.agent = Agent(
+                # Create LangGraph agent
+                self.agent = LangGraphAgent(
                     model=self.model,
                     tools=self.tools,
                     system_prompt=self.system_prompt,
-                    **additional_params,
+                    verbose=self.verbose_mode,
+                    callbacks=[self.callback_handler],
                 )
+
+                logger.info("LangGraph agent initialized successfully")
+
         except Exception as e:
             stacktrace = traceback.format_exc()
             logger.error(stacktrace)
-
             raise e
+
+    def query(self, prompt: str) -> str:
+        """Send a query to the agent.
+
+        Args:
+            prompt: User's query
+
+        Returns:
+            Agent's response
+        """
+        if not self.agent:
+            raise RuntimeError(
+                "Client not started. Call start() or use with-statement first."
+            )
+
+        # Reset callback state and start spinner
+        self.callback_handler.reset()
+        with self.spinner_lock:
+            self.first_token_received = False
+            self.spinner.start()
+
+        try:
+            # Retrieve similar episodes from episodic memory
+            if self.episodic_memory:
+                prompt = self._inject_episodic_context(prompt)
+
+            with self.mcp_client:
+                # Call agent with prompt
+                response = self.agent(prompt)
+
+                # Flush code formatter
+                self.callback_handler.code_formatter.flush()
+
+                # Manage conversation length
+                asyncio.run(
+                    self.conversation_manager.manage_messages(
+                        self, self.model, self.agent
+                    )
+                )
+
+                # Update user profile
+                if config.get("PROFILE", {}).get("USE_PROFILING", False):
+                    messages_for_profile = convert_langchain_messages_to_strands(
+                        self.agent.messages
+                    )
+                    self.profile_manager.analyze_conversation(messages_for_profile)
+
+                # Check for empty response
+                response_text = str(response)
+                visible_content = re.sub(
+                    r"<think(?:ing)?>.*?</think(?:ing)?>",
+                    "",
+                    response_text,
+                    flags=re.DOTALL | re.IGNORECASE,
+                ).strip()
+
+                if not visible_content:
+                    response_text += "\n\nI apologize, but I need to provide a visible response. Could you please rephrase your request?"
+                    print(
+                        "\n\033[91m⚠️  Model provided only thinking without visible response\033[0m"
+                    )
+                    print(
+                        "I apologize, but I need to provide a visible response. Could you please rephrase your request?"
+                    )
+
+                # Print token count
+                token_count = self._count_context_tokens()
+                print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
+
+                # Store for episodic memory
+                self.previous_query = prompt
+                self.previous_response = response_text
+                self.previous_messages = self.agent.messages.copy()
+
+                return response_text
+
+        except Exception as e:
+            with self.spinner_lock:
+                self.spinner.stop()
+            raise e
+        finally:
+            with self.spinner_lock:
+                self.spinner.stop()
+
+    def _inject_episodic_context(self, prompt: str) -> str:
+        """Inject episodic memory context into the prompt.
+
+        Args:
+            prompt: Original prompt
+
+        Returns:
+            Prompt with episodic context prepended
+        """
+        logger.debug("Retrieving similar episodes from episodic memory...")
+        similar_episodes = self.episodic_memory.retrieve_similar_episodes(
+            prompt, top_k=3
+        )
+        logger.debug(f"Found {len(similar_episodes)} similar episodes")
+
+        retrieval_threshold = config.get("EPISODIC_MEMORY", {}).get(
+            "RETRIEVAL_THRESHOLD", 0.7
+        )
+        relevant_episodes = [
+            ep
+            for ep in similar_episodes
+            if ep.get("similarity", 0) > retrieval_threshold
+        ]
+
+        if relevant_episodes:
+            logger.debug(f"Found {len(relevant_episodes)} relevant episodes")
+            context = self._format_episodic_context(relevant_episodes)
+            return f"{context}\n\n{prompt}"
+
+        return prompt
 
     def _format_episodic_context(self, episodes: list) -> str:
         """Format episodic memory episodes as compact context.
 
         Args:
-            episodes: List of episode dictionaries with task, tools, similarity
+            episodes: List of episode dictionaries
 
         Returns:
             Formatted context string
@@ -893,12 +498,10 @@ class StrandsClient:
         context = "[Episodic Memory - Similar Past Tasks]\n"
         for i, ep in enumerate(episodes, 1):
             task = ep.get("task", "Unknown task")
-            # Truncate at word boundary, not mid-word
             if len(task) > 70:
                 task = task[:70].rsplit(" ", 1)[0] + "..."
 
             tools = ep.get("tools", "")
-            # Parse tools string back to list
             if isinstance(tools, str):
                 import ast
 
@@ -916,158 +519,174 @@ class StrandsClient:
             similarity = ep.get("similarity", 0)
             context += f'{i}. "{task}" → {tools_str} → success (similarity: {similarity:.2f})\n'
 
-        logger.debug("Formatted episodic memory context for prompt:")
-        logger.debug(context)
         return context
 
-    def query(self, prompt: str) -> str:
-        """
-        Send a query to the Strands agent.
-
-        Args:
-            prompt: User's query
+    def _count_context_tokens(self) -> int:
+        """Count total tokens in the current conversation context.
 
         Returns:
-            Agent's response
+            Total token count
+        """
+        total_tokens = 0
+
+        if self.system_prompt:
+            total_tokens += count_tokens(self.system_prompt)
+
+        if self.agent and self.agent.messages:
+            messages_str = json.dumps(
+                [{"content": str(m.content)} for m in self.agent.messages], default=str
+            )
+            total_tokens += count_tokens(messages_str)
+
+        return total_tokens
+
+    def clear_context(self) -> None:
+        """Clear conversation history but keep system prompt."""
+        if self.agent:
+            self.agent.clear_messages()
+
+        profile_name = config.get("PROFILE", {}).get("NAME", "default")
+        self.session_id = f"{profile_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        system_msg = config.get("SYSTEM_PROMPT")
+        if system_msg:
+            current_date = date.today().strftime("%Y-%m-%d")
+            self.system_prompt = system_msg.format(current_date=current_date)
+            if self.agent:
+                self.agent.system_prompt = self.system_prompt
+
+        # Flush RAG database if enabled
+        if config.get("ENABLE_RAG", False):
+            self._flush_rag_store()
+
+        self._flush_chunk_cache_store()
+
+    def save_conversation(self, timestamp: str = None) -> None:
+        """Save conversation to file.
+
+        Args:
+            timestamp: Optional timestamp for filename
         """
         if not self.agent:
-            raise RuntimeError(
-                "Client not started. Call start() or use with-statement first."
-            )
-
-        # Reset first token flag and start spinner (thread-safe)
-        with self.spinner_lock:
-            self.first_token_received = False
-            self.spinner.start()
+            logger.error("Agent not initialized")
+            return
 
         try:
-            # Retrieve similar episodes from episodic memory
-            if self.episodic_memory:
-                logger.debug("Retrieving similar episodes from episodic memory...")
-                similar_episodes = self.episodic_memory.retrieve_similar_episodes(
-                    prompt, top_k=3
-                )
-                logger.debug(f"Found {len(similar_episodes)} similar episodes")
-                logger.debug(f"Similar episodes: {similar_episodes}")
+            user_home = os.path.expanduser("~")
+            profile_name = config.get("PROFILE", {}).get("NAME", "default")
+            conversations_dir = os.path.join(
+                user_home, "agent-conversations", profile_name
+            )
+            os.makedirs(conversations_dir, exist_ok=True)
 
-                # Filter by configurable similarity threshold
-                retrieval_threshold = config.get("EPISODIC_MEMORY", {}).get(
-                    "RETRIEVAL_THRESHOLD", 0.7
-                )
-                relevant_episodes = [
-                    ep
-                    for ep in similar_episodes
-                    if ep.get("similarity", 0) > retrieval_threshold
+            if timestamp is None:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            filepath = os.path.join(conversations_dir, f"conversation_{timestamp}.json")
+
+            # Convert LangChain messages to Strands format for compatibility
+            strands_messages = convert_langchain_messages_to_strands(
+                self.agent.messages
+            )
+
+            conversation_data = {
+                "messages": [
+                    {"role": "system", "content": [{"text": self.system_prompt}]}
                 ]
+                + strands_messages,
+                "tools": (
+                    [{"name": t.name, "description": t.description} for t in self.tools]
+                    if self.tools
+                    else []
+                ),
+            }
 
-                if relevant_episodes:
-                    logger.debug(f"Found {len(relevant_episodes)} relevant episodes")
-                    context = self._format_episodic_context(relevant_episodes)
-                    prompt = f"{context}\n\n{prompt}"
-                else:
-                    logger.debug(
-                        f"No relevant episodes found (similarity < {retrieval_threshold})"
-                    )
+            with open(filepath, "w") as f:
+                json.dump(conversation_data, f, indent=2, default=str)
 
-            with self.mcp_client:
-                # Call agent with prompt
-                response = self.agent(prompt)
+            logger.info(f"Conversation saved to {filepath}")
 
-                # Flush any remaining buffered backticks
-                if hasattr(self, "_code_formatter_minimal"):
-                    self._code_formatter_minimal.flush()
-                if hasattr(self, "_code_formatter_verbose"):
-                    self._code_formatter_verbose.flush()
-
-                asyncio.run(
-                    self.conversation_manager.manage_messages(
-                        self, self.model, self.agent
-                    )
-                )
-
-                if config.get("PROFILE", {}).get("USE_PROFILING", False):
-                    # Update user profile with conversation
-                    self.profile_manager.analyze_conversation(self.agent.messages)
-
-                # Check if response is only thinking tags (no visible content)
-                response_text = str(response)  # Convert AgentResult to string
-                visible_content = re.sub(
-                    r"<thinking>.*?</thinking>",
-                    "",
-                    response_text,
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
-                visible_content = re.sub(
-                    r"<think>.*?</think>",
-                    "",
-                    visible_content,
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
-                visible_content = visible_content.strip()
-
-                if not visible_content:
-                    # Response has only thinking, add a visible message
-                    response_text += "\n\nI apologize, but I need to provide a visible response. Could you please rephrase your request?"
-                    print(
-                        "\n\033[91m⚠️  Model provided only thinking without visible response\033[0m"
-                    )
-
-                    print(
-                        "I apologize, but I need to provide a visible response. Could you please rephrase your request?"
-                    )
-
-                # Print token count in a clean format
-                token_count = self.__count_context_tokens()
-                print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
-
-                # Store full conversation for episodic memory evaluation
-                if self.episodic_memory:
-                    logger.debug("Storing interaction for episodic memory evaluation")
-                    self.previous_query = prompt
-                    self.previous_response = response_text
-                    self.previous_messages = self.agent.messages.copy()
-                    logger.debug(
-                        f"Stored {len(self.previous_messages)} messages for evaluation"
-                    )
-
-                return response_text
-        except KeyboardInterrupt:
-            # Handle Ctrl+C gracefully - cancel all pending tasks
-            with self.spinner_lock:
-                self.first_token_received = False
-                self.spinner.stop()
-
-            try:
-                # Cancel all async tasks
-                loop = asyncio.get_event_loop()
-                pending = asyncio.all_tasks(loop)
-                for task in pending:
-                    task.cancel()
-
-                # Force close MCP client connection
-                if hasattr(self.mcp_client, "_client") and self.mcp_client._client:
-                    try:
-                        asyncio.run(self.mcp_client._client.__aexit__(None, None, None))
-                    except:
-                        pass
-            except:
-                pass
-
-            # Reset MCP client to clean state
-            try:
-                self.mcp_client = MCPClient(lambda: stdio_client(self.server_params))
-            except:
-                pass
-
-            return "Operation was cancelled."
         except Exception as e:
-            # Handle other exceptions - MCP client will be closed by context manager
-            with self.spinner_lock:
-                self.first_token_received = False
-                self.spinner.stop()
-            raise e
-        finally:
-            # Ensure spinner is stopped (thread-safe)
-            with self.spinner_lock:
-                self.first_token_received = False
-                self.spinner.stop()
+            logger.error(f"Failed to save conversation: {e}")
+
+    def load_conversation(self, file_path: str) -> bool:
+        """Load conversation from file.
+
+        Args:
+            file_path: Path to the conversation file
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            normalized_path = os.path.expanduser(file_path)
+            if not os.path.exists(normalized_path):
+                logger.error(f"File not found: {normalized_path}")
+                return False
+
+            with open(normalized_path, "r") as f:
+                conversation_data = json.load(f)
+
+            if isinstance(conversation_data, list):
+                messages = conversation_data
+            else:
+                messages = conversation_data.get("messages", [])
+
+            # Filter out system messages
+            conversation_messages = [m for m in messages if m.get("role") != "system"]
+
+            # Convert to LangChain messages
+            langchain_messages = convert_strands_messages_to_langchain(
+                conversation_messages
+            )
+
+            if self.agent:
+                self.agent.messages.clear()
+                self.agent.messages.extend(langchain_messages)
+                logger.info(
+                    f"Loaded {len(langchain_messages)} messages from {normalized_path}"
+                )
+
+                token_count = self._count_context_tokens()
+                print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
+                return True
+            else:
+                logger.error("Agent not initialized")
+                return False
+
+        except Exception as e:
+            logger.error(f"Failed to load conversation: {e}")
+            return False
+
+    def _initialize_rag_session(self) -> None:
+        """Initialize RAG session."""
+        # Implementation depends on your RAG setup
+        pass
+
+    def _initialize_chunk_cache(self) -> None:
+        """Initialize chunk cache database."""
+        # Implementation depends on your cache setup
+        pass
+
+    def _flush_rag_store(self) -> None:
+        """Flush the RAG store."""
+        # Implementation depends on your RAG setup
+        pass
+
+    def _flush_chunk_cache_store(self) -> None:
+        """Flush the chunk cache store."""
+        # Implementation depends on your cache setup
+        pass
+
+    def __enter__(self):
+        """Context manager entry."""
+        self.start(verbose=self.verbose_mode)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        pass
+
+
+# Alias for backward compatibility
+StrandsClient = LangGraphClient

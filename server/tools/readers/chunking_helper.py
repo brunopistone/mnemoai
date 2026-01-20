@@ -20,7 +20,7 @@ sys.path.append(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
 )
-from models.llm_controller import LLMController
+from models.langchain_llm_controller import LangChainLLMController
 from utils.config import config
 from utils.logger import logger
 
@@ -233,7 +233,7 @@ async def __summarize_with_model(text: str, context: str = "") -> str:
         Summarized text
     """
     try:
-        llm_controller = LLMController()
+        llm_controller = LangChainLLMController()
         llm_controller.initialize_model()
         model = llm_controller.get_model()
 
@@ -265,13 +265,13 @@ async def __summarize_with_model(text: str, context: str = "") -> str:
 
         prompt = textwrap.dedent(prompt).strip()
 
-        # Use model's stream method and collect response
-        messages = [{"role": "user", "content": [{"text": prompt}]}]
+        # Use LangChain model's invoke method
+        from langchain_core.messages import HumanMessage
 
-        response_text = ""
-        async for event in model.stream(messages):
-            if event.get("chunk_type") == "content_delta" and event.get("data"):
-                response_text += event["data"]
+        messages = [HumanMessage(content=prompt)]
+        response = model.invoke(messages)
+
+        response_text = response.content if hasattr(response, 'content') else str(response)
 
         return (
             response_text.strip() if response_text else text[:2000] + "...[no response]"
