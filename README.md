@@ -10,16 +10,16 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM (100+ providers)
+- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
-- **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search
+- **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search (_if available_)
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
 - **📊 Training Data Collection**: SFT markers for quality training data
-- **🔍 Web Search**: Integrated Brave Search API
+- **🔍 Web Search**: Integrated Brave Search API (_if available_)
 - **🌐 Web Crawler**: Extract and index content from web pages
-- **🖼️ Vision Support**: Image analysis with vision models
+- **🖼️ Vision Support**: Image analysis with vision models (_if available_)
 - **📁 File Operations**: Read/write/edit with support for text, CSV, JSON, PDF, DOCX
 - **✏️ Precise File Editing**: Safe string replacement with validation and uniqueness checking
 - **🔎 Fast Search Tools**: Glob pattern matching and ripgrep content search (10-100x faster)
@@ -89,7 +89,9 @@ ai-assistant/
 │   ├── base_model_controller.py            # Base controller class
 │   ├── llm_controller.py                   # LangChain LLM initialization
 │   ├── vision_model_controller.py          # Vision model initialization
-│   └── embeddings_controller.py            # Embeddings initialization
+│   ├── embeddings_controller.py            # Embeddings initialization
+│   └── classes/
+│       └── sagemaker_chat.py               # SageMaker Handler class for Langchain
 │
 ├── utils/                                  # Utilities
 │   ├── config.py                           # Config loader
@@ -124,25 +126,26 @@ ai-assistant/
       │  (client.py)    │            │  (server.py)     │
       └────────┬────────┘            └────────┬─────────┘
                │                              │
-               │                              │
           ┌────┴─────┐                        ▼
           │          │                   ┌──────────┐
           ▼          ▼                   │  Tools   │
       ┌────────┐ ┌──────────┐            └────┬─────┘
       │  UI    │ │ Managers │                 │
       └────────┘ └──────────┘            ┌────┴────┐
-                                         │         │
-               ┌──────────┐              ▼         ▼
-               │LangGraph │        ┌──────────┐ ┌─────┐
-               │  Agent   │        │ Readers  │ │ RAG │
-               └──────────┘        └──────────┘ └─────┘
+          │          │                   │         │
+          └────┬─────┘                   ▼         ▼
+               ▼                    ┌──────────┐ ┌─────┐
+          ┌──────────┐              │ Readers  │ │ RAG │
+          │LangGraph │              └──────────┘ └─────┘
+          │  Agent   │
+          └──────────┘
 ```
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.11+
 - (Optional) Ollama installed for local models
 - (Optional) AWS credentials for Bedrock/SageMaker
 - (Optional) ripgrep for fast content search
@@ -153,7 +156,7 @@ ai-assistant/
 
 ```bash
 git clone https://github.com/brunopistone/personal-ai-assistant.git
-cd ai-assistant
+cd personal-ai-assistant
 ```
 
 2. **Set up Python environment** (choose one):
