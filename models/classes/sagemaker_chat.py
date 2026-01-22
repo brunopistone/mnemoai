@@ -309,7 +309,9 @@ class ChatSageMaker(BaseChatModel):
                                 yield ChatGenerationChunk(
                                     message=AIMessageChunk(
                                         content="",
-                                        additional_kwargs={"reasoning_content": parts[0]},
+                                        additional_kwargs={
+                                            "reasoning_content": parts[0]
+                                        },
                                     )
                                 )
                             if len(parts) > 1 and parts[1]:

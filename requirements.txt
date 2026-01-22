@@ -21,6 +21,7 @@ qdrant-client
 langgraph>=0.2.0
 langchain-core>=0.3.0
 langchain-aws>=0.2.0
+langchain-litellm>=0.3.5
 langchain-openai>=0.2.0
 langchain-ollama>=0.2.0
 tiktoken

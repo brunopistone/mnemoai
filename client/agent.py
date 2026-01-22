@@ -143,7 +143,9 @@ class LangGraphAgent:
             # Print content with syntax highlighting
             if chunk_content:
                 if had_reasoning:
-                    print("\n", end="", flush=True)
+                    # Only add newline if content doesn't start with newlines
+                    if not chunk_content.startswith("\n"):
+                        print("\n", end="", flush=True)
                     had_reasoning = False
                 self._code_formatter.process_chunk(chunk_content)
 
@@ -186,11 +188,15 @@ class LangGraphAgent:
         else:
             chunk_content = str(raw_content) if raw_content else ""
 
-        # Ollama reasoning from additional_kwargs
+        # Check for reasoning in additional_kwargs (Ollama, LiteLLM)
         if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
-            ollama_reasoning = chunk.additional_kwargs.get("reasoning_content", "")
-            if ollama_reasoning:
-                reasoning_content = ollama_reasoning
+            reasoning = chunk.additional_kwargs.get("reasoning_content", "")
+            if reasoning:
+                reasoning_content = reasoning
+
+        # Strip </think> tag from content if present (for models that include it)
+        if "</think>" in chunk_content:
+            chunk_content = chunk_content.replace("</think>", "").strip()
 
         return chunk_content, reasoning_content
 

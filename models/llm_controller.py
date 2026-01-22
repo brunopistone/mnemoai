@@ -3,6 +3,7 @@
 from typing import Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.callbacks import BaseCallbackHandler
+from langchain_litellm import ChatLiteLLM
 from models.base_model_controller import BaseModelController
 from models.classes.sagemaker_chat import ChatSageMaker
 from utils.config import config
@@ -31,7 +32,6 @@ class LangChainLLMController(BaseModelController):
         self.presence_penalty = self.model_id.get("PRESENCE_PENALTY", None)
         self.reasoning_effort = self.model_id.get("REASONING_EFFORT", None)
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
-        self.repeat_last_n = self.model_id.get("REPEAT_LAST_N", None)
         self.stop = self.model_id.get("STOP", None)
         self.stream = self.model_id.get("STREAM", True)
         self.temperature = self.model_id.get("TEMPERATURE", 0.1)
@@ -54,6 +54,8 @@ class LangChainLLMController(BaseModelController):
             self._initialize_openai_model(callbacks)
         elif self.model_type == "sagemaker":
             self._initialize_sagemaker_model(callbacks)
+        elif self.model_type == "litellm":
+            self._initialize_litellm_model(callbacks)
         else:
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
@@ -90,6 +92,36 @@ class LangChainLLMController(BaseModelController):
             streaming=self.stream,
             callbacks=callbacks,
         )
+
+    def _initialize_litellm_model(self, callbacks: list = None) -> None:
+        """Initialize LiteLLM model using langchain-litellm."""
+        logger.info("Initializing LiteLLM model...")
+
+        kwargs = {
+            "model": self.model_name,
+            "callbacks": callbacks,
+            "streaming": self.stream,
+        }
+
+        model_kwargs = dict()
+
+        if self.model_id.get("API_BASE"):
+            kwargs["api_base"] = self.model_id["API_BASE"]
+        if self.model_id.get("API_KEY"):
+            kwargs["api_key"] = self.model_id["API_KEY"]
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+
+        if self.stop:
+            model_kwargs["stop"] = self.stop
+        if self.repetition_penalty is not None:
+            model_kwargs["repeat_penalty"] = self.repetition_penalty
+
+        self.model = ChatLiteLLM(model_kwargs=model_kwargs, **kwargs)
 
     def _initialize_ollama_model(self, callbacks: list = None) -> None:
         """Initialize Ollama model using LangChain."""

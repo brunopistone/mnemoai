@@ -4,13 +4,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Amazon SageMaker AI).
+A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Amazon SageMaker AI, LiteLLM).
 
 ![Demo](images/assistaint-demo.gif)
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI
+- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
@@ -652,7 +652,7 @@ get_task_output(task_id="abc123", tail_lines=50)
 
 ### Model Configuration
 
-The assistant supports three model types:
+The assistant supports multiple model types:
 
 #### Amazon Bedrock
 
@@ -699,6 +699,18 @@ MODEL_ID:
   REGION: us-east-1
   REPETITION_PENALTY: 1.1
   PRESENCE_PENALTY: 1.5
+  TEMPERATURE: 0.1
+  MAX_TOKENS: 4096
+```
+
+#### LiteLLM (100+ Providers)
+
+```yaml
+MODEL_ID:
+  NAME: openai/your-model-name
+  TYPE: litellm
+  API_BASE: http://localhost:8000/v1
+  API_KEY: your-api-key
   TEMPERATURE: 0.1
   MAX_TOKENS: 4096
 ```
