@@ -12,7 +12,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 
 - **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
-- **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search (_if available_)
+- **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search (_if enabled_)
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
