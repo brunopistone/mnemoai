@@ -4,9 +4,7 @@ MODEL_ID:
   HOST: localhost
   PORT: 11434
   MAX_TOKENS: 8192
-  PRESENCE_PENALTY: 0.1
   REPETITION_PENALTY: 1.3
-  REPEAT_LAST_N: 128
   TEMPERATURE: 0.3
   TOP_P: 0.95
   STOP:
@@ -25,7 +23,7 @@ DOC_MAX_TOKENS: 16384
 ENABLE_RAG: true
 RAG_MAX_TOKENS: 8192
 EMBED_MODEL_ID:
-  NAME: mxbai-embed-large
+  NAME: MXBAI-Embed-Large:latest
   TYPE: ollama
   HOST: localhost
   PORT: 11434

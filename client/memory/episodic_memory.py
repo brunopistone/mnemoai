@@ -288,8 +288,18 @@ def is_task_successful(
 
     # 3. Check if tools succeeded
     for msg in agent_messages:
-        if msg.get("role") == "user":
+        # Handle both dict format and LangChain message objects
+        if isinstance(msg, dict):
+            role = msg.get("role")
             content = msg.get("content", [])
+        else:
+            # LangChain message object
+            role = getattr(msg, "type", None)
+            if role == "human":
+                role = "user"
+            content = getattr(msg, "content", "")
+        
+        if role == "user":
             if isinstance(content, list):
                 for item in content:
                     if isinstance(item, dict) and "toolResult" in item:
@@ -302,43 +312,71 @@ def is_task_successful(
     return True
 
 
-def extract_tools_from_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def extract_tools_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
     """Extract tool usage information from conversation messages.
 
+    Supports both Strands format (dict) and LangChain format (BaseMessage).
+
     Args:
-        messages: Conversation messages
+        messages: Conversation messages in either format
 
     Returns:
         List of tool usage records
     """
+    # Try to import LangChain types
+    try:
+        from langchain_core.messages import AIMessage, ToolMessage
+        LANGCHAIN_AVAILABLE = True
+    except ImportError:
+        LANGCHAIN_AVAILABLE = False
+
     tools_used = []
 
     for msg in messages:
-        if msg.get("role") == "assistant":
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and "toolUse" in item:
-                        tool_use = item["toolUse"]
-                        tools_used.append(
-                            {
-                                "name": tool_use.get("name"),
-                                "args": tool_use.get("input", {}),
-                                "id": tool_use.get("toolUseId"),
-                            }
-                        )
+        # Handle LangChain AIMessage with tool_calls
+        if LANGCHAIN_AVAILABLE and hasattr(msg, 'tool_calls') and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tools_used.append({
+                    "name": tc.get("name"),
+                    "args": tc.get("args", {}),
+                    "id": tc.get("id"),
+                })
+            continue
 
-        elif msg.get("role") == "user":
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and "toolResult" in item:
-                        result = item["toolResult"]
-                        # Find matching tool by ID
-                        for tool in tools_used:
-                            if tool.get("id") == result.get("toolUseId"):
-                                tool["result"] = result.get("content", [{}])[0].get(
-                                    "text", ""
-                                )
+        # Handle LangChain ToolMessage (contains result)
+        if LANGCHAIN_AVAILABLE and hasattr(msg, 'tool_call_id'):
+            for tool in tools_used:
+                if tool.get("id") == msg.tool_call_id:
+                    tool["result"] = str(msg.content)
+            continue
+
+        # Handle Strands dict format
+        if isinstance(msg, dict):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and "toolUse" in item:
+                            tool_use = item["toolUse"]
+                            tools_used.append(
+                                {
+                                    "name": tool_use.get("name"),
+                                    "args": tool_use.get("input", {}),
+                                    "id": tool_use.get("toolUseId"),
+                                }
+                            )
+
+            elif msg.get("role") == "user":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and "toolResult" in item:
+                            result = item["toolResult"]
+                            # Find matching tool by ID
+                            for tool in tools_used:
+                                if tool.get("id") == result.get("toolUseId"):
+                                    tool["result"] = result.get("content", [{}])[0].get(
+                                        "text", ""
+                                    )
 
     return tools_used

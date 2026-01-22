@@ -4,22 +4,22 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on the Strands framework with support for multiple LLM providers (Ollama, Amazon Bedrock, Amazon SageMaker AI).
+A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Amazon SageMaker AI, LiteLLM).
 
 ![Demo](images/assistaint-demo.gif)
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI
+- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
-- **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search
+- **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search (_if enabled_)
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
 - **📊 Training Data Collection**: SFT markers for quality training data
-- **🔍 Web Search**: Integrated Brave Search API
+- **🔍 Web Search**: Integrated Brave Search API (_if available_)
 - **🌐 Web Crawler**: Extract and index content from web pages
-- **🖼️ Vision Support**: Image analysis with vision models
+- **🖼️ Vision Support**: Image analysis with vision models (_if available_)
 - **📁 File Operations**: Read/write/edit with support for text, CSV, JSON, PDF, DOCX
 - **✏️ Precise File Editing**: Safe string replacement with validation and uniqueness checking
 - **🔎 Fast Search Tools**: Glob pattern matching and ripgrep content search (10-100x faster)
@@ -38,7 +38,9 @@ ai-assistant/
 ├── README.md                               # This file
 │
 ├── client/                                 # Client layer
-│   ├── client.py                           # Strands client
+│   ├── client.py                           # LangGraph client
+│   ├── agent.py                            # LangGraph agent with streaming
+│   ├── mcp_tool_wrapper.py                 # MCP to LangChain tool adapter
 │   ├── ui/                                 # User interface
 │   │   ├── chat_interface.py               # Chat loop
 │   │   └── spinner.py                      # Loading animations
@@ -85,12 +87,11 @@ ai-assistant/
 │
 ├── models/                                 # Model layer
 │   ├── base_model_controller.py            # Base controller class
-│   ├── llm_controller.py                   # LLM initialization
+│   ├── llm_controller.py                   # LangChain LLM initialization
 │   ├── vision_model_controller.py          # Vision model initialization
 │   ├── embeddings_controller.py            # Embeddings initialization
-│   └── classes/                            # Custom implementations
-│       ├── thinking_ollama.py              # Ollama with thinking tags
-│       └── sagemaker_vision_model.py       # SageMaker vision wrapper
+│   └── classes/
+│       └── sagemaker_chat.py               # SageMaker Handler class for Langchain
 │
 ├── utils/                                  # Utilities
 │   ├── config.py                           # Config loader
@@ -121,10 +122,9 @@ ai-assistant/
               │                               │
               ▼                               ▼
       ┌─────────────────┐            ┌──────────────────┐
-      │  StrandsClient  │◄──────────►│  MCP Server      │
+      │ LangGraphClient │◄──────────►│  MCP Server      │
       │  (client.py)    │            │  (server.py)     │
       └────────┬────────┘            └────────┬─────────┘
-               │                              │
                │                              │
           ┌────┴─────┐                        ▼
           │          │                   ┌──────────┐
@@ -132,18 +132,20 @@ ai-assistant/
       ┌────────┐ ┌──────────┐            └────┬─────┘
       │  UI    │ │ Managers │                 │
       └────────┘ └──────────┘            ┌────┴────┐
-                                         │         │
-                                         ▼         ▼
-                                   ┌──────────┐ ┌─────┐
-                                   │ Readers  │ │ RAG │
-                                   └──────────┘ └─────┘
+          │          │                   │         │
+          └────┬─────┘                   ▼         ▼
+               ▼                    ┌──────────┐ ┌─────┐
+          ┌──────────┐              │ Readers  │ │ RAG │
+          │LangGraph │              └──────────┘ └─────┘
+          │  Agent   │
+          └──────────┘
 ```
 
 ## 🚀 Quick Start
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.11+
 - (Optional) Ollama installed for local models
 - (Optional) AWS credentials for Bedrock/SageMaker
 - (Optional) ripgrep for fast content search
@@ -154,7 +156,7 @@ ai-assistant/
 
 ```bash
 git clone https://github.com/brunopistone/personal-ai-assistant.git
-cd ai-assistant
+cd personal-ai-assistant
 ```
 
 2. **Set up Python environment** (choose one):
@@ -304,11 +306,21 @@ python main.py --no-verbose # Hide thinking process
 
 The client manages the conversation flow and user interaction.
 
-- **`client.py`**: Core Strands client
+- **`client.py`**: Core LangGraph client
   - Initializes MCP connection
   - Manages conversation state
   - Handles model configuration
   - Coordinates managers (profile, conversation)
+    <<<<<<< HEAD
+    =======
+- **`agent.py`**: LangGraph agent implementation
+  - State graph with agent and tools nodes
+  - Streaming support with reasoning display
+  - Code syntax highlighting
+- **`mcp_tool_wrapper.py`**: MCP to LangChain adapter
+  - Wraps MCP tools as LangChain BaseTool
+  - Handles async/sync conversion
+    > > > > > > > langgraph
 - **`ui/`**: User interface components
   - `chat_interface.py`: Interactive chat loop with command handling
   - `spinner.py`: Loading animations
@@ -355,8 +367,7 @@ Model controllers and custom implementations.
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
 - **Custom implementations** (`classes/`):
-  - `thinking_ollama.py`: Ollama model with thinking tag support
-  - `sagemaker_vision_model.py`: SageMaker vision model wrapper
+  - `sagemaker_chat.py`: SageMaker Handler class for Langchain
 
 #### 4. **Utils Layer** (`utils/`)
 
@@ -372,12 +383,12 @@ Shared utilities and configuration.
 
 ### Data Flow
 
-1. **User Input** → `ChatInterface` → `StrandsClient`
-2. **Client** → Sends message to LLM with MCP tools
-3. **LLM** → Decides to use tools via MCP protocol
+1. **User Input** → `ChatInterface` → `LangGraphClient`
+2. **Client** → Invokes LangGraph agent with MCP tools
+3. **LangGraph** → Executes agent node, decides to use tools
 4. **MCP Server** → Executes tool (e.g., fs_read, web_search, RAG)
-5. **Tool Result** → Returned to LLM
-6. **LLM** → Generates response using tool results
+5. **Tool Result** → Returned to agent via tools node
+6. **LangGraph** → Continues agent loop until response complete
 7. **Response** → Displayed to user via `ChatInterface`
 
 ### Session Management
@@ -646,7 +657,7 @@ get_task_output(task_id="abc123", tail_lines=50)
 
 ### Model Configuration
 
-The assistant supports three model types:
+The assistant supports multiple model types:
 
 #### Amazon Bedrock
 
@@ -693,6 +704,18 @@ MODEL_ID:
   REGION: us-east-1
   REPETITION_PENALTY: 1.1
   PRESENCE_PENALTY: 1.5
+  TEMPERATURE: 0.1
+  MAX_TOKENS: 4096
+```
+
+#### LiteLLM (100+ Providers)
+
+```yaml
+MODEL_ID:
+  NAME: openai/your-model-name
+  TYPE: litellm
+  API_BASE: http://localhost:8000/v1
+  API_KEY: your-api-key
   TEMPERATURE: 0.1
   MAX_TOKENS: 4096
 ```
@@ -995,9 +1018,12 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 
 **Core Python Packages:**
 
-- `strands-agents`: Agent framework
+- `langgraph`: Agent orchestration framework
+- `langchain`, `langchain-core`: LLM abstraction layer
+- `langchain-ollama`: Ollama integration
+- `langchain-aws`: AWS Bedrock integration
+- `langchain-openai`: OpenAI integration
 - `mcp`, `mcp[cli]`: Model Context Protocol
-- `litellm`: Multi-provider LLM support
 - `ollama`: Local LLM support
 - `boto3`: AWS Bedrock/SageMaker
 - `tiktoken`: Token counting
@@ -1140,6 +1166,6 @@ If you use this code in your own projects, attribution to the original repositor
 
 ## 🙏 Acknowledgments
 
-- Built with [Strands](https://github.com/strands-agents/sdk-python) framework
+- Built with [LangGraph](https://github.com/langchain-ai/langgraph) and [LangChain](https://github.com/langchain-ai/langchain)
 - Uses [FastMCP](https://github.com/jlowin/fastmcp) for Model Context Protocol
 - Powered by [Ollama](https://ollama.ai), [Amazon Bedrock](https://aws.amazon.com/bedrock/), and [Amazon SageMaker AI](https://aws.amazon.com/sagemaker/ai/)

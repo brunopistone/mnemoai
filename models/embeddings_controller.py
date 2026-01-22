@@ -172,7 +172,6 @@ class EmbeddingsController:
             NumPy array of embeddings
         """
         try:
-            # Truncate texts that exceed embedding model's context limit
             resp = ollama.embed(model=self.embed_model_name, input=texts)
             emb = self._extract_embeddings_from_response(resp)
             return np.array(emb, dtype=np.float32)

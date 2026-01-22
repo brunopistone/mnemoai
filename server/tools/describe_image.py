@@ -61,20 +61,12 @@ def register_image_tools(mcp: FastMCP) -> None:
 
             image_ext = normalized_path.split(".")[-1]
 
-            # Create messages with image and question
-            messages = [
-                vision_model_controller.format_request(question, image_bytes, image_ext)
-            ]
+            # Create message with image and question using LangChain format
+            message = vision_model_controller.format_request(question, image_bytes, image_ext)
 
-            # Stream response and collect text
-            description = ""
-            async for event in vision_model.stream(messages):
-                if (
-                    "contentBlockDelta" in event
-                    and "delta" in event["contentBlockDelta"]
-                ):
-                    if "text" in event["contentBlockDelta"]["delta"]:
-                        description += event["contentBlockDelta"]["delta"]["text"]
+            # Use LangChain model invoke
+            response = vision_model.invoke([message])
+            description = response.content if hasattr(response, 'content') else str(response)
 
             return json.dumps(
                 {
