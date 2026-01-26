@@ -1,5 +1,5 @@
 MODEL_ID:
-  NAME: brnpistone/qwen3-4b-thinking-2507-toolcodereasoning-q5-k-m:latest
+  NAME: brnpistone/Qwen3-4B-AgentCoder-q5-k-m:latest
   TYPE: ollama
   HOST: localhost
   PORT: 11434
