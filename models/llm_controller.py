@@ -5,6 +5,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_litellm import ChatLiteLLM
 from models.base_model_controller import BaseModelController
+from models.classes.chat_ollama_wrapper import ChatOllamaWrapper
 from models.classes.sagemaker_chat import ChatSageMaker
 from utils.config import config
 from utils.logger import logger
@@ -29,6 +30,7 @@ class LangChainLLMController(BaseModelController):
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
         self.min_p = self.model_id.get("MIN_P", None)
+        self.frequency_penalty = self.model_id.get("FREQUENCY_PENALTY", None)
         self.presence_penalty = self.model_id.get("PRESENCE_PENALTY", None)
         self.reasoning_effort = self.model_id.get("REASONING_EFFORT", None)
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
@@ -125,8 +127,6 @@ class LangChainLLMController(BaseModelController):
 
     def _initialize_ollama_model(self, callbacks: list = None) -> None:
         """Initialize Ollama model using LangChain."""
-        from langchain_ollama import ChatOllama
-
         logger.info("Initializing Ollama model...")
 
         host = self.model_id.get("HOST", "localhost")
@@ -152,6 +152,10 @@ class LangChainLLMController(BaseModelController):
             kwargs["stop"] = self.stop
         if self.repetition_penalty is not None:
             kwargs["repeat_penalty"] = self.repetition_penalty
+        if self.presence_penalty is not None:
+            kwargs["presence_penalty"] = self.presence_penalty
+        if self.frequency_penalty is not None:
+            kwargs["frequency_penalty"] = self.frequency_penalty
 
         # Set context window
         kwargs["num_ctx"] = self.max_conversation_tokens
@@ -160,7 +164,7 @@ class LangChainLLMController(BaseModelController):
         if self.verbose_mode:
             kwargs["reasoning"] = True
 
-        self.model = ChatOllama(**kwargs)
+        self.model = ChatOllamaWrapper(**kwargs)
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
         """Initialize OpenAI model using LangChain."""
