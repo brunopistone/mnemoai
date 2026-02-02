@@ -298,7 +298,7 @@ def is_task_successful(
             if role == "human":
                 role = "user"
             content = getattr(msg, "content", "")
-        
+
         if role == "user":
             if isinstance(content, list):
                 for item in content:
@@ -326,6 +326,7 @@ def extract_tools_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
     # Try to import LangChain types
     try:
         from langchain_core.messages import AIMessage, ToolMessage
+
         LANGCHAIN_AVAILABLE = True
     except ImportError:
         LANGCHAIN_AVAILABLE = False
@@ -334,17 +335,19 @@ def extract_tools_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
 
     for msg in messages:
         # Handle LangChain AIMessage with tool_calls
-        if LANGCHAIN_AVAILABLE and hasattr(msg, 'tool_calls') and msg.tool_calls:
+        if LANGCHAIN_AVAILABLE and hasattr(msg, "tool_calls") and msg.tool_calls:
             for tc in msg.tool_calls:
-                tools_used.append({
-                    "name": tc.get("name"),
-                    "args": tc.get("args", {}),
-                    "id": tc.get("id"),
-                })
+                tools_used.append(
+                    {
+                        "name": tc.get("name"),
+                        "args": tc.get("args", {}),
+                        "id": tc.get("id"),
+                    }
+                )
             continue
 
         # Handle LangChain ToolMessage (contains result)
-        if LANGCHAIN_AVAILABLE and hasattr(msg, 'tool_call_id'):
+        if LANGCHAIN_AVAILABLE and hasattr(msg, "tool_call_id"):
             for tool in tools_used:
                 if tool.get("id") == msg.tool_call_id:
                     tool["result"] = str(msg.content)

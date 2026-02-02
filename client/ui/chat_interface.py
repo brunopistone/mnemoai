@@ -326,6 +326,10 @@ class ChatInterface:
                 if self.client.episodic_memory and use_immediate_storage:
                     self.__store_current_episode_immediately(query, response)
 
+                # ACE Reflection: learn from this interaction
+                if self.client.reflector:
+                    self.client.reflect_and_learn(query)
+
                 if response != "Operation was cancelled.":
                     print("\n")
             except KeyboardInterrupt:
