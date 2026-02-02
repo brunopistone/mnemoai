@@ -1,6 +1,6 @@
 # Personal AI Assistant
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
@@ -10,12 +10,13 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM
+- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search (_if enabled_)
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
+- **📖 ACE Playbook**: Learns strategies from successes AND failures via Agentic Context Engineering
 - **📊 Training Data Collection**: SFT markers for quality training data
 - **🔍 Web Search**: Integrated Brave Search API (_if available_)
 - **🌐 Web Crawler**: Extract and index content from web pages
@@ -49,6 +50,8 @@ ai-assistant/
 │   │   └── user_profile_manager.py         # User profiling and learning
 │   └── memory/                             # Memory systems
 │       ├── episodic_memory.py              # Episodic memory manager
+│       ├── reflector.py                    # ACE Reflector - extracts strategies
+│       ├── playbook_store.py               # ACE Playbook - stores learned strategies
 │       ├── faiss_store.py                  # FAISS episodic store
 │       └── chroma_store.py                 # ChromaDB episodic store
 │
@@ -968,6 +971,73 @@ EMBED_MODEL_ID: # Required for both stores
   TYPE: ollama
 ```
 
+### ACE Playbook (Agentic Context Engineering)
+
+The ACE Playbook learns strategies from both successes AND failures, implementing the Agentic Context Engineering framework for continuous improvement.
+
+**How it works:**
+
+1. **Reflector**: After each interaction, analyzes tool executions:
+   - Detects failure patterns (file not found, string not found, permission denied, etc.)
+   - Identifies successful strategies for specific tools (file_edit, execute_bash)
+   - Extracts specific, actionable insights (not generic summaries)
+   - Tracks metrics (success/failure rates, failure types) in `metrics.json`
+
+2. **Playbook Store**: Maintains structured strategy entries:
+
+   ```json
+   {
+     "context": "editing python files",
+     "strategy": "Read the file first to get exact string including whitespace before using str_replace",
+     "source": "Failed file_edit on 2026-02-01: string_not_found",
+     "outcome": "failure",
+     "tools": ["file_edit"],
+     "confidence": 0.9
+   }
+   ```
+
+3. **Context Injection**: Injects relevant strategies into the system prompt at startup:
+
+   ```
+   [Playbook - Learned Strategies]
+   Avoid these patterns:
+     ✗ [editing files]: Read the file first to get exact string before str_replace
+   Effective strategies:
+     ✓ [searching files]: Use glob_search instead of find for better performance
+   ```
+
+4. **Lazy Refinement**: Only deduplicates when hitting token limits, using semantic similarity if embeddings are configured.
+
+**What gets stored:**
+
+- **Failures**: Specific patterns like `string_not_found`, `file_not_found`, `permission_denied`, `command_failed`, etc.
+- **Successes**: Only for tools with reusable patterns (file_edit, execute_bash with specific commands)
+- **Not stored**: Generic successes without actionable strategies
+
+**Key Differences from Episodic Memory:**
+
+| Feature     | Episodic Memory       | ACE Playbook            |
+| ----------- | --------------------- | ----------------------- |
+| Stores      | Full task completions | Granular strategies     |
+| Learns from | Successes only        | Successes AND failures  |
+| Format      | Conversation context  | Structured rules        |
+| Retrieval   | Semantic similarity   | Context + tool matching |
+
+**Configuration:**
+
+```yaml
+ENABLE_PLAYBOOK: true
+PLAYBOOK:
+  MAX_ENTRIES: 500 # Maximum entries before refinement
+  SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
+  MAX_INJECT: 10 # Maximum entries to inject per query
+```
+
+**Storage Location:**
+
+- Strategies: `~/agent-conversations/{profile}/playbook/playbook.json`
+- Metrics: `~/agent-conversations/{profile}/playbook/metrics.json`
+
 ### Training Data Collection
 
 #### Supervised Fine-Tuning (SFT)
@@ -975,25 +1045,6 @@ EMBED_MODEL_ID: # Required for both stores
 - Use `/good` to mark high-quality responses
 - Saved conversations include quality markers
 - Extract labeled interactions for training
-
-#### Direct Preference Optimization (DPO)
-
-- **Manual**: Use `/reject` to generate alternative response
-- **Auto**: Enable `/dpo` mode for background collection
-- Saved as JSONL in `~/agent-conversations/{profile}/dpo_pairs/`
-
-**DPO Pair Format:**
-
-```json
-{
-  "prompt": "user question",
-  "chosen": "good response",
-  "rejected": "alternative response",
-  "metadata": { "timestamp": "20251104_153000" }
-}
-```
-
-See `bash/dpo-collection/DPO_COLLECTION.md` for details.
 
 ## 📦 Dependencies
 

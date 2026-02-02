@@ -25,20 +25,20 @@ class LangChainLLMController(BaseModelController):
         self.model_name = self.model_id["NAME"]
         self.model_type = self.model_id["TYPE"]
         self.region = self.model_id.get("REGION", "us-east-1")
-        self.reasoning_model = self.model_id.get("REASONING", False)
-        self.thinking_tokens = self.model_id.get("THINKING_TOKENS", 1024 * 2)
-        self.max_tokens = self.model_id.get("MAX_TOKENS", None)
-        self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
-        self.min_p = self.model_id.get("MIN_P", None)
         self.frequency_penalty = self.model_id.get("FREQUENCY_PENALTY", None)
+        self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
+        self.max_tokens = self.model_id.get("MAX_TOKENS", None)
+        self.min_p = self.model_id.get("MIN_P", None)
         self.presence_penalty = self.model_id.get("PRESENCE_PENALTY", None)
         self.reasoning_effort = self.model_id.get("REASONING_EFFORT", None)
+        self.reasoning_model = self.model_id.get("REASONING", False)
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
         self.stop = self.model_id.get("STOP", None)
         self.stream = self.model_id.get("STREAM", True)
         self.temperature = self.model_id.get("TEMPERATURE", 0.1)
-        self.top_p = self.model_id.get("TOP_P", None)
+        self.thinking_tokens = self.model_id.get("THINKING_TOKENS", 1024 * 2)
         self.top_k = self.model_id.get("TOP_K", None)
+        self.top_p = self.model_id.get("TOP_P", None)
 
         self.model: Optional[BaseChatModel] = None
 

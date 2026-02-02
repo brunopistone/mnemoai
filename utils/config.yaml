@@ -82,6 +82,13 @@ EPISODIC_MEMORY:
   # Query Enhancement
   ENABLE_QUERY_EXPANSION: true # Expand queries with synonyms
   QUERY_EXPANSION_TERMS: 3 # Max terms to add per query
+# ACE Playbook Configuration (Agentic Context Engineering)
+ENABLE_PLAYBOOK: true
+PLAYBOOK:
+  MAX_ENTRIES: 500 # Maximum playbook entries before refinement
+  SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
+  MAX_INJECT: 10 # Maximum entries to inject per query
+
 # LLM Interaction Configuration (Enhanced)
 LLM:
   # Thinking/Reasoning
