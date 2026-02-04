@@ -314,8 +314,6 @@ The client manages the conversation flow and user interaction.
   - Manages conversation state
   - Handles model configuration
   - Coordinates managers (profile, conversation)
-    <<<<<<< HEAD
-    =======
 - **`agent.py`**: LangGraph agent implementation
   - State graph with agent and tools nodes
   - Streaming support with reasoning display
@@ -323,13 +321,13 @@ The client manages the conversation flow and user interaction.
 - **`mcp_tool_wrapper.py`**: MCP to LangChain adapter
   - Wraps MCP tools as LangChain BaseTool
   - Handles async/sync conversion
-    > > > > > > > langgraph
 - **`ui/`**: User interface components
   - `chat_interface.py`: Interactive chat loop with command handling
   - `spinner.py`: Loading animations
 - **`managers/`**: Business logic
   - `agent_conversation_manager.py`: Conversation state and token tracking
   - `user_profile_manager.py`: Automatic user profiling and learning
+  - `dpo_collector.py`: DPO preference pair collection
 
 #### 2. **Server Layer** (`server/`)
 
@@ -793,13 +791,20 @@ VECTOR_STORE:
 ```yaml
 ENABLE_EPISODIC_MEMORY: true
 EPISODIC_MEMORY_STORE: chromadb # or faiss
+EPISODIC_MEMORY:
+  RETRIEVAL_THRESHOLD: 0.7 # Minimum similarity to retrieve episodes
+  FOLLOW_UP_THRESHOLD: 0.4 # Similarity to detect follow-up questions
+  REDUNDANCY_THRESHOLD: 0.5 # Filter episodes redundant with conversation
 ```
 
 **How it works:**
 
 - Automatically stores successful task completions with full conversation context
 - Uses hybrid search (70% semantic + 30% keyword) to find similar past tasks
-- Retrieves relevant episodes before processing new queries
+- **Conversation-aware injection**: Only injects episodic memory when relevant
+  - Detects follow-up questions and skips injection (uses conversation context instead)
+  - Filters out episodes redundant with current conversation
+  - Uses semantic similarity (with embeddings) or Jaccard similarity (fallback)
 - Injects compact context showing: task → tools used → outcome
 - Automatic cleanup: keeps max 1000 episodes, removes entries older than 90 days
 

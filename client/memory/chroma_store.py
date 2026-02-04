@@ -1,5 +1,6 @@
+import ast
 import chromadb
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 from typing import Any, Dict, List
 from utils.config import config
@@ -127,8 +128,6 @@ class ChromaEpisodicStore:
             # Extract tool names from tools string
             tool_names = []
             if isinstance(tools_str, str):
-                import ast
-
                 try:
                     tools_list = ast.literal_eval(tools_str)
                     tool_names = [
@@ -175,8 +174,6 @@ class ChromaEpisodicStore:
             max_episodes: Maximum number of episodes to keep
             max_age_days: Maximum age in days
         """
-        from datetime import timedelta
-
         if len(self.metadatas) == 0:
             return
 

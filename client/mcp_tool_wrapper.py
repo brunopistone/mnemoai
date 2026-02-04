@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Type
 from langchain_core.tools import BaseTool, ToolException
 from langchain_core.callbacks import CallbackManagerForToolRun
 from pydantic import BaseModel, Field, create_model
-from mcp import StdioServerParameters
+from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool as MCPTool
 
@@ -193,8 +193,6 @@ class MCPClientWrapper:
 
         self._client_cm = stdio_client(self.server_params)
         read, write = await self._client_cm.__aenter__()
-
-        from mcp import ClientSession
 
         self._session = ClientSession(read, write)
         await self._session.__aenter__()

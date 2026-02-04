@@ -1,20 +1,7 @@
 """LangGraph-based client implementation."""
 
+import ast
 import asyncio
-import json
-import os
-import re
-import shutil
-import sqlite3
-import threading
-import traceback
-from datetime import date, datetime
-from typing import Optional
-
-from langchain_core.callbacks import BaseCallbackHandler
-from mcp import StdioServerParameters
-import sys
-
 from client.agent import (
     LangGraphAgent,
     convert_strands_messages_to_langchain,
@@ -27,7 +14,20 @@ from client.memory.episodic_memory import EpisodicMemoryManager
 from client.memory.reflector import Reflector
 from client.memory.playbook_store import PlaybookStore
 from client.ui.spinner import Spinner
+from datetime import date, datetime
+import json
+from langchain_core.callbacks import BaseCallbackHandler
+from mcp import StdioServerParameters
+from models.llm_controller import LangChainLLMController
+import numpy as np
+import os
 from server.tools import count_tokens
+import shutil
+import sqlite3
+import sys
+import threading
+import traceback
+from typing import Optional
 from utils.config import config
 from utils.logger import logger
 
@@ -131,8 +131,6 @@ class LangGraphClient:
         self.model = None
 
         # LLM controller
-        from models.llm_controller import LangChainLLMController
-
         self.llm_controller = LangChainLLMController(verbose=self.verbose_mode)
 
         # Managers
@@ -227,6 +225,7 @@ class LangGraphClient:
         if config.get("EMBED_MODEL_ID"):
             try:
                 from models.embeddings_controller import EmbeddingsController
+
                 embeddings = EmbeddingsController()
             except Exception as e:
                 logger.warning(f"Could not initialize embeddings for playbook: {e}")
@@ -410,17 +409,95 @@ class LangGraphClient:
 
         return prompt
 
+    def _get_conversation_context(self) -> str:
+        """Extract text context from current conversation.
+
+        Returns:
+            Concatenated text from recent messages
+        """
+        if not self.agent or not self.agent.messages:
+            return ""
+
+        context_parts = []
+        for msg in self.agent.messages[-6:]:
+            content = getattr(msg, "content", "")
+            if isinstance(content, str) and content:
+                context_parts.append(content[:1000])
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and "text" in item:
+                        context_parts.append(item["text"][:1000])
+
+        return " ".join(context_parts)
+
+    def _compute_similarity(self, text1: str, text2: str) -> float:
+        """Compute similarity between two texts.
+
+        Uses embeddings if available, falls back to lexical similarity.
+
+        Args:
+            text1: First text
+            text2: Second text
+
+        Returns:
+            Similarity score (0-1)
+        """
+        if not text1 or not text2:
+            return 0.0
+
+        # Try semantic similarity with embeddings
+        if config.get("EMBED_MODEL_ID"):
+            try:
+                from models.embeddings_controller import EmbeddingsController
+
+                embeddings = EmbeddingsController()
+                emb = embeddings.embed([text1, text2])
+                emb1, emb2 = emb[0], emb[1]
+                similarity = np.dot(emb1, emb2) / (
+                    np.linalg.norm(emb1) * np.linalg.norm(emb2)
+                )
+                return float(similarity)
+            except Exception:
+                pass
+
+        # Fallback: Jaccard similarity on word sets
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        if not words1 or not words2:
+            return 0.0
+        intersection = len(words1 & words2)
+        union = len(words1 | words2)
+        return intersection / union if union > 0 else 0.0
+
     def _inject_episodic_context(self, prompt: str) -> str:
         """Inject episodic memory context into the prompt.
+
+        Uses similarity (semantic or lexical) to determine:
+        1. If the query relates to the current conversation (skip injection)
+        2. If retrieved episodes add new information vs. being redundant
 
         Args:
             prompt: Original prompt
 
         Returns:
-            Prompt with episodic context prepended
+            Prompt with episodic context prepended (if relevant and non-redundant)
         """
+        conversation_context = self._get_conversation_context()
+
+        # If there's existing conversation, check if query relates to it
+        if conversation_context:
+            query_to_conv_similarity = self._compute_similarity(
+                prompt, conversation_context
+            )
+            follow_up_threshold = config.get("EPISODIC_MEMORY", {}).get(
+                "FOLLOW_UP_THRESHOLD", 0.4  # Lower for Jaccard fallback
+            )
+            if query_to_conv_similarity > follow_up_threshold:
+                return prompt
+
+        # Retrieve similar episodes
         similar_episodes = self.episodic_memory.retrieve_similar_episodes(
-            prompt, top_k=3
+            prompt, top_k=5
         )
         retrieval_threshold = config.get("EPISODIC_MEMORY", {}).get(
             "RETRIEVAL_THRESHOLD", 0.7
@@ -431,30 +508,46 @@ class LangGraphClient:
             if ep.get("similarity", 0) > retrieval_threshold
         ]
 
-        if relevant_episodes:
-            context = "[Episodic Memory - Similar Past Tasks]\n"
-            for i, ep in enumerate(relevant_episodes, 1):
-                task = ep.get("task", "Unknown task")[:70]
-                tools = ep.get("tools", "")
-                tool_names = []
-                if isinstance(tools, str):
-                    import ast
+        if not relevant_episodes:
+            return prompt
 
-                    try:
-                        tools_list = ast.literal_eval(tools)
-                        tool_names = [
-                            t.get("name", "") for t in tools_list if isinstance(t, dict)
-                        ]
-                    except:
-                        pass
-                tools_str = ", ".join(tool_names) if tool_names else "no tools"
-                similarity = ep.get("similarity", 0)
-                context += (
-                    f'{i}. "{task}" → {tools_str} (similarity: {similarity:.2f})\n'
+        # Filter episodes redundant with current conversation
+        if conversation_context:
+            redundancy_threshold = config.get("EPISODIC_MEMORY", {}).get(
+                "REDUNDANCY_THRESHOLD", 0.5
+            )
+            filtered_episodes = []
+            for ep in relevant_episodes:
+                ep_task = ep.get("task", "")
+                ep_to_conv_similarity = self._compute_similarity(
+                    ep_task, conversation_context
                 )
-            return f"{context}\n\n{prompt}"
+                if ep_to_conv_similarity < redundancy_threshold:
+                    filtered_episodes.append(ep)
+            relevant_episodes = filtered_episodes
 
-        return prompt
+        if not relevant_episodes:
+            return prompt
+
+        # Format and inject
+        context = "[Episodic Memory - Similar Past Tasks]\n"
+        for i, ep in enumerate(relevant_episodes, 1):
+            task = ep.get("task", "Unknown task")[:70]
+            tools = ep.get("tools", "")
+            tool_names = []
+            if isinstance(tools, str):
+                try:
+                    tools_list = ast.literal_eval(tools)
+                    tool_names = [
+                        t.get("name", "") for t in tools_list if isinstance(t, dict)
+                    ]
+                except:
+                    pass
+            tools_str = ", ".join(tool_names) if tool_names else "no tools"
+            similarity = ep.get("similarity", 0)
+            context += f'{i}. "{task}" → {tools_str} (similarity: {similarity:.2f})\n'
+
+        return f"{context}\n\n{prompt}"
 
     def _count_context_tokens(self) -> int:
         """Count total tokens in the current conversation context.
