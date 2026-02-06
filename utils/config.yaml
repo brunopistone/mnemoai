@@ -24,7 +24,7 @@ DOC_MAX_TOKENS: 16384
 ENABLE_RAG: true
 RAG_MAX_TOKENS: 8192
 EMBED_MODEL_ID:
-  NAME: MXBAI-Embed-Large:latest
+  NAME: qwen3-embedding:0.6b
   TYPE: ollama
   HOST: localhost
   PORT: 11434
