@@ -20,7 +20,7 @@ cp ollama.environment.plist ~/Library/LaunchAgents/
 2. Load the launch agent:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/ollama.environment.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ollama.environment.plist
 ```
 
 3. Restart Ollama:
@@ -43,9 +43,11 @@ ps aux | grep "ollama serve" | grep -v grep | awk '{print $2}' | head -1 | xargs
 Edit `~/Library/LaunchAgents/ollama.environment.plist` and reload:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/ollama.environment.plist
-launchctl load ~/Library/LaunchAgents/ollama.environment.plist
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ollama.environment.plist 2>/dev/null
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ollama.environment.plist
 ```
+
+> Note: The `bootout` command may fail with an I/O error if the agent has already finished running. This is expected since the agent uses `LaunchOnlyOnce` and can be safely ignored.
 
 ### KV Cache Options
 
