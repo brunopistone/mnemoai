@@ -154,3 +154,6 @@ dmypy.json
 
 # Base data exclude
 */**/cdk.*/
+
+./claude
+./**/claude
