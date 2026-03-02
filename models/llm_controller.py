@@ -29,7 +29,7 @@ class LLMController(BaseModelController):
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
         self.repeat_last_n = self.model_id.get("REPEAT_LAST_N", None)
         self.stop = self.model_id.get("STOP", None)
-        self.stream = self.model_id.get("STREAM", False)
+        self.stream = self.model_id.get("STREAM", True)
         self.temperature = self.model_id.get("TEMPERATURE", 0.1)
         self.top_p = self.model_id.get("TOP_P", None)
         self.top_k = self.model_id.get("TOP_K", None)

@@ -1,12 +1,12 @@
 # Personal AI Assistant
 
-[![Python Version](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
 A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on the Strands framework with support for multiple LLM providers (Ollama, Amazon Bedrock, Amazon SageMaker AI).
 
-![Demo](images/assistaint-demo.gif)
+![Demo](images/assistant-demo.gif)
 
 ## ✨ Key Features
 
@@ -16,7 +16,8 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
-- **📊 Training Data Collection**: SFT markers for quality training data
+- **📖 ACE Playbook**: Learns strategies from successes AND failures via Agentic Context Engineering
+- **📊 Training Data Collection**: Mark high-quality responses for SFT training
 - **🔍 Web Search**: Integrated Brave Search API (_if available_)
 - **🌐 Web Crawler**: Extract and index content from web pages
 - **🖼️ Vision Support**: Image analysis with vision models (_if available_)
@@ -47,6 +48,8 @@ ai-assistant/
 │   │   └── user_profile_manager.py         # User profiling and learning
 │   └── memory/                             # Memory systems
 │       ├── episodic_memory.py              # Episodic memory manager
+│       ├── reflector.py                    # ACE Reflector - extracts strategies
+│       ├── playbook_store.py               # ACE Playbook - stores learned strategies
 │       ├── faiss_store.py                  # FAISS episodic store
 │       └── chroma_store.py                 # ChromaDB episodic store
 │
@@ -89,6 +92,7 @@ ai-assistant/
 │   ├── vision_model_controller.py          # Vision model initialization
 │   ├── embeddings_controller.py            # Embeddings initialization
 │   └── classes/                            # Custom implementations
+│       ├── __init__.py
 │       ├── thinking_ollama.py              # Ollama with thinking tags
 │       └── sagemaker_vision_model.py       # SageMaker vision wrapper
 │
@@ -143,10 +147,26 @@ ai-assistant/
 
 ### Prerequisites
 
-- Python 3.8+
-- (Optional) Ollama installed for local models
-- (Optional) AWS credentials for Bedrock/SageMaker
-- (Optional) ripgrep for fast content search
+**Required:**
+
+- Python 3.11+
+- At least **one LLM provider** configured and accessible (see below)
+
+**LLM Providers (choose at least one):**
+
+| Provider | Requirements |
+|---|---|
+| **Ollama** (local, recommended for getting started) | [Install Ollama](https://ollama.ai), then pull a model: `ollama pull qwen3:4b` |
+| **Amazon Bedrock** | AWS CLI configured (`aws configure`) with Bedrock access in your region |
+| **Amazon SageMaker AI** | AWS CLI configured with a deployed SageMaker endpoint |
+| **OpenAI** | Set `OPENAI_API_KEY` environment variable |
+
+**Optional:**
+
+- **ripgrep** — 10-100x faster content search (see installation below)
+- **Embedding model** — Required if you enable RAG, Episodic Memory, or ACE Playbook (see [Feature Toggles](#-feature-toggles))
+- **Vision model** — Required for image analysis (`describe_image` tool)
+- **Brave Search API key** — Required for web search ([get one here](https://brave.com/search/api/))
 
 ### Installation
 
@@ -154,7 +174,7 @@ ai-assistant/
 
 ```bash
 git clone https://github.com/brunopistone/personal-ai-assistant.git
-cd ai-assistant
+cd personal-ai-assistant
 ```
 
 2. **Set up Python environment** (choose one):
@@ -226,15 +246,37 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
-Edit `utils/config.yaml`:
+Copy and edit `utils/config.yaml`. At minimum, configure your LLM provider:
+
+**For Ollama (quickest setup):**
+
+```bash
+# Pull a model first
+ollama pull qwen3:4b
+```
 
 ```yaml
+# utils/config.yaml (minimal)
 MODEL_ID:
-  NAME: qwen3-4b-thinking-2507-q6-k:latest
-  TYPE: ollama # or bedrock, sagemaker
+  NAME: qwen3:4b
+  TYPE: ollama
   HOST: localhost
   PORT: 11434
+  TEMPERATURE: 0.6
+
+# Profile name (used for session data isolation)
+PROFILE:
+  NAME: default
+
+# Everything else can be left at defaults or disabled
+ENABLE_RAG: false
+ENABLE_EPISODIC_MEMORY: false
+ENABLE_PLAYBOOK: false
+ENABLE_WEB_SEARCH: false
+ENABLE_WEB_CRAWL: false
 ```
+
+See [Configuration](#-configuration) for all options and [Feature Toggles](#-feature-toggles) for enabling advanced features.
 
 5. **Run the assistant**:
 
@@ -258,6 +300,23 @@ personal-ai-assistant
 ```
 
 See `bash/system-command-app/README.md` for details.
+
+## 🔀 Feature Toggles
+
+All advanced features can be independently enabled or disabled in `utils/config.yaml`. Here is a quick reference:
+
+| Feature | Config Key | Default | Dependencies |
+|---|---|---|---|
+| **RAG** (document indexing & search) | `ENABLE_RAG: true` | `true` | Embedding model (`EMBED_MODEL_ID`) |
+| **Episodic Memory** (learn from past tasks) | `ENABLE_EPISODIC_MEMORY: true` | `true` | Embedding model (`EMBED_MODEL_ID`) |
+| **ACE Playbook** (learn strategies from success/failure) | `ENABLE_PLAYBOOK: true` | `true` | None (embeddings optional for refinement) |
+| **User Profiling** (personalized responses) | `PROFILE.USE_PROFILING: true` | `true` | Activates after 5+ interactions |
+| **Web Search** | `ENABLE_WEB_SEARCH: true` | `true` | `BRAVE_API_KEY` configured |
+| **Web Crawler** | `ENABLE_WEB_CRAWL: true` | `true` | None |
+| **Vision** (image analysis) | Configure `VISION_MODEL_ID` | Disabled if not set | Vision-capable model |
+| **Verbose Mode** (show thinking process) | CLI flag `--no-verbose` | Enabled | Supported by model |
+
+**Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](#embeddings-model)).
 
 ## 💡 Usage
 
@@ -325,10 +384,10 @@ MCP server that provides tools to the LLM.
   - `tools_manager.py`: Centralized tool registration and utilities
   - `fs_read.py`: File reading (text, CSV, JSON, PDF, DOCX)
   - `fs_write.py`: File writing with mandatory user confirmation (dry-run preview)
-  - `edit.py`: Precise string replacement with validation and uniqueness checking
+  - `file_edit.py`: Precise string replacement with validation and uniqueness checking
   - `execute_bash.py`: Shell command execution with intelligent error handling
-  - `search.py`: Fast file/content search (glob patterns + ripgrep)
-  - `todo.py`: Todo list management for multi-step tasks
+  - `file_search.py`: Fast file/content search (glob patterns + ripgrep)
+  - `todo_manager.py`: Todo list management for multi-step tasks
   - `error_handler.py`: Standardized error handling decorator for all tools
   - `web_search.py`: Brave Search integration
   - `web_crawler.py`: Web page content extraction with RAG integration
@@ -386,7 +445,7 @@ Each chat session has a unique ID used for:
 
 - RAG document indexing (session-scoped)
 - Chunk caching for file summarization
-- DPO pair collection
+- Training data collection (SFT markers)
 
 Session data is stored in `~/agent-conversations/{profile_name}/`:
 
@@ -394,10 +453,12 @@ Session data is stored in `~/agent-conversations/{profile_name}/`:
 ~/agent-conversations/
 └── {profile_name}/
     ├── conversations/           # Saved conversations
-    ├── dpo_pairs/              # DPO training data
     ├── profiles/               # User profiles
+    ├── episodic_memory/        # Episodic memory store (FAISS or ChromaDB)
+    ├── playbook/               # ACE playbook strategies and metrics
+    ├── todos/                  # Todo list data
     ├── rag_session_id.txt      # Current RAG session
-    ├── rag_store_*.faiss       # FAISS vector index
+    ├── rag_store_*.faiss       # FAISS vector index (or ChromaDB directory)
     └── chunk_cache_*.db        # SQLite chunk cache
 ```
 
@@ -420,7 +481,7 @@ Track multi-step tasks with automatic status management:
 - Three states: `pending`, `in_progress`, `completed`
 - Enforces exactly ONE task in progress at a time
 - Real-time progress tracking
-- Stored in `~/.claude/{profile}/current_todos.json`
+- Stored in `~/agent-conversations/{profile}/todos/current_todos.json`
 
 **Usage Example:**
 
@@ -604,6 +665,7 @@ Implementation planning workflow for complex tasks:
 - Unclear requirements
 
 **Plan Storage:** `~/.claude/current_plan.json`
+**Task Output:** `~/.claude/tasks/`
 
 ### 🔄 Background Tasks
 
@@ -646,7 +708,7 @@ get_task_output(task_id="abc123", tail_lines=50)
 
 ### Model Configuration
 
-The assistant supports three model types:
+The assistant supports multiple model types:
 
 #### Amazon Bedrock
 
@@ -680,8 +742,7 @@ MODEL_ID:
   TYPE: openai
   STREAM: true
   REASONING_EFFORT: medium
-ENV:
-  OPENAI_API_KEY: your-openai-api-key
+# Requires OPENAI_API_KEY environment variable
 ```
 
 #### Amazon SageMaker AI
@@ -740,34 +801,131 @@ VISION_MODEL_ID:
   TEMPERATURE: 0.3
 ```
 
+### Model Parameters
+
+All `MODEL_ID` configurations support these optional parameters:
+
+| Parameter | Description | Default |
+|---|---|---|
+| `TEMPERATURE` | Sampling temperature | `0.1` |
+| `MAX_TOKENS` | Maximum tokens to generate | Model default |
+| `TOP_P` | Top-p (nucleus) sampling | `None` |
+| `TOP_K` | Top-k sampling (Ollama/SageMaker) | `None` |
+| `MIN_P` | Min-P sampling (Ollama) | `None` |
+| `STOP` | Stop sequences (list) | `None` |
+| `STREAM` | Enable streaming responses | `true` |
+| `REPETITION_PENALTY` | Repetition penalty (Ollama/SageMaker) | `None` |
+| `PRESENCE_PENALTY` | Presence penalty (Ollama) | `None` |
+| `FREQUENCY_PENALTY` | Frequency penalty (Ollama) | `None` |
+| `REASONING` | Enable thinking/reasoning mode | `false` |
+| `THINKING_TOKENS` | Token budget for reasoning (Bedrock) | `2048` |
+| `REASONING_EFFORT` | Reasoning effort level (OpenAI o1/o3) | `None` |
+
+### General Parameters
+
+```yaml
+# Context window size (passed to model as num_ctx for Ollama)
+MAX_CONVERSATION_TOKENS: 65536
+
+# Maximum tokens when reading documents (CSV, JSON, text files)
+DOC_MAX_TOKENS: 16384
+
+# Profile configuration
+PROFILE:
+  NAME: default          # Used for session data isolation (~/agent-conversations/{NAME}/)
+  USE_PROFILING: true    # Enable automatic user profiling
+```
+
+### Embeddings Configuration
+
+```yaml
+EMBEDDINGS:
+  CACHE_ENABLED: true      # LRU cache for embedding vectors (avoids re-embedding same text)
+  CACHE_SIZE: 1000         # Maximum cached embeddings
+  FALLBACK_ENABLED: true   # Fall back to SHA256 if embedding model unavailable
+  FALLBACK_TYPE: "sha256"  # Fallback type (sha256, random, zeros)
+```
+
+### LLM Interaction Configuration
+
+```yaml
+LLM:
+  ENABLE_THINKING: true    # Enable thinking tags (verbose mode)
+  RETRY_ENABLED: true      # Retry failed LLM calls
+  MAX_RETRIES: 3           # Maximum retry attempts
+  RETRY_DELAY: 1.0         # Seconds between retries
+  RETRY_BACKOFF: 2.0       # Exponential backoff multiplier
+  SUMMARIZATION_THINK: false # Include thinking in summarization
+  TOKEN_COUNTING:
+    OLLAMA_APPROXIMATION: 1.3  # Chars-to-tokens multiplier for Ollama
+    FALLBACK_MODEL: "gpt-4"    # Tiktoken model for fallback counting
+```
+
 ### System Prompt
 
-The system prompt in `config.yaml` defines the assistant's behavior. Key sections:
+The system prompt in `config.yaml` defines the assistant's behavior. Customize the `SYSTEM_PROMPT` field to change the assistant's personality, instructions, and tool usage patterns. Key sections in the default prompt:
 
-- `<general_assistant_info>`: Basic identity and capabilities
-- `<critical_response_requirement>`: Response quality standards
-- `<reasoning_and_response>`: Thinking tag requirements
-- `<core_principles>`: RAG-first mandate, user intent focus
-- `<tool_usage>`: Tool selection rules and safety checks
-- `<mandatory_rag_check>`: RAG workflow enforcement
-- `<rag_query_guidelines>`: Query optimization rules
+- `<identity>`: Basic identity and core principles
+- `<reasoning_discipline>`: Thinking rules and loop detection
+- `<output_format>`: Response formatting requirements
+- `<information_sources>`: RAG vs web vs internal knowledge decision tree
+- `<file_operations>`: Read/write/edit workflow rules
+- `<search_tools>`: Glob and grep usage guidance
+- `<git_operations>`: Git safety rules
+- `<task_management>`: Todo, plan mode, and background task rules
+- `<error_handling>`: Error response guidelines
+- `<communication>`: Style and security rules
 
 ### RAG Configuration
 
 ```yaml
-ENABLE_RAG: true
-RAG_MAX_TOKENS: 8192
-DOC_CHUNK_TOKENS: 1024
+ENABLE_RAG: true             # Master toggle for RAG system
+RAG_MAX_TOKENS: 8192         # Threshold: documents above this are ingested into RAG
+DOC_CHUNK_TOKENS: 256        # Chunk size in tokens (recommended: 256-1024)
 VECTOR_STORE:
-  TYPE: faiss # or chromadb
+  TYPE: chromadb              # Vector store backend: "faiss" or "chromadb"
 ```
+
+**Requires:** An embedding model configured via `EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
 
 ### Episodic Memory Configuration
 
 ```yaml
 ENABLE_EPISODIC_MEMORY: true
-EPISODIC_MEMORY_STORE: chromadb # or faiss
+EPISODIC_MEMORY_STORE: chromadb    # or faiss
+EPISODIC_MEMORY:
+  ENABLED: true
+  STORE_TYPE: chromadb             # or faiss
+  # Similarity Thresholds
+  DUPLICATE_THRESHOLD: 0.95       # Higher = stricter duplicate detection
+  RETRIEVAL_THRESHOLD: 0.7        # Minimum similarity to retrieve episodes
+  # Hybrid Search Weights
+  SEMANTIC_WEIGHT: 0.7            # Semantic similarity weight (0-1)
+  KEYWORD_WEIGHT: 0.3             # Keyword matching weight (0-1)
+  # Token and Size Limits
+  MAX_TOKENS_PER_EPISODE: 400     # Max tokens for episode text
+  MAX_EPISODES: 1000              # Maximum stored episodes
+  MAX_AGE_DAYS: 90                # Maximum episode age in days
+  # Success Detection
+  SUCCESS_MARKERS:                # Phrases that indicate task success
+    - thanks
+    - perfect
+    - great
+    - worked
+  CORRECTION_MARKERS:             # Phrases that indicate errors
+    - wrong
+    - error
+    - fix
+    - actually
+  # Storage Behavior
+  IMMEDIATE_STORAGE: true         # Store episodes immediately
+  MIN_TOOLS_OR_LENGTH: 300        # Min response length if no tools used
+  # Query Enhancement
+  ENABLE_QUERY_EXPANSION: true    # Expand queries with synonyms
+  QUERY_EXPANSION_TERMS: 3        # Max terms to add per query
 ```
+
+**Requires:** An embedding model configured via `EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
 
 **How it works:**
 
@@ -784,7 +942,7 @@ EPISODIC_MEMORY_STORE: chromadb # or faiss
 - All tools executed successfully
 - Filters out simple greetings and short responses
 
-#### Embeddings model
+#### Embeddings Model
 
 For Bedrock:
 
@@ -947,6 +1105,73 @@ EMBED_MODEL_ID: # Required for both stores
   TYPE: ollama
 ```
 
+### ACE Playbook (Agentic Context Engineering)
+
+The ACE Playbook learns strategies from both successes AND failures, implementing the Agentic Context Engineering framework for continuous improvement.
+
+**How it works:**
+
+1. **Reflector**: After each interaction, analyzes tool executions:
+   - Detects failure patterns (file not found, string not found, permission denied, etc.)
+   - Identifies successful strategies for specific tools (file_edit, execute_bash)
+   - Extracts specific, actionable insights (not generic summaries)
+   - Tracks metrics (success/failure rates, failure types) in `metrics.json`
+
+2. **Playbook Store**: Maintains structured strategy entries:
+
+   ```json
+   {
+     "context": "editing python files",
+     "strategy": "Read the file first to get exact string including whitespace before using str_replace",
+     "source": "Failed file_edit on 2026-02-01: string_not_found",
+     "outcome": "failure",
+     "tools": ["file_edit"],
+     "confidence": 0.9
+   }
+   ```
+
+3. **Context Injection**: Injects relevant strategies into the system prompt at startup:
+
+   ```
+   [Playbook - Learned Strategies]
+   Avoid these patterns:
+     ✗ [editing files]: Read the file first to get exact string before str_replace
+   Effective strategies:
+     ✓ [searching files]: Use glob_search instead of find for better performance
+   ```
+
+4. **Lazy Refinement**: Only deduplicates when hitting token limits, using semantic similarity if embeddings are configured.
+
+**What gets stored:**
+
+- **Failures**: Specific patterns like `string_not_found`, `file_not_found`, `permission_denied`, `command_failed`, etc.
+- **Successes**: Only for tools with reusable patterns (file_edit, execute_bash with specific commands)
+- **Not stored**: Generic successes without actionable strategies
+
+**Key Differences from Episodic Memory:**
+
+| Feature     | Episodic Memory       | ACE Playbook            |
+| ----------- | --------------------- | ----------------------- |
+| Stores      | Full task completions | Granular strategies     |
+| Learns from | Successes only        | Successes AND failures  |
+| Format      | Conversation context  | Structured rules        |
+| Retrieval   | Semantic similarity   | Context + tool matching |
+
+**Configuration:**
+
+```yaml
+ENABLE_PLAYBOOK: true
+PLAYBOOK:
+  MAX_ENTRIES: 500 # Maximum entries before refinement
+  SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
+  MAX_INJECT: 10 # Maximum entries to inject per query
+```
+
+**Storage Location:**
+
+- Strategies: `~/agent-conversations/{profile}/playbook/playbook.json`
+- Metrics: `~/agent-conversations/{profile}/playbook/metrics.json`
+
 ### Training Data Collection
 
 #### Supervised Fine-Tuning (SFT)
@@ -954,25 +1179,6 @@ EMBED_MODEL_ID: # Required for both stores
 - Use `/good` to mark high-quality responses
 - Saved conversations include quality markers
 - Extract labeled interactions for training
-
-#### Direct Preference Optimization (DPO)
-
-- **Manual**: Use `/reject` to generate alternative response
-- **Auto**: Enable `/dpo` mode for background collection
-- Saved as JSONL in `~/agent-conversations/{profile}/dpo_pairs/`
-
-**DPO Pair Format:**
-
-```json
-{
-  "prompt": "user question",
-  "chosen": "good response",
-  "rejected": "alternative response",
-  "metadata": { "timestamp": "20251104_153000" }
-}
-```
-
-See `bash/dpo-collection/DPO_COLLECTION.md` for details.
 
 ## 📦 Dependencies
 
@@ -997,7 +1203,6 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 
 - `strands-agents`: Agent framework
 - `mcp`, `mcp[cli]`: Model Context Protocol
-- `litellm`: Multi-provider LLM support
 - `ollama`: Local LLM support
 - `boto3`: AWS Bedrock/SageMaker
 - `tiktoken`: Token counting
@@ -1093,6 +1298,58 @@ def initialize_model(self):
 
 2. Add configuration in `config.yaml`
 
+## 🔧 Ollama Utilities (Optional)
+
+The `bash/` directory contains helper scripts for Ollama users on macOS and Linux.
+
+### Ollama Environment Setup (macOS)
+
+Sets Ollama performance environment variables at boot and launches the Ollama app:
+
+```bash
+# Variables set: OLLAMA_FLASH_ATTENTION=1, OLLAMA_KV_CACHE_TYPE=q8_0, OLLAMA_NUM_GPU=999
+```
+
+**Setup:**
+
+1. Edit `bash/ollama-env-mac/ollama.environment.plist` (no changes needed for defaults)
+2. Copy to LaunchAgents:
+
+```bash
+cp bash/ollama-env-mac/ollama.environment.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/ollama.environment.plist
+```
+
+### VRAM Cleaner
+
+Automatically unloads idle Ollama models from VRAM to free GPU memory. Useful when running multiple models or when GPU memory is limited.
+
+**macOS (LaunchAgent, runs every 60 seconds):**
+
+1. Edit `bash/ollama-freeup-vram/com.ollama.vramcleaner.plist`:
+   - Replace `<PATH_TO_FOLDER>` with the actual path to this repository
+   - Replace `<PATH_TO_USER_HOME>` with your home directory
+2. Install:
+
+```bash
+cp bash/ollama-freeup-vram/com.ollama.vramcleaner.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.ollama.vramcleaner.plist
+```
+
+**Linux (systemd):**
+
+1. Edit `bash/ollama-freeup-vram/ollama-vram-cleaner.service`:
+   - Replace `<PATH_TO_FOLDER>` with the actual path
+2. Install:
+
+```bash
+sudo cp bash/ollama-freeup-vram/ollama-vram-cleaner.service /etc/systemd/system/
+sudo systemctl enable ollama-vram-cleaner
+sudo systemctl start ollama-vram-cleaner
+```
+
+See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for more details.
+
 ## 🐛 Troubleshooting
 
 ### Common Issues
@@ -1101,23 +1358,33 @@ def initialize_model(self):
 
 - Verify Python path in `client.py` matches your environment
 - Check server path is correct
+- Ensure all dependencies are installed (`pip install -r requirements.txt`)
 
 **Model Loading Issues**
 
 - Verify model name and type in `config.yaml`
-- For Ollama: Ensure model is pulled (`ollama pull model-name`)
-- For AWS: Check credentials and region
+- For Ollama: Ensure Ollama is running (`ollama serve`) and model is pulled (`ollama pull model-name`)
+- For AWS Bedrock: Check credentials (`aws sts get-caller-identity`), region, and model access
+- For OpenAI: Ensure `OPENAI_API_KEY` environment variable is set
 
-**RAG Not Working**
+**RAG / Episodic Memory Not Working**
 
-- Ensure `ENABLE_RAG: true` in config
-- Check embedding model is available
+- Ensure `ENABLE_RAG: true` (or `ENABLE_EPISODIC_MEMORY: true`) in config
+- Verify embedding model is configured and available (`EMBED_MODEL_ID` in config)
+- For Ollama embeddings: ensure the embedding model is pulled (`ollama pull mxbai-embed-large`)
+- Check logs for "fallback embeddings" warnings — this means the real model is unreachable
 - Verify documents are being indexed with `list_documents()`
 
 **Permission Errors**
 
 - Ensure write permissions for `~/agent-conversations/`
+- Ensure write permissions for `~/.claude/` (used by plan mode and background tasks)
 - Check file paths in configuration
+
+**Import Errors on Startup**
+
+- Some dependencies (chromadb, faiss-cpu, crawl4ai) can be tricky to install. Check platform-specific instructions.
+- On Apple Silicon: `faiss-cpu` may require `pip install faiss-cpu --no-cache-dir`
 
 ### Logging
 

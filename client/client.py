@@ -5,6 +5,8 @@ from datetime import date, datetime
 from client.managers.agent_conversation_manager import AgentConversationManager
 from client.managers.user_profile_manager import UserProfileManager
 from client.memory.episodic_memory import EpisodicMemoryManager
+from client.memory.reflector import Reflector
+from client.memory.playbook_store import PlaybookStore
 from client.ui.spinner import Spinner
 import os
 import json
@@ -44,7 +46,7 @@ class StrandsClient:
         self.server_params = StdioServerParameters(
             command=sys.executable,
             args=[server_path],
-            env=None,
+            env=os.environ.copy(),
         )
 
         # Initialize profile manager first
@@ -129,10 +131,92 @@ class StrandsClient:
         else:
             logger.debug("Episodic memory is disabled")
 
+        # ACE components (Reflector + Playbook)
+        self.reflector = None
+        self.playbook = None
+        if config.get("ENABLE_PLAYBOOK", False):
+            self._initialize_playbook()
+
         # Track previous interaction for episodic memory
         self.previous_query = None
         self.previous_response = None
         self.previous_messages = None
+
+    def _initialize_playbook(self) -> None:
+        """Initialize ACE Reflector and Playbook store."""
+        logger.debug("Initializing ACE Playbook...")
+
+        user_home = os.path.expanduser("~")
+        profile_name = config.get("PROFILE", {}).get("NAME", "default")
+        playbook_path = os.path.join(
+            user_home, "agent-conversations", profile_name, "playbook"
+        )
+        os.makedirs(playbook_path, exist_ok=True)
+
+        # Get embeddings for semantic deduplication if available
+        embeddings = None
+        if config.get("EMBED_MODEL_ID"):
+            try:
+                from models.embeddings_controller import EmbeddingsController
+
+                embeddings = EmbeddingsController()
+            except Exception as e:
+                logger.warning(f"Could not initialize embeddings for playbook: {e}")
+
+        self.reflector = Reflector(persist_path=playbook_path)
+        self.playbook = PlaybookStore(
+            persist_path=playbook_path,
+            embeddings_controller=embeddings,
+            max_entries=config.get("PLAYBOOK", {}).get("MAX_ENTRIES", 500),
+            similarity_threshold=config.get("PLAYBOOK", {}).get(
+                "SIMILARITY_THRESHOLD", 0.85
+            ),
+        )
+
+        stats = self.playbook.get_stats()
+        logger.debug(f"Playbook initialized ({stats['total_entries']} entries)")
+
+    def reflect_and_learn(self, task: str) -> None:
+        """Run reflection on the last interaction and update playbook.
+
+        Args:
+            task: The original user task
+        """
+        if not self.reflector or not self.playbook:
+            return
+
+        if not self.agent or not hasattr(self.agent, "messages") or not self.agent.messages:
+            return
+
+        try:
+            entries = self.reflector.reflect_on_trajectory(
+                messages=self.agent.messages,
+                task=task,
+            )
+
+            if entries:
+                self.playbook.append_batch(entries)
+                logger.debug(f"Reflector: learned {len(entries)} strategies")
+        except Exception as e:
+            logger.error(f"Reflection failed: {e}")
+
+    def _get_playbook_context(self) -> str:
+        """Get formatted playbook context for system prompt.
+
+        Returns:
+            Formatted playbook strategies or empty string
+        """
+        if not self.playbook:
+            return ""
+
+        # Get all entries for system prompt (not task-specific)
+        entries = self.playbook.get_relevant_entries(
+            task="",  # Empty task gets general strategies
+            top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
+            include_failures=True,
+        )
+
+        return self.playbook.format_for_prompt(entries) if entries else ""
 
     def _process_thinking_buffer(self, buffer: str, in_tag: bool) -> tuple:
         """Process buffered content, handling thinking tags that may span chunks.
@@ -865,11 +949,20 @@ class StrandsClient:
                         "callback_handler": self.__verbose_callback_handler
                     }
 
+                # Build system prompt with playbook context
+                system_prompt_with_context = self.system_prompt
+                if self.playbook:
+                    playbook_context = self._get_playbook_context()
+                    if playbook_context:
+                        system_prompt_with_context = (
+                            f"{self.system_prompt}\n\n{playbook_context}"
+                        )
+
                 # Create agent with tools
                 self.agent = Agent(
                     model=self.model,
                     tools=self.tools,
-                    system_prompt=self.system_prompt,
+                    system_prompt=system_prompt_with_context,
                     **additional_params,
                 )
         except Exception as e:
