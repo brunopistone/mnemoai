@@ -1,6 +1,7 @@
 """LangGraph-based agent implementation."""
 
 import operator
+import re
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 
 from langchain_core.messages import (
@@ -154,10 +155,95 @@ class LangGraphAgent:
         if response is None:
             response = self.model_with_tools.invoke(messages, config=config)
 
-        # Extract final thinking content
+        # Extract final thinking content from all possible sources
         thinking = None
+
+        # 1. Check additional_kwargs (Ollama via wrapper, LiteLLM)
         if hasattr(response, "additional_kwargs"):
             thinking = response.additional_kwargs.get("reasoning_content")
+
+        # 2. Check Bedrock-style content blocks
+        if not thinking and isinstance(response.content, list):
+            thinking_parts = []
+            for block in response.content:
+                if isinstance(block, dict) and block.get("type") == "thinking":
+                    thinking_parts.append(block.get("thinking", ""))
+            if thinking_parts:
+                thinking = "".join(thinking_parts)
+
+        # 3. Check <think>/<thinking> tags in string content (Ollama raw)
+        if not thinking and isinstance(response.content, str):
+            think_match = re.search(
+                r"<think(?:ing)?>(.*?)</think(?:ing)?>",
+                response.content,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if think_match:
+                thinking = think_match.group(1).strip()
+
+        # Determine visible content (strip thinking tags from all formats)
+        visible = ""
+        if isinstance(response.content, str):
+            visible = re.sub(
+                r"<think(?:ing)?>.*?</think(?:ing)?>",
+                "",
+                response.content,
+                flags=re.DOTALL | re.IGNORECASE,
+            ).strip()
+        elif isinstance(response.content, list):
+            for block in response.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    visible += block.get("text", "")
+
+        # If model produced only reasoning with no visible content,
+        # retry once — user already saw the reasoning (gray text),
+        # so only print the visible answer on retry
+        if thinking and not visible and not response.tool_calls:
+            if not response.additional_kwargs.get("reasoning_content"):
+                response.additional_kwargs["reasoning_content"] = thinking
+
+            logger.debug("Model produced only reasoning, retrying for visible answer")
+
+            retry_messages = messages + [
+                response,
+                HumanMessage(
+                    content=(
+                        "You provided reasoning but no visible response. "
+                        "Please provide your answer."
+                    )
+                ),
+            ]
+
+            self._code_formatter = CodeFormatter()
+            retry_response = None
+            for chunk in self.model_with_tools.stream(retry_messages, config=config):
+                chunk_content, _ = self._extract_content(chunk)
+                # Only print visible content — user already saw reasoning
+                if chunk_content:
+                    self._code_formatter.process_chunk(chunk_content)
+                retry_response = (
+                    chunk if retry_response is None else retry_response + chunk
+                )
+
+            if retry_response is not None:
+                retry_visible = ""
+                if isinstance(retry_response.content, str):
+                    retry_visible = re.sub(
+                        r"<think(?:ing)?>.*?</think(?:ing)?>",
+                        "",
+                        retry_response.content,
+                        flags=re.DOTALL | re.IGNORECASE,
+                    ).strip()
+                elif isinstance(retry_response.content, list):
+                    for block in retry_response.content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            retry_visible += block.get("text", "")
+
+                if retry_visible:
+                    # Preserve original thinking in the retry response
+                    if not retry_response.additional_kwargs.get("reasoning_content"):
+                        retry_response.additional_kwargs["reasoning_content"] = thinking
+                    return {"messages": [retry_response], "thinking": thinking}
 
         return {"messages": [response], "thinking": thinking}
 
@@ -338,7 +424,13 @@ class LangGraphAgent:
 
         for msg in reversed(final_messages):
             if isinstance(msg, AIMessage) and not msg.tool_calls:
-                return str(msg.content)
+                content = str(msg.content)
+                if content:
+                    return content
+                # Content is empty but reasoning may exist - return reasoning
+                # so the caller knows the model did respond
+                if self._thinking:
+                    return ""
 
         return ""
 
@@ -374,6 +466,7 @@ def convert_strands_messages_to_langchain(
         content = msg.get("content", [])
 
         text_content = ""
+        reasoning_text = ""
         tool_calls = []
         tool_results = []
 
@@ -382,6 +475,11 @@ def convert_strands_messages_to_langchain(
                 if isinstance(block, dict):
                     if "text" in block:
                         text_content += block["text"]
+                    elif "reasoningContent" in block:
+                        rc = block["reasoningContent"]
+                        reasoning_text += rc.get("reasoningText", {}).get(
+                            "text", ""
+                        )
                     elif "toolUse" in block:
                         tool_calls.append(block["toolUse"])
                     elif "toolResult" in block:
@@ -403,6 +501,9 @@ def convert_strands_messages_to_langchain(
             else:
                 langchain_messages.append(HumanMessage(content=text_content))
         elif role == "assistant":
+            additional_kwargs = {}
+            if reasoning_text:
+                additional_kwargs["reasoning_content"] = reasoning_text
             if tool_calls:
                 formatted_tool_calls = [
                     {
@@ -413,10 +514,19 @@ def convert_strands_messages_to_langchain(
                     for tc in tool_calls
                 ]
                 langchain_messages.append(
-                    AIMessage(content=text_content, tool_calls=formatted_tool_calls)
+                    AIMessage(
+                        content=text_content,
+                        tool_calls=formatted_tool_calls,
+                        additional_kwargs=additional_kwargs,
+                    )
                 )
             else:
-                langchain_messages.append(AIMessage(content=text_content))
+                langchain_messages.append(
+                    AIMessage(
+                        content=text_content,
+                        additional_kwargs=additional_kwargs,
+                    )
+                )
         elif role == "system":
             langchain_messages.append(SystemMessage(content=text_content))
 
@@ -444,8 +554,52 @@ def convert_langchain_messages_to_strands(
             strands_messages.append({"role": "user", "content": content_blocks})
 
         elif isinstance(msg, AIMessage):
+            # Extract reasoning content from additional_kwargs (Ollama, LiteLLM)
+            reasoning_text = ""
+            if hasattr(msg, "additional_kwargs") and msg.additional_kwargs:
+                reasoning_text = msg.additional_kwargs.get("reasoning_content", "")
+
             if msg.content:
-                content_blocks.append({"text": str(msg.content)})
+                if isinstance(msg.content, list):
+                    # Bedrock format: list of content blocks
+                    for block in msg.content:
+                        if isinstance(block, dict):
+                            block_type = block.get("type", "")
+                            if block_type == "thinking":
+                                # Preserve reasoning as reasoningContent block
+                                thinking_text = block.get("thinking", "")
+                                if thinking_text:
+                                    content_blocks.append(
+                                        {
+                                            "reasoningContent": {
+                                                "reasoningText": {
+                                                    "text": thinking_text
+                                                }
+                                            }
+                                        }
+                                    )
+                            elif block_type == "text":
+                                text = block.get("text", "")
+                                if text:
+                                    content_blocks.append({"text": text})
+                            elif "text" in block:
+                                content_blocks.append({"text": block["text"]})
+                else:
+                    content_blocks.append({"text": str(msg.content)})
+
+            # Add reasoning from additional_kwargs if not already added from content blocks
+            if reasoning_text and not any(
+                "reasoningContent" in b for b in content_blocks
+            ):
+                content_blocks.insert(
+                    0,
+                    {
+                        "reasoningContent": {
+                            "reasoningText": {"text": reasoning_text}
+                        }
+                    },
+                )
+
             if msg.tool_calls:
                 for tc in msg.tool_calls:
                     content_blocks.append(

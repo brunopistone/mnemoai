@@ -484,6 +484,22 @@ class LangGraphClient:
         """
         conversation_context = self._get_conversation_context()
 
+        # Skip episodic injection for short/vague follow-up queries when there's
+        # an active conversation. Short queries like "can you search?", "yes",
+        # "tell me more", "what about X?" are almost always follow-ups that only
+        # make sense in the current conversation context.
+        if conversation_context:
+            query_words = prompt.strip().split()
+            short_query_threshold = config.get("EPISODIC_MEMORY", {}).get(
+                "SHORT_QUERY_WORDS", 8
+            )
+            if len(query_words) <= short_query_threshold:
+                logger.debug(
+                    f"Skipping episodic injection: short follow-up query "
+                    f"({len(query_words)} words <= {short_query_threshold})"
+                )
+                return prompt
+
         # If there's existing conversation, check if query relates to it
         if conversation_context:
             query_to_conv_similarity = self._compute_similarity(
