@@ -204,6 +204,23 @@ class LangGraphAgent:
 
             logger.debug("Model produced only reasoning, retrying for visible answer")
 
+            # Move to a new line so spinner doesn't overwrite reasoning output
+            print("", flush=True)
+
+            # Restart spinner so user sees feedback during retry
+            for cb in self.callbacks:
+                if hasattr(cb, "spinner") and cb.spinner:
+                    lock = getattr(cb, "spinner_lock", None)
+                    if lock:
+                        with lock:
+                            cb.spinner.start()
+                            if hasattr(cb, "first_token_received"):
+                                cb.first_token_received = False
+                    else:
+                        cb.spinner.start()
+                        if hasattr(cb, "first_token_received"):
+                            cb.first_token_received = False
+
             retry_messages = messages + [
                 response,
                 HumanMessage(
@@ -215,9 +232,25 @@ class LangGraphAgent:
             ]
 
             self._code_formatter = CodeFormatter()
+            retry_first_token = True
             retry_response = None
             for chunk in self.model_with_tools.stream(retry_messages, config=config):
                 chunk_content, _ = self._extract_content(chunk)
+
+                # Stop spinner on first token
+                if retry_first_token and chunk_content and self.callbacks:
+                    retry_first_token = False
+                    for cb in self.callbacks:
+                        if hasattr(cb, "first_token_received"):
+                            cb.first_token_received = True
+                        if hasattr(cb, "spinner") and cb.spinner:
+                            lock = getattr(cb, "spinner_lock", None)
+                            if lock:
+                                with lock:
+                                    cb.spinner.stop()
+                            else:
+                                cb.spinner.stop()
+
                 # Only print visible content — user already saw reasoning
                 if chunk_content:
                     self._code_formatter.process_chunk(chunk_content)
