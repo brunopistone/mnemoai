@@ -1033,31 +1033,52 @@ class StrandsClient:
         try:
             # Retrieve similar episodes from episodic memory
             if self.episodic_memory:
-                logger.debug("Retrieving similar episodes from episodic memory...")
-                similar_episodes = self.episodic_memory.retrieve_similar_episodes(
-                    prompt, top_k=3
+                # Skip episodic injection for short follow-up queries when there's
+                # an active conversation. Short queries like "can you search?",
+                # "yes", "tell me more" are follow-ups that only make sense in
+                # the current conversation context.
+                has_conversation = (
+                    self.agent
+                    and hasattr(self.agent, "messages")
+                    and len(self.agent.messages) > 0
                 )
-                logger.debug(f"Found {len(similar_episodes)} similar episodes")
-                logger.debug(f"Similar episodes: {similar_episodes}")
-
-                # Filter by configurable similarity threshold
-                retrieval_threshold = config.get("EPISODIC_MEMORY", {}).get(
-                    "RETRIEVAL_THRESHOLD", 0.7
+                query_words = prompt.strip().split()
+                short_query_threshold = config.get("EPISODIC_MEMORY", {}).get(
+                    "SHORT_QUERY_WORDS", 8
                 )
-                relevant_episodes = [
-                    ep
-                    for ep in similar_episodes
-                    if ep.get("similarity", 0) > retrieval_threshold
-                ]
+                skip_episodic = has_conversation and len(query_words) <= short_query_threshold
 
-                if relevant_episodes:
-                    logger.debug(f"Found {len(relevant_episodes)} relevant episodes")
-                    context = self._format_episodic_context(relevant_episodes)
-                    prompt = f"{context}\n\n{prompt}"
-                else:
+                if skip_episodic:
                     logger.debug(
-                        f"No relevant episodes found (similarity < {retrieval_threshold})"
+                        f"Skipping episodic injection: short follow-up query "
+                        f"({len(query_words)} words <= {short_query_threshold})"
                     )
+                else:
+                    logger.debug("Retrieving similar episodes from episodic memory...")
+                    similar_episodes = self.episodic_memory.retrieve_similar_episodes(
+                        prompt, top_k=3
+                    )
+                    logger.debug(f"Found {len(similar_episodes)} similar episodes")
+                    logger.debug(f"Similar episodes: {similar_episodes}")
+
+                    # Filter by configurable similarity threshold
+                    retrieval_threshold = config.get("EPISODIC_MEMORY", {}).get(
+                        "RETRIEVAL_THRESHOLD", 0.7
+                    )
+                    relevant_episodes = [
+                        ep
+                        for ep in similar_episodes
+                        if ep.get("similarity", 0) > retrieval_threshold
+                    ]
+
+                    if relevant_episodes:
+                        logger.debug(f"Found {len(relevant_episodes)} relevant episodes")
+                        context = self._format_episodic_context(relevant_episodes)
+                        prompt = f"{context}\n\n{prompt}"
+                    else:
+                        logger.debug(
+                            f"No relevant episodes found (similarity < {retrieval_threshold})"
+                        )
 
             with self.mcp_client:
                 # Call agent with prompt
@@ -1082,29 +1103,40 @@ class StrandsClient:
                 # Check if response is only thinking tags (no visible content)
                 response_text = str(response)  # Convert AgentResult to string
                 visible_content = re.sub(
-                    r"<thinking>.*?</thinking>",
+                    r"<think(?:ing)?>.*?</think(?:ing)?>",
                     "",
                     response_text,
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
-                visible_content = re.sub(
-                    r"<think>.*?</think>",
-                    "",
-                    visible_content,
                     flags=re.DOTALL | re.IGNORECASE,
                 )
                 visible_content = visible_content.strip()
 
                 if not visible_content:
-                    # Response has only thinking, add a visible message
-                    response_text += "\n\nI apologize, but I need to provide a visible response. Could you please rephrase your request?"
-                    print(
-                        "\n\033[91m⚠️  Model provided only thinking without visible response\033[0m"
+                    # Model produced only reasoning — user already saw it
+                    # in gray. Retry once to get a visible answer.
+                    logger.debug(
+                        "Model produced only reasoning, retrying for visible answer"
+                    )
+                    retry_response = self.agent(
+                        "You provided reasoning but no visible response. "
+                        "Please provide your answer."
                     )
 
-                    print(
-                        "I apologize, but I need to provide a visible response. Could you please rephrase your request?"
-                    )
+                    # Flush any remaining buffered content from retry
+                    if hasattr(self, "_code_formatter_minimal"):
+                        self._code_formatter_minimal.flush()
+                    if hasattr(self, "_code_formatter_verbose"):
+                        self._code_formatter_verbose.flush()
+
+                    retry_text = str(retry_response)
+                    retry_visible = re.sub(
+                        r"<think(?:ing)?>.*?</think(?:ing)?>",
+                        "",
+                        retry_text,
+                        flags=re.DOTALL | re.IGNORECASE,
+                    ).strip()
+
+                    if retry_visible:
+                        response_text = retry_text
 
                 # Print token count in a clean format
                 token_count = self.__count_context_tokens()
