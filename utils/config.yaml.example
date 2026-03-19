@@ -1,5 +1,5 @@
 MODEL_ID:
-  NAME: brnpistone/Qwen3-4B-AgentCoder-q6-k:latest
+  NAME: qwen3:4b
   TYPE: ollama
   HOST: localhost
   PORT: 11434
@@ -114,7 +114,7 @@ BRAVE_API_KEY: your_brave_api_key
 ENABLE_WEB_CRAWL: true
 # File system paths
 PROFILE:
-  NAME: bpistone
+  NAME: default
   USE_PROFILING: true
 SYSTEM_PROMPT: |
   <identity>

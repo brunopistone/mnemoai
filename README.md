@@ -98,7 +98,7 @@ ai-assistant/
 │
 ├── utils/                                  # Utilities
 │   ├── config.py                           # Config loader
-│   ├── config.yaml                         # Main config
+│   ├── config.yaml.example                  # Config template (copy to config.yaml)
 │   ├── logger.py                           # Logging utilities
 │   └── formatting/                         # Text formatting
 │       ├── code_formatter.py               # Code syntax highlighting
@@ -246,7 +246,11 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
-Copy and edit `utils/config.yaml`. At minimum, configure your LLM provider:
+```bash
+cp utils/config.yaml.example utils/config.yaml
+```
+
+Edit `utils/config.yaml` with your settings. At minimum, configure your LLM provider:
 
 **For Ollama (quickest setup):**
 
@@ -303,7 +307,7 @@ See `bash/system-command-app/README.md` for details.
 
 ## 🔀 Feature Toggles
 
-All advanced features can be independently enabled or disabled in `utils/config.yaml`. Here is a quick reference:
+All advanced features can be independently enabled or disabled in your local `utils/config.yaml` (copied from `config.yaml.example`). Here is a quick reference:
 
 | Feature | Config Key | Default | Dependencies |
 |---|---|---|---|
@@ -422,7 +426,7 @@ Model controllers and custom implementations.
 Shared utilities and configuration.
 
 - `config.py`: Configuration loader
-- `config.yaml`: Main configuration file
+- `config.yaml.example`: Config template (copy to `config.yaml` for local use; `config.yaml` is gitignored)
 - `logger.py`: Logging utilities (stderr output)
 - **`formatting/`**: Text formatting
   - `code_formatter.py`: Code syntax highlighting
