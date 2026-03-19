@@ -1,3 +1,6 @@
+# Configuration (contains API keys)
+utils/config.yaml
+
 # IDE
 .idea/
 .vscode/
