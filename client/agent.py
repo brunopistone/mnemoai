@@ -112,114 +112,25 @@ class LangGraphAgent:
 
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
-        # Reset code formatter for new response
-        self._code_formatter = CodeFormatter()
-
-        first_token = True
-        had_reasoning = False
-        response = None
-
-        for chunk in self.model_with_tools.stream(messages, config=config):
-            chunk_content, reasoning_content = self._extract_content(chunk)
-
-            # Stop spinner on first token (thread-safe)
-            if first_token and (chunk_content or reasoning_content) and self.callbacks:
-                first_token = False
-                for cb in self.callbacks:
-                    if hasattr(cb, "first_token_received"):
-                        cb.first_token_received = True
-                    if hasattr(cb, "spinner") and cb.spinner:
-                        lock = getattr(cb, "spinner_lock", None)
-                        if lock:
-                            with lock:
-                                cb.spinner.stop()
-                        else:
-                            cb.spinner.stop()
-
-            # Print reasoning in gray
-            if reasoning_content and self.verbose:
-                print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
-                had_reasoning = True
-
-            # Print content with syntax highlighting
-            if chunk_content:
-                if had_reasoning:
-                    # Only add newline if content doesn't start with newlines
-                    if not chunk_content.startswith("\n"):
-                        print("\n", end="", flush=True)
-                    had_reasoning = False
-                self._code_formatter.process_chunk(chunk_content)
-
-            response = chunk if response is None else response + chunk
+        response, had_reasoning = self._stream_response(messages, config)
 
         if response is None:
             response = self.model_with_tools.invoke(messages, config=config)
 
-        # Extract final thinking content from all possible sources
-        thinking = None
-
-        # 1. Check additional_kwargs (Ollama via wrapper, LiteLLM)
-        if hasattr(response, "additional_kwargs"):
-            thinking = response.additional_kwargs.get("reasoning_content")
-
-        # 2. Check Bedrock-style content blocks
-        if not thinking and isinstance(response.content, list):
-            thinking_parts = []
-            for block in response.content:
-                if isinstance(block, dict) and block.get("type") == "thinking":
-                    thinking_parts.append(block.get("thinking", ""))
-            if thinking_parts:
-                thinking = "".join(thinking_parts)
-
-        # 3. Check <think>/<thinking> tags in string content (Ollama raw)
-        if not thinking and isinstance(response.content, str):
-            think_match = re.search(
-                r"<think(?:ing)?>(.*?)</think(?:ing)?>",
-                response.content,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-            if think_match:
-                thinking = think_match.group(1).strip()
-
-        # Determine visible content (strip thinking tags from all formats)
-        visible = ""
-        if isinstance(response.content, str):
-            visible = re.sub(
-                r"<think(?:ing)?>.*?</think(?:ing)?>",
-                "",
-                response.content,
-                flags=re.DOTALL | re.IGNORECASE,
-            ).strip()
-        elif isinstance(response.content, list):
-            for block in response.content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    visible += block.get("text", "")
+        thinking = self._extract_thinking(response)
+        visible = self._extract_visible(response.content)
 
         # If model produced only reasoning with no visible content,
-        # retry once — user already saw the reasoning (gray text),
-        # so only print the visible answer on retry
+        # retry once with reasoning disabled
         if thinking and not visible and not response.tool_calls:
             if not response.additional_kwargs.get("reasoning_content"):
                 response.additional_kwargs["reasoning_content"] = thinking
 
-            logger.debug("Model produced only reasoning, retrying for visible answer")
+            logger.debug("Model produced only reasoning, retrying without thinking")
 
-            # Move to a new line so spinner doesn't overwrite reasoning output
-            print("", flush=True)
-
-            # Restart spinner so user sees feedback during retry
-            for cb in self.callbacks:
-                if hasattr(cb, "spinner") and cb.spinner:
-                    lock = getattr(cb, "spinner_lock", None)
-                    if lock:
-                        with lock:
-                            cb.spinner.start()
-                            if hasattr(cb, "first_token_received"):
-                                cb.first_token_received = False
-                    else:
-                        cb.spinner.start()
-                        if hasattr(cb, "first_token_received"):
-                            cb.first_token_received = False
+            if had_reasoning:
+                print("", flush=True)
+            self._start_spinner()
 
             retry_messages = messages + [
                 response,
@@ -231,54 +142,187 @@ class LangGraphAgent:
                 ),
             ]
 
-            self._code_formatter = CodeFormatter()
-            retry_first_token = True
-            retry_response = None
-            for chunk in self.model_with_tools.stream(retry_messages, config=config):
-                chunk_content, _ = self._extract_content(chunk)
-
-                # Stop spinner on first token
-                if retry_first_token and chunk_content and self.callbacks:
-                    retry_first_token = False
-                    for cb in self.callbacks:
-                        if hasattr(cb, "first_token_received"):
-                            cb.first_token_received = True
-                        if hasattr(cb, "spinner") and cb.spinner:
-                            lock = getattr(cb, "spinner_lock", None)
-                            if lock:
-                                with lock:
-                                    cb.spinner.stop()
-                            else:
-                                cb.spinner.stop()
-
-                # Only print visible content — user already saw reasoning
-                if chunk_content:
-                    self._code_formatter.process_chunk(chunk_content)
-                retry_response = (
-                    chunk if retry_response is None else retry_response + chunk
+            saved = self._disable_reasoning()
+            try:
+                retry_response, _ = self._stream_response(
+                    retry_messages, config, print_reasoning=False
                 )
+            finally:
+                self._restore_reasoning(saved)
 
             if retry_response is not None:
-                retry_visible = ""
-                if isinstance(retry_response.content, str):
-                    retry_visible = re.sub(
-                        r"<think(?:ing)?>.*?</think(?:ing)?>",
-                        "",
-                        retry_response.content,
-                        flags=re.DOTALL | re.IGNORECASE,
-                    ).strip()
-                elif isinstance(retry_response.content, list):
-                    for block in retry_response.content:
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            retry_visible += block.get("text", "")
-
+                retry_visible = self._extract_visible(retry_response.content)
                 if retry_visible:
-                    # Preserve original thinking in the retry response
                     if not retry_response.additional_kwargs.get("reasoning_content"):
                         retry_response.additional_kwargs["reasoning_content"] = thinking
                     return {"messages": [retry_response], "thinking": thinking}
 
         return {"messages": [response], "thinking": thinking}
+
+    def _stream_response(
+        self, messages: list, config: dict, print_reasoning: bool = True
+    ) -> tuple:
+        """Stream model response, handling spinner and output.
+
+        Args:
+            messages: Messages to send to the model
+            config: LangChain config dict
+            print_reasoning: Whether to print reasoning in gray
+
+        Returns:
+            Tuple of (response, had_reasoning)
+        """
+        self._code_formatter = CodeFormatter()
+        first_token = True
+        had_reasoning = False
+        response = None
+
+        for chunk in self.model_with_tools.stream(messages, config=config):
+            chunk_content, reasoning_content = self._extract_content(chunk)
+
+            if first_token and (chunk_content or reasoning_content) and self.callbacks:
+                first_token = False
+                self._stop_spinner()
+
+            if reasoning_content and self.verbose and print_reasoning:
+                print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
+                had_reasoning = True
+
+            if chunk_content:
+                if had_reasoning:
+                    if not chunk_content.startswith("\n"):
+                        print("\n", end="", flush=True)
+                    had_reasoning = False
+                self._code_formatter.process_chunk(chunk_content)
+
+            response = chunk if response is None else response + chunk
+
+        return response, had_reasoning
+
+    def _stop_spinner(self) -> None:
+        """Stop the spinner and mark first token received."""
+        for cb in self.callbacks:
+            if hasattr(cb, "first_token_received"):
+                cb.first_token_received = True
+            if hasattr(cb, "spinner") and cb.spinner:
+                lock = getattr(cb, "spinner_lock", None)
+                if lock:
+                    with lock:
+                        cb.spinner.stop()
+                else:
+                    cb.spinner.stop()
+
+    def _start_spinner(self) -> None:
+        """Restart the spinner and reset first token flag."""
+        for cb in self.callbacks:
+            if hasattr(cb, "spinner") and cb.spinner:
+                lock = getattr(cb, "spinner_lock", None)
+                if lock:
+                    with lock:
+                        cb.spinner.start()
+                        if hasattr(cb, "first_token_received"):
+                            cb.first_token_received = False
+                else:
+                    cb.spinner.start()
+                    if hasattr(cb, "first_token_received"):
+                        cb.first_token_received = False
+
+    def _extract_thinking(self, response) -> Optional[str]:
+        """Extract thinking/reasoning content from a response.
+
+        Checks all possible sources: additional_kwargs, Bedrock content blocks,
+        and <think>/<thinking> tags in string content.
+
+        Args:
+            response: AIMessage response
+
+        Returns:
+            Thinking text or None
+        """
+        # 1. Check additional_kwargs (Ollama via wrapper, LiteLLM)
+        if hasattr(response, "additional_kwargs"):
+            thinking = response.additional_kwargs.get("reasoning_content")
+            if thinking:
+                return thinking
+
+        # 2. Check Bedrock-style content blocks
+        if isinstance(response.content, list):
+            parts = [
+                block.get("thinking", "")
+                for block in response.content
+                if isinstance(block, dict) and block.get("type") == "thinking"
+            ]
+            if parts:
+                return "".join(parts)
+
+        # 3. Check <think>/<thinking> tags in string content (Ollama raw)
+        if isinstance(response.content, str):
+            match = re.search(
+                r"<think(?:ing)?>(.*?)</think(?:ing)?>",
+                response.content,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if match:
+                return match.group(1).strip()
+
+        return None
+
+    def _extract_visible(self, content) -> str:
+        """Extract visible content, stripping thinking tags.
+
+        Args:
+            content: Response content (str or list of blocks)
+
+        Returns:
+            Visible text content
+        """
+        if isinstance(content, str):
+            return re.sub(
+                r"<think(?:ing)?>.*?</think(?:ing)?>",
+                "",
+                content,
+                flags=re.DOTALL | re.IGNORECASE,
+            ).strip()
+        if isinstance(content, list):
+            return "".join(
+                block.get("text", "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        return ""
+
+    def _disable_reasoning(self) -> dict:
+        """Temporarily disable reasoning/thinking on the model.
+
+        Returns:
+            Saved state to pass to _restore_reasoning()
+        """
+        saved = {}
+        reasoning = getattr(self.model, "reasoning", None)
+        if reasoning is not None:
+            saved["reasoning"] = reasoning
+            self.model.reasoning = False
+        if (
+            hasattr(self.model, "model_kwargs")
+            and "thinking" in self.model.model_kwargs
+        ):
+            saved["thinking"] = self.model.model_kwargs.pop("thinking")
+            saved["temperature"] = self.model.model_kwargs.get("temperature")
+            self.model.model_kwargs["temperature"] = 0.1
+        return saved
+
+    def _restore_reasoning(self, saved: dict) -> None:
+        """Restore reasoning/thinking settings on the model.
+
+        Args:
+            saved: State from _disable_reasoning()
+        """
+        if "reasoning" in saved:
+            self.model.reasoning = saved["reasoning"]
+        if "thinking" in saved:
+            self.model.model_kwargs["thinking"] = saved["thinking"]
+        if "temperature" in saved:
+            self.model.model_kwargs["temperature"] = saved["temperature"]
 
     def _extract_content(self, chunk) -> tuple[str, str]:
         """Extract content and reasoning from a chunk.
@@ -333,15 +377,7 @@ class LangGraphAgent:
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
             return {"messages": []}
 
-        # Stop spinner during tool execution
-        for cb in self.callbacks:
-            if hasattr(cb, "spinner") and cb.spinner:
-                lock = getattr(cb, "spinner_lock", None)
-                if lock:
-                    with lock:
-                        cb.spinner.stop()
-                else:
-                    cb.spinner.stop()
+        self._stop_spinner()
 
         tool_results = []
         for tool_call in last_message.tool_calls:
@@ -377,22 +413,7 @@ class LangGraphAgent:
                     )
                 )
 
-        # Restart spinner for model response after tools
-        for cb in self.callbacks:
-            if hasattr(cb, "spinner") and cb.spinner:
-                lock = getattr(cb, "spinner_lock", None)
-                if lock:
-                    with lock:
-                        cb.spinner.start()
-                        if hasattr(cb, "first_token_received"):
-                            cb.first_token_received = False
-                else:
-                    cb.spinner.start()
-                    if hasattr(cb, "first_token_received"):
-                        cb.first_token_received = False
-
-        # Reset code formatter for new response
-        self._code_formatter = CodeFormatter()
+        self._start_spinner()
 
         return {"messages": tool_results}
 
@@ -510,9 +531,7 @@ def convert_strands_messages_to_langchain(
                         text_content += block["text"]
                     elif "reasoningContent" in block:
                         rc = block["reasoningContent"]
-                        reasoning_text += rc.get("reasoningText", {}).get(
-                            "text", ""
-                        )
+                        reasoning_text += rc.get("reasoningText", {}).get("text", "")
                     elif "toolUse" in block:
                         tool_calls.append(block["toolUse"])
                     elif "toolResult" in block:
@@ -605,9 +624,7 @@ def convert_langchain_messages_to_strands(
                                     content_blocks.append(
                                         {
                                             "reasoningContent": {
-                                                "reasoningText": {
-                                                    "text": thinking_text
-                                                }
+                                                "reasoningText": {"text": thinking_text}
                                             }
                                         }
                                     )
@@ -626,11 +643,7 @@ def convert_langchain_messages_to_strands(
             ):
                 content_blocks.insert(
                     0,
-                    {
-                        "reasoningContent": {
-                            "reasoningText": {"text": reasoning_text}
-                        }
-                    },
+                    {"reasoningContent": {"reasoningText": {"text": reasoning_text}}},
                 )
 
             if msg.tool_calls:

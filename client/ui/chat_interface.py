@@ -175,6 +175,10 @@ class ChatInterface:
             logger.debug("No agent messages to evaluate")
             return
 
+        if not response or not response.strip():
+            logger.debug("✗ Skipping storage - empty response")
+            return
+
         messages = self.client.agent.messages.copy()
 
         # Extract tools used
