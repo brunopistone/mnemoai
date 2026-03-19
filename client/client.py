@@ -185,7 +185,11 @@ class StrandsClient:
         if not self.reflector or not self.playbook:
             return
 
-        if not self.agent or not hasattr(self.agent, "messages") or not self.agent.messages:
+        if (
+            not self.agent
+            or not hasattr(self.agent, "messages")
+            or not self.agent.messages
+        ):
             return
 
         try:
@@ -217,6 +221,57 @@ class StrandsClient:
         )
 
         return self.playbook.format_for_prompt(entries) if entries else ""
+
+    def _extract_visible(self, text: str) -> str:
+        """Extract visible content by stripping thinking tags.
+
+        Args:
+            text: Response text that may contain thinking tags
+
+        Returns:
+            Visible text with thinking tags removed
+        """
+        return re.sub(
+            r"<think(?:ing)?>.*?</think(?:ing)?>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        ).strip()
+
+    def _flush_formatters(self) -> None:
+        """Flush any remaining buffered content from code formatters."""
+        if hasattr(self, "_code_formatter_minimal"):
+            self._code_formatter_minimal.flush()
+        if hasattr(self, "_code_formatter_verbose"):
+            self._code_formatter_verbose.flush()
+
+    def _start_spinner(self) -> None:
+        """Restart the spinner and reset first token flag."""
+        with self.spinner_lock:
+            self.first_token_received = False
+            self.spinner.start()
+
+    def _disable_reasoning(self) -> dict:
+        """Temporarily disable reasoning/thinking on the model.
+
+        Returns:
+            Saved state to pass to _restore_reasoning()
+        """
+        saved = {}
+        return_thinking = getattr(self.model, "return_thinking", None)
+        if return_thinking is not None:
+            saved["return_thinking"] = return_thinking
+            self.model.return_thinking = False
+        return saved
+
+    def _restore_reasoning(self, saved: dict) -> None:
+        """Restore reasoning/thinking settings on the model.
+
+        Args:
+            saved: State from _disable_reasoning()
+        """
+        if "return_thinking" in saved:
+            self.model.return_thinking = saved["return_thinking"]
 
     def _process_thinking_buffer(self, buffer: str, in_tag: bool) -> tuple:
         """Process buffered content, handling thinking tags that may span chunks.
@@ -1046,7 +1101,9 @@ class StrandsClient:
                 short_query_threshold = config.get("EPISODIC_MEMORY", {}).get(
                     "SHORT_QUERY_WORDS", 8
                 )
-                skip_episodic = has_conversation and len(query_words) <= short_query_threshold
+                skip_episodic = (
+                    has_conversation and len(query_words) <= short_query_threshold
+                )
 
                 if skip_episodic:
                     logger.debug(
@@ -1072,7 +1129,9 @@ class StrandsClient:
                     ]
 
                     if relevant_episodes:
-                        logger.debug(f"Found {len(relevant_episodes)} relevant episodes")
+                        logger.debug(
+                            f"Found {len(relevant_episodes)} relevant episodes"
+                        )
                         context = self._format_episodic_context(relevant_episodes)
                         prompt = f"{context}\n\n{prompt}"
                     else:
@@ -1084,11 +1143,7 @@ class StrandsClient:
                 # Call agent with prompt
                 response = self.agent(prompt)
 
-                # Flush any remaining buffered backticks
-                if hasattr(self, "_code_formatter_minimal"):
-                    self._code_formatter_minimal.flush()
-                if hasattr(self, "_code_formatter_verbose"):
-                    self._code_formatter_verbose.flush()
+                self._flush_formatters()
 
                 asyncio.run(
                     self.conversation_manager.manage_messages(
@@ -1101,41 +1156,30 @@ class StrandsClient:
                     self.profile_manager.analyze_conversation(self.agent.messages)
 
                 # Check if response is only thinking tags (no visible content)
-                response_text = str(response)  # Convert AgentResult to string
-                visible_content = re.sub(
-                    r"<think(?:ing)?>.*?</think(?:ing)?>",
-                    "",
-                    response_text,
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
-                visible_content = visible_content.strip()
+                response_text = str(response)
 
-                if not visible_content:
-                    # Model produced only reasoning — user already saw it
-                    # in gray. Retry once to get a visible answer.
+                if not self._extract_visible(response_text):
+                    # Model produced only reasoning — retry with thinking disabled
                     logger.debug(
-                        "Model produced only reasoning, retrying for visible answer"
-                    )
-                    retry_response = self.agent(
-                        "You provided reasoning but no visible response. "
-                        "Please provide your answer."
+                        "Model produced only reasoning, retrying without thinking"
                     )
 
-                    # Flush any remaining buffered content from retry
-                    if hasattr(self, "_code_formatter_minimal"):
-                        self._code_formatter_minimal.flush()
-                    if hasattr(self, "_code_formatter_verbose"):
-                        self._code_formatter_verbose.flush()
+                    print("", flush=True)
+                    self._start_spinner()
+
+                    saved = self._disable_reasoning()
+                    try:
+                        retry_response = self.agent(
+                            "You provided reasoning but no visible response. "
+                            "Please provide your answer."
+                        )
+                    finally:
+                        self._restore_reasoning(saved)
+
+                    self._flush_formatters()
 
                     retry_text = str(retry_response)
-                    retry_visible = re.sub(
-                        r"<think(?:ing)?>.*?</think(?:ing)?>",
-                        "",
-                        retry_text,
-                        flags=re.DOTALL | re.IGNORECASE,
-                    ).strip()
-
-                    if retry_visible:
+                    if self._extract_visible(retry_text):
                         response_text = retry_text
 
                 # Print token count in a clean format
