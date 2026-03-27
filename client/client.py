@@ -275,12 +275,24 @@ class LangGraphClient:
                             f"{self.system_prompt}\n\n{playbook_context}"
                         )
 
+                # Initialize query router if enabled
+                router = None
+                tool_routes = None
+                if config.get("ENABLE_ROUTING", False):
+                    from client.router import QueryRouter, ROUTE_TOOLS
+
+                    router = QueryRouter(self.model)
+                    tool_routes = ROUTE_TOOLS
+                    logger.info("Query routing enabled")
+
                 self.agent = LangGraphAgent(
                     model=self.model,
                     tools=self.tools,
                     system_prompt=system_prompt_with_context,
                     verbose=self.verbose_mode,
                     callbacks=[self.callback_handler],
+                    router=router,
+                    tool_routes=tool_routes,
                 )
 
         except Exception as e:

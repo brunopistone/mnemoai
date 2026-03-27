@@ -24,6 +24,7 @@ class AgentState(TypedDict):
 
     messages: Annotated[Sequence[BaseMessage], operator.add]
     thinking: Optional[str]
+    route: Optional[str]
 
 
 class LangGraphAgent:
@@ -36,6 +37,8 @@ class LangGraphAgent:
         system_prompt: str = "",
         verbose: bool = False,
         callbacks: List[Any] = None,
+        router=None,
+        tool_routes: Optional[Dict[str, Optional[List[str]]]] = None,
     ) -> None:
         """Initialize the LangGraph agent.
 
@@ -45,6 +48,8 @@ class LangGraphAgent:
             system_prompt: System prompt for the agent
             verbose: Enable verbose mode for thinking display
             callbacks: Optional list of callback handlers for streaming
+            router: Optional QueryRouter for query classification
+            tool_routes: Optional dict mapping route names to tool name lists
         """
         self.model = model
         self.tools = tools
@@ -54,8 +59,28 @@ class LangGraphAgent:
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
         self._code_formatter = CodeFormatter()
+        self.router = router
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
+
+        # Build per-route tool subsets and model bindings
+        self.tools_by_route: Optional[Dict[str, List[BaseTool]]] = None
+        self.models_by_route: Optional[Dict[str, BaseChatModel]] = None
+        if router and tool_routes:
+            self.tools_by_route = {}
+            self.models_by_route = {}
+            for route_name, tool_names in tool_routes.items():
+                if tool_names is None:
+                    route_tools = tools
+                elif not tool_names:
+                    route_tools = []
+                else:
+                    route_tools = [t for t in tools if t.name in tool_names]
+                self.tools_by_route[route_name] = route_tools
+                self.models_by_route[route_name] = (
+                    model.bind_tools(route_tools) if route_tools else model
+                )
+
         self.graph = self._build_graph()
 
     @property
@@ -83,9 +108,16 @@ class LangGraphAgent:
             Compiled state graph
         """
         workflow = StateGraph(AgentState)
+
+        if self.router:
+            workflow.add_node("classifier", self._classify)
+            workflow.set_entry_point("classifier")
+            workflow.add_edge("classifier", "agent")
+        else:
+            workflow.set_entry_point("agent")
+
         workflow.add_node("agent", self._call_model)
         workflow.add_node("tools", self._execute_tools)
-        workflow.set_entry_point("agent")
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
@@ -93,6 +125,62 @@ class LangGraphAgent:
         )
         workflow.add_edge("tools", "agent")
         return workflow.compile()
+
+    def _classify(self, state: AgentState) -> Dict[str, Any]:
+        """Classify the query and set the route in state.
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            Updated state with route
+        """
+        messages = state["messages"]
+        if not messages:
+            return {"route": "full"}
+
+        # Build conversation context from recent messages (excluding the last)
+        context = ""
+        if len(messages) > 1:
+            recent = messages[-min(4, len(messages)) : -1]
+            context = "\n".join(
+                str(m.content)[:200]
+                for m in recent
+                if hasattr(m, "content") and m.content
+            )
+
+        query = str(messages[-1].content) if messages else ""
+        route = self.router.classify(query, context)
+        logger.debug(f"Query routed to: {route}")
+        return {"route": route}
+
+    def _get_route_model(self, state: AgentState):
+        """Get the model binding for the current route.
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            Model with appropriate tools bound
+        """
+        route = state.get("route")
+        if route and self.models_by_route:
+            return self.models_by_route.get(route, self.model_with_tools)
+        return self.model_with_tools
+
+    def _get_route_tools(self, state: AgentState) -> List[BaseTool]:
+        """Get the tool list for the current route.
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            List of tools available for the route
+        """
+        route = state.get("route")
+        if route and self.tools_by_route:
+            return self.tools_by_route.get(route, self.tools)
+        return self.tools
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with current state using streaming.
@@ -112,10 +200,13 @@ class LangGraphAgent:
 
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
-        response, had_reasoning = self._stream_response(messages, config)
+        active_model = self._get_route_model(state)
+        response, had_reasoning = self._stream_response(
+            messages, config, model=active_model
+        )
 
         if response is None:
-            response = self.model_with_tools.invoke(messages, config=config)
+            response = active_model.invoke(messages, config=config)
 
         thinking = self._extract_thinking(response)
         visible = self._extract_visible(response.content)
@@ -145,7 +236,10 @@ class LangGraphAgent:
             saved = self._disable_reasoning()
             try:
                 retry_response, _ = self._stream_response(
-                    retry_messages, config, print_reasoning=False
+                    retry_messages,
+                    config,
+                    print_reasoning=False,
+                    model=active_model,
                 )
             finally:
                 self._restore_reasoning(saved)
@@ -160,7 +254,11 @@ class LangGraphAgent:
         return {"messages": [response], "thinking": thinking}
 
     def _stream_response(
-        self, messages: list, config: dict, print_reasoning: bool = True
+        self,
+        messages: list,
+        config: dict,
+        print_reasoning: bool = True,
+        model=None,
     ) -> tuple:
         """Stream model response, handling spinner and output.
 
@@ -168,16 +266,18 @@ class LangGraphAgent:
             messages: Messages to send to the model
             config: LangChain config dict
             print_reasoning: Whether to print reasoning in gray
+            model: Optional model override (defaults to self.model_with_tools)
 
         Returns:
             Tuple of (response, had_reasoning)
         """
+        active_model = model or self.model_with_tools
         self._code_formatter = CodeFormatter()
         first_token = True
         had_reasoning = False
         response = None
 
-        for chunk in self.model_with_tools.stream(messages, config=config):
+        for chunk in active_model.stream(messages, config=config):
             chunk_content, reasoning_content = self._extract_content(chunk)
 
             if first_token and (chunk_content or reasoning_content) and self.callbacks:
@@ -379,13 +479,18 @@ class LangGraphAgent:
 
         self._stop_spinner()
 
+        route_tools = self._get_route_tools(state)
+
         tool_results = []
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
             tool_args = tool_call["args"]
             tool_id = tool_call["id"]
 
-            tool = next((t for t in self.tools if t.name == tool_name), None)
+            # Look up in route tools first, fall back to all tools
+            tool = next((t for t in route_tools if t.name == tool_name), None)
+            if not tool:
+                tool = next((t for t in self.tools if t.name == tool_name), None)
 
             if tool:
                 try:
@@ -457,6 +562,7 @@ class LangGraphAgent:
         initial_state: AgentState = {
             "messages": self._messages.copy(),
             "thinking": None,
+            "route": None,
         }
 
         if self.system_prompt:
