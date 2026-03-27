@@ -285,6 +285,13 @@ class LangGraphClient:
                     tool_routes = ROUTE_TOOLS
                     logger.info("Query routing enabled")
 
+                # Orchestration requires routing
+                orchestrator_enabled = (
+                    config.get("ENABLE_ORCHESTRATION", False) and router is not None
+                )
+                if orchestrator_enabled:
+                    logger.info("Orchestrator enabled for complex tasks")
+
                 self.agent = LangGraphAgent(
                     model=self.model,
                     tools=self.tools,
@@ -293,6 +300,7 @@ class LangGraphClient:
                     callbacks=[self.callback_handler],
                     router=router,
                     tool_routes=tool_routes,
+                    orchestrator_enabled=orchestrator_enabled,
                 )
 
         except Exception as e:

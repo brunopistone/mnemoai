@@ -39,6 +39,7 @@ class LangGraphAgent:
         callbacks: List[Any] = None,
         router=None,
         tool_routes: Optional[Dict[str, Optional[List[str]]]] = None,
+        orchestrator_enabled: bool = False,
     ) -> None:
         """Initialize the LangGraph agent.
 
@@ -50,6 +51,7 @@ class LangGraphAgent:
             callbacks: Optional list of callback handlers for streaming
             router: Optional QueryRouter for query classification
             tool_routes: Optional dict mapping route names to tool name lists
+            orchestrator_enabled: Enable orchestrator for 'full' route
         """
         self.model = model
         self.tools = tools
@@ -60,6 +62,7 @@ class LangGraphAgent:
         self._thinking: Optional[str] = None
         self._code_formatter = CodeFormatter()
         self.router = router
+        self.orchestrator_enabled = orchestrator_enabled and router is not None
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
 
@@ -112,7 +115,17 @@ class LangGraphAgent:
         if self.router:
             workflow.add_node("classifier", self._classify)
             workflow.set_entry_point("classifier")
-            workflow.add_edge("classifier", "agent")
+
+            if self.orchestrator_enabled:
+                workflow.add_node("orchestrator", self._orchestrate)
+                workflow.add_conditional_edges(
+                    "classifier",
+                    self._route_after_classify,
+                    {"agent": "agent", "orchestrator": "orchestrator"},
+                )
+                workflow.add_edge("orchestrator", END)
+            else:
+                workflow.add_edge("classifier", "agent")
         else:
             workflow.set_entry_point("agent")
 
@@ -125,6 +138,19 @@ class LangGraphAgent:
         )
         workflow.add_edge("tools", "agent")
         return workflow.compile()
+
+    def _route_after_classify(self, state: AgentState) -> str:
+        """Route to orchestrator for 'full' tasks, agent otherwise.
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            "orchestrator" or "agent"
+        """
+        if state.get("route") == "full":
+            return "orchestrator"
+        return "agent"
 
     def _classify(self, state: AgentState) -> Dict[str, Any]:
         """Classify the query and set the route in state.
@@ -153,6 +179,264 @@ class LangGraphAgent:
         route = self.router.classify(query, context)
         logger.debug(f"Query routed to: {route}")
         return {"route": route}
+
+    def _orchestrate(self, state: AgentState) -> Dict[str, Any]:
+        """Decompose a complex task into subtasks, execute workers, aggregate.
+
+        This node handles the full orchestration pipeline:
+        1. Decompose the query into subtasks via LLM
+        2. Execute each subtask with a route-specific worker loop
+        3. Aggregate results into a final response
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            Updated state with the final aggregated response
+        """
+        from client.orchestrator import (
+            get_orchestrator_prompt,
+            get_aggregator_prompt,
+            parse_subtasks,
+        )
+        from client.router import ROUTE_TOOLS
+
+        messages = state["messages"]
+        # Extract user query (skip system prompt)
+        query = ""
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                query = str(msg.content)
+                break
+
+        if not query:
+            return {"messages": [AIMessage(content="No query found.")]}
+
+        # Step 1: Decompose task into subtasks
+        logger.debug("Orchestrator: decomposing task")
+        subtasks = self._decompose_task(
+            query, get_orchestrator_prompt(), set(ROUTE_TOOLS.keys())
+        )
+        logger.debug(f"Orchestrator: {len(subtasks)} subtasks")
+
+        # Step 2: Execute each subtask with a worker
+        worker_results = []
+        for i, subtask in enumerate(subtasks):
+            desc = subtask["description"]
+            category = subtask["category"]
+
+            # Print subtask header
+            total = len(subtasks)
+            short_desc = desc[:70] + ("..." if len(desc) > 70 else "")
+            print(
+                f"\n\033[90m[Step {i + 1}/{total}: {short_desc}]\033[0m",
+                flush=True,
+            )
+
+            # Get route-specific model and tools
+            if category == "full" or not self.tools_by_route:
+                worker_tools = self.tools
+                worker_model = self.model_with_tools
+            elif category == "simple_qa":
+                worker_tools = []
+                worker_model = self.model
+            else:
+                worker_tools = self.tools_by_route.get(category, self.tools)
+                worker_model = self.models_by_route.get(category, self.model_with_tools)
+
+            # Build worker prompt with context from previous results
+            worker_prompt = desc
+            if worker_results:
+                context_parts = []
+                for r in worker_results:
+                    context_parts.append(f"[Completed: {r['task']}]\n{r['result']}")
+                context_text = "\n\n".join(context_parts)
+                worker_prompt = (
+                    f"Context from completed steps:\n{context_text}"
+                    f"\n\nCurrent task: {desc}"
+                )
+
+            # Execute worker
+            result = self._run_worker_loop(worker_model, worker_tools, worker_prompt)
+            worker_results.append(
+                {
+                    "task": desc,
+                    "category": category,
+                    "result": result,
+                }
+            )
+
+        # Step 3: Aggregate results
+        if len(subtasks) == 1:
+            final_content = worker_results[0]["result"]
+        else:
+            print(
+                "\n\033[90m[Synthesizing results...]\033[0m",
+                flush=True,
+            )
+            final_content = self._aggregate_results(
+                query, worker_results, get_aggregator_prompt()
+            )
+
+        return {"messages": [AIMessage(content=final_content)]}
+
+    def _decompose_task(
+        self, query: str, orchestrator_prompt: str, valid_categories: set
+    ) -> List[Dict[str, Any]]:
+        """Call the LLM to decompose a task into subtasks.
+
+        Args:
+            query: The user's original query
+            orchestrator_prompt: System prompt for decomposition
+            valid_categories: Set of valid category names
+
+        Returns:
+            List of subtask dicts
+        """
+        from client.orchestrator import parse_subtasks
+
+        messages = [
+            SystemMessage(content=orchestrator_prompt),
+            HumanMessage(content=query),
+        ]
+
+        # Suppress callbacks to keep spinner running
+        saved_callbacks = getattr(self.model, "callbacks", None)
+        self.model.callbacks = None
+        try:
+            response = self.model.invoke(messages, config={"callbacks": []})
+        finally:
+            self.model.callbacks = saved_callbacks
+
+        return parse_subtasks(response.content, query, valid_categories)
+
+    def _run_worker_loop(
+        self,
+        worker_model,
+        worker_tools: List[BaseTool],
+        prompt: str,
+        max_iterations: int = 10,
+    ) -> str:
+        """Execute a worker agent loop with streaming until completion.
+
+        Args:
+            worker_model: Model with route-specific tools bound
+            worker_tools: Tools available to this worker
+            prompt: The worker's task prompt
+            max_iterations: Safety limit for agent loop
+
+        Returns:
+            Worker's final text response
+        """
+        worker_messages: List[BaseMessage] = []
+        if self.system_prompt:
+            worker_messages.append(SystemMessage(content=self.system_prompt))
+        worker_messages.append(HumanMessage(content=prompt))
+
+        config = {"callbacks": self.callbacks} if self.callbacks else {}
+
+        for _ in range(max_iterations):
+            self._start_spinner()
+
+            response, _ = self._stream_response(
+                worker_messages, config, model=worker_model
+            )
+
+            if response is None:
+                response = worker_model.invoke(worker_messages, config=config)
+
+            worker_messages.append(response)
+
+            # If no tool calls, worker is done
+            if not isinstance(response, AIMessage) or not response.tool_calls:
+                self._stop_spinner()
+                visible = self._extract_visible(response.content)
+                return visible or str(response.content)
+
+            # Execute tools
+            self._stop_spinner()
+            for tc in response.tool_calls:
+                tool_name = tc["name"]
+                tool_id = tc["id"]
+                tool_args = tc["args"]
+
+                tool = next((t for t in worker_tools if t.name == tool_name), None)
+                # Fall back to all tools if not found in worker subset
+                if not tool:
+                    tool = next((t for t in self.tools if t.name == tool_name), None)
+
+                if tool:
+                    try:
+                        logger.debug(f"Worker tool: {tool_name} args: {tool_args}")
+                        result = tool.invoke(tool_args)
+                        worker_messages.append(
+                            ToolMessage(
+                                content=str(result),
+                                tool_call_id=tool_id,
+                                name=tool_name,
+                            )
+                        )
+                    except Exception as e:
+                        logger.error(f"Worker tool error: {e}")
+                        worker_messages.append(
+                            ToolMessage(
+                                content=f"Error: {e}",
+                                tool_call_id=tool_id,
+                                name=tool_name,
+                            )
+                        )
+                else:
+                    worker_messages.append(
+                        ToolMessage(
+                            content=f"Tool not found: {tool_name}",
+                            tool_call_id=tool_id,
+                            name=tool_name,
+                        )
+                    )
+
+        self._stop_spinner()
+        return "Task completed (max iterations reached)"
+
+    def _aggregate_results(
+        self,
+        original_query: str,
+        worker_results: List[Dict[str, Any]],
+        aggregator_prompt: str,
+    ) -> str:
+        """Aggregate worker results into a final response via LLM.
+
+        Args:
+            original_query: The user's original query
+            worker_results: List of worker result dicts
+            aggregator_prompt: System prompt for aggregation
+
+        Returns:
+            Aggregated response text
+        """
+        results_text = "\n\n".join(
+            f"## Subtask: {r['task']}\n{r['result']}" for r in worker_results
+        )
+
+        messages = [
+            SystemMessage(content=aggregator_prompt),
+            HumanMessage(
+                content=(
+                    f"Original request: {original_query}\n\n"
+                    f"Completed subtask results:\n\n{results_text}"
+                )
+            ),
+        ]
+
+        config = {"callbacks": self.callbacks} if self.callbacks else {}
+
+        self._start_spinner()
+        response, _ = self._stream_response(messages, config)
+
+        if response is None:
+            response = self.model.invoke(messages, config=config)
+
+        self._stop_spinner()
+        return self._extract_visible(response.content) or str(response.content)
 
     def _get_route_model(self, state: AgentState):
         """Get the model binding for the current route.

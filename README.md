@@ -30,6 +30,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **📝 Plan Mode**: Implementation planning workflow for complex tasks
 - **🔄 Background Tasks**: Run long operations in parallel without blocking
 - **🔀 Query Routing**: Automatic query classification routes to specialized tool subsets for faster, more focused responses
+- **🎭 Orchestrator-Workers**: Complex tasks are decomposed into subtasks executed by specialized workers with focused tool sets
 
 ## 📖 Project Structure
 
@@ -43,6 +44,7 @@ ai-assistant/
 │   ├── client.py                           # LangGraph client
 │   ├── agent.py                            # LangGraph agent with streaming
 │   ├── router.py                           # Query classifier and routing
+│   ├── orchestrator.py                     # Task decomposition and worker orchestration
 │   ├── mcp_tool_wrapper.py                 # MCP to LangChain tool adapter
 │   ├── ui/                                 # User interface
 │   │   ├── chat_interface.py               # Chat loop
@@ -324,6 +326,7 @@ All advanced features can be independently enabled or disabled in your local `ut
 | **Web Crawler**                                          | `ENABLE_WEB_CRAWL: true`       | `true`              | None                                      |
 | **Vision** (image analysis)                              | Configure `VISION_MODEL_ID`    | Disabled if not set | Vision-capable model                      |
 | **Query Routing** (classify & route queries)             | `ENABLE_ROUTING: true`         | `true`              | None                                      |
+| **Orchestration** (decompose complex tasks)              | `ENABLE_ORCHESTRATION: true`   | `true`              | Requires `ENABLE_ROUTING`                 |
 | **Verbose Mode** (show thinking process)                 | CLI flag `--no-verbose`        | Enabled             | Supported by model                        |
 
 **Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](#embeddings-model)).
@@ -387,6 +390,9 @@ The client manages the conversation flow and user interaction.
   - Classifies queries into categories (simple_qa, code, research, knowledge, full)
   - Routes each category to a specialized tool subset
   - Configurable classifier prompt via `ROUTING_PROMPT` in config
+- **`orchestrator.py`**: Task decomposition and worker orchestration
+  - Decomposes complex tasks into ordered subtasks with category assignments
+  - Configurable orchestrator and aggregator prompts via config
 - **`mcp_tool_wrapper.py`**: MCP to LangChain adapter
   - Wraps MCP tools as LangChain BaseTool
   - Handles async/sync conversion
@@ -456,11 +462,12 @@ Shared utilities and configuration.
 1. **User Input** → `ChatInterface` → `LangGraphClient`
 2. **Client** → Invokes LangGraph agent with MCP tools
 3. **Classifier** → Routes query to a category (simple_qa, code, research, knowledge, full) (_if routing enabled_)
-4. **LangGraph** → Executes agent node with route-specific tools, decides to use tools
-5. **MCP Server** → Executes tool (e.g., fs_read, web_search, RAG)
-6. **Tool Result** → Returned to agent via tools node
-7. **LangGraph** → Continues agent loop until response complete
-8. **Response** → Displayed to user via `ChatInterface`
+4. **Orchestrator** → For `full` tasks: decomposes into subtasks, spawns workers, aggregates results (_if orchestration enabled_)
+5. **LangGraph** → Executes agent node with route-specific tools, decides to use tools
+6. **MCP Server** → Executes tool (e.g., fs_read, web_search, RAG)
+7. **Tool Result** → Returned to agent via tools node
+8. **LangGraph** → Continues agent loop until response complete
+9. **Response** → Displayed to user via `ChatInterface`
 
 ### Session Management
 
@@ -1058,6 +1065,36 @@ ROUTING_PROMPT: |
   # Custom classifier prompt (optional, has a sensible default)
   ...
 ```
+
+### Orchestrator-Workers
+
+When enabled alongside routing, tasks classified as `full` (spanning multiple categories) are automatically decomposed into focused subtasks executed by specialized workers.
+
+**How it works:**
+
+1. **Orchestrator**: An LLM call decomposes the complex query into ordered subtasks, each assigned a category (code, research, knowledge, etc.)
+2. **Workers**: Each subtask is executed by a worker agent with only the tools for its category. Workers run sequentially — each receives context from previously completed subtasks.
+3. **Aggregator**: If there were multiple subtasks, a final LLM call synthesizes all worker results into a single coherent response.
+
+**Example flow for "Read this PDF and write a summary to a file":**
+
+```
+Orchestrator decomposes into:
+  [Step 1/2: Read and summarize the PDF document]        → knowledge worker
+  [Step 2/2: Write the summary to summary.md]            → code worker
+  [Synthesizing results...]                               → aggregator
+```
+
+**Configuration:**
+
+```yaml
+ENABLE_ROUTING: true          # Required
+ENABLE_ORCHESTRATION: true    # Activates orchestrator for 'full' route
+# ORCHESTRATOR_PROMPT: |      # Optional: customize decomposition prompt
+# AGGREGATOR_PROMPT: |        # Optional: customize synthesis prompt
+```
+
+**When orchestration is disabled**, `full` routes use all tools in a single agent loop (the previous behavior). No regression.
 
 ### Web Search Configuration
 
