@@ -43,7 +43,15 @@ def parse_subtasks(
     Returns:
         List of subtask dicts with 'description' and 'category' keys
     """
-    text = content or ""
+    # Handle Bedrock-style list content blocks (thinking enabled)
+    if isinstance(content, list):
+        text = "".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    else:
+        text = content or ""
 
     # Strip thinking tags
     text = re.sub(
