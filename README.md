@@ -17,6 +17,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
 - **📖 ACE Playbook**: Learns strategies from successes AND failures via Agentic Context Engineering
+- **🔀 Query Routing**: Automatic query classification routes to optimized tool subsets
 - **📊 Training Data Collection**: Mark high-quality responses for SFT training
 - **🔍 Web Search**: Integrated Brave Search API (_if available_)
 - **🌐 Web Crawler**: Extract and index content from web pages
@@ -40,6 +41,7 @@ ai-assistant/
 │
 ├── client/                                 # Client layer
 │   ├── client.py                           # Strands client
+│   ├── router.py                           # Query classifier and routing
 │   ├── ui/                                 # User interface
 │   │   ├── chat_interface.py               # Chat loop
 │   │   └── spinner.py                      # Loading animations
@@ -154,12 +156,12 @@ ai-assistant/
 
 **LLM Providers (choose at least one):**
 
-| Provider | Requirements |
-|---|---|
+| Provider                                            | Requirements                                                                   |
+| --------------------------------------------------- | ------------------------------------------------------------------------------ |
 | **Ollama** (local, recommended for getting started) | [Install Ollama](https://ollama.ai), then pull a model: `ollama pull qwen3:4b` |
-| **Amazon Bedrock** | AWS CLI configured (`aws configure`) with Bedrock access in your region |
-| **Amazon SageMaker AI** | AWS CLI configured with a deployed SageMaker endpoint |
-| **OpenAI** | Set `OPENAI_API_KEY` environment variable |
+| **Amazon Bedrock**                                  | AWS CLI configured (`aws configure`) with Bedrock access in your region        |
+| **Amazon SageMaker AI**                             | AWS CLI configured with a deployed SageMaker endpoint                          |
+| **OpenAI**                                          | Set `OPENAI_API_KEY` environment variable                                      |
 
 **Optional:**
 
@@ -309,16 +311,17 @@ See `bash/system-command-app/README.md` for details.
 
 All advanced features can be independently enabled or disabled in your local `utils/config.yaml` (copied from `config.yaml.example`). Here is a quick reference:
 
-| Feature | Config Key | Default | Dependencies |
-|---|---|---|---|
-| **RAG** (document indexing & search) | `ENABLE_RAG: true` | `true` | Embedding model (`EMBED_MODEL_ID`) |
-| **Episodic Memory** (learn from past tasks) | `ENABLE_EPISODIC_MEMORY: true` | `true` | Embedding model (`EMBED_MODEL_ID`) |
-| **ACE Playbook** (learn strategies from success/failure) | `ENABLE_PLAYBOOK: true` | `true` | None (embeddings optional for refinement) |
-| **User Profiling** (personalized responses) | `PROFILE.USE_PROFILING: true` | `true` | Activates after 5+ interactions |
-| **Web Search** | `ENABLE_WEB_SEARCH: true` | `true` | `BRAVE_API_KEY` configured |
-| **Web Crawler** | `ENABLE_WEB_CRAWL: true` | `true` | None |
-| **Vision** (image analysis) | Configure `VISION_MODEL_ID` | Disabled if not set | Vision-capable model |
-| **Verbose Mode** (show thinking process) | CLI flag `--no-verbose` | Enabled | Supported by model |
+| Feature                                                  | Config Key                     | Default             | Dependencies                              |
+| -------------------------------------------------------- | ------------------------------ | ------------------- | ----------------------------------------- |
+| **RAG** (document indexing & search)                     | `ENABLE_RAG: true`             | `true`              | Embedding model (`EMBED_MODEL_ID`)        |
+| **Episodic Memory** (learn from past tasks)              | `ENABLE_EPISODIC_MEMORY: true` | `true`              | Embedding model (`EMBED_MODEL_ID`)        |
+| **ACE Playbook** (learn strategies from success/failure) | `ENABLE_PLAYBOOK: true`        | `true`              | None (embeddings optional for refinement) |
+| **User Profiling** (personalized responses)              | `PROFILE.USE_PROFILING: true`  | `true`              | Activates after 5+ interactions           |
+| **Web Search**                                           | `ENABLE_WEB_SEARCH: true`      | `true`              | `BRAVE_API_KEY` configured                |
+| **Web Crawler**                                          | `ENABLE_WEB_CRAWL: true`       | `true`              | None                                      |
+| **Vision** (image analysis)                              | Configure `VISION_MODEL_ID`    | Disabled if not set | Vision-capable model                      |
+| **Query Routing** (classify & route queries)             | `ENABLE_ROUTING: true`         | `false`             | None                                      |
+| **Verbose Mode** (show thinking process)                 | CLI flag `--no-verbose`        | Enabled             | Supported by model                        |
 
 **Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](#embeddings-model)).
 
@@ -372,6 +375,10 @@ The client manages the conversation flow and user interaction.
   - Manages conversation state
   - Handles model configuration
   - Coordinates managers (profile, conversation)
+  - Routes queries via classifier when routing is enabled
+- **`router.py`**: Query classifier and routing
+  - Classifies queries into categories (simple_qa, code, research, knowledge, full)
+  - Maps categories to tool subsets for optimized handling
 - **`ui/`**: User interface components
   - `chat_interface.py`: Interactive chat loop with command handling
   - `spinner.py`: Loading animations
@@ -436,12 +443,14 @@ Shared utilities and configuration.
 ### Data Flow
 
 1. **User Input** → `ChatInterface` → `StrandsClient`
-2. **Client** → Sends message to LLM with MCP tools
-3. **LLM** → Decides to use tools via MCP protocol
-4. **MCP Server** → Executes tool (e.g., fs_read, web_search, RAG)
-5. **Tool Result** → Returned to LLM
-6. **LLM** → Generates response using tool results
-7. **Response** → Displayed to user via `ChatInterface`
+2. **Classifier** _(if routing enabled)_ → Categorizes query into route (simple_qa, code, research, knowledge, full)
+3. **Route Dispatch** → `simple_qa` calls model directly (no tools); other routes use the full Strands agent
+4. **Client** → Sends message to LLM with MCP tools
+5. **LLM** → Decides to use tools via MCP protocol
+6. **MCP Server** → Executes tool (e.g., fs_read, web_search, RAG)
+7. **Tool Result** → Returned to LLM
+8. **LLM** → Generates response using tool results
+9. **Response** → Displayed to user via `ChatInterface`
 
 ### Session Management
 
@@ -809,21 +818,21 @@ VISION_MODEL_ID:
 
 All `MODEL_ID` configurations support these optional parameters:
 
-| Parameter | Description | Default |
-|---|---|---|
-| `TEMPERATURE` | Sampling temperature | `0.1` |
-| `MAX_TOKENS` | Maximum tokens to generate | Model default |
-| `TOP_P` | Top-p (nucleus) sampling | `None` |
-| `TOP_K` | Top-k sampling (Ollama/SageMaker) | `None` |
-| `MIN_P` | Min-P sampling (Ollama) | `None` |
-| `STOP` | Stop sequences (list) | `None` |
-| `STREAM` | Enable streaming responses | `true` |
-| `REPETITION_PENALTY` | Repetition penalty (Ollama/SageMaker) | `None` |
-| `PRESENCE_PENALTY` | Presence penalty (Ollama) | `None` |
-| `FREQUENCY_PENALTY` | Frequency penalty (Ollama) | `None` |
-| `REASONING` | Enable thinking/reasoning mode | `false` |
-| `THINKING_TOKENS` | Token budget for reasoning (Bedrock) | `2048` |
-| `REASONING_EFFORT` | Reasoning effort level (OpenAI o1/o3) | `None` |
+| Parameter            | Description                           | Default       |
+| -------------------- | ------------------------------------- | ------------- |
+| `TEMPERATURE`        | Sampling temperature                  | `0.1`         |
+| `MAX_TOKENS`         | Maximum tokens to generate            | Model default |
+| `TOP_P`              | Top-p (nucleus) sampling              | `None`        |
+| `TOP_K`              | Top-k sampling (Ollama/SageMaker)     | `None`        |
+| `MIN_P`              | Min-P sampling (Ollama)               | `None`        |
+| `STOP`               | Stop sequences (list)                 | `None`        |
+| `STREAM`             | Enable streaming responses            | `true`        |
+| `REPETITION_PENALTY` | Repetition penalty (Ollama/SageMaker) | `None`        |
+| `PRESENCE_PENALTY`   | Presence penalty (Ollama)             | `None`        |
+| `FREQUENCY_PENALTY`  | Frequency penalty (Ollama)            | `None`        |
+| `REASONING`          | Enable thinking/reasoning mode        | `false`       |
+| `THINKING_TOKENS`    | Token budget for reasoning (Bedrock)  | `2048`        |
+| `REASONING_EFFORT`   | Reasoning effort level (OpenAI o1/o3) | `None`        |
 
 ### General Parameters
 
@@ -836,33 +845,33 @@ DOC_MAX_TOKENS: 16384
 
 # Profile configuration
 PROFILE:
-  NAME: default          # Used for session data isolation (~/agent-conversations/{NAME}/)
-  USE_PROFILING: true    # Enable automatic user profiling
+  NAME: default # Used for session data isolation (~/agent-conversations/{NAME}/)
+  USE_PROFILING: true # Enable automatic user profiling
 ```
 
 ### Embeddings Configuration
 
 ```yaml
 EMBEDDINGS:
-  CACHE_ENABLED: true      # LRU cache for embedding vectors (avoids re-embedding same text)
-  CACHE_SIZE: 1000         # Maximum cached embeddings
-  FALLBACK_ENABLED: true   # Fall back to SHA256 if embedding model unavailable
-  FALLBACK_TYPE: "sha256"  # Fallback type (sha256, random, zeros)
+  CACHE_ENABLED: true # LRU cache for embedding vectors (avoids re-embedding same text)
+  CACHE_SIZE: 1000 # Maximum cached embeddings
+  FALLBACK_ENABLED: true # Fall back to SHA256 if embedding model unavailable
+  FALLBACK_TYPE: "sha256" # Fallback type (sha256, random, zeros)
 ```
 
 ### LLM Interaction Configuration
 
 ```yaml
 LLM:
-  ENABLE_THINKING: true    # Enable thinking tags (verbose mode)
-  RETRY_ENABLED: true      # Retry failed LLM calls
-  MAX_RETRIES: 3           # Maximum retry attempts
-  RETRY_DELAY: 1.0         # Seconds between retries
-  RETRY_BACKOFF: 2.0       # Exponential backoff multiplier
+  ENABLE_THINKING: true # Enable thinking tags (verbose mode)
+  RETRY_ENABLED: true # Retry failed LLM calls
+  MAX_RETRIES: 3 # Maximum retry attempts
+  RETRY_DELAY: 1.0 # Seconds between retries
+  RETRY_BACKOFF: 2.0 # Exponential backoff multiplier
   SUMMARIZATION_THINK: false # Include thinking in summarization
   TOKEN_COUNTING:
-    OLLAMA_APPROXIMATION: 1.3  # Chars-to-tokens multiplier for Ollama
-    FALLBACK_MODEL: "gpt-4"    # Tiktoken model for fallback counting
+    OLLAMA_APPROXIMATION: 1.3 # Chars-to-tokens multiplier for Ollama
+    FALLBACK_MODEL: "gpt-4" # Tiktoken model for fallback counting
 ```
 
 ### System Prompt
@@ -883,11 +892,11 @@ The system prompt in `config.yaml` defines the assistant's behavior. Customize t
 ### RAG Configuration
 
 ```yaml
-ENABLE_RAG: true             # Master toggle for RAG system
-RAG_MAX_TOKENS: 8192         # Threshold: documents above this are ingested into RAG
-DOC_CHUNK_TOKENS: 256        # Chunk size in tokens (recommended: 256-1024)
+ENABLE_RAG: true # Master toggle for RAG system
+RAG_MAX_TOKENS: 8192 # Threshold: documents above this are ingested into RAG
+DOC_CHUNK_TOKENS: 256 # Chunk size in tokens (recommended: 256-1024)
 VECTOR_STORE:
-  TYPE: chromadb              # Vector store backend: "faiss" or "chromadb"
+  TYPE: chromadb # Vector store backend: "faiss" or "chromadb"
 ```
 
 **Requires:** An embedding model configured via `EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
@@ -896,37 +905,37 @@ VECTOR_STORE:
 
 ```yaml
 ENABLE_EPISODIC_MEMORY: true
-EPISODIC_MEMORY_STORE: chromadb    # or faiss
+EPISODIC_MEMORY_STORE: chromadb # or faiss
 EPISODIC_MEMORY:
   ENABLED: true
-  STORE_TYPE: chromadb             # or faiss
+  STORE_TYPE: chromadb # or faiss
   # Similarity Thresholds
-  DUPLICATE_THRESHOLD: 0.95       # Higher = stricter duplicate detection
-  RETRIEVAL_THRESHOLD: 0.7        # Minimum similarity to retrieve episodes
+  DUPLICATE_THRESHOLD: 0.95 # Higher = stricter duplicate detection
+  RETRIEVAL_THRESHOLD: 0.7 # Minimum similarity to retrieve episodes
   # Hybrid Search Weights
-  SEMANTIC_WEIGHT: 0.7            # Semantic similarity weight (0-1)
-  KEYWORD_WEIGHT: 0.3             # Keyword matching weight (0-1)
+  SEMANTIC_WEIGHT: 0.7 # Semantic similarity weight (0-1)
+  KEYWORD_WEIGHT: 0.3 # Keyword matching weight (0-1)
   # Token and Size Limits
-  MAX_TOKENS_PER_EPISODE: 400     # Max tokens for episode text
-  MAX_EPISODES: 1000              # Maximum stored episodes
-  MAX_AGE_DAYS: 90                # Maximum episode age in days
+  MAX_TOKENS_PER_EPISODE: 400 # Max tokens for episode text
+  MAX_EPISODES: 1000 # Maximum stored episodes
+  MAX_AGE_DAYS: 90 # Maximum episode age in days
   # Success Detection
-  SUCCESS_MARKERS:                # Phrases that indicate task success
+  SUCCESS_MARKERS: # Phrases that indicate task success
     - thanks
     - perfect
     - great
     - worked
-  CORRECTION_MARKERS:             # Phrases that indicate errors
+  CORRECTION_MARKERS: # Phrases that indicate errors
     - wrong
     - error
     - fix
     - actually
   # Storage Behavior
-  IMMEDIATE_STORAGE: true         # Store episodes immediately
-  MIN_TOOLS_OR_LENGTH: 300        # Min response length if no tools used
+  IMMEDIATE_STORAGE: true # Store episodes immediately
+  MIN_TOOLS_OR_LENGTH: 300 # Min response length if no tools used
   # Query Enhancement
-  ENABLE_QUERY_EXPANSION: true    # Expand queries with synonyms
-  QUERY_EXPANSION_TERMS: 3        # Max terms to add per query
+  ENABLE_QUERY_EXPANSION: true # Expand queries with synonyms
+  QUERY_EXPANSION_TERMS: 3 # Max terms to add per query
 ```
 
 **Requires:** An embedding model configured via `EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
@@ -992,6 +1001,39 @@ EMBED_MODEL_ID:
 Switch between stores by changing `VECTOR_STORE.TYPE` in config. The system uses a controller pattern, so all RAG functionality works identically regardless of the store.
 
 ## 📚 Advanced Features
+
+### Query Routing
+
+When enabled (`ENABLE_ROUTING: true`), the assistant classifies each query before processing and routes it to an optimized handling path.
+
+**Categories:**
+
+| Category    | Description                               | Tools Available                                                                                                   |
+| ----------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `simple_qa` | Greetings, factual questions, chitchat    | None (direct model call, fastest)                                                                                 |
+| `code`      | File operations, code editing, git, shell | fs_read, fs_write, file_edit, execute_bash, git_safe, glob_search, grep_search, todo, plan mode, background tasks |
+| `research`  | Web lookup, URL fetching                  | web_search, web_crawler                                                                                           |
+| `knowledge` | Document reading, RAG queries             | fs_read, glob_search, read_csv, read_json, read_pdf, read_docx, list_documents, search_in_documents               |
+| `full`      | Multi-category or ambiguous tasks         | All tools                                                                                                         |
+
+**How it works:**
+
+1. The classifier LLM call categorizes the user's query (spinner stays active during this step)
+2. For `simple_qa`: the model is called directly without tool overhead, providing faster responses
+3. For all other routes: the full Strands agent handles the query with all tools available
+4. Conversation context from recent messages is used to disambiguate follow-up queries
+
+**Configuration:**
+
+```yaml
+ENABLE_ROUTING: true
+ROUTING_PROMPT: |
+  <query_classifier>
+  ...  # See config.yaml.example for full prompt
+  </query_classifier>
+```
+
+The classifier prompt is fully customizable in `config.yaml`. It uses XML-structured categories with decision rules following Anthropic's system prompt best practices.
 
 ### Web Search Configuration
 

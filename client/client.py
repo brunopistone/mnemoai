@@ -90,6 +90,9 @@ class StrandsClient:
         self.first_token_received = False
         self.visible_content = None
 
+        # Query routing
+        self.router = None
+
         # Initialize episodic memory if enabled
         self.episodic_memory = None
         if config.get("ENABLE_EPISODIC_MEMORY", False):
@@ -1013,6 +1016,13 @@ class StrandsClient:
                             f"{self.system_prompt}\n\n{playbook_context}"
                         )
 
+                # Initialize query router if enabled
+                if config.get("ENABLE_ROUTING", False):
+                    from client.router import QueryRouter
+
+                    self.router = QueryRouter(self.model)
+                    logger.debug("Query routing enabled")
+
                 # Create agent with tools
                 self.agent = Agent(
                     model=self.model,
@@ -1064,6 +1074,139 @@ class StrandsClient:
         logger.debug("Formatted episodic memory context for prompt:")
         logger.debug(context)
         return context
+
+    def _handle_simple_qa(self, prompt: str) -> str:
+        """Handle simple Q&A queries by calling the model directly without tools.
+
+        This provides faster responses for conversational queries that don't
+        need any tool invocation.
+
+        Args:
+            prompt: User's query
+
+        Returns:
+            Model's response text
+        """
+        logger.debug("Handling query via simple_qa route (no tools)")
+
+        # Add user message to agent's conversation history
+        user_msg = {"role": "user", "content": [{"text": prompt}]}
+        self.agent.messages.append(user_msg)
+
+        # Build messages for the model call (include conversation history)
+        messages = []
+        for m in self.agent.messages:
+            role = m.get("role")
+            # Skip system messages and tool-related messages for simple QA
+            if role in ("user", "assistant"):
+                content = m.get("content", [])
+                # Skip messages with tool use/results
+                has_tool = False
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and (
+                            "toolUse" in block or "toolResult" in block
+                        ):
+                            has_tool = True
+                            break
+                if not has_tool:
+                    messages.append(m)
+
+        # Stream response from model directly
+        response_text = ""
+        callback = (
+            self._StrandsClient__verbose_callback_handler
+            if self.verbose_mode
+            else self._StrandsClient__minimal_callback_handler
+        )
+
+        think_param = config.get("LLM", {}).get("ENABLE_THINKING", False)
+        if not self.verbose_mode:
+            think_param = False
+
+        async def _stream():
+            nonlocal response_text
+            async for event in self.model.stream(
+                messages, system_prompt=self.system_prompt, think=think_param
+            ):
+                # Forward events to the callback handler for spinner/formatting
+                if (
+                    "contentBlockDelta" in event
+                    and "delta" in event["contentBlockDelta"]
+                    and "text" in event["contentBlockDelta"]["delta"]
+                ):
+                    text = event["contentBlockDelta"]["delta"]["text"]
+                    response_text += text
+                    callback(data=text)
+                elif "contentBlockStart" in event or "messageStart" in event:
+                    callback(event=event)
+
+        asyncio.run(_stream())
+        self._flush_formatters()
+
+        # Add assistant response to conversation history
+        visible = self._extract_visible(response_text)
+        assistant_msg = {
+            "role": "assistant",
+            "content": [{"text": visible or response_text}],
+        }
+        self.agent.messages.append(assistant_msg)
+
+        asyncio.run(
+            self.conversation_manager.manage_messages(self, self.model, self.agent)
+        )
+
+        if config.get("PROFILE", {}).get("USE_PROFILING", False):
+            self.profile_manager.analyze_conversation(self.agent.messages)
+
+        return visible or response_text
+
+    def _handle_agent_query(self, prompt: str) -> str:
+        """Handle queries using the full Strands agent with tools.
+
+        Args:
+            prompt: User's query
+
+        Returns:
+            Agent's response text
+        """
+        response = self.agent(prompt)
+
+        self._flush_formatters()
+
+        asyncio.run(
+            self.conversation_manager.manage_messages(self, self.model, self.agent)
+        )
+
+        if config.get("PROFILE", {}).get("USE_PROFILING", False):
+            self.profile_manager.analyze_conversation(self.agent.messages)
+
+        # Check if response is only thinking tags (no visible content)
+        response_text = str(response)
+
+        if not self._extract_visible(response_text):
+            # Model produced only reasoning — retry with thinking disabled
+            logger.debug("Model produced only reasoning, retrying without thinking")
+
+            print("", flush=True)
+            self._start_spinner()
+
+            saved = self._disable_reasoning()
+            try:
+                retry_response = self.agent(
+                    "You provided reasoning but no visible response. "
+                    "Please provide your answer."
+                )
+            finally:
+                self._restore_reasoning(saved)
+
+            self._flush_formatters()
+
+            retry_text = str(retry_response)
+            if self._extract_visible(retry_text):
+                response_text = retry_text
+
+        return response_text
 
     def query(self, prompt: str) -> str:
         """
@@ -1139,48 +1282,39 @@ class StrandsClient:
                             f"No relevant episodes found (similarity < {retrieval_threshold})"
                         )
 
+            # Classify query if routing is enabled
+            route = None
+            if self.router:
+                # Build conversation context from recent messages
+                context = ""
+                if (
+                    self.agent
+                    and hasattr(self.agent, "messages")
+                    and len(self.agent.messages) > 1
+                ):
+                    recent = self.agent.messages[-min(4, len(self.agent.messages)) :]
+                    context_parts = []
+                    for m in recent:
+                        text = ""
+                        content = m.get("content", [])
+                        if isinstance(content, list):
+                            for block in content:
+                                if isinstance(block, dict) and "text" in block:
+                                    text += block["text"][:200]
+                        elif isinstance(content, str):
+                            text = content[:200]
+                        if text:
+                            context_parts.append(text)
+                    context = "\n".join(context_parts)
+
+                route = self.router.classify(prompt, context)
+
             with self.mcp_client:
-                # Call agent with prompt
-                response = self.agent(prompt)
-
-                self._flush_formatters()
-
-                asyncio.run(
-                    self.conversation_manager.manage_messages(
-                        self, self.model, self.agent
-                    )
-                )
-
-                if config.get("PROFILE", {}).get("USE_PROFILING", False):
-                    # Update user profile with conversation
-                    self.profile_manager.analyze_conversation(self.agent.messages)
-
-                # Check if response is only thinking tags (no visible content)
-                response_text = str(response)
-
-                if not self._extract_visible(response_text):
-                    # Model produced only reasoning — retry with thinking disabled
-                    logger.debug(
-                        "Model produced only reasoning, retrying without thinking"
-                    )
-
-                    print("", flush=True)
-                    self._start_spinner()
-
-                    saved = self._disable_reasoning()
-                    try:
-                        retry_response = self.agent(
-                            "You provided reasoning but no visible response. "
-                            "Please provide your answer."
-                        )
-                    finally:
-                        self._restore_reasoning(saved)
-
-                    self._flush_formatters()
-
-                    retry_text = str(retry_response)
-                    if self._extract_visible(retry_text):
-                        response_text = retry_text
+                # For simple_qa route, call model directly without tools
+                if route == "simple_qa":
+                    response_text = self._handle_simple_qa(prompt)
+                else:
+                    response_text = self._handle_agent_query(prompt)
 
                 # Print token count in a clean format
                 token_count = self.__count_context_tokens()
