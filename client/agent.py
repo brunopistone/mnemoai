@@ -257,14 +257,22 @@ class LangGraphAgent:
                 )
 
             # Execute worker
-            result = self._run_worker_loop(worker_model, worker_tools, worker_prompt)
+            result, worker_msgs = self._run_worker_loop(
+                worker_model, worker_tools, worker_prompt
+            )
             worker_results.append(
                 {
                     "task": desc,
                     "category": category,
                     "result": result,
+                    "messages": worker_msgs,
                 }
             )
+
+        # Collect all intermediate worker messages for conversation saving
+        all_worker_messages: List[BaseMessage] = []
+        for wr in worker_results:
+            all_worker_messages.extend(wr.get("messages", []))
 
         # Step 3: Aggregate results
         if len(subtasks) == 1:
@@ -278,7 +286,7 @@ class LangGraphAgent:
                 query, worker_results, get_aggregator_prompt()
             )
 
-        return {"messages": [AIMessage(content=final_content)]}
+        return {"messages": all_worker_messages + [AIMessage(content=final_content)]}
 
     def _decompose_task(
         self, query: str, orchestrator_prompt: str, valid_categories: set
@@ -316,7 +324,7 @@ class LangGraphAgent:
         worker_tools: List[BaseTool],
         prompt: str,
         max_iterations: int = 10,
-    ) -> str:
+    ) -> tuple:
         """Execute a worker agent loop with streaming until completion.
 
         Args:
@@ -326,7 +334,8 @@ class LangGraphAgent:
             max_iterations: Safety limit for agent loop
 
         Returns:
-            Worker's final text response
+            Tuple of (final_text, worker_messages) where worker_messages
+            contains all intermediate AI and Tool messages for saving
         """
         worker_messages: List[BaseMessage] = []
         if self.system_prompt:
@@ -351,7 +360,11 @@ class LangGraphAgent:
             if not isinstance(response, AIMessage) or not response.tool_calls:
                 self._stop_spinner()
                 visible = self._extract_visible(response.content)
-                return visible or str(response.content)
+                # Return non-system messages for conversation saving
+                saveable = [
+                    m for m in worker_messages if not isinstance(m, SystemMessage)
+                ]
+                return visible or str(response.content), saveable
 
             # Execute tools
             self._stop_spinner()
@@ -395,7 +408,8 @@ class LangGraphAgent:
                     )
 
         self._stop_spinner()
-        return "Task completed (max iterations reached)"
+        saveable = [m for m in worker_messages if not isinstance(m, SystemMessage)]
+        return "Task completed (max iterations reached)", saveable
 
     def _aggregate_results(
         self,
