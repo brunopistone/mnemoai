@@ -318,8 +318,8 @@ All advanced features can be independently enabled or disabled in your local `ut
 
 | Feature                                                  | Config Key                     | Default             | Dependencies                              |
 | -------------------------------------------------------- | ------------------------------ | ------------------- | ----------------------------------------- |
-| **RAG** (document indexing & search)                     | `ENABLE_RAG: true`             | `true`              | Embedding model (`EMBED_MODEL_ID`)        |
-| **Episodic Memory** (learn from past tasks)              | `ENABLE_EPISODIC_MEMORY: true` | `true`              | Embedding model (`EMBED_MODEL_ID`)        |
+| **RAG** (document indexing & search)                     | `ENABLE_RAG: true`             | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
+| **Episodic Memory** (learn from past tasks)              | `ENABLE_EPISODIC_MEMORY: true` | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
 | **ACE Playbook** (learn strategies from success/failure) | `ENABLE_PLAYBOOK: true`        | `true`              | None (embeddings optional for refinement) |
 | **User Profiling** (personalized responses)              | `PROFILE.USE_PROFILING: true`  | `true`              | Activates after 5+ interactions           |
 | **Web Search**                                           | `ENABLE_WEB_SEARCH: true`      | `true`              | `BRAVE_API_KEY` configured                |
@@ -329,7 +329,7 @@ All advanced features can be independently enabled or disabled in your local `ut
 | **Orchestration** (decompose complex tasks)              | `ENABLE_ORCHESTRATION: true`   | `true`              | Requires `ENABLE_ROUTING`                 |
 | **Verbose Mode** (show thinking process)                 | CLI flag `--no-verbose`        | Enabled             | Supported by model                        |
 
-**Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](#embeddings-model)).
+**Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `RAG.EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](#embeddings-model)).
 
 ## 💡 Usage
 
@@ -461,7 +461,7 @@ Shared utilities and configuration.
 
 1. **User Input** → `ChatInterface` → `LangGraphClient`
 2. **Client** → Invokes LangGraph agent with MCP tools
-3. **Classifier** → Routes query to a category (simple_qa, code, research, knowledge, full) (_if routing enabled_)
+3. **Classifier** → Routes query to a category (simple*qa, code, research, knowledge, full) (\_if routing enabled*)
 4. **Orchestrator** → For `full` tasks: decomposes into subtasks, spawns workers, aggregates results (_if orchestration enabled_)
 5. **LangGraph** → Executes agent node with route-specific tools, decides to use tools
 6. **MCP Server** → Executes tool (e.g., fs_read, web_search, RAG)
@@ -880,12 +880,15 @@ PROFILE:
 
 ### Embeddings Configuration
 
+Embeddings settings are nested under the `RAG` section:
+
 ```yaml
-EMBEDDINGS:
-  CACHE_ENABLED: true # LRU cache for embedding vectors (avoids re-embedding same text)
-  CACHE_SIZE: 1000 # Maximum cached embeddings
-  FALLBACK_ENABLED: true # Fall back to SHA256 if embedding model unavailable
-  FALLBACK_TYPE: "sha256" # Fallback type (sha256, random, zeros)
+RAG:
+  EMBEDDINGS:
+    CACHE_ENABLED: true # LRU cache for embedding vectors (avoids re-embedding same text)
+    CACHE_SIZE: 1000 # Maximum cached embeddings
+    FALLBACK_ENABLED: true # Fall back to SHA256 if embedding model unavailable
+    FALLBACK_TYPE: "sha256" # Fallback type (sha256, random, zeros)
 ```
 
 ### LLM Interaction Configuration
@@ -922,21 +925,28 @@ The system prompt in `config.yaml` defines the assistant's behavior. Customize t
 
 ```yaml
 ENABLE_RAG: true # Master toggle for RAG system
-RAG_MAX_TOKENS: 8192 # Threshold: documents above this are ingested into RAG
-DOC_CHUNK_TOKENS: 256 # Chunk size in tokens (recommended: 256-1024)
-VECTOR_STORE:
-  TYPE: chromadb # Vector store backend: "faiss" or "chromadb"
+RAG:
+  MAX_TOKENS: 8192 # Threshold: documents above this are ingested into RAG
+  CHUNK_TOKENS: 1024 # Chunk size in tokens (recommended: 512-2048)
+  SEARCH:
+    SEMANTIC_WEIGHT: 0.5 # Semantic similarity weight (0-1)
+    KEYWORD_WEIGHT: 0.5 # BM25 keyword weight (0-1)
+  VECTOR_STORE:
+    TYPE: chromadb # Vector store backend: "faiss" or "chromadb"
+  EMBEDDINGS:
+    CACHE_ENABLED: true
+    CACHE_SIZE: 1000
+    FALLBACK_ENABLED: true
+    FALLBACK_TYPE: "sha256"
 ```
 
-**Requires:** An embedding model configured via `EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
+**Requires:** An embedding model configured via `RAG.EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
 
 ### Episodic Memory Configuration
 
 ```yaml
 ENABLE_EPISODIC_MEMORY: true
-EPISODIC_MEMORY_STORE: chromadb # or faiss
 EPISODIC_MEMORY:
-  ENABLED: true
   STORE_TYPE: chromadb # or faiss
   # Similarity Thresholds
   DUPLICATE_THRESHOLD: 0.95 # Higher = stricter duplicate detection
@@ -969,12 +979,12 @@ EPISODIC_MEMORY:
   QUERY_EXPANSION_TERMS: 3 # Max terms to add per query
 ```
 
-**Requires:** An embedding model configured via `EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
+**Requires:** An embedding model configured via `RAG.EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
 
 **How it works:**
 
 - Automatically stores successful task completions with full conversation context
-- Uses hybrid search (70% semantic + 30% keyword) to find similar past tasks
+- Uses hybrid search (70% semantic + 30% BM25) to find similar past tasks
 - **Conversation-aware injection**: Only injects episodic memory when relevant
   - Detects follow-up questions and skips injection (uses conversation context instead)
   - Filters out episodes redundant with current conversation
@@ -991,40 +1001,46 @@ EPISODIC_MEMORY:
 
 #### Embeddings Model
 
+All embedding configuration is nested under `RAG:`:
+
 For Bedrock:
 
 ```yaml
-EMBED_MODEL_ID:
-  NAME: amazon.titan-embed-text-v2:0
-  TYPE: bedrock
-  REGION: us-east-1 # For bedrock/sagemaker
+RAG:
+  EMBED_MODEL_ID:
+    NAME: amazon.titan-embed-text-v2:0
+    TYPE: bedrock
+    REGION: us-east-1
 ```
 
 For Ollama:
 
 ```yaml
-EMBED_MODEL_ID:
-  NAME: mxbai-embed-large
-  TYPE: ollama # or bedrock, sagemaker
-  HOST: localhost
-  PORT: 11434
+RAG:
+  EMBED_MODEL_ID:
+    NAME: mxbai-embed-large
+    TYPE: ollama
+    HOST: localhost
+    PORT: 11434
 ```
 
 For OpenAI:
 
 ```yaml
-EMBED_MODEL_ID:
-  NAME: text-embedding-ada-002
-  TYPE: openai
+RAG:
+  EMBED_MODEL_ID:
+    NAME: text-embedding-ada-002
+    TYPE: openai
 ```
 
 For SageMaker:
 
 ```yaml
-EMBED_MODEL_ID:
-  NAME: your-endpoint-name
-  TYPE: sagemaker
-  REGION: us-east-1 # For bedrock/sagemaker
+RAG:
+  EMBED_MODEL_ID:
+    NAME: your-endpoint-name
+    TYPE: sagemaker
+    REGION: us-east-1
 ```
 
 **Vector Store Options:**
@@ -1032,7 +1048,7 @@ EMBED_MODEL_ID:
 - **ChromaDB** (default): Persistent vector database with built-in metadata support
 - **FAISS**: Fast, in-memory vector search with disk persistence
 
-Switch between stores by changing `VECTOR_STORE.TYPE` in config. The system uses a controller pattern, so all RAG functionality works identically regardless of the store.
+Switch between stores by changing `RAG.VECTOR_STORE.TYPE` in config. The system uses a controller pattern, so all RAG functionality works identically regardless of the store.
 
 ## 📚 Advanced Features
 
@@ -1042,13 +1058,13 @@ When enabled, the assistant classifies each query before processing it and route
 
 **Categories:**
 
-| Route         | Description                                 | Tools Available                                      |
-| ------------- | ------------------------------------------- | ---------------------------------------------------- |
-| `simple_qa`   | Greetings, explanations, general knowledge  | None (direct LLM answer)                             |
-| `code`        | File ops, code editing, git, shell commands | fs_read, fs_write, file_edit, bash, git, search, etc |
-| `research`    | Web search, URL fetching                    | web_search, web_crawler                              |
-| `knowledge`   | Document reading, indexing, RAG queries     | pdf/csv/docx/json readers, RAG tools, fs_read        |
-| `full`        | Multi-category or ambiguous tasks           | All tools (fallback)                                 |
+| Route       | Description                                 | Tools Available                                      |
+| ----------- | ------------------------------------------- | ---------------------------------------------------- |
+| `simple_qa` | Greetings, explanations, general knowledge  | None (direct LLM answer)                             |
+| `code`      | File ops, code editing, git, shell commands | fs_read, fs_write, file_edit, bash, git, search, etc |
+| `research`  | Web search, URL fetching                    | web_search, web_crawler                              |
+| `knowledge` | Document reading, indexing, RAG queries     | pdf/csv/docx/json readers, RAG tools, fs_read        |
+| `full`      | Multi-category or ambiguous tasks           | All tools (fallback)                                 |
 
 **How it works:**
 
@@ -1088,8 +1104,8 @@ Orchestrator decomposes into:
 **Configuration:**
 
 ```yaml
-ENABLE_ROUTING: true          # Required
-ENABLE_ORCHESTRATION: true    # Activates orchestrator for 'full' route
+ENABLE_ROUTING: true # Required
+ENABLE_ORCHESTRATION: true # Activates orchestrator for 'full' route
 # ORCHESTRATOR_PROMPT: |      # Optional: customize decomposition prompt
 # AGGREGATOR_PROMPT: |        # Optional: customize synthesis prompt
 ```
@@ -1120,7 +1136,7 @@ When enabled, the `web_crawler` tool:
 
 ### RAG (Retrieval-Augmented Generation)
 
-The RAG system automatically indexes documents for semantic search with **hybrid search** (semantic + keyword matching).
+The RAG system automatically indexes documents for semantic search with **hybrid search** (semantic embeddings + BM25 keyword scoring).
 
 **How it works:**
 
@@ -1131,15 +1147,17 @@ The RAG system automatically indexes documents for semantic search with **hybrid
 **RAG Tools:**
 
 - `list_documents()`: Show indexed documents
-- `search_in_documents(query, top_k)`: Hybrid semantic + keyword search
+- `search_in_documents(query, top_k)`: Hybrid semantic + BM25 search
 - `clear_documents()`: Clear RAG index
 
 **Configuration:**
 
-- `DOC_CHUNK_TOKENS`: Chunk size (recommended: 512-1024)
-- `VECTOR_STORE.TYPE`: Choose between `faiss` or `chromadb`
+- `RAG.CHUNK_TOKENS`: Chunk size (recommended: 512-2048)
+- `RAG.VECTOR_STORE.TYPE`: Choose between `faiss` or `chromadb`
+- `RAG.SEARCH.SEMANTIC_WEIGHT` / `RAG.SEARCH.KEYWORD_WEIGHT`: Configurable hybrid weights
 - Recursive chunking with 10% overlap
-- Hybrid search: 50% keyword matching + 50% semantic similarity
+- Hybrid search: BM25 (Okapi BM25 with TF-IDF, term saturation, length normalization) + semantic similarity
+- Independent candidate retrieval from both BM25 and embeddings, merged and re-ranked
 
 **Vector Store Options:**
 
@@ -1175,7 +1193,7 @@ The episodic memory system learns from successful task completions and retrieves
 
 2. **Hybrid Search**: Retrieves similar episodes using:
    - 70% semantic similarity (task intent)
-   - 30% keyword matching (tool names, action verbs)
+   - 30% BM25 keyword scoring (tool names, action verbs)
 
 3. **Context Injection**: Before processing queries, injects compact context:
 
@@ -1206,10 +1224,12 @@ The episodic memory system learns from successful task completions and retrieves
 
 ```yaml
 ENABLE_EPISODIC_MEMORY: true
-EPISODIC_MEMORY_STORE: chromadb # or faiss
-EMBED_MODEL_ID: # Required for both stores
-  NAME: mxbai-embed-large
-  TYPE: ollama
+EPISODIC_MEMORY:
+  STORE_TYPE: chromadb # or faiss
+RAG:
+  EMBED_MODEL_ID: # Required for both stores
+    NAME: mxbai-embed-large
+    TYPE: ollama
 ```
 
 ### ACE Playbook (Agentic Context Engineering)
@@ -1389,9 +1409,10 @@ VISION_MODEL_ID:
 **For Embeddings:**
 
 ```yaml
-EMBED_MODEL_ID:
-  NAME: mxbai-embed-large
-  TYPE: ollama
+RAG:
+  EMBED_MODEL_ID:
+    NAME: mxbai-embed-large
+    TYPE: ollama
 ```
 
 The controllers (`llm_controller.py`, `vision_model_controller.py`, `embeddings_controller.py`) handle all provider-specific initialization automatically.
@@ -1481,7 +1502,7 @@ See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for 
 **RAG / Episodic Memory Not Working**
 
 - Ensure `ENABLE_RAG: true` (or `ENABLE_EPISODIC_MEMORY: true`) in config
-- Verify embedding model is configured and available (`EMBED_MODEL_ID` in config)
+- Verify embedding model is configured and available (`RAG.EMBED_MODEL_ID` in config)
 - For Ollama embeddings: ensure the embedding model is pulled (`ollama pull mxbai-embed-large`)
 - Check logs for "fallback embeddings" warnings — this means the real model is unreachable
 - Verify documents are being indexed with `list_documents()`

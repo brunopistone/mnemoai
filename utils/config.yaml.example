@@ -22,20 +22,27 @@ MAX_CONVERSATION_TOKENS: 65536
 DOC_MAX_TOKENS: 16384
 # RAG Configuration
 ENABLE_RAG: true
-RAG_MAX_TOKENS: 8192
-EMBED_MODEL_ID:
-  NAME: qwen3-embedding:0.6b
-  TYPE: ollama
-  HOST: localhost
-  PORT: 11434
-DOC_CHUNK_TOKENS: 256
-VECTOR_STORE:
-  TYPE: chromadb # or faiss
+RAG:
+  MAX_TOKENS: 8192
+  EMBED_MODEL_ID:
+    NAME: qwen3-embedding:0.6b
+    TYPE: ollama
+    HOST: localhost
+    PORT: 11434
+  CHUNK_TOKENS: 1024
+  SEARCH:
+    SEMANTIC_WEIGHT: 0.5 # Semantic similarity weight (0-1)
+    KEYWORD_WEIGHT: 0.5 # BM25 keyword weight (0-1)
+  VECTOR_STORE:
+    TYPE: chromadb # or faiss
+  EMBEDDINGS:
+    FALLBACK_ENABLED: true
+    FALLBACK_TYPE: "sha256" # or "random", "zeros"
+    CACHE_ENABLED: true
+    CACHE_SIZE: 1000 # LRU cache size for embeddings
 # Episodic Memory Configuration (Enhanced)
 ENABLE_EPISODIC_MEMORY: true
-EPISODIC_MEMORY_STORE: chromadb # or faiss
 EPISODIC_MEMORY:
-  ENABLED: true
   STORE_TYPE: chromadb # or faiss
   # Similarity Thresholds
   DUPLICATE_THRESHOLD: 0.95 # Higher = stricter duplicate detection
@@ -257,12 +264,6 @@ LLM:
     FALLBACK_MODEL: "gpt-4" # Tiktoken model for fallback
   # Context Management
   SUMMARIZATION_THINK: false
-# Embedding Configuration (Enhanced)
-EMBEDDINGS:
-  FALLBACK_ENABLED: true
-  FALLBACK_TYPE: "sha256" # or "random", "zeros"
-  CACHE_ENABLED: true
-  CACHE_SIZE: 1000 # LRU cache size for embeddings
 # Web search Configuration
 ENABLE_WEB_SEARCH: true
 BRAVE_API_KEY: your_brave_api_key

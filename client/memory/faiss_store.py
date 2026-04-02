@@ -1,9 +1,9 @@
-import ast
 from datetime import datetime, timedelta
 import faiss
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
+from utils.bm25 import BM25
 from utils.config import config
 from utils.logger import logger
 
@@ -46,6 +46,26 @@ class FAISSEpisodicStore:
         else:
             self.metadata = []
 
+        self.bm25: Optional[BM25] = None
+        self._rebuild_bm25()
+
+    def _get_searchable_text(self, metadata: Dict[str, Any]) -> str:
+        """Build searchable text from episode metadata for BM25 indexing."""
+        parts = [metadata.get("task", ""), metadata.get("solution", "")]
+        tools_str = metadata.get("tools", "")
+        if isinstance(tools_str, str) and tools_str:
+            parts.append(tools_str)
+        return " ".join(p for p in parts if p)
+
+    def _rebuild_bm25(self) -> None:
+        """Rebuild BM25 index from all stored episode metadata."""
+        if not self.metadata:
+            return
+        texts = [self._get_searchable_text(m) for m in self.metadata]
+        self.bm25 = BM25()
+        self.bm25.fit(texts)
+        logger.debug(f"Episodic BM25 index built with {len(texts)} episodes")
+
     def add(self, text: str, metadata: Dict[str, Any], episode_id: str = None) -> None:
         """Add episode to FAISS index.
 
@@ -71,6 +91,7 @@ class FAISSEpisodicStore:
         # Store metadata
         metadata["episode_id"] = episode_id
         self.metadata.append(metadata)
+        self._rebuild_bm25()
 
         # Persist
         faiss.write_index(self.index, self.index_path)
@@ -80,7 +101,10 @@ class FAISSEpisodicStore:
         logger.debug(f"Stored episode in FAISS: {episode_id}")
 
     def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
-        """Search for similar episodes using hybrid search (70% semantic + 30% keyword).
+        """Search for similar episodes using hybrid search (semantic + BM25).
+
+        Retrieves candidates independently from semantic search and BM25,
+        merges both sets, then re-ranks with a hybrid score.
 
         Args:
             query: Query text
@@ -92,70 +116,54 @@ class FAISSEpisodicStore:
         if self.index is None or len(self.metadata) == 0:
             return []
 
-        # Generate query embedding
+        candidate_k = min(top_k * 3, len(self.metadata))
+
+        # --- Semantic candidates ---
         query_embedding = self.embeddings.embed([query])
+        scores, indices = self.index.search(query_embedding, candidate_k)
 
-        # Optimize: retrieve only top_k * 3 for hybrid re-ranking (not all episodes)
-        # This reduces O(n) to O(k log n) where k is much smaller than n
-        retrieval_k = min(top_k * 3, len(self.metadata))
-        logger.debug(
-            f"FAISS search: retrieving top {retrieval_k} of {len(self.metadata)} episodes for hybrid ranking"
-        )
+        # idx -> (semantic_score, metadata)
+        sem_candidates: Dict[int, Tuple] = {}
+        for i, idx in enumerate(indices[0]):
+            if idx < 0 or idx >= len(self.metadata):
+                continue
+            sem_candidates[idx] = (float(scores[0][i]), self.metadata[idx])
 
-        scores, indices = self.index.search(query_embedding, retrieval_k)
+        # --- BM25 candidates ---
+        bm25_candidates: Dict[int, float] = {}
+        if self.bm25 and self.bm25.corpus_size > 0:
+            raw_bm25 = self.bm25.score(query)
+            max_bm25 = max(raw_bm25) if raw_bm25 else 0.0
 
-        # Hybrid search: combine semantic + keyword matching
-        query_lower = query.lower()
+            if max_bm25 > 0:
+                indexed_scores = sorted(
+                    enumerate(raw_bm25), key=lambda x: x[1], reverse=True
+                )[:candidate_k]
+
+                for idx, score in indexed_scores:
+                    if score <= 0 or idx >= len(self.metadata):
+                        continue
+                    bm25_candidates[idx] = score / max_bm25
+
+        # --- Merge and re-rank ---
+        all_indices = set(sem_candidates.keys()) | set(bm25_candidates.keys())
         hybrid_results = []
 
-        for i, idx in enumerate(indices[0]):
-            if idx < len(self.metadata):
-                meta = self.metadata[idx].copy()
-                semantic_score = float(scores[0][i])
+        for idx in all_indices:
+            sem_score = sem_candidates[idx][0] if idx in sem_candidates else 0.0
+            bm25_val = bm25_candidates.get(idx, 0.0)
+            meta = (
+                sem_candidates[idx][1] if idx in sem_candidates else self.metadata[idx]
+            ).copy()
 
-                # Keyword matching: check task text and tool names
-                task = meta.get("task", "").lower()
-                tools_str = meta.get("tools", "")
+            hybrid_score = (
+                self.semantic_weight * sem_score + self.keyword_weight * bm25_val
+            )
 
-                # Extract tool names from tools string
-                tool_names = []
-                if isinstance(tools_str, str):
-                    try:
-                        tools_list = ast.literal_eval(tools_str)
-                        tool_names = [
-                            t.get("name", "").lower()
-                            for t in tools_list
-                            if isinstance(t, dict)
-                        ]
-                    except:
-                        pass
+            meta["similarity"] = hybrid_score
+            hybrid_results.append((hybrid_score, meta))
 
-                # Keyword score: boost if query terms appear in task or tool names
-                keyword_score = 0.0
-                query_terms = query_lower.split()
-
-                for term in query_terms:
-                    if len(term) > 2:  # Skip short words
-                        if term in task:
-                            keyword_score += 0.5
-                        if any(term in tool for tool in tool_names):
-                            keyword_score += 0.5
-
-                keyword_score = min(keyword_score, 1.0)  # Cap at 1.0
-
-                # Hybrid: configurable semantic + keyword weights
-                hybrid_score = (
-                    self.semantic_weight * semantic_score
-                    + self.keyword_weight * keyword_score
-                )
-
-                meta["similarity"] = hybrid_score
-                hybrid_results.append((hybrid_score, meta))
-
-        # Sort by hybrid score
         hybrid_results.sort(key=lambda x: x[0], reverse=True)
-
-        # Return top_k
         return [meta for _, meta in hybrid_results[:top_k]]
 
     def cleanup(self, max_episodes: int = 1000, max_age_days: int = 90) -> None:
@@ -200,6 +208,7 @@ class FAISSEpisodicStore:
 
             self.index = new_index
             self.metadata = new_metadata
+            self._rebuild_bm25()
 
             # Persist
             faiss.write_index(self.index, self.index_path)
@@ -218,4 +227,5 @@ class FAISSEpisodicStore:
             os.remove(self.metadata_path)
         self.index = None
         self.metadata = []
+        self.bm25 = None
         logger.info("Cleared FAISS episodic memory")

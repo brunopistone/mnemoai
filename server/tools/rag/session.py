@@ -17,6 +17,7 @@ sys.path.append(
         os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     )
 )
+from utils.bm25 import BM25
 from utils.config import config
 from utils.logger import logger
 from models.embeddings_controller import EmbeddingsController
@@ -63,7 +64,7 @@ def get_rag_session() -> Optional[Any]:
             with open(session_file, "r") as f:
                 session_id = f.read().strip()
 
-            embed_model_config = config.get("EMBED_MODEL_ID", {})
+            embed_model_config = config.get("RAG", {}).get("EMBED_MODEL_ID", {})
             _rag_session = SessionRAG(
                 embed_model_config=embed_model_config,
                 session_id=session_id,
@@ -140,6 +141,13 @@ class SessionRAG:
         self.session_id = session_id or self._generate_session_id()
         self.rag_dir = rag_dir
 
+        # Load hybrid search weights from config
+        rag_search_config = config.get("RAG", {}).get("SEARCH", {})
+        self.semantic_weight = rag_search_config.get("SEMANTIC_WEIGHT", 0.5)
+        self.keyword_weight = rag_search_config.get("KEYWORD_WEIGHT", 0.5)
+
+        self.bm25: Optional[BM25] = None
+
         # Try to load existing store using controller
         if rag_dir and session_id:
             detected_dim = VectorStoreController.detect_existing_store(
@@ -152,6 +160,7 @@ class SessionRAG:
                     self.dim, session_id=session_id, rag_dir=rag_dir
                 )
                 logger.debug(f"Loaded existing vector store with dim={self.dim}")
+                self._rebuild_bm25()
             else:
                 self.store = None  # Will be created on first ingest
         else:
@@ -166,6 +175,16 @@ class SessionRAG:
         profile_name = config.get("PROFILE", {}).get("NAME", "default")
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{profile_name}_{timestamp}"
+
+    def _rebuild_bm25(self) -> None:
+        """Rebuild the BM25 index from the current store's metadata."""
+        if self.store is None or not hasattr(self.store, "metadatas"):
+            return
+        texts = [m.get("text", "") for m in self.store.metadatas]
+        if texts:
+            self.bm25 = BM25()
+            self.bm25.fit(texts)
+            logger.debug(f"BM25 index built with {len(texts)} documents")
 
     def _embed_batch(self, texts: List[str]) -> np.ndarray:
         """Embed texts using the embeddings controller.
@@ -256,13 +275,18 @@ class SessionRAG:
                     self.store["vectors"].append(v)
                     self.store["metadatas"].append(m)
 
+            # Rebuild BM25 index with all chunks
+            self._rebuild_bm25()
+
         return len(chunks)
 
     def query(self, query_text: str, top_k: int = 6) -> Tuple[List[float], List[Dict]]:
-        """Search indexed documents using hybrid search (semantic + keyword matching).
+        """Search indexed documents using hybrid search (semantic + BM25).
 
-        Retrieves all chunks from vector store, applies hybrid ranking (50% keyword + 50% semantic),
-        and returns top_k results.
+        Retrieves candidates independently from both semantic search and BM25,
+        merges the two candidate sets, then re-ranks with a hybrid score.
+        This ensures keyword-strong matches surface even when semantic similarity
+        is low (e.g. exact name lookups).
 
         Args:
             query_text: Search query text
@@ -285,45 +309,69 @@ class SessionRAG:
             return [], []
 
         vec = embeddings[0]
+        candidate_k = top_k * 3
 
-        # Get all results for hybrid ranking
+        # --- Semantic candidates ---
+        sem_candidates: Dict[str, Tuple[float, Dict]] = {}
         if hasattr(self.store, "search"):
-            all_scores, all_metas = self.store.search(
-                vec, top_k=len(self.store.metadatas)
+            sem_scores, sem_metas = self.store.search(
+                vec, top_k=min(candidate_k, len(self.store.metadatas))
             )
         else:
             scores_metas: List[Tuple[float, Dict]] = []
             for v, m in zip(self.store["vectors"], self.store["metadatas"]):
-                score = (
-                    float(
-                        np.dot(vec, v)
-                        / (np.linalg.norm(vec) * np.linalg.norm(v) + 1e-12)
-                    )
-                    if np is not None
-                    else 0.0
+                score = float(
+                    np.dot(vec, v) / (np.linalg.norm(vec) * np.linalg.norm(v) + 1e-12)
                 )
                 scores_metas.append((score, m))
             scores_metas.sort(key=lambda x: x[0], reverse=True)
-            all_scores = [s for s, _ in scores_metas]
-            all_metas = [m for _, m in scores_metas]
+            sem_scores = [s for s, _ in scores_metas[:candidate_k]]
+            sem_metas = [m for _, m in scores_metas[:candidate_k]]
 
-        # Hybrid search: combine semantic + keyword matching
-        query_lower = query_text.lower()
+        for score, meta in zip(sem_scores, sem_metas):
+            key = f"{meta.get('doc_id', '')}:{meta.get('chunk_idx', '')}"
+            sem_candidates[key] = (score, meta)
+
+        # --- BM25 candidates ---
+        bm25_candidates: Dict[str, Tuple[float, Dict]] = {}
+        if self.bm25 and self.bm25.corpus_size > 0:
+            raw_bm25 = self.bm25.score(query_text)
+            max_bm25 = max(raw_bm25) if raw_bm25 else 0.0
+
+            if max_bm25 > 0:
+                # Get top candidate_k BM25 results by index
+                indexed_scores = sorted(
+                    enumerate(raw_bm25), key=lambda x: x[1], reverse=True
+                )[:candidate_k]
+
+                all_metas = self.store.metadatas
+                for idx, score in indexed_scores:
+                    if score <= 0 or idx >= len(all_metas):
+                        continue
+                    norm_score = score / max_bm25
+                    meta = all_metas[idx]
+                    key = f"{meta.get('doc_id', '')}:{meta.get('chunk_idx', '')}"
+                    bm25_candidates[key] = (norm_score, meta)
+
+        # --- Merge and re-rank ---
+        all_keys = set(sem_candidates.keys()) | set(bm25_candidates.keys())
         hybrid_results = []
 
-        for score, meta in zip(all_scores, all_metas):
-            text = meta.get("text", "").lower()
+        for key in all_keys:
+            sem_score = sem_candidates[key][0] if key in sem_candidates else 0.0
+            bm25_score = bm25_candidates[key][0] if key in bm25_candidates else 0.0
+            meta = (
+                sem_candidates[key][1]
+                if key in sem_candidates
+                else bm25_candidates[key][1]
+            )
 
-            # Keyword match boost
-            keyword_score = 1.0 if query_lower in text else 0.0
+            hybrid_score = (
+                self.semantic_weight * sem_score + self.keyword_weight * bm25_score
+            )
+            hybrid_results.append((hybrid_score, meta))
 
-            # Combine: 50% keyword, 50% semantic
-            hybrid_score = 0.5 * keyword_score + 0.5 * score
-            hybrid_results.append((hybrid_score, score, meta))
-
-        # Sort by hybrid score
         hybrid_results.sort(key=lambda x: x[0], reverse=True)
 
-        # Return top_k with hybrid scores
         top_results = hybrid_results[:top_k]
-        return [r[0] for r in top_results], [r[2] for r in top_results]
+        return [r[0] for r in top_results], [r[1] for r in top_results]
