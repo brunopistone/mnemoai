@@ -184,9 +184,11 @@ class LangGraphClient:
         """Initialize episodic memory if enabled."""
         logger.debug("Initializing episodic memory...")
 
-        embed_model_config = config.get("EMBED_MODEL_ID")
+        embed_model_config = config.get("RAG", {}).get("EMBED_MODEL_ID")
         if not embed_model_config:
-            raise ValueError("EMBED_MODEL_ID must be configured for episodic memory")
+            raise ValueError(
+                "RAG.EMBED_MODEL_ID must be configured for episodic memory"
+            )
 
         user_home = os.path.expanduser("~")
         profile_name = config.get("PROFILE", {}).get("NAME", "default")
@@ -195,7 +197,9 @@ class LangGraphClient:
         )
         os.makedirs(episodic_path, exist_ok=True)
 
-        store_type = config.get("EPISODIC_MEMORY_STORE", "chromadb").lower()
+        store_type = (
+            config.get("EPISODIC_MEMORY", {}).get("STORE_TYPE", "chromadb").lower()
+        )
 
         from models.embeddings_controller import EmbeddingsController
 
@@ -222,7 +226,7 @@ class LangGraphClient:
 
         # Get embeddings for semantic deduplication if available
         embeddings = None
-        if config.get("EMBED_MODEL_ID"):
+        if config.get("RAG", {}).get("EMBED_MODEL_ID"):
             try:
                 from models.embeddings_controller import EmbeddingsController
 
@@ -466,7 +470,7 @@ class LangGraphClient:
             return 0.0
 
         # Try semantic similarity with embeddings
-        if config.get("EMBED_MODEL_ID"):
+        if config.get("RAG", {}).get("EMBED_MODEL_ID"):
             try:
                 from models.embeddings_controller import EmbeddingsController
 

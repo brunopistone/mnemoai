@@ -73,7 +73,7 @@ async def read_docx(file_path: str) -> str:
         # If RAG enabled, ingest into session store instead of summarizing everything
         if config.get("ENABLE_RAG", False) and _rag_available:
             tokens = count_tokens(full_text)
-            if tokens > config.get("RAG_MAX_TOKENS", 1024 * 8):
+            if tokens > config.get("RAG", {}).get("MAX_TOKENS", 1024 * 8):
                 try:
                     rag = get_rag_session()
                     if rag is None:
@@ -84,7 +84,9 @@ async def read_docx(file_path: str) -> str:
                         num_chunks = rag.ingest(
                             os.path.basename(normalized_path),
                             full_text,
-                            chunk_size_tokens=int(config.get("DOC_CHUNK_TOKENS", 2048)),
+                            chunk_size_tokens=int(
+                                config.get("RAG", {}).get("CHUNK_TOKENS", 1024)
+                            ),
                         )
 
                         return json.dumps(

@@ -21,7 +21,7 @@ class VectorStoreController:
         self.rag_dir = rag_dir
 
         # Get store type from config
-        store_config = config.get("VECTOR_STORE", {})
+        store_config = config.get("RAG", {}).get("VECTOR_STORE", {})
         self.store_type = store_config.get("TYPE", "faiss")
 
         self.store = self._initialize_store()
@@ -40,7 +40,7 @@ class VectorStoreController:
         if not session_id or not rag_dir:
             return None
 
-        store_config = config.get("VECTOR_STORE", {})
+        store_config = config.get("RAG", {}).get("VECTOR_STORE", {})
         store_type = store_config.get("TYPE", "faiss")
 
         if store_type == "faiss":

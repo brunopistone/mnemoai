@@ -62,8 +62,8 @@ def register_rag_tools(mcp: FastMCP) -> None:
             return f"Error listing documents: {e}"
 
     @mcp.tool()
-    def search_in_documents(query: str, top_k: int = 5) -> str:
-        """Search for information in indexed documents using hybrid semantic + keyword search.
+    def search_in_documents(query: str, top_k: int = 8) -> str:
+        """Search for information in indexed documents using hybrid semantic + BM25 keyword search.
 
         Use short, focused queries (3-6 keywords) for best results. Extract only the key terms from the user's question. Use top_k of at least 5 for accurate results.
 
@@ -74,7 +74,7 @@ def register_rag_tools(mcp: FastMCP) -> None:
 
         Args:
             query: SHORT search query with key terms (3-6 keywords)
-            top_k: Number of relevant chunks to retrieve (minimum 5, default 5)
+            top_k: Number of relevant chunks to retrieve (default 8)
 
         Returns:
             Relevant text chunks from indexed documents with similarity scores

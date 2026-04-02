@@ -18,7 +18,9 @@ class EmbeddingsController:
         Args:
             embed_model_config: Optional embedding model configuration
         """
-        self.embed_model_config = embed_model_config or config.get("EMBED_MODEL_ID", {})
+        self.embed_model_config = embed_model_config or config.get("RAG", {}).get(
+            "EMBED_MODEL_ID", {}
+        )
         self.embed_model_type = self.embed_model_config.get("TYPE", "ollama")
         self.embed_model_name = self.embed_model_config.get("NAME", "mxbai-embed-large")
         self.region = self.embed_model_config.get("REGION", "us-east-1")
@@ -32,7 +34,7 @@ class EmbeddingsController:
         self.dim = model_dims.get(self.embed_model_name, 1024)  # Default to 1024
 
         # Initialize embedding cache for performance
-        embeddings_config = config.get("EMBEDDINGS", {})
+        embeddings_config = config.get("RAG", {}).get("EMBEDDINGS", {})
         self.cache_enabled = embeddings_config.get("CACHE_ENABLED", True)
         self.cache_size = embeddings_config.get("CACHE_SIZE", 1000)
         self._embedding_cache = {}  # {cache_key: embedding_vector}
@@ -267,7 +269,7 @@ class EmbeddingsController:
             NumPy array of deterministic embeddings
         """
         # Get fallback configuration
-        fallback_config = config.get("EMBEDDINGS", {})
+        fallback_config = config.get("RAG", {}).get("EMBEDDINGS", {})
         fallback_type = fallback_config.get("FALLBACK_TYPE", "sha256")
 
         # Prominent warning about degraded functionality

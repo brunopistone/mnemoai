@@ -62,38 +62,51 @@ class LangChainLLMController(BaseModelController):
             raise ValueError(f"Unsupported model type: {self.model_type}")
 
     def _initialize_bedrock_model(self, callbacks: list = None) -> None:
-        """Initialize AWS Bedrock model using LangChain."""
-        from langchain_aws import ChatBedrock
+        """Initialize AWS Bedrock model using LangChain Converse API."""
+        from langchain_aws import ChatBedrockConverse
 
         logger.info("Initializing Bedrock model via LangChain...")
 
-        model_kwargs = {}
+        kwargs = {
+            "model": self.model_name,
+            "region_name": self.region,
+            "callbacks": callbacks,
+        }
 
         if self.temperature is not None:
-            model_kwargs["temperature"] = self.temperature
+            kwargs["temperature"] = self.temperature
         if self.top_p is not None:
-            model_kwargs["top_p"] = self.top_p
+            kwargs["top_p"] = self.top_p
         if self.max_tokens is not None:
-            model_kwargs["max_tokens"] = self.max_tokens
+            kwargs["max_tokens"] = self.max_tokens
         if self.stop:
-            model_kwargs["stop_sequences"] = self.stop
+            kwargs["stop"] = self.stop
 
-        # Enable thinking/reasoning for Claude models if verbose
+        # Enable thinking/reasoning for Claude models
         if self.reasoning_model:
-            model_kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": self.thinking_tokens,
+            # Map REASONING_EFFORT to budget_tokens when set
+            effort_to_tokens = {
+                "low": 1024,
+                "medium": 8192,
+                "high": 16384,
+                "max": 32768,
+            }
+            budget = (
+                effort_to_tokens.get(self.reasoning_effort, self.thinking_tokens)
+                if self.reasoning_effort
+                else self.thinking_tokens
+            )
+
+            kwargs["additional_model_request_fields"] = {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                }
             }
             # Thinking requires temperature=1
-            model_kwargs["temperature"] = 1.0
+            kwargs["temperature"] = 1.0
 
-        self.model = ChatBedrock(
-            model_id=self.model_name,
-            region_name=self.region,
-            model_kwargs=model_kwargs,
-            streaming=self.stream,
-            callbacks=callbacks,
-        )
+        self.model = ChatBedrockConverse(**kwargs)
 
     def _initialize_litellm_model(self, callbacks: list = None) -> None:
         """Initialize LiteLLM model using langchain-litellm."""

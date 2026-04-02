@@ -700,6 +700,7 @@ class LangGraphAgent:
         if reasoning is not None:
             saved["reasoning"] = reasoning
             self.model.reasoning = False
+        # ChatBedrock (old API)
         if (
             hasattr(self.model, "model_kwargs")
             and "thinking" in self.model.model_kwargs
@@ -707,6 +708,12 @@ class LangGraphAgent:
             saved["thinking"] = self.model.model_kwargs.pop("thinking")
             saved["temperature"] = self.model.model_kwargs.get("temperature")
             self.model.model_kwargs["temperature"] = 0.1
+        # ChatBedrockConverse (Converse API)
+        additional = getattr(self.model, "additional_model_request_fields", None)
+        if additional and "thinking" in additional:
+            saved["additional_thinking"] = additional.pop("thinking")
+            saved["converse_temperature"] = getattr(self.model, "temperature", None)
+            self.model.temperature = 0.1
         return saved
 
     def _restore_reasoning(self, saved: dict) -> None:
@@ -719,6 +726,12 @@ class LangGraphAgent:
             self.model.reasoning = saved["reasoning"]
         if "thinking" in saved:
             self.model.model_kwargs["thinking"] = saved["thinking"]
+        if "additional_thinking" in saved:
+            self.model.additional_model_request_fields["thinking"] = saved[
+                "additional_thinking"
+            ]
+            if saved.get("converse_temperature") is not None:
+                self.model.temperature = saved["converse_temperature"]
         if "temperature" in saved:
             self.model.model_kwargs["temperature"] = saved["temperature"]
 
