@@ -70,6 +70,17 @@ class TestDisableRestoreBedrockConverse:
         assert model.additional_model_request_fields["thinking"] == {"type": "enabled"}
         assert model.temperature == 0.8
 
+    def test_none_temperature_left_untouched(self):
+        # Regression: newer Bedrock Claude models reject `temperature` as
+        # deprecated, so these models run with temperature=None and
+        # disable_reasoning must NOT set one.
+        model = FakeBedrockConverseModel()
+        model.temperature = None
+        saved = disable_reasoning(model)
+        assert model.temperature is None
+        restore_reasoning(model, saved)
+        assert model.temperature is None
+
 
 class TestDisableRestorePlainModel:
     def test_noop_on_model_without_reasoning(self):

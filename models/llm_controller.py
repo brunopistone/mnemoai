@@ -35,7 +35,7 @@ class LangChainLLMController(BaseModelController):
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
         self.stop = self.model_id.get("STOP", None)
         self.stream = self.model_id.get("STREAM", True)
-        self.temperature = self.model_id.get("TEMPERATURE", 0.1)
+        self.temperature = self.model_id.get("TEMPERATURE", None)
         self.thinking_tokens = self.model_id.get("THINKING_TOKENS", 1024 * 2)
         self.top_k = self.model_id.get("TOP_K", None)
         self.top_p = self.model_id.get("TOP_P", None)
@@ -103,8 +103,11 @@ class LangChainLLMController(BaseModelController):
                     "budget_tokens": budget,
                 }
             }
-            # Thinking requires temperature=1
-            kwargs["temperature"] = 1.0
+            # Older Claude models require temperature=1 with thinking; newer
+            # ones reject the parameter entirely. Only override when a
+            # temperature was explicitly configured.
+            if self.temperature is not None:
+                kwargs["temperature"] = 1.0
 
         self.model = ChatBedrockConverse(**kwargs)
 

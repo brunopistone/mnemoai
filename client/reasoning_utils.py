@@ -31,15 +31,22 @@ def disable_reasoning(model) -> Dict[str, Any]:
     # ChatBedrock (old API)
     if hasattr(model, "model_kwargs") and "thinking" in model.model_kwargs:
         saved["thinking"] = model.model_kwargs.pop("thinking")
-        saved["temperature"] = model.model_kwargs.get("temperature")
-        model.model_kwargs["temperature"] = 0.1
+        # Same deprecation caveat as below: only adjust temperature when the
+        # model was already sending one.
+        if model.model_kwargs.get("temperature") is not None:
+            saved["temperature"] = model.model_kwargs["temperature"]
+            model.model_kwargs["temperature"] = 0.1
 
     # ChatBedrockConverse (Converse API)
     additional = getattr(model, "additional_model_request_fields", None)
     if additional and "thinking" in additional:
         saved["additional_thinking"] = additional.pop("thinking")
-        saved["converse_temperature"] = getattr(model, "temperature", None)
-        model.temperature = 0.1
+        # Only touch temperature if the model already sends one. Newer Bedrock
+        # Claude models reject `temperature` as deprecated, and these models
+        # are initialized with temperature=None.
+        if getattr(model, "temperature", None) is not None:
+            saved["converse_temperature"] = model.temperature
+            model.temperature = 0.1
 
     return saved
 
