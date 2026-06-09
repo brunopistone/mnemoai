@@ -160,3 +160,5 @@ dmypy.json
 
 ./claude
 ./**/claude
+./.claude
+./**/claude
