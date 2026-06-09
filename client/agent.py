@@ -14,7 +14,10 @@ from langchain_core.messages import (
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
+from langgraph.errors import GraphRecursionError
 
+from client.reasoning_utils import disable_reasoning, restore_reasoning
+from utils.config import config
 from utils.formatting.code_formatter import CodeFormatter
 from utils.logger import logger
 
@@ -63,6 +66,7 @@ class LangGraphAgent:
         self._code_formatter = CodeFormatter()
         self.router = router
         self.orchestrator_enabled = orchestrator_enabled and router is not None
+        self.recursion_limit = config.get("LLM", {}).get("RECURSION_LIMIT", 50)
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
 
@@ -256,10 +260,17 @@ class LangGraphAgent:
                     f"\n\nCurrent task: {desc}"
                 )
 
-            # Execute worker
-            result, worker_msgs = self._run_worker_loop(
-                worker_model, worker_tools, worker_prompt
-            )
+            # Execute worker (a single worker failing shouldn't abort the
+            # whole orchestration — record the error and continue).
+            try:
+                result, worker_msgs = self._run_worker_loop(
+                    worker_model, worker_tools, worker_prompt
+                )
+            except Exception as e:
+                logger.error(f"Worker for subtask {i + 1} failed: {e}")
+                self._stop_spinner()
+                result = f"(This step could not be completed: {e})"
+                worker_msgs = []
             worker_results.append(
                 {
                     "task": desc,
@@ -282,9 +293,18 @@ class LangGraphAgent:
                 "\n\033[90m[Synthesizing results...]\033[0m",
                 flush=True,
             )
-            final_content = self._aggregate_results(
-                query, worker_results, get_aggregator_prompt()
-            )
+            try:
+                final_content = self._aggregate_results(
+                    query, worker_results, get_aggregator_prompt()
+                )
+            except Exception as e:
+                # If synthesis fails, fall back to concatenating the per-step
+                # results so the user still gets the work that was done.
+                logger.error(f"Aggregation failed: {e}; concatenating results")
+                self._stop_spinner()
+                final_content = "\n\n".join(
+                    f"### {r['task']}\n{r['result']}" for r in worker_results
+                )
 
         return {"messages": all_worker_messages + [AIMessage(content=final_content)]}
 
@@ -308,15 +328,25 @@ class LangGraphAgent:
             HumanMessage(content=query),
         ]
 
-        # Suppress callbacks to keep spinner running
+        # Suppress callbacks to keep spinner running, and disable reasoning
+        # so the JSON subtask list lands in response.content (reasoning
+        # models otherwise leave content empty and parsing fails).
         saved_callbacks = getattr(self.model, "callbacks", None)
-        self.model.callbacks = None
+        saved_reasoning = None
         try:
+            self.model.callbacks = None
+            saved_reasoning = self._disable_reasoning()
             response = self.model.invoke(messages, config={"callbacks": []})
+            return parse_subtasks(response.content, query, valid_categories)
+        except Exception as e:
+            # A failed decomposition shouldn't crash the turn: fall back to
+            # treating the whole query as a single 'full' subtask.
+            logger.warning(f"Task decomposition failed: {e}; using single subtask")
+            return [{"description": query, "category": "full"}]
         finally:
+            if saved_reasoning is not None:
+                self._restore_reasoning(saved_reasoning)
             self.model.callbacks = saved_callbacks
-
-        return parse_subtasks(response.content, query, valid_categories)
 
     def _run_worker_loop(
         self,
@@ -409,7 +439,15 @@ class LangGraphAgent:
 
         self._stop_spinner()
         saveable = [m for m in worker_messages if not isinstance(m, SystemMessage)]
-        return "Task completed (max iterations reached)", saveable
+        # Salvage the last visible output rather than discarding it behind a
+        # generic "completed" string, and flag that the step was truncated.
+        partial = self._last_visible_from(worker_messages)
+        truncated_note = (
+            f"(Step stopped after {max_iterations} tool iterations without "
+            "finishing.)"
+        )
+        result = f"{partial}\n\n{truncated_note}" if partial else truncated_note
+        return result, saveable
 
     def _aggregate_results(
         self,
@@ -544,10 +582,24 @@ class LangGraphAgent:
 
             if retry_response is not None:
                 retry_visible = self._extract_visible(retry_response.content)
-                if retry_visible:
+                if retry_visible or retry_response.tool_calls:
                     if not retry_response.additional_kwargs.get("reasoning_content"):
                         retry_response.additional_kwargs["reasoning_content"] = thinking
                     return {"messages": [retry_response], "thinking": thinking}
+
+            # Both attempts yielded no usable output: surface a fallback so the
+            # user never sees a silent turn.
+            fallback = AIMessage(
+                content=(
+                    "I wasn't able to produce a response for that. "
+                    "Could you rephrase or give me a bit more detail?"
+                )
+            )
+            fallback.additional_kwargs["reasoning_content"] = thinking
+            print("\n", end="", flush=True)
+            self._stop_spinner()
+            print(fallback.content, flush=True)
+            return {"messages": [fallback], "thinking": thinking}
 
         return {"messages": [response], "thinking": thinking}
 
@@ -575,25 +627,44 @@ class LangGraphAgent:
         had_reasoning = False
         response = None
 
-        for chunk in active_model.stream(messages, config=config):
-            chunk_content, reasoning_content = self._extract_content(chunk)
+        try:
+            for chunk in active_model.stream(messages, config=config):
+                chunk_content, reasoning_content = self._extract_content(chunk)
 
-            if first_token and (chunk_content or reasoning_content) and self.callbacks:
-                first_token = False
-                self._stop_spinner()
+                if (
+                    first_token
+                    and (chunk_content or reasoning_content)
+                    and self.callbacks
+                ):
+                    first_token = False
+                    self._stop_spinner()
 
-            if reasoning_content and self.verbose and print_reasoning:
-                print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
-                had_reasoning = True
+                if reasoning_content and self.verbose and print_reasoning:
+                    print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
+                    had_reasoning = True
 
-            if chunk_content:
-                if had_reasoning:
-                    if not chunk_content.startswith("\n"):
-                        print("\n", end="", flush=True)
-                    had_reasoning = False
-                self._code_formatter.process_chunk(chunk_content)
+                if chunk_content:
+                    if had_reasoning:
+                        print("\n\n", end="", flush=True)
+                        had_reasoning = False
+                        chunk_content = chunk_content.lstrip("\n")
+                    self._code_formatter.process_chunk(chunk_content)
 
-            response = chunk if response is None else response + chunk
+                response = chunk if response is None else response + chunk
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            # A transient streaming error shouldn't lose the whole turn. If we
+            # already have partial output, keep it; otherwise fall back to a
+            # single non-streaming call so the turn can still produce a result.
+            logger.warning(f"Streaming error: {e}; falling back to non-streaming")
+            self._stop_spinner()
+            if response is None:
+                try:
+                    response = active_model.invoke(messages, config=config)
+                except Exception as e2:
+                    logger.error(f"Non-streaming fallback also failed: {e2}")
+                    response = None
 
         return response, had_reasoning
 
@@ -695,26 +766,7 @@ class LangGraphAgent:
         Returns:
             Saved state to pass to _restore_reasoning()
         """
-        saved = {}
-        reasoning = getattr(self.model, "reasoning", None)
-        if reasoning is not None:
-            saved["reasoning"] = reasoning
-            self.model.reasoning = False
-        # ChatBedrock (old API)
-        if (
-            hasattr(self.model, "model_kwargs")
-            and "thinking" in self.model.model_kwargs
-        ):
-            saved["thinking"] = self.model.model_kwargs.pop("thinking")
-            saved["temperature"] = self.model.model_kwargs.get("temperature")
-            self.model.model_kwargs["temperature"] = 0.1
-        # ChatBedrockConverse (Converse API)
-        additional = getattr(self.model, "additional_model_request_fields", None)
-        if additional and "thinking" in additional:
-            saved["additional_thinking"] = additional.pop("thinking")
-            saved["converse_temperature"] = getattr(self.model, "temperature", None)
-            self.model.temperature = 0.1
-        return saved
+        return disable_reasoning(self.model)
 
     def _restore_reasoning(self, saved: dict) -> None:
         """Restore reasoning/thinking settings on the model.
@@ -722,18 +774,7 @@ class LangGraphAgent:
         Args:
             saved: State from _disable_reasoning()
         """
-        if "reasoning" in saved:
-            self.model.reasoning = saved["reasoning"]
-        if "thinking" in saved:
-            self.model.model_kwargs["thinking"] = saved["thinking"]
-        if "additional_thinking" in saved:
-            self.model.additional_model_request_fields["thinking"] = saved[
-                "additional_thinking"
-            ]
-            if saved.get("converse_temperature") is not None:
-                self.model.temperature = saved["converse_temperature"]
-        if "temperature" in saved:
-            self.model.model_kwargs["temperature"] = saved["temperature"]
+        restore_reasoning(self.model, saved)
 
     def _extract_content(self, chunk) -> tuple[str, str]:
         """Extract content and reasoning from a chunk.
@@ -881,7 +922,25 @@ class LangGraphAgent:
                 SystemMessage(content=self.system_prompt)
             ] + list(initial_state["messages"])
 
-        result = self.graph.invoke(initial_state)
+        # Bound the model<->tools loop. LangGraph's default recursion_limit is
+        # 25; raise it so legitimate multi-tool tasks complete, but still cap it
+        # so a stuck loop degrades gracefully instead of running forever.
+        try:
+            result = self.graph.invoke(
+                initial_state, config={"recursion_limit": self.recursion_limit}
+            )
+        except GraphRecursionError:
+            logger.warning(
+                "Agent hit recursion limit (%d steps); returning partial result",
+                self.recursion_limit,
+            )
+            self._stop_spinner()
+            partial = self._last_visible_from(self._messages)
+            return partial or (
+                "I reached my step limit while working on that and couldn't "
+                "finish. Try narrowing the request or breaking it into smaller "
+                "steps."
+            )
 
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
@@ -903,6 +962,24 @@ class LangGraphAgent:
                 if self._thinking:
                     return ""
 
+        return ""
+
+    def _last_visible_from(self, messages: List[BaseMessage]) -> str:
+        """Return the most recent visible AI text from a message list.
+
+        Used to salvage a partial answer when the agent loop is cut short.
+
+        Args:
+            messages: Message history to scan (most recent last)
+
+        Returns:
+            Visible text of the last AIMessage with content, or empty string
+        """
+        for msg in reversed(messages):
+            if isinstance(msg, AIMessage):
+                visible = self._extract_visible(msg.content)
+                if visible:
+                    return visible
         return ""
 
     def get_thinking(self) -> Optional[str]:

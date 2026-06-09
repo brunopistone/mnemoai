@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from client.reasoning_utils import disable_reasoning, restore_reasoning
 from utils.config import config
 from utils.logger import logger
 
@@ -107,12 +108,16 @@ class QueryRouter:
 
         try:
             # Temporarily suppress instance-level callbacks so the
-            # spinner keeps running during classification
+            # spinner keeps running during classification, and disable
+            # reasoning so the route lands in response.content (reasoning
+            # models otherwise leave content empty).
             saved_callbacks = getattr(self.model, "callbacks", None)
             self.model.callbacks = None
+            saved_reasoning = disable_reasoning(self.model)
             try:
                 response = self.model.invoke(messages, config={"callbacks": []})
             finally:
+                restore_reasoning(self.model, saved_reasoning)
                 self.model.callbacks = saved_callbacks
             route = self._parse_route(response.content)
 
