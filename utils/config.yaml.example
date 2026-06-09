@@ -1,5 +1,5 @@
 MODEL_ID:
-  NAME: qwen3.5:8b
+  NAME: qwen3.5:4b
   TYPE: ollama
   HOST: localhost
   PORT: 11434
