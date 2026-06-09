@@ -366,6 +366,18 @@ class LangGraphClient:
                 self.spinner.stop()
             return "Operation was cancelled."
 
+        except Exception as e:
+            # Surface a clean, user-facing message for any model/MCP/runtime
+            # failure instead of letting it bubble to the chat-loop catch-all.
+            with self.spinner_lock:
+                self.spinner.stop()
+            logger.error(f"Query failed: {e}", exc_info=True)
+            return (
+                "Something went wrong while processing that request "
+                f"({type(e).__name__}). Your conversation is intact — "
+                "please try again or rephrase."
+            )
+
         finally:
             with self.spinner_lock:
                 self.spinner.stop()

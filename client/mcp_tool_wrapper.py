@@ -13,7 +13,13 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool as MCPTool
 
+from utils.config import config
 from utils.logger import logger
+
+# Upper bound for any single MCP tool call, in seconds. Must comfortably exceed
+# the longest tool-level timeout (e.g. execute_bash allows up to 120s) so the
+# transport doesn't abort a call the tool itself considers valid.
+MCP_CALL_TIMEOUT = config.get("LLM", {}).get("MCP_CALL_TIMEOUT", 300)
 
 
 class MCPToolWrapper(BaseTool):
@@ -172,11 +178,12 @@ class MCPClientWrapper:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _run_coroutine(self, coro):
+    def _run_coroutine(self, coro, timeout: float = MCP_CALL_TIMEOUT):
         """Run a coroutine in the background event loop and wait for result.
 
         Args:
             coro: Coroutine to run
+            timeout: Max seconds to wait before cancelling the coroutine
 
         Returns:
             Result of the coroutine
@@ -184,7 +191,13 @@ class MCPClientWrapper:
         if self._loop is None:
             raise RuntimeError("Background loop not started")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-        return future.result(timeout=60)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            # Cancel the orphaned coroutine on the background loop so it can't
+            # keep mutating session state after we've given up on it.
+            future.cancel()
+            raise
 
     async def _connect(self) -> None:
         """Connect to the MCP server."""
@@ -248,8 +261,28 @@ class MCPClientWrapper:
         """
         return self._run_coroutine(self.call_tool(name, arguments))
 
+    async def _reconnect(self) -> None:
+        """Tear down a dead session and establish a fresh one.
+
+        Called when a tool invocation fails with a transport-level error
+        (e.g. the server subprocess crashed). Without this, a single crash
+        would make every subsequent tool call fail for the rest of the session.
+        """
+        logger.warning("MCP session appears dead; attempting reconnect")
+        self._connected = False
+        try:
+            await self._disconnect()
+        except Exception as e:
+            logger.debug(f"Error during reconnect teardown (ignored): {e}")
+        self._session = None
+        self._client_cm = None
+        await self._connect()
+        # Refresh tool handles bound to the new session.
+        await self._list_tools()
+        logger.info("MCP session reconnected")
+
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
-        """Call an MCP tool.
+        """Call an MCP tool, reconnecting once if the session has died.
 
         Args:
             name: Tool name
@@ -262,8 +295,28 @@ class MCPClientWrapper:
             raise RuntimeError("Not connected to MCP server")
 
         logger.debug(f"Executing MCP tool: {name} with args: {arguments}")
-        result = await self._session.call_tool(name, arguments)
+        try:
+            result = await self._session.call_tool(name, arguments)
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception as e:
+            # Transport/connection failure: try one reconnect, then retry once.
+            logger.warning(f"MCP tool call failed ({type(e).__name__}: {e}); retrying")
+            await self._reconnect()
+            result = await self._session.call_tool(name, arguments)
 
+        return self._parse_tool_result(result)
+
+    @staticmethod
+    def _parse_tool_result(result: Any) -> str:
+        """Convert an MCP tool result into a plain string.
+
+        Args:
+            result: Raw MCP call_tool result
+
+        Returns:
+            Result content as string
+        """
         if hasattr(result, "content"):
             content = result.content
             if isinstance(content, list):
