@@ -24,7 +24,9 @@ class VisionModelController(BaseModelController):
         self.model_type = self.model_id["TYPE"]
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
-        self.temperature = self.model_id.get("TEMPERATURE", 0.1)
+        # No default: newer Bedrock Claude models reject `temperature` as
+        # deprecated, so only send it when explicitly configured.
+        self.temperature = self.model_id.get("TEMPERATURE", None)
         self.top_p = self.model_id.get("TOP_P", None)
         self.top_k = self.model_id.get("TOP_K", None)
         self.stop = self.model_id.get("STOP", None)
