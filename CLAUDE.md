@@ -243,7 +243,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 
 ## Code Conventions
 
-- **No tests** — the project has no test suite
+- **Tests** — pytest unit suite in `tests/` covers pure-logic modules (no LLM/Ollama needed). Run with `python -m pytest`. See the Testing section below
 - **Error handling in tools** — `@tool_error_handler` decorator (`server/tools/error_handler.py`) for standardized responses
 - **Async/sync bridge** — MCP client uses a background thread with `asyncio.new_event_loop()` in `client/mcp_tool_wrapper.py`; sync callers use `run_coroutine_threadsafe`
 - **Imports** — relative within packages, absolute across packages
@@ -251,6 +251,22 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 - **Naming** — snake_case functions/variables, PascalCase classes, UPPER_CASE config keys
 - **File I/O** — JSON for persistence (playbook, todos, profile, episodic metadata), SQLite for chunk cache
 - **Token counting** — tiktoken for OpenAI/Bedrock, character-based approximation (÷4) for Ollama
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt         # installs pytest
+python -m pytest                             # everything (integration auto-skips)
+python -m pytest tests/unit                  # unit tier only
+python -m pytest tests/unit/test_bm25.py     # run one file
+python -m pytest -m integration              # integration tier (needs Ollama + config.yaml)
+python -m pytest -m "not integration"        # explicitly exclude integration
+```
+
+- Layout: `tests/unit/` (pure-logic) and `tests/integration/` (live agent). Configured via `pytest.ini` (testpaths=tests). `tests/conftest.py` puts the repo root on `sys.path` so `utils`/`client`/`server` import cleanly.
+- **Unit tier (default):** deterministic, pure-logic tests — no LLM, Ollama, or network needed, runs in seconds. Covers `utils/bm25.py`, `client/reasoning_utils.py`, `utils/formatting/` (response_parser, url_formatter, code_formatter), `client/orchestrator.parse_subtasks`, `server/tools/error_handler.py`, `server/tools/git_safety.py` (command-danger classification), `server/tools/file_edit.py` + `glob_search`, `execute_bash` timeout/process-group behavior, and `client/memory/episodic_memory` success/tool-extraction heuristics.
+- Unit tests must not require a `config.yaml` — modules degrade gracefully without one. Keep import-time side effects config-independent so new code stays unit-testable.
+- **Integration tier (`tests/integration/`, marked `@pytest.mark.integration`):** drives the real `LangGraphClient` + Ollama + MCP subprocess (greeting/routing, tool calls, bash timeout, no-silent-empty-turn). Auto-skipped unless a runtime `config.yaml` exists AND the configured Ollama host is reachable (see `tests/integration/conftest.py`). The shared client is session-scoped; an autouse fixture calls `clear_context()` between tests for isolation.
 
 ## Adding a New MCP Tool
 
@@ -272,7 +288,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 
 ## Known Limitations
 
-- No test suite — changes need manual verification
+- Unit tests cover pure logic only — agent/LLM integration paths still need manual verification
 - MCP server is a subprocess — debugging requires attaching to child process or reading logs
 - No Docker/containerization — runs directly on host with system Python/conda/venv
 - No database — all persistence is file-based (JSON, FAISS index files, SQLite chunk cache)

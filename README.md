@@ -110,6 +110,14 @@ ai-assistant/
 │       ├── url_formatter.py                # URL highlighting
 │       └── response_parser.py              # Response processing
 │
+├── tests/                                  # Test suite (pytest)
+│   ├── conftest.py                         # Shared path setup
+│   ├── unit/                               # Fast, deterministic, no deps
+│   └── integration/                        # Live agent + Ollama + MCP
+│
+├── pytest.ini                              # Pytest configuration
+├── requirements-dev.txt                    # Dev/test dependencies
+│
 └── bash/                                   # Helper scripts
     ├── personal-ai-assistant-wrapper.sh    # System command wrapper
     ├── ollama-freeup-vram/                 # VRAM management
@@ -1345,6 +1353,32 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 - `crawl4ai`: Web crawling
 
 ## 🛠️ Development
+
+### Testing
+
+The test suite uses `pytest` and is split into two tiers under `tests/`:
+
+- **`tests/unit/`** — fast, deterministic tests for pure logic (BM25, reasoning helpers, response parsing, subtask parsing, the tool error handler, git-safety command classification, file editing/search, bash timeout handling, and episodic-memory heuristics). No LLM, Ollama, or network required, so they run in seconds and don't need a `config.yaml`.
+- **`tests/integration/`** — end-to-end tests that drive the real agent against a live Ollama server and the MCP subprocess (routing, tool calls, bash timeout, no silent empty turns). Marked with `@pytest.mark.integration` and **auto-skipped** unless a runtime `utils/config.yaml` exists and the configured Ollama host is reachable.
+
+```bash
+# Install test dependencies
+pip install -r requirements-dev.txt
+
+# Run everything (integration auto-skips if Ollama/config aren't available)
+python -m pytest
+
+# Unit tier only (fast — good for CI and pre-commit)
+python -m pytest tests/unit
+
+# Integration tier only (requires Ollama running + a real config.yaml)
+python -m pytest -m integration
+
+# Run a single file
+python -m pytest tests/unit/test_bm25.py
+```
+
+When adding new code, keep import-time side effects independent of `config.yaml` so the module stays unit-testable.
 
 ### Adding New Tools
 

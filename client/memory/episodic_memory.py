@@ -250,8 +250,10 @@ def is_task_successful(
     if next_user_message:
         next_lower = next_user_message.lower()
 
-        # Check for success markers (whole words)
-        success_markers_lower = [m.lower() for m in success_markers]
+        # Check for success markers (whole words). Coerce to str: unquoted
+        # YAML values like `no`/`yes`/`off` parse as bool/None, which would
+        # otherwise crash on .lower().
+        success_markers_lower = [str(m).lower() for m in success_markers]
         if any(
             f" {marker} " in f" {next_lower} "
             or next_lower.startswith(marker + " ")
@@ -264,7 +266,7 @@ def is_task_successful(
             return True
 
         # Check for correction requests (whole words only)
-        correction_markers_lower = [m.lower() for m in correction_markers]
+        correction_markers_lower = [str(m).lower() for m in correction_markers]
         if any(
             f" {marker} " in f" {next_lower} "
             or next_lower.startswith(marker + " ")
@@ -281,7 +283,7 @@ def is_task_successful(
 
     # 2. Check for error markers in response (configurable)
     response_lower = agent_response.lower()
-    error_patterns_lower = [p.lower() for p in error_patterns]
+    error_patterns_lower = [str(p).lower() for p in error_patterns]
     if any(pattern in response_lower for pattern in error_patterns_lower):
         logger.debug(f"✗ Error marker found in response")
         return False

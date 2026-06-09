@@ -75,7 +75,7 @@ EPISODIC_MEMORY:
     - actually
     - instead
     - incorrect
-    - no
+    - "no" # quoted: bare `no` parses as YAML boolean false
     - not right
   ERROR_PATTERNS:
     - "error:"
