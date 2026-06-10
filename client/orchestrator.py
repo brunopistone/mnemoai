@@ -74,7 +74,12 @@ def parse_subtasks(
         else:
             subtasks = json.loads(text)
     except (json.JSONDecodeError, ValueError) as e:
-        logger.warning(f"Orchestrator JSON parse failed: {e}")
+        # Expected for models that don't emit clean JSON; we degrade gracefully
+        # by treating the whole query as a single subtask, so this is debug-level.
+        logger.debug(
+            f"Orchestrator returned no parseable JSON ({e}); "
+            "falling back to a single subtask"
+        )
         return [{"description": fallback_query, "category": "full"}]
 
     if not isinstance(subtasks, list):

@@ -66,7 +66,10 @@ def register_image_tools(mcp: FastMCP) -> None:
 
             # Use LangChain model invoke
             response = vision_model.invoke([message])
-            description = response.content if hasattr(response, 'content') else str(response)
+            content = response.content if hasattr(response, 'content') else response
+            # Normalize: some protocols (e.g. OpenAI Responses, Anthropic) return
+            # content as a list of blocks rather than a plain string.
+            description = vision_model_controller._content_to_text(content)
 
             return json.dumps(
                 {

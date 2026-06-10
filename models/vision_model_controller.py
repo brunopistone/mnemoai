@@ -22,6 +22,8 @@ class VisionModelController(BaseModelController):
         self.model_id = config.get("VISION_MODEL_ID")
         self.model_name = self.model_id["NAME"]
         self.model_type = self.model_id["TYPE"]
+        # Optional custom Bedrock endpoint (e.g. Bedrock Mantle).
+        self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
         # No default: newer Bedrock Claude models reject `temperature` as
@@ -37,6 +39,8 @@ class VisionModelController(BaseModelController):
         """Initialize the vision model based on configured type."""
         if self.model_type == "bedrock":
             self._initialize_bedrock_model()
+        elif self.model_type == "mantle":
+            self._initialize_mantle_model()
         elif self.model_type == "ollama":
             self._initialize_ollama_model()
         elif self.model_type == "openai":
@@ -60,11 +64,16 @@ class VisionModelController(BaseModelController):
 
         region = self.model_id.get("REGION", "us-east-1")
 
-        self.model = ChatBedrock(
-            model_id=self.model_name,
-            region_name=region,
-            model_kwargs=model_kwargs,
-        )
+        bedrock_kwargs = {
+            "model_id": self.model_name,
+            "region_name": region,
+            "model_kwargs": model_kwargs,
+        }
+        if self.endpoint_url:
+            bedrock_kwargs["endpoint_url"] = self.endpoint_url
+            logger.debug(f"Using custom Bedrock endpoint: {self.endpoint_url}")
+
+        self.model = ChatBedrock(**bedrock_kwargs)
 
     def _initialize_ollama_model(self) -> None:
         """Initialize Ollama vision model using LangChain."""
@@ -112,6 +121,24 @@ class VisionModelController(BaseModelController):
             kwargs["top_p"] = self.top_p
 
         self.model = ChatOpenAI(**kwargs)
+
+    def _initialize_mantle_model(self) -> None:
+        """Initialize a Bedrock Mantle vision model.
+
+        Delegates to the shared Mantle factory so the vision path supports the
+        same protocols as the chat controller (chat_completions | responses |
+        anthropic), selected via ``API_PROTOCOL``. The existing
+        ``format_request`` emits the OpenAI ``image_url`` content format, which
+        the OpenAI-compatible protocols accept directly.
+        """
+        from models.mantle_factory import build_mantle_model
+
+        self.model = build_mantle_model(
+            self.model_id,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            top_p=self.top_p,
+        )
 
     def get_model(self) -> BaseChatModel:
         """Get the initialized vision model instance.
@@ -179,4 +206,28 @@ class VisionModelController(BaseModelController):
         message = self.format_request(question, image_data, image_ext)
         response = self.model.invoke([message])
 
-        return response.content if hasattr(response, "content") else str(response)
+        content = response.content if hasattr(response, "content") else response
+        return self._content_to_text(content)
+
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        """Normalize model content to a plain string.
+
+        Different protocols return different shapes: Chat Completions yields a
+        string, while the OpenAI Responses API (and other multimodal paths)
+        yield a list of content blocks like ``[{"type": "text", "text": ...}]``.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    # Only collect text blocks; skip reasoning/tool/other blocks.
+                    # Blocks default to "text" when no type is given (Bedrock).
+                    if block.get("type", "text") == "text" and "text" in block:
+                        parts.append(block["text"])
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts).strip()
+        return str(content)

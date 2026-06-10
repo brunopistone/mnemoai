@@ -8,6 +8,71 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 
 ![Demo](images/assistant-demo.gif)
 
+## 📑 Table of Contents
+
+- [✨ Key Features](#-key-features)
+- [📖 Project Structure](#-project-structure)
+- [🏗️ Architecture](#️-architecture)
+  - [High-Level Overview](#high-level-overview)
+  - [Component Breakdown](#component-breakdown)
+  - [Data Flow](#data-flow)
+  - [Session Management](#session-management)
+- [🚀 Quick Start](#-quick-start)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Optional: Create System Command](#optional-create-system-command)
+- [🔀 Feature Toggles](#-feature-toggles)
+- [💡 Usage](#-usage)
+  - [Basic Chat](#basic-chat)
+  - [Commands](#commands)
+  - [Keyboard Shortcuts](#keyboard-shortcuts)
+  - [Verbose Mode](#verbose-mode)
+- [🚀 Productivity Tools](#-productivity-tools)
+  - [📋 Todo List Management](#-todo-list-management)
+  - [🔎 Fast Search Tools](#-fast-search-tools)
+  - [✏️ Precise File Editing](#️-precise-file-editing)
+  - [🛡️ Enhanced Error Handling](#️-enhanced-error-handling)
+  - [📁 File Write Confirmation](#-file-write-confirmation)
+  - [🛡️ Git Safety](#️-git-safety)
+  - [📝 Plan Mode](#-plan-mode)
+  - [🔄 Background Tasks](#-background-tasks)
+- [🔧 Configuration](#-configuration)
+  - [Model Configuration](#model-configuration)
+  - [Vision Model Configuration](#vision-model-configuration)
+  - [Model Parameters](#model-parameters)
+  - [General Parameters](#general-parameters)
+  - [Embeddings Configuration](#embeddings-configuration)
+  - [LLM Interaction Configuration](#llm-interaction-configuration)
+  - [System Prompt](#system-prompt)
+  - [RAG Configuration](#rag-configuration)
+  - [Episodic Memory Configuration](#episodic-memory-configuration)
+- [📚 Advanced Features](#-advanced-features)
+  - [Query Routing](#query-routing)
+  - [Orchestrator-Workers](#orchestrator-workers)
+  - [Web Search Configuration](#web-search-configuration)
+  - [Web Crawler Configuration](#web-crawler-configuration)
+  - [RAG (Retrieval-Augmented Generation)](#rag-retrieval-augmented-generation)
+  - [User Profile Learning](#user-profile-learning)
+  - [Episodic Memory](#episodic-memory)
+  - [ACE Playbook (Agentic Context Engineering)](#ace-playbook-agentic-context-engineering)
+  - [Training Data Collection](#training-data-collection)
+- [📦 Dependencies](#-dependencies)
+- [🛠️ Development](#️-development)
+  - [Testing](#testing)
+  - [Adding New Tools](#adding-new-tools)
+  - [Adding New File Readers](#adding-new-file-readers)
+  - [Switching Model Providers](#switching-model-providers)
+  - [Adding New Model Providers](#adding-new-model-providers)
+- [🔧 Ollama Utilities (Optional)](#-ollama-utilities-optional)
+  - [Ollama Environment Setup (macOS)](#ollama-environment-setup-macos)
+  - [VRAM Cleaner](#vram-cleaner)
+- [🐛 Troubleshooting](#-troubleshooting)
+  - [Common Issues](#common-issues)
+  - [Logging](#logging)
+- [📄 License](#-license)
+- [🤝 Contributing](#-contributing)
+- [🙏 Acknowledgments](#-acknowledgments)
+
 ## ✨ Key Features
 
 - **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM (100+ providers)
@@ -41,6 +106,9 @@ ai-assistant/
 ├── client/                                 # Client layer
 │   ├── client.py                           # LangGraph client
 │   ├── agent.py                            # LangGraph agent with streaming
+│   ├── router.py                           # Query classifier and routing
+│   ├── orchestrator.py                     # Task decomposition and worker orchestration
+│   ├── reasoning_utils.py                  # Toggle reasoning/thinking for auxiliary LLM calls
 │   ├── mcp_tool_wrapper.py                 # MCP to LangChain tool adapter
 │   ├── ui/                                 # User interface
 │   │   ├── chat_interface.py               # Chat loop
@@ -93,6 +161,7 @@ ai-assistant/
 │   ├── llm_controller.py                   # LangChain LLM initialization
 │   ├── vision_model_controller.py          # Vision model initialization
 │   ├── embeddings_controller.py            # Embeddings initialization
+│   ├── mantle_factory.py                   # Bedrock Mantle model factory (multi-protocol)
 │   └── classes/
 │       ├── chat_ollama_wrapper.py           # Ollama model with penalty support
 │       └── sagemaker_chat.py               # SageMaker Handler class for Langchain
@@ -387,6 +456,16 @@ The client manages the conversation flow and user interaction.
   - State graph with agent and tools nodes
   - Streaming support with reasoning display
   - Code syntax highlighting
+- **`router.py`**: Query classifier and routing
+  - Classifies queries into categories (simple_qa, code, research, knowledge, full)
+  - Routes each category to a specialized tool subset
+  - Configurable classifier prompt via `ROUTING_PROMPT` in config
+- **`orchestrator.py`**: Task decomposition and worker orchestration
+  - Decomposes complex tasks into ordered subtasks with category assignments
+  - Configurable orchestrator and aggregator prompts via config
+- **`reasoning_utils.py`**: Shared reasoning/thinking helpers
+  - Temporarily disables reasoning for auxiliary LLM calls (routing, task decomposition) so output lands in the response content
+  - Extracts visible text from `<think>` tags and Bedrock thinking blocks
 - **`mcp_tool_wrapper.py`**: MCP to LangChain adapter
   - Wraps MCP tools as LangChain BaseTool
   - Handles async/sync conversion
@@ -743,6 +822,51 @@ MODEL_ID:
   REGION: us-east-1
   TEMPERATURE: 0.1
 ```
+
+> **Note:** Newer Claude models on Bedrock reject `temperature` as deprecated. Omit `TEMPERATURE` for those — it is only sent when explicitly configured.
+
+#### Amazon Bedrock Mantle
+
+Bedrock Mantle is an **OpenAI-compatible** API (not the Bedrock Converse API). It authenticates with a short-lived bearer token minted from your standard AWS credentials via [`aws-bedrock-token-generator`](https://pypi.org/project/aws-bedrock-token-generator/), so your normal `aws configure` / SSO setup works — no extra keys to manage. Use `TYPE: mantle` and a bare model ID from the Mantle catalog.
+
+```yaml
+MODEL_ID:
+  NAME: qwen.qwen3-32b # bare Mantle model id (e.g. anthropic.claude-opus-4-8)
+  TYPE: mantle
+  REGION: us-east-1
+  MAX_TOKENS: 8192
+```
+
+**API protocols.** Mantle serves models under three protocols. Select with `API_PROTOCOL` (works for both chat and vision):
+
+- `chat_completions` (default) — base `/v1`, OpenAI Chat Completions API. Most models (Qwen, Gemma, GPT-OSS, DeepSeek, …).
+- `responses` — base `/openai/v1`, OpenAI Responses API. Required by models that only expose Responses, such as `openai.gpt-5.4`.
+- `anthropic` — base `/anthropic`, Anthropic Messages API. For Claude models (e.g. `anthropic.claude-haiku-4-5`).
+
+```yaml
+# OpenAI Responses model (e.g. GPT-5.4)
+MODEL_ID:
+  NAME: openai.gpt-5.4
+  TYPE: mantle
+  REGION: us-west-2 # gpt-5.4 is in us-west-2, not us-east-1
+  API_PROTOCOL: responses
+  MAX_TOKENS: 8192
+
+# Anthropic Claude model
+MODEL_ID:
+  NAME: anthropic.claude-haiku-4-5
+  TYPE: mantle
+  REGION: us-east-1
+  API_PROTOCOL: anthropic
+  MAX_TOKENS: 8192
+```
+
+- `ENDPOINT_URL` is optional; it defaults to `https://bedrock-mantle.<REGION>.api.aws/{v1 | openai/v1 | anthropic}` depending on the protocol.
+- The Mantle catalog (Qwen, Mistral, DeepSeek, GLM, Gemma, Claude, GPT-5.4, …) differs from standard Bedrock and varies by account/region.
+- `TYPE: mantle` works for both `MODEL_ID` (chat) and `VISION_MODEL_ID` (image description) — vision-capable models like `qwen.qwen3-vl-235b-a22b-instruct` are supported.
+- **Caveats:** Pick the right `API_PROTOCOL` per model (using the wrong one returns a 400 "does not support the '/v1/…' API" error). `anthropic` requires the `langchain-anthropic` package (in `requirements.txt`). Models like `anthropic.claude-fable-5` also require the account's data-retention mode to be `provider_data_share`, otherwise they report `unavailable`.
+
+> For **standard** Bedrock (Converse API), `ENDPOINT_URL` is also accepted on `MODEL_ID`/`VISION_MODEL_ID` with `TYPE: bedrock` to override the default endpoint.
 
 #### Ollama (Local)
 
@@ -1326,7 +1450,9 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 - `langchain`, `langchain-core`: LLM abstraction layer
 - `langchain-ollama`: Ollama integration
 - `langchain-aws`: AWS Bedrock integration
-- `langchain-openai`: OpenAI integration
+- `langchain-openai`: OpenAI integration (also used for Bedrock Mantle OpenAI/Responses protocols)
+- `langchain-anthropic`: Anthropic integration (Bedrock Mantle `anthropic` protocol)
+- `aws-bedrock-token-generator`: Bearer-token auth for Bedrock Mantle
 - `mcp`, `mcp[cli]`: Model Context Protocol
 - `ollama`: Local LLM support
 - `boto3`: AWS Bedrock/SageMaker

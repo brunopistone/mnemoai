@@ -25,6 +25,10 @@ class LangChainLLMController(BaseModelController):
         self.model_name = self.model_id["NAME"]
         self.model_type = self.model_id["TYPE"]
         self.region = self.model_id.get("REGION", "us-east-1")
+        # Optional custom Bedrock endpoint (e.g. Bedrock Mantle:
+        # https://bedrock-mantle.<region>.api.aws). Routes standard SigV4
+        # Converse calls to that endpoint when set; default endpoint otherwise.
+        self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
         self.frequency_penalty = self.model_id.get("FREQUENCY_PENALTY", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
@@ -50,6 +54,8 @@ class LangChainLLMController(BaseModelController):
         """
         if self.model_type == "bedrock":
             self._initialize_bedrock_model(callbacks)
+        elif self.model_type == "mantle":
+            self._initialize_mantle_model(callbacks)
         elif self.model_type == "ollama":
             self._initialize_ollama_model(callbacks)
         elif self.model_type == "openai":
@@ -72,6 +78,11 @@ class LangChainLLMController(BaseModelController):
             "region_name": self.region,
             "callbacks": callbacks,
         }
+
+        # Route to a custom Bedrock endpoint (e.g. Bedrock Mantle) when set.
+        if self.endpoint_url:
+            kwargs["endpoint_url"] = self.endpoint_url
+            logger.info(f"Using custom Bedrock endpoint: {self.endpoint_url}")
 
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
@@ -110,6 +121,27 @@ class LangChainLLMController(BaseModelController):
                 kwargs["temperature"] = 1.0
 
         self.model = ChatBedrockConverse(**kwargs)
+
+    def _initialize_mantle_model(self, callbacks: list = None) -> None:
+        """Initialize an AWS Bedrock Mantle model.
+
+        Mantle authenticates with a short-lived bearer token derived from
+        standard AWS (SigV4) credentials. Model IDs are bare provider names
+        (e.g. ``qwen.qwen3-32b``, ``openai.gpt-5.4``, ``anthropic.claude-haiku-4-5``).
+
+        The protocol is chosen with ``API_PROTOCOL`` (chat_completions |
+        responses | anthropic); see ``models.mantle_factory``.
+        """
+        from models.mantle_factory import build_mantle_model
+
+        self.model = build_mantle_model(
+            self.model_id,
+            callbacks=callbacks,
+            streaming=self.stream,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            top_p=self.top_p,
+        )
 
     def _initialize_litellm_model(self, callbacks: list = None) -> None:
         """Initialize LiteLLM model using langchain-litellm."""
