@@ -34,20 +34,30 @@ def patch_bedrock(monkeypatch):
 
 @pytest.fixture
 def patch_mantle(monkeypatch):
-    """Replace ChatOpenAI and the Mantle token generator with mocks.
+    """Replace ChatOpenAI / ChatAnthropic and the Mantle token generator.
 
-    Returns the dict of kwargs ChatOpenAI was constructed with.
+    Returns a dict of the kwargs the constructed model was built with, plus a
+    ``_class`` key naming which class was used.
     """
     import langchain_openai
+    import langchain_anthropic
     import aws_bedrock_token_generator
 
     captured = {}
 
-    def fake_chat_openai(**kwargs):
-        captured.update(kwargs)
-        return MagicMock(name="ChatOpenAI")
+    def make_recorder(cls_name):
+        def _recorder(**kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            captured["_class"] = cls_name
+            return MagicMock(name=cls_name)
 
-    monkeypatch.setattr(langchain_openai, "ChatOpenAI", fake_chat_openai)
+        return _recorder
+
+    monkeypatch.setattr(langchain_openai, "ChatOpenAI", make_recorder("ChatOpenAI"))
+    monkeypatch.setattr(
+        langchain_anthropic, "ChatAnthropic", make_recorder("ChatAnthropic")
+    )
     monkeypatch.setattr(
         aws_bedrock_token_generator,
         "provide_token",
@@ -146,6 +156,52 @@ class TestMantleModelType:
         ctrl.initialize_model()
         assert patch_mantle["base_url"] == "https://custom-mantle.example/v1"
 
+    def test_default_protocol_is_chat_completions(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {"NAME": "qwen.qwen3-32b", "TYPE": "mantle", "REGION": "us-east-1"},
+        )
+        ctrl.initialize_model()
+        # Chat Completions uses the /v1 base and does NOT set use_responses_api.
+        assert patch_mantle["base_url"].endswith("/v1")
+        assert "use_responses_api" not in patch_mantle
+
+    def test_responses_protocol_uses_openai_v1_and_flag(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.4",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["base_url"] == (
+            "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
+        )
+        assert patch_mantle["use_responses_api"] is True
+
+    def test_anthropic_protocol_uses_chatanthropic(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic.claude-haiku-4-5",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_PROTOCOL": "anthropic",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["anthropic_api_url"] == (
+            "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+        )
+        # Mantle accepts the bearer token supplied as the Anthropic API key.
+        assert patch_mantle["anthropic_api_key"] == "bedrock-api-fake-token"
+
 
 class TestMantleVisionModelType:
     def test_vision_builds_chatopenai_with_token_and_endpoint(
@@ -180,3 +236,90 @@ class TestMantleVisionModelType:
         )
         ctrl.initialize_model()
         assert patch_mantle["base_url"] == "https://custom-mantle.example/v1"
+
+    def test_vision_default_protocol_is_chat_completions(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {
+                "NAME": "qwen.qwen3-vl-235b-a22b-instruct",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["base_url"].endswith("/v1")
+        assert "use_responses_api" not in patch_mantle
+
+    def test_vision_responses_protocol_uses_openai_v1_and_flag(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.4",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["base_url"] == (
+            "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
+        )
+        assert patch_mantle["use_responses_api"] is True
+
+    def test_vision_anthropic_protocol_uses_chatanthropic(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic.claude-haiku-4-5",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_PROTOCOL": "anthropic",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["anthropic_api_url"] == (
+            "https://bedrock-mantle.us-east-1.api.aws/anthropic"
+        )
+
+
+class TestMantleFactory:
+    def test_invalid_protocol_raises(self, patch_mantle):
+        from models.mantle_factory import build_mantle_model
+
+        with pytest.raises(ValueError, match="Unknown Mantle API_PROTOCOL"):
+            build_mantle_model(
+                {"NAME": "x", "TYPE": "mantle", "API_PROTOCOL": "bogus"}
+            )
+
+    def test_explicit_endpoint_url_overrides_anthropic_default(self, patch_mantle):
+        from models.mantle_factory import build_mantle_model
+
+        build_mantle_model(
+            {
+                "NAME": "anthropic.claude-haiku-4-5",
+                "API_PROTOCOL": "anthropic",
+                "REGION": "us-east-1",
+                "ENDPOINT_URL": "https://custom.example/anthropic",
+            }
+        )
+        assert patch_mantle["anthropic_api_url"] == "https://custom.example/anthropic"
+
+    def test_anthropic_defaults_max_tokens_when_unset(self, patch_mantle):
+        from models.mantle_factory import build_mantle_model
+
+        build_mantle_model(
+            {
+                "NAME": "anthropic.claude-haiku-4-5",
+                "API_PROTOCOL": "anthropic",
+                "REGION": "us-east-1",
+            }
+        )
+        # Anthropic requires max_tokens; factory supplies a default.
+        assert patch_mantle["max_tokens"] == 4096

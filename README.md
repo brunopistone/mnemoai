@@ -163,6 +163,7 @@ ai-assistant/
 │   ├── llm_controller.py                   # LangChain LLM initialization
 │   ├── vision_model_controller.py          # Vision model initialization
 │   ├── embeddings_controller.py            # Embeddings initialization
+│   ├── mantle_factory.py                   # Bedrock Mantle model factory (multi-protocol)
 │   └── classes/
 │       ├── chat_ollama_wrapper.py           # Ollama model with penalty support
 │       └── sagemaker_chat.py               # SageMaker Handler class for Langchain
@@ -841,10 +842,34 @@ MODEL_ID:
   MAX_TOKENS: 8192
 ```
 
-- `ENDPOINT_URL` is optional; it defaults to `https://bedrock-mantle.<REGION>.api.aws/v1`.
-- The Mantle catalog (e.g. Qwen, Mistral, DeepSeek, GLM, Gemma, Claude) differs from standard Bedrock and varies by account/region.
+**API protocols.** Mantle serves models under three protocols. Select with `API_PROTOCOL` (works for both chat and vision):
+
+- `chat_completions` (default) — base `/v1`, OpenAI Chat Completions API. Most models (Qwen, Gemma, GPT-OSS, DeepSeek, …).
+- `responses` — base `/openai/v1`, OpenAI Responses API. Required by models that only expose Responses, such as `openai.gpt-5.4`.
+- `anthropic` — base `/anthropic`, Anthropic Messages API. For Claude models (e.g. `anthropic.claude-haiku-4-5`).
+
+```yaml
+# OpenAI Responses model (e.g. GPT-5.4)
+MODEL_ID:
+  NAME: openai.gpt-5.4
+  TYPE: mantle
+  REGION: us-west-2 # gpt-5.4 is in us-west-2, not us-east-1
+  API_PROTOCOL: responses
+  MAX_TOKENS: 8192
+
+# Anthropic Claude model
+MODEL_ID:
+  NAME: anthropic.claude-haiku-4-5
+  TYPE: mantle
+  REGION: us-east-1
+  API_PROTOCOL: anthropic
+  MAX_TOKENS: 8192
+```
+
+- `ENDPOINT_URL` is optional; it defaults to `https://bedrock-mantle.<REGION>.api.aws/{v1 | openai/v1 | anthropic}` depending on the protocol.
+- The Mantle catalog (Qwen, Mistral, DeepSeek, GLM, Gemma, Claude, GPT-5.4, …) differs from standard Bedrock and varies by account/region.
 - `TYPE: mantle` works for both `MODEL_ID` (chat) and `VISION_MODEL_ID` (image description) — vision-capable models like `qwen.qwen3-vl-235b-a22b-instruct` are supported.
-- **Caveats:** Some models only expose `/v1/chat/completions`; certain models (notably some Anthropic Claude variants on Mantle) currently reject that API. Models like `anthropic.claude-fable-5` also require the account's data-retention mode to be `provider_data_share`, otherwise they report `unavailable`.
+- **Caveats:** Pick the right `API_PROTOCOL` per model (using the wrong one returns a 400 "does not support the '/v1/…' API" error). `anthropic` requires the `langchain-anthropic` package (in `requirements.txt`). Models like `anthropic.claude-fable-5` also require the account's data-retention mode to be `provider_data_share`, otherwise they report `unavailable`.
 
 > For **standard** Bedrock (Converse API), `ENDPOINT_URL` is also accepted on `MODEL_ID`/`VISION_MODEL_ID` with `TYPE: bedrock` to override the default endpoint.
 
@@ -1430,7 +1455,9 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 - `langchain`, `langchain-core`: LLM abstraction layer
 - `langchain-ollama`: Ollama integration
 - `langchain-aws`: AWS Bedrock integration
-- `langchain-openai`: OpenAI integration
+- `langchain-openai`: OpenAI integration (also used for Bedrock Mantle OpenAI/Responses protocols)
+- `langchain-anthropic`: Anthropic integration (Bedrock Mantle `anthropic` protocol)
+- `aws-bedrock-token-generator`: Bearer-token auth for Bedrock Mantle
 - `mcp`, `mcp[cli]`: Model Context Protocol
 - `ollama`: Local LLM support
 - `boto3`: AWS Bedrock/SageMaker

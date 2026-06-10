@@ -125,39 +125,23 @@ class LangChainLLMController(BaseModelController):
     def _initialize_mantle_model(self, callbacks: list = None) -> None:
         """Initialize an AWS Bedrock Mantle model.
 
-        Mantle exposes an OpenAI-compatible API at
-        ``https://bedrock-mantle.<region>.api.aws/v1`` and authenticates with a
-        short-lived bearer token derived from standard AWS (SigV4) credentials
-        via ``aws_bedrock_token_generator``. Model IDs are bare provider names
-        (e.g. ``qwen.qwen3-32b``, ``anthropic.claude-opus-4-8``).
+        Mantle authenticates with a short-lived bearer token derived from
+        standard AWS (SigV4) credentials. Model IDs are bare provider names
+        (e.g. ``qwen.qwen3-32b``, ``openai.gpt-5.4``, ``anthropic.claude-haiku-4-5``).
+
+        The protocol is chosen with ``API_PROTOCOL`` (chat_completions |
+        responses | anthropic); see ``models.mantle_factory``.
         """
-        from langchain_openai import ChatOpenAI
-        from aws_bedrock_token_generator import provide_token
+        from models.mantle_factory import build_mantle_model
 
-        logger.info("Initializing Bedrock Mantle model (OpenAI-compatible)...")
-
-        base_url = self.model_id.get(
-            "ENDPOINT_URL", f"https://bedrock-mantle.{self.region}.api.aws/v1"
+        self.model = build_mantle_model(
+            self.model_id,
+            callbacks=callbacks,
+            streaming=self.stream,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            top_p=self.top_p,
         )
-        # Short-lived bearer token (default ~12h) minted from AWS credentials.
-        token = provide_token(region=self.region)
-
-        kwargs = {
-            "model": self.model_name,
-            "base_url": base_url,
-            "api_key": token,
-            "callbacks": callbacks,
-            "streaming": self.stream,
-        }
-
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-
-        self.model = ChatOpenAI(**kwargs)
 
     def _initialize_litellm_model(self, callbacks: list = None) -> None:
         """Initialize LiteLLM model using langchain-litellm."""

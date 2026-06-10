@@ -125,34 +125,20 @@ class VisionModelController(BaseModelController):
     def _initialize_mantle_model(self) -> None:
         """Initialize a Bedrock Mantle vision model.
 
-        Mantle is OpenAI-compatible, so the existing ``format_request`` (which
-        already emits the OpenAI ``image_url`` content format) works unchanged.
-        Auth is a short-lived bearer token derived from AWS credentials.
+        Delegates to the shared Mantle factory so the vision path supports the
+        same protocols as the chat controller (chat_completions | responses |
+        anthropic), selected via ``API_PROTOCOL``. The existing
+        ``format_request`` emits the OpenAI ``image_url`` content format, which
+        the OpenAI-compatible protocols accept directly.
         """
-        from langchain_openai import ChatOpenAI
-        from aws_bedrock_token_generator import provide_token
+        from models.mantle_factory import build_mantle_model
 
-        logger.debug("Initializing Bedrock Mantle vision model (OpenAI-compatible)...")
-
-        region = self.model_id.get("REGION", "us-east-1")
-        base_url = self.model_id.get(
-            "ENDPOINT_URL", f"https://bedrock-mantle.{region}.api.aws/v1"
+        self.model = build_mantle_model(
+            self.model_id,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            top_p=self.top_p,
         )
-        token = provide_token(region=region)
-
-        kwargs = {
-            "model": self.model_name,
-            "base_url": base_url,
-            "api_key": token,
-        }
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-
-        self.model = ChatOpenAI(**kwargs)
 
     def get_model(self) -> BaseChatModel:
         """Get the initialized vision model instance.
@@ -220,4 +206,28 @@ class VisionModelController(BaseModelController):
         message = self.format_request(question, image_data, image_ext)
         response = self.model.invoke([message])
 
-        return response.content if hasattr(response, "content") else str(response)
+        content = response.content if hasattr(response, "content") else response
+        return self._content_to_text(content)
+
+    @staticmethod
+    def _content_to_text(content: Any) -> str:
+        """Normalize model content to a plain string.
+
+        Different protocols return different shapes: Chat Completions yields a
+        string, while the OpenAI Responses API (and other multimodal paths)
+        yield a list of content blocks like ``[{"type": "text", "text": ...}]``.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    # Only collect text blocks; skip reasoning/tool/other blocks.
+                    # Blocks default to "text" when no type is given (Bedrock).
+                    if block.get("type", "text") == "text" and "text" in block:
+                        parts.append(block["text"])
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts).strip()
+        return str(content)

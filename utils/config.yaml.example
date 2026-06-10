@@ -21,11 +21,6 @@ VISION_MODEL_ID:
   HOST: localhost
   PORT: 11434
   TEMPERATURE: 0.3
-# --- Vision via Bedrock Mantle (OpenAI-compatible, bearer-token auth) ---
-# VISION_MODEL_ID:
-#   NAME: qwen.qwen3-vl-235b-a22b-instruct  # a vision-capable Mantle model
-#   TYPE: mantle
-#   REGION: us-east-1
 # Model parameters
 MAX_CONVERSATION_TOKENS: 65536
 DOC_MAX_TOKENS: 16384
