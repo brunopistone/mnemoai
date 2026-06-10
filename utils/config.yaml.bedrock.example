@@ -1,34 +1,16 @@
 MODEL_ID:
-  NAME: qwen3.5:4b
-  TYPE: ollama
-  HOST: localhost
-  PORT: 11434
-  MAX_TOKENS: 8192
-  TEMPERATURE: 0.6
-  # Keep penalties low for reasoning models. High presence/frequency penalties
-  # push the model away from the structured tokens needed to commit to a tool
-  # call or a concise answer, causing it to ramble in <think> and end the turn
-  # with no visible output.
-  FREQUENCY_PENALTY: 0.0
-  PRESENCE_PENALTY: 0.0
-  STOP:
-    - "<|im_start|>"
-    - "<|im_end|>"
-    - "<|endoftext|>"
+  NAME: global.anthropic.claude-fable-5
+  TYPE: bedrock
+  MAX_TOKENS: 128000
+  # Omit TEMPERATURE for newer Claude models that reject it as deprecated.
+  # REASONING: true            # enable extended thinking
+  # REASONING_EFFORT: medium   # low | medium | high | max
 VISION_MODEL_ID:
-  NAME: qwen2.5vl:3b
-  TYPE: ollama
-  HOST: localhost
-  PORT: 11434
-  TEMPERATURE: 0.3
-# --- Vision via Bedrock Mantle (OpenAI-compatible, bearer-token auth) ---
-# VISION_MODEL_ID:
-#   NAME: qwen.qwen3-vl-235b-a22b-instruct  # a vision-capable Mantle model
-#   TYPE: mantle
-#   REGION: us-east-1
+  NAME: global.anthropic.claude-fable-5
+  TYPE: bedrock
 # Model parameters
-MAX_CONVERSATION_TOKENS: 65536
-DOC_MAX_TOKENS: 16384
+MAX_CONVERSATION_TOKENS: 1000000
+DOC_MAX_TOKENS: 524288
 # RAG Configuration
 ENABLE_RAG: true
 RAG:
@@ -52,6 +34,7 @@ RAG:
 # Episodic Memory Configuration (Enhanced)
 ENABLE_EPISODIC_MEMORY: true
 EPISODIC_MEMORY:
+  ENABLED: true
   STORE_TYPE: chromadb # or faiss
   # Similarity Thresholds
   DUPLICATE_THRESHOLD: 0.95 # Higher = stricter duplicate detection
@@ -80,7 +63,7 @@ EPISODIC_MEMORY:
     - actually
     - instead
     - incorrect
-    - "no" # quoted: bare `no` parses as YAML boolean false
+    - "no"
     - not right
   ERROR_PATTERNS:
     - "error:"

@@ -22,6 +22,8 @@ class VisionModelController(BaseModelController):
         self.model_id = config.get("VISION_MODEL_ID")
         self.model_name = self.model_id["NAME"]
         self.model_type = self.model_id["TYPE"]
+        # Optional custom Bedrock endpoint (e.g. Bedrock Mantle).
+        self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
         self.max_tokens = self.model_id.get("MAX_TOKENS", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
         # No default: newer Bedrock Claude models reject `temperature` as
@@ -37,6 +39,8 @@ class VisionModelController(BaseModelController):
         """Initialize the vision model based on configured type."""
         if self.model_type == "bedrock":
             self._initialize_bedrock_model()
+        elif self.model_type == "mantle":
+            self._initialize_mantle_model()
         elif self.model_type == "ollama":
             self._initialize_ollama_model()
         elif self.model_type == "openai":
@@ -60,11 +64,16 @@ class VisionModelController(BaseModelController):
 
         region = self.model_id.get("REGION", "us-east-1")
 
-        self.model = ChatBedrock(
-            model_id=self.model_name,
-            region_name=region,
-            model_kwargs=model_kwargs,
-        )
+        bedrock_kwargs = {
+            "model_id": self.model_name,
+            "region_name": region,
+            "model_kwargs": model_kwargs,
+        }
+        if self.endpoint_url:
+            bedrock_kwargs["endpoint_url"] = self.endpoint_url
+            logger.debug(f"Using custom Bedrock endpoint: {self.endpoint_url}")
+
+        self.model = ChatBedrock(**bedrock_kwargs)
 
     def _initialize_ollama_model(self) -> None:
         """Initialize Ollama vision model using LangChain."""
@@ -104,6 +113,38 @@ class VisionModelController(BaseModelController):
             "model": self.model_name,
         }
 
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+
+        self.model = ChatOpenAI(**kwargs)
+
+    def _initialize_mantle_model(self) -> None:
+        """Initialize a Bedrock Mantle vision model.
+
+        Mantle is OpenAI-compatible, so the existing ``format_request`` (which
+        already emits the OpenAI ``image_url`` content format) works unchanged.
+        Auth is a short-lived bearer token derived from AWS credentials.
+        """
+        from langchain_openai import ChatOpenAI
+        from aws_bedrock_token_generator import provide_token
+
+        logger.debug("Initializing Bedrock Mantle vision model (OpenAI-compatible)...")
+
+        region = self.model_id.get("REGION", "us-east-1")
+        base_url = self.model_id.get(
+            "ENDPOINT_URL", f"https://bedrock-mantle.{region}.api.aws/v1"
+        )
+        token = provide_token(region=region)
+
+        kwargs = {
+            "model": self.model_name,
+            "base_url": base_url,
+            "api_key": token,
+        }
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
         if self.max_tokens is not None:

@@ -45,6 +45,7 @@ ai-assistant/
 │   ├── agent.py                            # LangGraph agent with streaming
 │   ├── router.py                           # Query classifier and routing
 │   ├── orchestrator.py                     # Task decomposition and worker orchestration
+│   ├── reasoning_utils.py                  # Toggle reasoning/thinking for auxiliary LLM calls
 │   ├── mcp_tool_wrapper.py                 # MCP to LangChain tool adapter
 │   ├── ui/                                 # User interface
 │   │   ├── chat_interface.py               # Chat loop
@@ -401,6 +402,9 @@ The client manages the conversation flow and user interaction.
 - **`orchestrator.py`**: Task decomposition and worker orchestration
   - Decomposes complex tasks into ordered subtasks with category assignments
   - Configurable orchestrator and aggregator prompts via config
+- **`reasoning_utils.py`**: Shared reasoning/thinking helpers
+  - Temporarily disables reasoning for auxiliary LLM calls (routing, task decomposition) so output lands in the response content
+  - Extracts visible text from `<think>` tags and Bedrock thinking blocks
 - **`mcp_tool_wrapper.py`**: MCP to LangChain adapter
   - Wraps MCP tools as LangChain BaseTool
   - Handles async/sync conversion
@@ -757,6 +761,27 @@ MODEL_ID:
   REGION: us-east-1
   TEMPERATURE: 0.1
 ```
+
+> **Note:** Newer Claude models on Bedrock reject `temperature` as deprecated. Omit `TEMPERATURE` for those — it is only sent when explicitly configured.
+
+#### Amazon Bedrock Mantle
+
+Bedrock Mantle is an **OpenAI-compatible** API (not the Bedrock Converse API). It authenticates with a short-lived bearer token minted from your standard AWS credentials via [`aws-bedrock-token-generator`](https://pypi.org/project/aws-bedrock-token-generator/), so your normal `aws configure` / SSO setup works — no extra keys to manage. Use `TYPE: mantle` and a bare model ID from the Mantle catalog.
+
+```yaml
+MODEL_ID:
+  NAME: qwen.qwen3-32b # bare Mantle model id (e.g. anthropic.claude-opus-4-8)
+  TYPE: mantle
+  REGION: us-east-1
+  MAX_TOKENS: 8192
+```
+
+- `ENDPOINT_URL` is optional; it defaults to `https://bedrock-mantle.<REGION>.api.aws/v1`.
+- The Mantle catalog (e.g. Qwen, Mistral, DeepSeek, GLM, Gemma, Claude) differs from standard Bedrock and varies by account/region.
+- `TYPE: mantle` works for both `MODEL_ID` (chat) and `VISION_MODEL_ID` (image description) — vision-capable models like `qwen.qwen3-vl-235b-a22b-instruct` are supported.
+- **Caveats:** Some models only expose `/v1/chat/completions`; certain models (notably some Anthropic Claude variants on Mantle) currently reject that API. Models like `anthropic.claude-fable-5` also require the account's data-retention mode to be `provider_data_share`, otherwise they report `unavailable`.
+
+> For **standard** Bedrock (Converse API), `ENDPOINT_URL` is also accepted on `MODEL_ID`/`VISION_MODEL_ID` with `TYPE: bedrock` to override the default endpoint.
 
 #### Ollama (Local)
 
