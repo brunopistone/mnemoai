@@ -418,13 +418,14 @@ Assistant: [Uses fs_read tool and displays content]
 
 ### Commands
 
-| Command            | Description                                   |
-| ------------------ | --------------------------------------------- |
-| `/exit` or `/quit` | Exit the application                          |
-| `/clear`           | Clear conversation history and RAG index      |
-| `/save`            | Save current conversation                     |
-| `/load <path>`     | Load a saved conversation                     |
-| `/good`            | Mark last response as good (for SFT training) |
+| Command            | Description                                                           |
+| ------------------ | --------------------------------------------------------------------- |
+| `/exit` or `/quit` | Exit the application                                                  |
+| `/clear`           | Clear conversation history and RAG index                              |
+| `/save`            | Save current conversation                                             |
+| `/load <path>`     | Load a saved conversation                                             |
+| `/good`            | Mark last response as good (for SFT training)                         |
+| `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions) |
 
 ### Keyboard Shortcuts
 
@@ -564,6 +565,17 @@ Session data is stored in `~/agent-conversations/{profile_name}/`:
     ├── rag_store_*.faiss       # FAISS vector index (or ChromaDB directory)
     └── chunk_cache_*.db        # SQLite chunk cache
 ```
+
+#### Context Compaction
+
+To keep long conversations within the model's context window, the assistant compacts history by summarizing it:
+
+- **Automatic** — after a turn pushes the conversation past `MAX_CONVERSATION_TOKENS`, older messages are summarized into the system prompt while the most recent `LLM.KEEP_RECENT_MESSAGES` turns are kept verbatim.
+- **Manual** — run `/compact` any time (optionally `/compact <focus instructions>` to steer what the summary emphasizes). Manual compaction keeps a smaller recent window (`LLM.MANUAL_COMPACT_KEEP_RECENT`).
+
+The kept-verbatim window is bounded by **both** a message count and a token budget (`LLM.KEEP_RECENT_TOKEN_BUDGET`, default 25% of `MAX_CONVERSATION_TOKENS`). Walking newest→oldest, a message that would exceed the budget is summarized instead of kept — so a single oversized recent message (e.g. a pasted document that alone fills the context window) cannot survive compaction verbatim.
+
+The summary preserves topics, decisions, and **tool calls/results** (which tools ran, their inputs, and outcomes), so the agent retains actionable context after compacting.
 
 ## 🚀 Productivity Tools
 
