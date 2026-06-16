@@ -8,6 +8,71 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 
 ![Demo](images/assistant-demo.gif)
 
+## 📑 Table of Contents
+
+- [✨ Key Features](#-key-features)
+- [📖 Project Structure](#-project-structure)
+- [🏗️ Architecture](#️-architecture)
+  - [High-Level Overview](#high-level-overview)
+  - [Component Breakdown](#component-breakdown)
+  - [Data Flow](#data-flow)
+  - [Session Management](#session-management)
+- [🚀 Quick Start](#-quick-start)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Optional: Create System Command](#optional-create-system-command)
+- [🔀 Feature Toggles](#-feature-toggles)
+- [💡 Usage](#-usage)
+  - [Basic Chat](#basic-chat)
+  - [Commands](#commands)
+  - [Keyboard Shortcuts](#keyboard-shortcuts)
+  - [Verbose Mode](#verbose-mode)
+- [🚀 Productivity Tools](#-productivity-tools)
+  - [📋 Todo List Management](#-todo-list-management)
+  - [🔎 Fast Search Tools](#-fast-search-tools)
+  - [✏️ Precise File Editing](#️-precise-file-editing)
+  - [🛡️ Enhanced Error Handling](#️-enhanced-error-handling)
+  - [📁 File Write Confirmation](#-file-write-confirmation)
+  - [🛡️ Git Safety](#️-git-safety)
+  - [📝 Plan Mode](#-plan-mode)
+  - [🔄 Background Tasks](#-background-tasks)
+- [🔧 Configuration](#-configuration)
+  - [Model Configuration](#model-configuration)
+  - [Vision Model Configuration](#vision-model-configuration)
+  - [Model Parameters](#model-parameters)
+  - [General Parameters](#general-parameters)
+  - [Embeddings Configuration](#embeddings-configuration)
+  - [LLM Interaction Configuration](#llm-interaction-configuration)
+  - [System Prompt](#system-prompt)
+  - [RAG Configuration](#rag-configuration)
+  - [Episodic Memory Configuration](#episodic-memory-configuration)
+- [📚 Advanced Features](#-advanced-features)
+  - [Query Routing](#query-routing)
+  - [Orchestrator-Workers](#orchestrator-workers)
+  - [Web Search Configuration](#web-search-configuration)
+  - [Web Crawler Configuration](#web-crawler-configuration)
+  - [RAG (Retrieval-Augmented Generation)](#rag-retrieval-augmented-generation)
+  - [User Profile Learning](#user-profile-learning)
+  - [Episodic Memory](#episodic-memory)
+  - [ACE Playbook (Agentic Context Engineering)](#ace-playbook-agentic-context-engineering)
+  - [Training Data Collection](#training-data-collection)
+- [📦 Dependencies](#-dependencies)
+- [🛠️ Development](#️-development)
+  - [Testing](#testing)
+  - [Adding New Tools](#adding-new-tools)
+  - [Adding New File Readers](#adding-new-file-readers)
+  - [Switching Model Providers](#switching-model-providers)
+  - [Adding New Model Providers](#adding-new-model-providers)
+- [🔧 Ollama Utilities (Optional)](#-ollama-utilities-optional)
+  - [Ollama Environment Setup (macOS)](#ollama-environment-setup-macos)
+  - [VRAM Cleaner](#vram-cleaner)
+- [🐛 Troubleshooting](#-troubleshooting)
+  - [Common Issues](#common-issues)
+  - [Logging](#logging)
+- [📄 License](#-license)
+- [🤝 Contributing](#-contributing)
+- [🙏 Acknowledgments](#-acknowledgments)
+
 ## ✨ Key Features
 
 - **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI
@@ -42,6 +107,7 @@ ai-assistant/
 ├── client/                                 # Client layer
 │   ├── client.py                           # Strands client
 │   ├── router.py                           # Query classifier and routing
+│   ├── orchestrator.py                     # Task decomposition / subtask parsing
 │   ├── ui/                                 # User interface
 │   │   ├── chat_interface.py               # Chat loop
 │   │   └── spinner.py                      # Loading animations
@@ -100,12 +166,21 @@ ai-assistant/
 │
 ├── utils/                                  # Utilities
 │   ├── config.py                           # Config loader
-│   ├── config.yaml.example                  # Config template (copy to config.yaml)
+│   ├── config.yaml.example                 # Config template (Ollama)
+│   ├── config.yaml.bedrock.example         # Config template (standard Bedrock)
+│   ├── config.yaml.bedrock.mantle.example  # Config template (Bedrock Mantle)
 │   ├── logger.py                           # Logging utilities
 │   └── formatting/                         # Text formatting
 │       ├── code_formatter.py               # Code syntax highlighting
 │       ├── url_formatter.py                # URL highlighting
 │       └── response_parser.py              # Response processing
+│
+├── tests/                                  # Test suite (pytest)
+│   ├── conftest.py                         # Shared path setup
+│   └── unit/                               # Fast, deterministic unit tests
+│
+├── pytest.ini                              # Pytest configuration
+├── requirements-dev.txt                    # Dev/test dependencies
 │
 └── bash/                                   # Helper scripts
     ├── personal-ai-assistant-wrapper.sh    # System command wrapper
@@ -733,6 +808,37 @@ MODEL_ID:
   TEMPERATURE: 0.1
 ```
 
+#### Amazon Bedrock Mantle
+
+Mantle authenticates with a short-lived bearer token minted from your standard AWS credentials (via `aws-bedrock-token-generator`, handled natively by `strands-agents>=1.43.0`). Use `TYPE: mantle` and a bare model ID. `API_PROTOCOL` selects the wire protocol — `chat_completions` (default), `responses` (e.g. GPT-5.4), or `anthropic` (Claude).
+
+```yaml
+# Chat Completions (most models)
+MODEL_ID:
+  NAME: qwen.qwen3-32b
+  TYPE: mantle
+  REGION: us-east-1
+  MAX_TOKENS: 8192
+
+# OpenAI Responses model (e.g. GPT-5.4, in us-west-2)
+MODEL_ID:
+  NAME: openai.gpt-5.4
+  TYPE: mantle
+  REGION: us-west-2
+  API_PROTOCOL: responses
+  MAX_TOKENS: 8192
+
+# Anthropic Claude model
+MODEL_ID:
+  NAME: anthropic.claude-haiku-4-5
+  TYPE: mantle
+  REGION: us-east-1
+  API_PROTOCOL: anthropic
+  MAX_TOKENS: 8192
+```
+
+`TYPE: mantle` works for both `MODEL_ID` and `VISION_MODEL_ID`. Model availability varies by region.
+
 #### Ollama (Local)
 
 ```yaml
@@ -1035,6 +1141,36 @@ ROUTING_PROMPT: |
 
 The classifier prompt is fully customizable in `config.yaml`. It uses XML-structured categories with decision rules following Anthropic's system prompt best practices.
 
+### Orchestrator-Workers
+
+When enabled alongside routing, tasks classified as `full` (spanning multiple categories) are automatically decomposed into focused subtasks executed by specialized workers. On the Strands branch this is a hand-rolled loop over Strands `Agent` instances (there is no StateGraph).
+
+**How it works:**
+
+1. **Orchestrator**: A model call (`_decompose_task`, reasoning disabled) decomposes the complex query into ordered subtasks, each assigned a category (code, research, knowledge, etc.). Parsing is tolerant of non-JSON output and falls back to a single subtask.
+2. **Workers**: Each subtask is executed by its own route-scoped `strands.Agent` (`_run_worker`) with only the tools for its category. Workers run sequentially — each receives context from previously completed subtasks. A failing worker degrades gracefully without aborting the pipeline.
+3. **Aggregator**: If there were multiple subtasks, a final model call (`_aggregate_results`) synthesizes all worker results into a single coherent response.
+
+**Example flow for "Read this PDF and write a summary to a file":**
+
+```
+Orchestrator decomposes into:
+  [Step 1/2: Read and summarize the PDF document]        → knowledge worker
+  [Step 2/2: Write the summary to summary.md]            → code worker
+  [Synthesizing results...]                               → aggregator
+```
+
+**Configuration:**
+
+```yaml
+ENABLE_ROUTING: true # Required
+ENABLE_ORCHESTRATION: true # Activates orchestrator for 'full' route
+# ORCHESTRATOR_PROMPT: |      # Optional: customize decomposition prompt
+# AGGREGATOR_PROMPT: |        # Optional: customize synthesis prompt
+```
+
+**When orchestration is disabled**, `full` routes use all tools in a single Strands agent loop.
+
 ### Web Search Configuration
 
 This tool uses the Brave Search API. Obtain an API key from [Brave Search Developer Portal](https://brave.com/search/api/).
@@ -1260,6 +1396,25 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 - `crawl4ai`: Web crawling
 
 ## 🛠️ Development
+
+### Testing
+
+The test suite uses `pytest`. Tests live in `tests/unit/` and are fast, deterministic, pure-logic checks — no live model, Ollama, or network required, so they run in seconds and don't need a `config.yaml`.
+
+Covered: the tool error handler, git-safety command classification (incl. `git branch -D`), file editing + glob search, `execute_bash` timeout/process-group behavior, response parsing, the URL/code formatters, subtask parsing (`parse_subtasks`), and token-aware conversation compaction.
+
+```bash
+# Install test dependencies
+pip install -r requirements-dev.txt
+
+# Run the suite
+python -m pytest
+
+# Run a single file
+python -m pytest tests/unit/test_git_safety.py
+```
+
+When adding new code, keep import-time side effects independent of `config.yaml` so the module stays unit-testable.
 
 ### Adding New Tools
 
