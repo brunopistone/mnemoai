@@ -179,6 +179,26 @@ class StrandsClient:
         stats = self.playbook.get_stats()
         logger.debug(f"Playbook initialized ({stats['total_entries']} entries)")
 
+    def compact_conversation(self, focus_instructions: str = "") -> bool:
+        """Manually compact the conversation (the /compact command).
+
+        Summarizes older messages and keeps recent turns verbatim.
+
+        Args:
+            focus_instructions: Optional guidance on what the summary should
+                emphasize.
+
+        Returns:
+            True if compaction ran, False if there was nothing to compact.
+        """
+        if not self.agent:
+            return False
+        return asyncio.run(
+            self.conversation_manager.compact(
+                self, self.model, self.agent, focus_instructions
+            )
+        )
+
     def reflect_and_learn(self, task: str) -> None:
         """Run reflection on the last interaction and update playbook.
 

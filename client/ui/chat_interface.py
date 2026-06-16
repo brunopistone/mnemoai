@@ -85,6 +85,9 @@ class ChatInterface:
         print(
             "\033[90m│\033[97m   \033[92m/good\033[97m - Mark last response as good (training data)     \033[90m│\033[0m"
         )
+        print(
+            "\033[90m│\033[97m   \033[92m/compact [focus]\033[97m - Summarize & shrink context        \033[90m│\033[0m"
+        )
         print("\033[90m├" + "─" * 58 + "┤\033[0m")
         print(
             "\033[90m│\033[97m Use \033[92mCtrl+J\033[97m for new lines, Enter to submit                \033[90m│\033[0m"
@@ -280,6 +283,17 @@ class ChatInterface:
                 timestamp = self.client.session_id.split("_", 1)[1]
                 self.client.save_conversation_with_quality(
                     timestamp, self.interaction_quality
+                )
+                continue
+
+            # Manually compact the conversation: /compact [focus instructions]
+            if query.lower() == "/compact" or query.lower().startswith("/compact "):
+                focus = query[len("/compact"):].strip()
+                did = self.client.compact_conversation(focus)
+                print(
+                    "Conversation compacted."
+                    if did
+                    else "Nothing to compact yet."
                 )
                 continue
 

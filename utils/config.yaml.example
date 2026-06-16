@@ -204,6 +204,17 @@ LLM:
     FALLBACK_MODEL: "gpt-4" # Tiktoken model for fallback
   # Context Management
   SUMMARIZATION_THINK: false
+  # Compaction: when the conversation exceeds MAX_CONVERSATION_TOKENS it is
+  # auto-compacted — older messages are summarized into the system prompt while
+  # the most recent messages are kept verbatim.
+  KEEP_RECENT_MESSAGES: 6
+  # The manual /compact command keeps a smaller window (so it still shrinks a
+  # short conversation on demand).
+  MANUAL_COMPACT_KEEP_RECENT: 2
+  # The kept-verbatim window is ALSO bounded by tokens, walking newest->oldest,
+  # so a single oversized recent message (e.g. a pasted document) is summarized
+  # rather than kept. Defaults to 25% of MAX_CONVERSATION_TOKENS when unset.
+  KEEP_RECENT_TOKEN_BUDGET: 16384
 # Embedding Configuration (Enhanced)
 EMBEDDINGS:
   FALLBACK_ENABLED: true
