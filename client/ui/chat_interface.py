@@ -86,7 +86,7 @@ class ChatInterface:
             "\033[90m│\033[97m   \033[92m/good\033[97m - Mark last response as good (training data)     \033[90m│\033[0m"
         )
         print(
-            "\033[90m│\033[97m   \033[92m/compact [focus]\033[97m - Summarize & shrink context        \033[90m│\033[0m"
+            "\033[90m│\033[97m   \033[92m/compact [focus]\033[97m - Summarize & shrink context          \033[90m│\033[0m"
         )
         print("\033[90m├" + "─" * 58 + "┤\033[0m")
         print(
