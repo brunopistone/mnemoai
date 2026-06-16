@@ -30,9 +30,15 @@ class LLMController(BaseModelController):
         self.repeat_last_n = self.model_id.get("REPEAT_LAST_N", None)
         self.stop = self.model_id.get("STOP", None)
         self.stream = self.model_id.get("STREAM", True)
-        self.temperature = self.model_id.get("TEMPERATURE", 0.1)
+        # No default: newer Bedrock Claude models reject `temperature` as
+        # deprecated, so only send it when explicitly configured.
+        self.temperature = self.model_id.get("TEMPERATURE", None)
         self.top_p = self.model_id.get("TOP_P", None)
         self.top_k = self.model_id.get("TOP_K", None)
+        # Bedrock Mantle: OpenAI-compatible (chat/responses) or Anthropic API,
+        # selected via API_PROTOCOL. Optional ENDPOINT_URL overrides the default.
+        self.api_protocol = self.model_id.get("API_PROTOCOL", "chat_completions")
+        self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
 
         self.model = None
 
@@ -81,8 +87,89 @@ class LLMController(BaseModelController):
                 },
                 payload_config=payload_config,
             )
+        elif self.model_type == "mantle":
+            self._initialize_mantle_model()
         else:
             raise ValueError(f"Unsupported model type: {self.model_type}")
+
+    def _initialize_mantle_model(self) -> None:
+        """Initialize an AWS Bedrock Mantle model.
+
+        Mantle authenticates with a short-lived bearer token minted from
+        standard AWS (SigV4) credentials. Model IDs are bare provider names
+        (e.g. ``qwen.qwen3-32b``, ``openai.gpt-5.4``, ``anthropic.claude-haiku-4-5``).
+
+        ``API_PROTOCOL`` selects the wire protocol:
+          - ``chat_completions`` (default): OpenAI Chat Completions at ``/v1``.
+            Uses Strands' native ``bedrock_mantle_config`` (token handled by SDK).
+          - ``responses``: OpenAI Responses at ``/openai/v1`` (e.g. GPT-5.4).
+            Strands' mantle helper targets ``/v1``, so we supply the
+            ``/openai/v1`` base_url + bearer token via ``client_args`` instead.
+          - ``anthropic``: Anthropic Messages at ``/anthropic`` (Claude models).
+        """
+        protocol = self.api_protocol
+        logger.info(f"Initializing Bedrock Mantle model (protocol={protocol})...")
+
+        root = f"https://bedrock-mantle.{self.region}.api.aws"
+        params = {}
+        if self.max_tokens:
+            params["max_tokens"] = self.max_tokens
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
+        if self.top_p is not None:
+            params["top_p"] = self.top_p
+
+        if protocol == "chat_completions":
+            from strands.models.openai import OpenAIModel
+
+            # Native Mantle support: SDK derives base_url (/v1) + bearer token.
+            self.model = OpenAIModel(
+                model_id=self.model_name,
+                bedrock_mantle_config={"region": self.region},
+                params=params or None,
+            )
+        elif protocol == "responses":
+            from strands.models.openai_responses import OpenAIResponsesModel
+            from aws_bedrock_token_generator import provide_token
+
+            # Mantle serves Responses under /openai/v1 (not /v1), so override
+            # base_url + token via client_args rather than bedrock_mantle_config.
+            base_url = self.endpoint_url or f"{root}/openai/v1"
+            token = provide_token(region=self.region)
+            # The Responses API uses `max_output_tokens`, not `max_tokens`.
+            responses_params = {
+                k: v for k, v in params.items() if k != "max_tokens"
+            }
+            if self.max_tokens:
+                responses_params["max_output_tokens"] = self.max_tokens
+            self.model = OpenAIResponsesModel(
+                model_id=self.model_name,
+                client_args={"api_key": token, "base_url": base_url},
+                params=responses_params or None,
+            )
+        elif protocol == "anthropic":
+            from strands.models.anthropic import AnthropicModel
+            from aws_bedrock_token_generator import provide_token
+
+            base_url = self.endpoint_url or f"{root}/anthropic"
+            token = provide_token(region=self.region)
+            # AnthropicModel takes max_tokens as a top-level (required) kwarg;
+            # other inference params go in `params`. Anthropic requires
+            # max_tokens, so default it when unset.
+            inference_params = {
+                k: v for k, v in params.items() if k != "max_tokens"
+            }
+            self.model = AnthropicModel(
+                model_id=self.model_name,
+                max_tokens=self.max_tokens or 4096,
+                client_args={"api_key": token, "base_url": base_url},
+                params=inference_params or None,
+            )
+        else:
+            raise ValueError(
+                f"Unknown Mantle API_PROTOCOL '{protocol}'. Expected: "
+                "chat_completions, responses, anthropic"
+            )
 
     def get_model(self) -> Union[BedrockModel, SageMakerAIModel, ThinkingOllamaModel]:
         """Get the initialized LLM model instance, initializing if needed.

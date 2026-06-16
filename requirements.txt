@@ -1,3 +1,4 @@
+aws-bedrock-token-generator
 boto3
 brave-search-python-client
 chromadb
@@ -18,7 +19,7 @@ Pygments
 PyPDF2
 python-docx
 qdrant-client
-strands-agents
+strands-agents>=1.43.0
 strands-agents-tools
 tiktoken
 uv

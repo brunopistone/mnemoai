@@ -27,9 +27,14 @@ class VisionModelController(BaseModelController):
         self.repeat_last_n = self.model_id.get("REPEAT_LAST_N", None)
         self.stream = self.model_id.get("STREAM", False)
         self.stop = self.model_id.get("STOP", None)
-        self.temperature = self.model_id.get("TEMPERATURE", 0.1)
+        # No default: newer Bedrock Claude models reject `temperature`.
+        self.temperature = self.model_id.get("TEMPERATURE", None)
         self.top_p = self.model_id.get("TOP_P", None)
         self.top_k = self.model_id.get("TOP_K", None)
+        self.region = self.model_id.get("REGION", "us-east-1")
+        # Bedrock Mantle protocol selection.
+        self.api_protocol = self.model_id.get("API_PROTOCOL", "chat_completions")
+        self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
 
         self.model = None
 
@@ -77,8 +82,69 @@ class VisionModelController(BaseModelController):
                 additional_args=additional_args,
                 **args,
             )
+        elif self.model_id["TYPE"] == "mantle":
+            self._initialize_mantle_model()
         else:
             raise ValueError(f"Unsupported vision model type: {self.model_id['TYPE']}")
+
+    def _initialize_mantle_model(self) -> None:
+        """Initialize a Bedrock Mantle vision model.
+
+        Vision-capable Mantle models (e.g. qwen.qwen3-vl) use the OpenAI
+        Chat Completions protocol via Strands' native ``bedrock_mantle_config``.
+        The ``responses`` and ``anthropic`` protocols are also supported for
+        vision-capable models served under those APIs.
+        """
+        protocol = self.api_protocol
+        logger.debug(f"Initializing Bedrock Mantle vision model (protocol={protocol})...")
+
+        root = f"https://bedrock-mantle.{self.region}.api.aws"
+        params = {}
+        if self.max_tokens:
+            params["max_tokens"] = self.max_tokens
+        if self.temperature is not None:
+            params["temperature"] = self.temperature
+        if self.top_p is not None:
+            params["top_p"] = self.top_p
+
+        if protocol == "chat_completions":
+            self.model = OpenAIModel(
+                model_id=self.model_id["NAME"],
+                bedrock_mantle_config={"region": self.region},
+                params=params or None,
+            )
+        elif protocol == "responses":
+            from strands.models.openai_responses import OpenAIResponsesModel
+            from aws_bedrock_token_generator import provide_token
+
+            base_url = self.endpoint_url or f"{root}/openai/v1"
+            token = provide_token(region=self.region)
+            responses_params = {k: v for k, v in params.items() if k != "max_tokens"}
+            if self.max_tokens:
+                responses_params["max_output_tokens"] = self.max_tokens
+            self.model = OpenAIResponsesModel(
+                model_id=self.model_id["NAME"],
+                client_args={"api_key": token, "base_url": base_url},
+                params=responses_params or None,
+            )
+        elif protocol == "anthropic":
+            from strands.models.anthropic import AnthropicModel
+            from aws_bedrock_token_generator import provide_token
+
+            base_url = self.endpoint_url or f"{root}/anthropic"
+            token = provide_token(region=self.region)
+            inference_params = {k: v for k, v in params.items() if k != "max_tokens"}
+            self.model = AnthropicModel(
+                model_id=self.model_id["NAME"],
+                max_tokens=self.max_tokens or 4096,
+                client_args={"api_key": token, "base_url": base_url},
+                params=inference_params or None,
+            )
+        else:
+            raise ValueError(
+                f"Unknown Mantle API_PROTOCOL '{protocol}'. Expected: "
+                "chat_completions, responses, anthropic"
+            )
 
     def get_model(self) -> Union[SageMakerVisionModel, OllamaModel]:
         """Get the initialized vision model instance, initializing if needed.
@@ -129,8 +195,9 @@ class VisionModelController(BaseModelController):
                     {"image": {"source": {"bytes": image_base64}}},
                 ],
             }
-        elif self.model_id["TYPE"] == "openai":
-            # OpenAI expects base64 string with data URI
+        elif self.model_id["TYPE"] in ("openai", "mantle"):
+            # OpenAI/Mantle: Strands' model classes accept the standard content
+            # block (raw bytes) and convert to the provider's image format.
             return {
                 "role": "user",
                 "content": [
