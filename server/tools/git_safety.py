@@ -49,7 +49,9 @@ DANGEROUS_PATTERNS = [
     ),
     # Branch deletion
     (
-        r"branch\s+.*-D",
+        # -D (force delete) is case-sensitive: lowercase -d only deletes merged
+        # branches and is safe, so scope the flag off with (?-i:...).
+        r"branch\s+.*(?-i:-D)",
         "force_delete_branch",
         "Force delete (-D) will delete the branch even if not fully merged.",
     ),
@@ -100,17 +102,20 @@ BLOCKED_COMMANDS = [
 
 def check_dangerous_command(command: str) -> dict:
     """Check if a git command is dangerous and return details."""
-    command_lower = command.lower().strip()
+    # Match against the original-case command with IGNORECASE so keywords are
+    # case-insensitive, while patterns can still opt into case-sensitivity for
+    # flags like -D vs -d via an inline (?-i:...) scope.
+    command_stripped = command.strip()
 
     # Check for completely blocked commands
     for pattern, message in BLOCKED_COMMANDS:
-        if re.search(pattern, command_lower):
+        if re.search(pattern, command_stripped, re.IGNORECASE):
             return {"blocked": True, "reason": message, "command": command}
 
     # Check for dangerous patterns that need warnings
     warnings = []
     for pattern, danger_type, message in DANGEROUS_PATTERNS:
-        if re.search(pattern, command_lower):
+        if re.search(pattern, command_stripped, re.IGNORECASE):
             warnings.append({"type": danger_type, "message": message})
 
     if warnings:

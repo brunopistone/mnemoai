@@ -5,6 +5,7 @@ import json
 from mcp.server.fastmcp import FastMCP
 import sys
 import os
+import signal
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,23 +46,42 @@ def register_execute_bash_tools(mcp: FastMCP) -> None:
         """
         logger.debug(f"Tool execute_bash called with command: {command}")
 
+        # start_new_session puts the shell (and its children) in their own
+        # process group so a timeout can kill the whole tree, not just the shell.
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            result = subprocess.run(
-                command, shell=True, capture_output=True, text=True, timeout=timeout
-            )
-
+            stdout, stderr = proc.communicate(timeout=timeout)
             return json.dumps(
                 {
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "exit_status": result.returncode,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "exit_status": proc.returncode,
                 }
             )
-
         except subprocess.TimeoutExpired:
+            # Kill the entire process group, then reap so we don't orphan
+            # grandchildren, and return whatever partial output we captured.
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc.kill()
+            stdout, stderr = proc.communicate()
             return json.dumps(
-                {"error": True, "message": f"Command timed out after {timeout} seconds"}
+                {
+                    "error": True,
+                    "message": f"Command timed out after {timeout} seconds",
+                    "stdout": stdout,
+                    "stderr": stderr,
+                }
             )
         except Exception as e:
             logger.error(f"Error executing bash command: {e}")
+            proc.kill()
             return json.dumps({"error": True, "message": str(e)})

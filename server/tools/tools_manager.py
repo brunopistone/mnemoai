@@ -29,12 +29,12 @@ class ToolManager:
         self.model_id = config.get("VISION_MODEL_ID")
         self.encoder = tiktoken.encoding_for_model(MODEL_ID)
 
+        self.vision_model_controller = None
+        self.vision_model = None
         if self.model_id:
             self.vision_model_controller = VisionModelController()
             self.vision_model_controller.initialize_model()
             self.vision_model = self.vision_model_controller.get_model()
-        else:
-            self.vision_model = None
 
     def get_encoder(self) -> tiktoken.Encoding:
         """Get the tiktoken encoder.
