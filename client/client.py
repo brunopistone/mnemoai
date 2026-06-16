@@ -1228,6 +1228,210 @@ class StrandsClient:
 
         return response_text
 
+    def _decompose_task(self, query: str) -> list:
+        """Ask the model to decompose a complex query into subtasks.
+
+        Reasoning is disabled for this auxiliary call so the JSON subtask list
+        lands in the response text. Falls back to a single 'full' subtask on
+        any failure (handled by parse_subtasks).
+
+        Returns:
+            List of {"description", "category"} dicts.
+        """
+        from client.orchestrator import get_orchestrator_prompt, parse_subtasks
+        from client.router import ROUTE_TOOLS
+
+        messages = [{"role": "user", "content": [{"text": query}]}]
+        response_text = ""
+        saved = self._disable_reasoning()
+
+        async def _stream():
+            nonlocal response_text
+            async for event in self.model.stream(
+                messages, system_prompt=get_orchestrator_prompt(), think=False
+            ):
+                if (
+                    "contentBlockDelta" in event
+                    and "delta" in event["contentBlockDelta"]
+                    and "text" in event["contentBlockDelta"]["delta"]
+                ):
+                    response_text += event["contentBlockDelta"]["delta"]["text"]
+
+        try:
+            asyncio.run(_stream())
+        except Exception as e:
+            logger.warning(f"Task decomposition failed: {e}; using single subtask")
+            return [{"description": query, "category": "full"}]
+        finally:
+            self._restore_reasoning(saved)
+
+        return parse_subtasks(response_text, query, set(ROUTE_TOOLS.keys()))
+
+    def _tools_for_category(self, category: str) -> list:
+        """Return the tool subset for a route category (by tool_name)."""
+        from client.router import ROUTE_TOOLS
+
+        names = ROUTE_TOOLS.get(category)
+        if names is None:  # 'full' (or unknown) -> all tools
+            return self.tools
+        if not names:  # simple_qa -> no tools
+            return []
+        return [t for t in self.tools if getattr(t, "tool_name", None) in names]
+
+    def _run_worker(self, description: str, category: str, prior_results: list) -> str:
+        """Run a single subtask with a route-scoped Strands worker agent.
+
+        Args:
+            description: The subtask description.
+            category: Route category (selects the worker's tool subset).
+            prior_results: Results of already-completed subtasks, injected as
+                context so later steps can build on earlier ones.
+
+        Returns:
+            The worker's visible response text.
+        """
+        from strands import Agent
+
+        worker_tools = self._tools_for_category(category)
+
+        worker_prompt = description
+        if prior_results:
+            context = "\n\n".join(
+                f"[Completed: {r['task']}]\n{r['result']}" for r in prior_results
+            )
+            worker_prompt = (
+                f"Context from completed steps:\n{context}\n\nCurrent task: {description}"
+            )
+
+        callback = (
+            self._StrandsClient__verbose_callback_handler
+            if self.verbose_mode
+            else self._StrandsClient__minimal_callback_handler
+        )
+        worker = Agent(
+            model=self.model,
+            tools=worker_tools,
+            system_prompt=self.system_prompt,
+            callback_handler=callback,
+        )
+        result = worker(worker_prompt)
+        self._flush_formatters()
+        return self._extract_visible(str(result)) or str(result)
+
+    def _aggregate_results(self, query: str, worker_results: list) -> str:
+        """Synthesize per-subtask results into one final response."""
+        from client.orchestrator import get_aggregator_prompt
+
+        results_text = "\n\n".join(
+            f"## Subtask: {r['task']}\n{r['result']}" for r in worker_results
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": (
+                            f"Original request: {query}\n\n"
+                            f"Completed subtask results:\n\n{results_text}"
+                        )
+                    }
+                ],
+            }
+        ]
+        callback = (
+            self._StrandsClient__verbose_callback_handler
+            if self.verbose_mode
+            else self._StrandsClient__minimal_callback_handler
+        )
+        response_text = ""
+
+        async def _stream():
+            nonlocal response_text
+            async for event in self.model.stream(
+                messages, system_prompt=get_aggregator_prompt(), think=False
+            ):
+                if (
+                    "contentBlockDelta" in event
+                    and "delta" in event["contentBlockDelta"]
+                    and "text" in event["contentBlockDelta"]["delta"]
+                ):
+                    text = event["contentBlockDelta"]["delta"]["text"]
+                    response_text += text
+                    callback(data=text)
+                elif "contentBlockStart" in event or "messageStart" in event:
+                    callback(event=event)
+
+        self._start_spinner()
+        saved = self._disable_reasoning()
+        try:
+            asyncio.run(_stream())
+        finally:
+            self._restore_reasoning(saved)
+        self._flush_formatters()
+        return self._extract_visible(response_text) or response_text
+
+    def _handle_orchestrated_query(self, prompt: str) -> str:
+        """Decompose a complex query, run a worker per subtask, aggregate.
+
+        The Strands analog of the langgraph orchestrator-workers pipeline:
+        decompose -> per-subtask worker Agent (route-scoped tools) -> aggregate.
+
+        Args:
+            prompt: User's query.
+
+        Returns:
+            The aggregated (or single-subtask) response text.
+        """
+        logger.debug("Orchestrator: decomposing task")
+        subtasks = self._decompose_task(prompt)
+        logger.debug(f"Orchestrator: {len(subtasks)} subtasks")
+
+        worker_results = []
+        total = len(subtasks)
+        for i, subtask in enumerate(subtasks):
+            desc = subtask["description"]
+            category = subtask["category"]
+            short = desc[:70] + ("..." if len(desc) > 70 else "")
+            print(f"\n\033[90m[Step {i + 1}/{total}: {short}]\033[0m", flush=True)
+
+            self._start_spinner()
+            try:
+                result = self._run_worker(desc, category, worker_results)
+            except Exception as e:
+                logger.error(f"Worker for subtask {i + 1} failed: {e}")
+                with self.spinner_lock:
+                    self.spinner.stop()
+                result = f"(This step could not be completed: {e})"
+            worker_results.append(
+                {"task": desc, "category": category, "result": result}
+            )
+
+        # Single subtask: no synthesis needed.
+        if len(worker_results) == 1:
+            final_content = worker_results[0]["result"]
+        else:
+            print("\n\033[90m[Synthesizing results...]\033[0m", flush=True)
+            try:
+                final_content = self._aggregate_results(prompt, worker_results)
+            except Exception as e:
+                logger.error(f"Aggregation failed: {e}; concatenating results")
+                final_content = "\n\n".join(
+                    f"### {r['task']}\n{r['result']}" for r in worker_results
+                )
+
+        # Record the exchange in conversation history + run post-processing.
+        self.agent.messages.append({"role": "user", "content": [{"text": prompt}]})
+        self.agent.messages.append(
+            {"role": "assistant", "content": [{"text": final_content}]}
+        )
+        asyncio.run(
+            self.conversation_manager.manage_messages(self, self.model, self.agent)
+        )
+        if config.get("PROFILE", {}).get("USE_PROFILING", False):
+            self.profile_manager.analyze_conversation(self.agent.messages)
+
+        return final_content
+
     def query(self, prompt: str) -> str:
         """
         Send a query to the Strands agent.
@@ -1330,9 +1534,14 @@ class StrandsClient:
                 route = self.router.classify(prompt, context)
 
             with self.mcp_client:
-                # For simple_qa route, call model directly without tools
+                # For simple_qa route, call model directly without tools.
+                # For 'full' route (when orchestration is enabled), decompose
+                # into subtasks and run a worker per subtask. Otherwise run the
+                # full Strands agent loop.
                 if route == "simple_qa":
                     response_text = self._handle_simple_qa(prompt)
+                elif route == "full" and config.get("ENABLE_ORCHESTRATION", False):
+                    response_text = self._handle_orchestrated_query(prompt)
                 else:
                     response_text = self._handle_agent_query(prompt)
 

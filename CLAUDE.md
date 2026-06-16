@@ -38,7 +38,7 @@ main.py → ChatInterface → StrandsClient.query()
 
 **Client-server split:** The MCP server (`server/server.py`) runs as a stdio subprocess. The client connects via Strands' built-in `strands.tools.mcp.MCPClient` (used as a context manager around each query). Tools are listed with `list_tools_sync()` and passed to the `Agent`.
 
-**No StateGraph / orchestrator:** Unlike the langgraph branch, there is no `agent.py`, no `orchestrator.py`, and no orchestrator-workers decomposition. The Strands `Agent` runs the model↔tool loop internally; routing only selects which tools are bound.
+**No StateGraph:** Unlike the langgraph branch, there is no `agent.py` / StateGraph — the Strands `Agent` runs the model↔tool loop internally. Orchestrator-workers *is* supported (see `client/orchestrator.py` + `StrandsClient._handle_orchestrated_query`), but it's a hand-rolled loop over Strands `Agent` instances rather than graph nodes.
 
 ## Directory Structure
 
@@ -140,7 +140,11 @@ Requires `strands-agents>=1.43.0`. Model availability varies by region.
 
 ### Query routing (`client/router.py`)
 
-`QueryRouter.classify()` categorizes queries; `ROUTE_TOOLS` maps each route to a tool subset. `simple_qa` bypasses tools entirely (`_handle_simple_qa`). No orchestrator-workers — `full` just binds all tools.
+`QueryRouter.classify()` categorizes queries; `ROUTE_TOOLS` maps each route to a tool subset. `simple_qa` bypasses tools entirely (`_handle_simple_qa`). When `ENABLE_ORCHESTRATION` is set, the `full` route is decomposed into worker subtasks (`_handle_orchestrated_query`); otherwise `full` binds all tools to one agent.
+
+### Orchestrator-workers (`client/orchestrator.py`, `StrandsClient`)
+
+When `ENABLE_ORCHESTRATION` is on, a `full`-routed query is: decomposed into subtasks via the model (`_decompose_task`, reasoning off, `parse_subtasks` tolerant of non-JSON), each subtask run by its own route-scoped `strands.Agent` (`_run_worker`, tools filtered by `ROUTE_TOOLS` via `.tool_name`, prior results passed as context), then synthesized (`_aggregate_results`). Per-worker and aggregation failures degrade gracefully. Uses `ORCHESTRATOR_PROMPT` / `AGGREGATOR_PROMPT` from config.
 
 ### Conversation compaction (`client/managers/agent_conversation_manager.py`)
 
@@ -161,8 +165,9 @@ Keeps the conversation under `MAX_CONVERSATION_TOKENS` by summarizing older mess
 | `LLM`                 | Thinking toggle, token counting, and compaction (`KEEP_RECENT_MESSAGES`, `MANUAL_COMPACT_KEEP_RECENT`, `KEEP_RECENT_TOKEN_BUDGET`)                                     |
 | `PROFILE`             | User name (data isolation), profiling toggle                                                                                                                          |
 | `SYSTEM_PROMPT` / `ROUTING_PROMPT` | System prompt and query-classifier prompt                                                                                                                |
+| `ORCHESTRATOR_PROMPT` / `AGGREGATOR_PROMPT` | Task-decomposition and result-synthesis prompts (used when `ENABLE_ORCHESTRATION`)                                                          |
 
-**Feature toggles** (boolean in config root): `ENABLE_RAG`, `ENABLE_EPISODIC_MEMORY`, `ENABLE_PLAYBOOK`, `ENABLE_WEB_SEARCH`, `ENABLE_WEB_CRAWL`, `ENABLE_ROUTING`.
+**Feature toggles** (boolean in config root): `ENABLE_RAG`, `ENABLE_EPISODIC_MEMORY`, `ENABLE_PLAYBOOK`, `ENABLE_WEB_SEARCH`, `ENABLE_WEB_CRAWL`, `ENABLE_ROUTING`, `ENABLE_ORCHESTRATION` (requires routing).
 
 **Environment variables:** `OPENAI_API_KEY` (OpenAI), `LOG_LEVEL`, AWS credentials via `aws configure` for Bedrock/SageMaker/Mantle (Mantle mints a bearer token from these).
 
@@ -199,7 +204,7 @@ python -m pytest tests/unit/test_git_safety.py
 ## Known Limitations
 
 - Unit tests cover pure logic only — agent/model integration paths need manual verification.
-- No orchestrator-workers (single Strands Agent loop; routing selects tools only).
+- Orchestrator-workers is a hand-rolled loop over Strands `Agent` instances (no graph); only the `full` route triggers it, and only when `ENABLE_ORCHESTRATION` is set.
 - MCP server is a subprocess — debugging requires reading logs / attaching to the child.
 - No Docker — runs directly on host Python/conda/venv.
 - Single-user — profile name isolates data, no auth/multi-tenancy.
