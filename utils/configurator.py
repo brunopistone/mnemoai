@@ -357,6 +357,14 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
             text = _set_or_add_in_section(
                 text, "VISION_MODEL_ID", "API_PROTOCOL", _MANTLE_PROTOCOLS[vchoice][0]
             )
+        v_max_tokens = _ask(
+            "Max output tokens (optional)",
+            _get_in_section(text, "VISION_MODEL_ID", "MAX_TOKENS") or "",
+        )
+        if v_max_tokens:
+            text = _set_or_add_in_section(
+                text, "VISION_MODEL_ID", "MAX_TOKENS", v_max_tokens
+            )
     else:
         # Drop the vision section entirely; image description stays disabled
         # until the user adds VISION_MODEL_ID back (e.g. via /config or /model).
@@ -500,7 +508,8 @@ def run_reconfigure() -> Optional[Path]:
 
 
 # Model sections that /model can override: key -> (config section, label,
-# whether MAX_TOKENS applies). Embeddings lives nested under RAG.
+# whether it's the chat LLM — which gets the context-window prompt).
+# Embeddings lives nested under RAG.
 _MODEL_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)", True),
     "2": ("VISION_MODEL_ID", "Vision model", False),
@@ -544,13 +553,15 @@ def _print_current_setup(text: str) -> None:
     print(f"    Embeddings:  {embeddings if embeddings else '(not configured)'}")
 
 
-def _prompt_model_section(text: str, section: str, has_max_tokens: bool) -> str:
+def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     """Prompt for one model section's fields and patch them into ``text``.
 
     Defaults are read from the current config so the user can press Enter to
     keep a value. The provider type itself is editable, so a section can be
     switched between providers (e.g. ollama -> bedrock). Connection prompts
-    follow the chosen type.
+    follow the chosen type. MAX_TOKENS is prompted for the chat (LLM) and
+    vision models; the context window (MAX_CONVERSATION_TOKENS) only for the
+    chat model (``is_llm``). Embeddings has neither.
     """
     cur_type = (_get_field(text, section, "TYPE") or "ollama").lower()
     print(f"\n  Provider type for this model (current: {cur_type})")
@@ -588,10 +599,13 @@ def _prompt_model_section(text: str, section: str, has_max_tokens: bool) -> str:
             if chosen != existing and not (existing is None and chosen == "chat_completions"):
                 text = _set_field(text, section, "API_PROTOCOL", chosen)
 
-    if has_max_tokens:
+    # MAX_TOKENS (output tokens) applies to chat and vision, not embeddings.
+    if section in ("MODEL_ID", "VISION_MODEL_ID"):
         max_tokens = _ask("Max output tokens", _get_field(text, section, "MAX_TOKENS"))
         if max_tokens:
             text = _set_field(text, section, "MAX_TOKENS", max_tokens)
+
+    if is_llm:
         # Max context window is the top-level MAX_CONVERSATION_TOKENS (feeds
         # Ollama num_ctx and the compaction budget); it's tied to the chat
         # model, so set it here. Default to the current value.
@@ -647,9 +661,9 @@ def run_model_override() -> Optional[Path]:
             print(f"  {section_label} is not configured. Cancelled.")
             return None
 
-        section, label, has_max_tokens = _MODEL_SECTIONS[choice]
+        section, label, is_llm = _MODEL_SECTIONS[choice]
         print(f"\n  -- {label} --")
-        new_text = _prompt_model_section(text, section, has_max_tokens)
+        new_text = _prompt_model_section(text, section, is_llm)
     except KeyboardInterrupt:
         print("\n  Cancelled. Config left untouched.")
         return None
