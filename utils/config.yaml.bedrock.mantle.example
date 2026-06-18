@@ -10,6 +10,10 @@ MODEL_ID:
   TYPE: mantle
   REGION: us-east-1
   MAX_TOKENS: 8192
+  # Auth: by default a short-lived token is minted from AWS credentials. To use
+  # a short-term Bedrock API key instead, uncomment API_KEY here (per-model) or
+  # set BEDROCK_API_KEY in the ENV section at the bottom (applies to all calls).
+  # API_KEY: bedrock-api-key-XXXXXXXX
 # Responses-API model example (GPT-5.4 lives in us-west-2, not us-east-1):
 # MODEL_ID:
 #   NAME: openai.gpt-5.5
@@ -329,10 +333,13 @@ PROFILE:
   NAME: bpistone
   USE_PROFILING: true
 # Environment variables exported at startup. Mantle mints its bearer token from
-# the standard AWS credential chain; set AWS_PROFILE here to use a named profile.
+# the standard AWS credential chain; set AWS_PROFILE here to use a named profile,
+# or set BEDROCK_API_KEY to authenticate with a short-term Bedrock API key
+# instead (no AWS credentials needed).
 # ENV:
 #   AWS_PROFILE: my-bedrock-profile
 #   AWS_REGION: us-east-1
+#   BEDROCK_API_KEY: bedrock-api-key-XXXXXXXX
 SYSTEM_PROMPT: |
   <identity>
     TODAY'S DATE: {current_date}

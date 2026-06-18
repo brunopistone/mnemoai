@@ -913,9 +913,18 @@ MODEL_ID:
 >   # AWS_REGION: us-east-1   # any AWS env var works here too
 > ```
 
+> **Using a Bedrock API key (instead of AWS credentials).** Bedrock supports short-term API keys (a `bedrock-api-key-...` value from the console). For **standard Bedrock** (`TYPE: bedrock`), set it as `AWS_BEARER_TOKEN_BEDROCK` — `langchain-aws` reads it automatically, no model config needed:
+>
+> ```yaml
+> ENV:
+>   AWS_BEARER_TOKEN_BEDROCK: bedrock-api-key-XXXXXXXX
+> ```
+>
+> (For **Mantle**, the same key is supplied differently — see the Mantle section below.)
+
 #### Amazon Bedrock Mantle
 
-Bedrock Mantle is an **OpenAI-compatible** API (not the Bedrock Converse API). It authenticates with a short-lived bearer token minted from your standard AWS credentials via [`aws-bedrock-token-generator`](https://pypi.org/project/aws-bedrock-token-generator/), so your normal `aws configure` / SSO setup works — no extra keys to manage. Use `TYPE: mantle` and a bare model ID from the Mantle catalog.
+Bedrock Mantle is an **OpenAI-compatible** API (not the Bedrock Converse API). By default it authenticates with a short-lived bearer token minted from your standard AWS credentials via [`aws-bedrock-token-generator`](https://pypi.org/project/aws-bedrock-token-generator/), so your normal `aws configure` / SSO setup works — no extra keys to manage. Use `TYPE: mantle` and a bare model ID from the Mantle catalog.
 
 ```yaml
 MODEL_ID:
@@ -923,6 +932,21 @@ MODEL_ID:
   TYPE: mantle
   REGION: us-east-1
   MAX_TOKENS: 8192
+```
+
+**Authenticating with a Bedrock API key (no AWS credentials).** Instead of minting a token, you can supply a short-term Bedrock API key directly. Mantle reads it from the `BEDROCK_API_KEY` environment variable (set it via the config `ENV:` section), or from a per-model `API_KEY` field. When a key is present it's used as-is; otherwise the app falls back to minting from AWS credentials. (Note: standard Bedrock uses `AWS_BEARER_TOKEN_BEDROCK` for the same key — Mantle uses `BEDROCK_API_KEY`.)
+
+```yaml
+# Option A — environment variable (applies to all Mantle calls)
+ENV:
+  BEDROCK_API_KEY: bedrock-api-key-XXXXXXXX
+
+# Option B — per-model key
+MODEL_ID:
+  NAME: qwen.qwen3-32b
+  TYPE: mantle
+  REGION: us-east-1
+  API_KEY: bedrock-api-key-XXXXXXXX
 ```
 
 **API protocols.** Mantle serves models under three protocols. Select with `API_PROTOCOL` (works for both chat and vision):

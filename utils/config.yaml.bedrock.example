@@ -287,11 +287,13 @@ PROFILE:
   NAME: bpistone
   USE_PROFILING: true
 # Environment variables exported at startup. Use this to select a named AWS
-# profile for Bedrock/SageMaker without changing your shell, or to set any
-# other env var the providers read.
+# profile for Bedrock/SageMaker without changing your shell, to pass a Bedrock
+# API key, or to set any other env var the providers read.
 # ENV:
 #   AWS_PROFILE: my-bedrock-profile
 #   AWS_REGION: us-east-1
+#   # Short-term Bedrock API key (alternative to AWS credentials):
+#   AWS_BEARER_TOKEN_BEDROCK: bedrock-api-key-XXXXXXXX
 SYSTEM_PROMPT: |
   <identity>
     TODAY'S DATE: {current_date}
