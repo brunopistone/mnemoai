@@ -158,7 +158,8 @@ ai-assistant/
 │           └── chunking_helper.py          # Document chunking utilities
 │
 ├── models/                                 # Model layer
-│   ├── base_model_controller.py            # Base controller class
+│   ├── base_model_controller.py            # Minimal shared base for the controllers
+│   ├── provider_params.py                  # Single source of truth: per-provider config keys
 │   ├── llm_controller.py                   # LangChain LLM initialization
 │   ├── vision_model_controller.py          # Vision model initialization
 │   ├── embeddings_controller.py            # Embeddings initialization
@@ -169,9 +170,11 @@ ai-assistant/
 │
 ├── utils/                                  # Utilities
 │   ├── config.py                           # Config loader
+│   ├── configurator.py                     # First-run setup + /config & /model interactive flows
 │   ├── paths.py                            # Central path helper (single ~/.personal-ai-assistant home)
-│   ├── config.yaml.example                 # Config template (copy to config.yaml)
+│   ├── config.yaml.example                 # Config template (copy to config.yaml; also .bedrock / .bedrock.mantle)
 │   ├── logger.py                           # Logging utilities
+│   ├── bm25.py                             # Lightweight BM25 (hybrid search)
 │   └── formatting/                         # Text formatting
 │       ├── code_formatter.py               # Code syntax highlighting
 │       ├── url_formatter.py                # URL highlighting
@@ -186,7 +189,7 @@ ai-assistant/
 ├── requirements-dev.txt                    # Dev/test dependencies
 │
 └── bash/                                   # Helper scripts
-    ├── personal-ai-assistant-wrapper.sh    # System command wrapper
+    ├── system-command-app/                 # `personal-ai-assistant` wrapper script
     ├── ollama-freeup-vram/                 # VRAM management
     └── ollama-env-mac/                     # Ollama config
 ```
@@ -362,7 +365,7 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
-**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle) plus chat model, connection details (for Mantle, the AWS region and API protocol — chat_completions / responses / anthropic), and max output tokens; the vision model (reusing the chat model's host/region, with its own Mantle protocol); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.personal-ai-assistant/config.yaml` from the matching template. Just run:
+**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle) plus chat model, connection details (for Mantle, the AWS region and API protocol — chat_completions / responses / anthropic), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.personal-ai-assistant/config.yaml` from the matching template. Just run:
 
 ```bash
 personal-ai-assistant      # or: python main.py  (from a checkout)
@@ -570,10 +573,12 @@ MCP server that provides tools to the LLM.
 Model controllers and custom implementations.
 
 - **Controllers** (centralized model initialization):
-  - `base_model_controller.py`: Base class with shared parameter setup
-  - `llm_controller.py`: LLM model initialization (Bedrock, Ollama, OpenAI, SageMaker AI)
+  - `base_model_controller.py`: Minimal shared base type for the controllers
+  - `provider_params.py`: Single source of truth for the config keys each provider consumes (per modality); controllers build their client kwargs from it via `build_kwargs`, and `/model` prunes unsupported keys from it
+  - `llm_controller.py`: LLM model initialization (Bedrock, Mantle, Ollama, OpenAI, SageMaker AI, LiteLLM)
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
+  - `mantle_factory.py`: Bedrock Mantle factory (chat_completions / responses / anthropic protocols), shared by the LLM and vision controllers
 - **Custom implementations** (`classes/`):
   - `chat_ollama_wrapper.py`: Extends ChatOllama with `presence_penalty` and `frequency_penalty` support
   - `sagemaker_chat.py`: Full LangChain `BaseChatModel` for SageMaker endpoints (streaming, tool calling, reasoning)
@@ -583,8 +588,10 @@ Model controllers and custom implementations.
 Shared utilities and configuration.
 
 - `config.py`: Configuration loader
+- `configurator.py`: First-run interactive setup (when no config resolves) and the `/config` (full reconfigure) and `/model` (override one model section) chat commands
 - `paths.py`: Central path helper — single source of truth for the app home (`~/.personal-ai-assistant`, override with `$PERSONAL_AI_ASSISTANT_HOME`) and all runtime subdirectories (config, plans, tasks, per-profile, per-model)
-- `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings)
+- `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings; `.bedrock` and `.bedrock.mantle` variants also provided)
+- `bm25.py`: Lightweight BM25 implementation for hybrid (semantic + keyword) search
 - `logger.py`: Logging utilities (stderr output)
 - **`formatting/`**: Text formatting
   - `code_formatter.py`: Code syntax highlighting
@@ -1071,23 +1078,69 @@ VISION_MODEL_ID:
 
 ### Model Parameters
 
-All `MODEL_ID` configurations support these optional parameters:
+This is the full reference for what you can put under `MODEL_ID`,
+`VISION_MODEL_ID`, and `RAG.EMBED_MODEL_ID`. Only `NAME` and `TYPE` are
+required; everything else is optional and omitted keys fall back to the
+provider/model default. The interactive configurator (`/config`, `/model`)
+sets the common ones — use this reference to hand-tune `config.yaml` for
+anything else a provider or model supports.
 
-| Parameter            | Description                           | Default       |
-| -------------------- | ------------------------------------- | ------------- |
-| `TEMPERATURE`        | Sampling temperature                  | `0.1`         |
-| `MAX_TOKENS`         | Maximum tokens to generate            | Model default |
-| `TOP_P`              | Top-p (nucleus) sampling              | `None`        |
-| `TOP_K`              | Top-k sampling (Ollama/SageMaker)     | `None`        |
-| `MIN_P`              | Min-P sampling (Ollama)               | `None`        |
-| `STOP`               | Stop sequences (list)                 | `None`        |
-| `STREAM`             | Enable streaming responses            | `true`        |
-| `REPETITION_PENALTY` | Repetition penalty (Ollama/SageMaker) | `None`        |
-| `PRESENCE_PENALTY`   | Presence penalty (Ollama)             | `None`        |
-| `FREQUENCY_PENALTY`  | Frequency penalty (Ollama)            | `None`        |
-| `REASONING`          | Enable thinking/reasoning mode        | `false`       |
-| `THINKING_TOKENS`    | Token budget for reasoning (Bedrock)  | `2048`        |
-| `REASONING_EFFORT`   | Reasoning effort level (OpenAI o1/o3) | `None`        |
+#### Identity, connection & auth
+
+| Parameter      | Applies to `TYPE`                | Description                                                                                                              |
+| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `NAME`         | all (**required**)               | Model id / Ollama model / Bedrock model id / Mantle bare id / SageMaker endpoint name                                    |
+| `TYPE`         | all (**required**)               | `ollama`, `bedrock`, `mantle`, `openai`, `sagemaker`, `litellm` (embeddings: `ollama`, `bedrock`, `openai`, `sagemaker`) |
+| `HOST`         | `ollama`                         | Ollama host (default `localhost`)                                                                                        |
+| `PORT`         | `ollama`                         | Ollama port (default `11434`)                                                                                            |
+| `REGION`       | `bedrock`, `mantle`, `sagemaker` | AWS region (default `us-east-1`)                                                                                         |
+| `API_PROTOCOL` | `mantle`                         | `chat_completions` (default), `responses`, or `anthropic`                                                                |
+| `ENDPOINT_URL` | `bedrock`, `mantle`              | Override the default endpoint URL                                                                                        |
+| `API_KEY`      | `mantle`, `litellm`              | Mantle: Bedrock API key (else `BEDROCK_API_KEY` env / minted token). LiteLLM: provider key                               |
+| `API_BASE`     | `litellm`                        | LiteLLM API base URL                                                                                                     |
+| `INPUT_FORMAT` | `sagemaker`                      | `openai_chat` (default) or `huggingface`                                                                                 |
+
+> Standard Bedrock also reads the `AWS_BEARER_TOKEN_BEDROCK` env var, and all AWS
+> providers honor `AWS_PROFILE` — see the API-key/profile notes under Amazon Bedrock.
+
+#### Inference parameters
+
+Optional generation settings. The **Honored by** column lists the providers that
+actually send each one (others ignore it). These apply to `MODEL_ID` and
+`VISION_MODEL_ID`; **`EMBED_MODEL_ID` takes none of them** (embeddings only use
+`NAME`/`TYPE` + connection).
+
+This table is derived from `models/provider_params.py` — the single source of
+truth that the controllers build their client kwargs from — so it reflects
+exactly what each provider's init path forwards. (`mantle` reads
+`TEMPERATURE`/`MAX_TOKENS`/`TOP_P` via the Mantle factory.)
+
+| Parameter            | Description                            | Honored by (`MODEL_ID`)                             |
+| -------------------- | -------------------------------------- | --------------------------------------------------- |
+| `MAX_TOKENS`         | Max output tokens to generate          | ollama, bedrock, mantle, openai, sagemaker, litellm |
+| `TEMPERATURE`        | Sampling temperature                   | ollama, bedrock, mantle, openai, sagemaker, litellm |
+| `TOP_P`              | Top-p (nucleus) sampling               | ollama, bedrock, mantle, openai, sagemaker, litellm |
+| `TOP_K`              | Top-k sampling                         | ollama, sagemaker                                   |
+| `STOP`               | Stop sequences (YAML list)             | ollama, bedrock, sagemaker, litellm                 |
+| `STREAM`             | Stream tokens (default `true`)         | mantle, openai, litellm                             |
+| `PRESENCE_PENALTY`   | Presence penalty                       | ollama, openai                                      |
+| `FREQUENCY_PENALTY`  | Frequency penalty                      | ollama                                              |
+| `REPETITION_PENALTY` | Repetition penalty                     | ollama, litellm                                     |
+| `REASONING`          | Enable extended thinking (boolean)     | bedrock                                             |
+| `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock                                             |
+| `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai (also maps to Bedrock thinking budget)       |
+
+`VISION_MODEL_ID` accepts a subset: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` on
+bedrock/ollama/openai/mantle, plus `TOP_K`/`STOP` on ollama.
+
+> **Provider-appropriate tuning matters.** Newer Claude and GPT models reject
+> `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K` are largely
+> Ollama/SageMaker concepts. When `/model` switches a section's provider it
+> drops the keys the new provider doesn't consume for you, but for everything
+> else edit `config.yaml` to match what your specific provider/model accepts.
+
+The context window is set separately, at the top level (it's not part of a model
+section): `MAX_CONVERSATION_TOKENS` (see General Parameters below).
 
 ### General Parameters
 
@@ -1359,6 +1412,14 @@ When enabled, the `web_crawler` tool:
 - Extracts content from web pages as markdown
 - Automatically ingests large pages (>8K tokens) into RAG (if enabled)
 - Uses the same chunking configuration as PDF/DOCX readers
+
+> **Browser dependency.** Crawling uses a headless Chromium via Playwright,
+> whose browser binary is a separate ~260MB download not pulled in by
+> `pip` / `uv tool install`. The tool installs it automatically on the first
+> crawl after a fresh install/upgrade. If that auto-install fails (e.g.
+> offline), run it manually in the same environment:
+> `python -m playwright install chromium` (for an installed CLI:
+> `~/.local/share/uv/tools/personal-ai-assistant/bin/python -m playwright install chromium`).
 
 ### RAG (Retrieval-Augmented Generation)
 

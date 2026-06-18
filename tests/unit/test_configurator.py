@@ -15,6 +15,7 @@ from utils.configurator import (
     _get_field,
     _get_in_section,
     _get_top_level,
+    _remove_field,
     _remove_top_section,
     _section_summary,
     _set_bool,
@@ -22,6 +23,7 @@ from utils.configurator import (
     _set_in_section,
     _set_or_add_in_section,
     _set_top_level,
+    _set_top_level_or_add,
     _truthy,
 )
 
@@ -222,6 +224,195 @@ def test_set_field_switches_provider_type_in_nested_section():
 def test_set_field_noop_when_section_absent():
     out = _set_field(NESTED, "NONEXISTENT_SECTION", "NAME", "x")
     assert out == NESTED
+
+
+def test_set_field_inserts_at_body_indent_with_nested_list_present():
+    # Regression: a nested list (deeper indent) inside the section must not
+    # shift where a new key is inserted. MODEL_ID's body is 2-space; STOP's
+    # items are 4-space.
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: m
+          TYPE: ollama
+          STOP:
+            - "<|im_end|>"
+            - "<|endoftext|>"
+        """
+    )
+    out = _set_field(text, "MODEL_ID", "MAX_TOKENS", "4096")
+    d = yaml.safe_load(out)  # must stay valid YAML
+    assert d["MODEL_ID"]["MAX_TOKENS"] == 4096
+    assert "\n  MAX_TOKENS: 4096" in out  # 2-space, not 4
+    assert d["MODEL_ID"]["STOP"] == ["<|im_end|>", "<|endoftext|>"]
+
+
+def test_remove_field_drops_key_in_nested_section():
+    out = _remove_field(NESTED, "EMBED_MODEL_ID", "PORT")
+    d = yaml.safe_load(out)
+    assert "PORT" not in d["RAG"]["EMBED_MODEL_ID"]
+    assert d["RAG"]["EMBED_MODEL_ID"]["NAME"] == "embed-model"
+
+
+def test_remove_field_absent_is_noop():
+    assert _remove_field(NESTED, "MODEL_ID", "MAX_TOKENS") == NESTED
+    assert _remove_field(NESTED, "NOPE", "NAME") == NESTED
+
+
+def test_remove_field_drops_multiline_list_block():
+    # A list value (e.g. STOP) and its items must be removed together, and a
+    # preceding comment describing it absorbed — leaving valid YAML.
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: m
+          TYPE: ollama
+          # stop sequences for this chat template
+          STOP:
+            - "<|im_start|>"
+            - "<|im_end|>"
+          TEMPERATURE: 0.6
+        """
+    )
+    out = _remove_field(text, "MODEL_ID", "STOP")
+    d = yaml.safe_load(out)
+    assert "STOP" not in d["MODEL_ID"]
+    assert "<|im_start|>" not in out and "stop sequences" not in out
+    # Surrounding keys survive.
+    assert d["MODEL_ID"]["NAME"] == "m"
+    assert d["MODEL_ID"]["TEMPERATURE"] == 0.6
+
+
+def test_set_top_level_or_add_appends_when_missing():
+    text = "MODEL_ID:\n  NAME: m\n"
+    out = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", "65536")
+    d = yaml.safe_load(out)
+    assert d["MAX_CONVERSATION_TOKENS"] == 65536
+
+
+def test_set_top_level_or_add_replaces_when_present():
+    text = "MAX_CONVERSATION_TOKENS: 1000\nMODEL_ID:\n  NAME: m\n"
+    out = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", "65536")
+    d = yaml.safe_load(out)
+    assert d["MAX_CONVERSATION_TOKENS"] == 65536
+    assert out.count("MAX_CONVERSATION_TOKENS:") == 1
+
+
+def test_prune_unsupported_params_mantle_to_ollama():
+    # The switch that motivated this: a mantle section carries REGION +
+    # API_PROTOCOL; switching to ollama must drop both (ollama doesn't consume
+    # them) while NAME/TYPE survive.
+    from utils.configurator import _prune_unsupported_params
+
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: xai.grok-4.3
+          TYPE: ollama
+          REGION: us-west-2
+          API_PROTOCOL: responses
+          HOST: localhost
+          PORT: 11434
+        """
+    )
+    out = _prune_unsupported_params(text, "MODEL_ID", "ollama")
+    d = yaml.safe_load(out)
+    assert "REGION" not in d["MODEL_ID"]
+    assert "API_PROTOCOL" not in d["MODEL_ID"]
+    assert d["MODEL_ID"]["HOST"] == "localhost" and d["MODEL_ID"]["PORT"] == 11434
+    assert d["MODEL_ID"]["NAME"] == "xai.grok-4.3"
+
+
+def test_prune_unsupported_params_strips_inference_keys_too():
+    # ollama -> bedrock must drop HOST/PORT *and* ollama-only inference params
+    # (FREQUENCY_PENALTY), keeping bedrock-valid keys (REGION, TEMPERATURE).
+    from utils.configurator import _prune_unsupported_params
+
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: m
+          TYPE: bedrock
+          HOST: localhost
+          PORT: 11434
+          FREQUENCY_PENALTY: 0.0
+          TEMPERATURE: 0.5
+          REGION: us-east-1
+        """
+    )
+    out = _prune_unsupported_params(text, "MODEL_ID", "bedrock")
+    d = yaml.safe_load(out)
+    assert "HOST" not in d["MODEL_ID"] and "PORT" not in d["MODEL_ID"]
+    assert "FREQUENCY_PENALTY" not in d["MODEL_ID"]
+    assert d["MODEL_ID"]["REGION"] == "us-east-1"
+    assert d["MODEL_ID"]["TEMPERATURE"] == 0.5
+
+
+def test_prune_unknown_provider_is_noop():
+    from utils.configurator import _prune_unsupported_params
+
+    text = "MODEL_ID:\n  NAME: m\n  TYPE: weird\n  FOO: bar\n"
+    assert _prune_unsupported_params(text, "MODEL_ID", "weird") == text
+
+
+def test_provider_params_registry_shape():
+    # Guard against drift: each section must advertise the provider set the
+    # configurator/controllers expect, and supported_keys must report sane sets.
+    from models.provider_params import providers, supported_keys
+
+    assert set(providers("MODEL_ID")) == {
+        "ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"
+    }
+    assert set(providers("VISION_MODEL_ID")) == {"ollama", "bedrock", "mantle", "openai"}
+    assert set(providers("EMBED_MODEL_ID")) == {"ollama", "bedrock", "openai", "sagemaker"}
+    # Embeddings take no inference params — only connection keys.
+    assert supported_keys("EMBED_MODEL_ID", "ollama") == {"HOST", "PORT"}
+    assert supported_keys("EMBED_MODEL_ID", "openai") == set()
+    # Unknown provider -> None (configurator then prunes nothing).
+    assert supported_keys("MODEL_ID", "bogus") is None
+
+
+def test_build_kwargs_matches_controller_logic():
+    # build_kwargs must reproduce the controller init behavior: STOP included
+    # only when truthy, others when not-None, mapped to the right client kwarg,
+    # routed to main vs model_kwargs.
+    from models.provider_params import build_kwargs
+
+    class FakeController:
+        temperature = 0.0      # not-None -> included (the bedrock truthy bug is gone)
+        top_p = None           # None -> dropped
+        top_k = 40
+        max_tokens = 8192
+        stop = []              # falsy list -> dropped (truthy rule)
+        repetition_penalty = 1.1
+        presence_penalty = None
+        frequency_penalty = 0.0
+        reasoning_effort = None
+
+    main, model_kwargs = build_kwargs("MODEL_ID", "ollama", FakeController())
+    assert main["temperature"] == 0.0          # not-None kept
+    assert "top_p" not in main                 # None dropped
+    assert main["top_k"] == 40
+    assert main["num_predict"] == 8192         # MAX_TOKENS -> num_predict
+    assert "stop" not in main                  # empty list dropped
+    assert main["repeat_penalty"] == 1.1       # REPETITION_PENALTY -> repeat_penalty
+    assert main["frequency_penalty"] == 0.0
+    assert model_kwargs == {}                  # ollama has no nested kwargs
+
+
+def test_build_kwargs_routes_to_model_kwargs():
+    from models.provider_params import build_kwargs
+
+    class FakeController:
+        temperature = 0.5
+        max_tokens = None
+        top_p = None
+        presence_penalty = None
+        reasoning_effort = "high"
+
+    main, model_kwargs = build_kwargs("MODEL_ID", "openai", FakeController())
+    assert main["temperature"] == 0.5
+    assert model_kwargs == {"reasoning_effort": "high"}  # nested, not main
 
 
 # --- Optional-section removal and current-setup summary (used by /config, /model) ---

@@ -32,6 +32,12 @@ _MANTLE_PROTOCOLS = {
     "3": ("anthropic", "Anthropic Messages (/anthropic) — Claude models"),
 }
 
+# Which config keys each provider actually consumes is owned by the model layer
+# (models/provider_params.py), derived from the controller init methods. The
+# configurator imports it so the two never drift; see _prune_unsupported_params.
+# MAX_CONVERSATION_TOKENS is a top-level key (not part of a model section), so
+# it's never pruned by the section-level logic.
+
 
 def _templates_dir() -> Path:
     """Directory holding the packaged config templates (ships next to this module)."""
@@ -151,22 +157,106 @@ def _set_field(text: str, section: str, key: str, value: str) -> str:
     if idx < 0:
         return text  # section not present; nothing to do
     header_indent = _indent_of(lines[idx])
-    body_indent = header_indent + 2
-    end = len(lines)
+    body_indent = None  # the section's direct-child indent (first body line)
     for j in range(idx + 1, len(lines)):
         line = lines[j]
         if line.strip() and _indent_of(line) <= header_indent:
-            end = j
-            break
-        if _indent_of(line) > header_indent:
-            body_indent = _indent_of(line)  # adopt the body's actual indent
+            break  # left the section body
+        # Capture the body's indent from its FIRST indented line only — deeper
+        # lines (e.g. a nested STOP: list's items) must not shift it.
+        if body_indent is None and line.strip() and _indent_of(line) > header_indent:
+            body_indent = _indent_of(line)
         m = re.match(rf"(\s+){re.escape(key)}:(?:\s.*)?$", line)
         if m:
             lines[j] = f"{m.group(1)}{key}: {value}"
             return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    # Not found in body -> insert just after the header.
-    lines.insert(idx + 1, f"{' ' * body_indent}{key}: {value}")
+    # Not found in body -> insert just after the header at the body indent.
+    indent = body_indent if body_indent is not None else header_indent + 2
+    lines.insert(idx + 1, f"{' ' * indent}{key}: {value}")
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _remove_field(text: str, section: str, key: str) -> str:
+    """Remove ``key`` (and its block) from within ``section`` at any depth.
+
+    Drops the ``key:`` line plus any deeper-indented continuation lines (a
+    list like ``STOP:`` or a nested mapping) and any immediately-preceding
+    comment lines describing it. No-op when the section or key is absent. Used
+    to make an optional field fall back to the provider default, or to strip
+    provider-specific params when switching providers.
+    """
+    lines = text.splitlines()
+    idx = _find_section(lines, section)
+    if idx < 0:
+        return text
+    header_indent = _indent_of(lines[idx])
+    for j in range(idx + 1, len(lines)):
+        line = lines[j]
+        if line.strip() and _indent_of(line) <= header_indent:
+            break  # left the section body
+        m = re.match(rf"(\s+){re.escape(key)}:(?:\s.*)?$", line)
+        if m:
+            key_indent = len(m.group(1))
+            start = j
+            # Absorb preceding comment lines that belong to this key.
+            while start - 1 > idx and lines[start - 1].strip().startswith("#"):
+                start -= 1
+            # Absorb the key line + any deeper-indented continuation lines.
+            end = j + 1
+            while end < len(lines):
+                nxt = lines[end]
+                if not nxt.strip():
+                    break
+                if _indent_of(nxt) <= key_indent and not nxt.lstrip().startswith("#"):
+                    break
+                end += 1
+            del lines[start:end]
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return text
+
+
+def _list_section_keys(text: str, section: str) -> list:
+    """Return the direct child keys present in ``section`` (at any depth)."""
+    lines = text.splitlines()
+    idx = _find_section(lines, section)
+    if idx < 0:
+        return []
+    header_indent = _indent_of(lines[idx])
+    body_indent = None
+    keys = []
+    for line in lines[idx + 1:]:
+        if line.strip() and _indent_of(line) <= header_indent:
+            break  # left the section body
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if body_indent is None:
+            body_indent = _indent_of(line)
+        if _indent_of(line) != body_indent:
+            continue  # nested deeper (e.g. a list item) — not a direct key
+        m = re.match(r"\s*([A-Za-z0-9_]+):", line)
+        if m:
+            keys.append(m.group(1))
+    return keys
+
+
+def _prune_unsupported_params(text: str, section: str, provider: str) -> str:
+    """Drop keys the ``provider`` doesn't consume for ``section``.
+
+    The supported-key registry lives in ``models.provider_params`` (derived
+    from the controller init methods), so this prunes any stale parameter left
+    over from a previous provider — connection, auth, and inference alike.
+    ``NAME``/``TYPE`` are always kept; an unknown provider prunes nothing.
+    """
+    from models.provider_params import supported_keys
+
+    allowed = supported_keys(section, provider)
+    if allowed is None:
+        return text  # unknown provider/section — don't touch anything
+    keep = allowed | {"NAME", "TYPE"}
+    for key in _list_section_keys(text, section):
+        if key not in keep:
+            text = _remove_field(text, section, key)
+    return text
 
 
 def _remove_top_section(text: str, section: str) -> str:
@@ -211,6 +301,14 @@ def _set_top_level(text: str, key: str, value: str) -> str:
         else:
             out.append(line)
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def _set_top_level_or_add(text: str, key: str, value: str) -> str:
+    """Set a top-level ``key``, appending it if the config doesn't have it yet."""
+    if _get_top_level(text, key) is not None:
+        return _set_top_level(text, key, value)
+    sep = "" if text.endswith("\n") or not text else "\n"
+    return f"{text}{sep}{key}: {value}\n"
 
 
 def _get_in_section(text: str, section: str, key: str) -> Optional[str]:
@@ -286,6 +384,12 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
     """
     text = template_text
 
+    # STOP sequences are kept in the example template for documentation, but
+    # not written into a generated config (they're easy to get wrong and only
+    # apply to some models). Drop them from both model sections up front.
+    text = _remove_field(text, "MODEL_ID", "STOP")
+    text = _remove_field(text, "VISION_MODEL_ID", "STOP")
+
     # --- Chat model ---
     print("\n  -- Chat model --")
     model = _ask("Chat model name", default_model)
@@ -322,9 +426,17 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
     elif provider == "bedrock":
         print("  Note: Bedrock uses your AWS credentials (run `aws configure`).")
 
-    max_tokens = _ask("Max output tokens", _get_in_section(text, "MODEL_ID", "MAX_TOKENS"))
-    if max_tokens:
-        text = _set_in_section(text, "MODEL_ID", "MAX_TOKENS", max_tokens)
+    # MAX_TOKENS (output tokens) is optional — 'none' / blank drops it so the
+    # provider default applies.
+    text = _prompt_max_tokens(text, "MODEL_ID")
+
+    # Max context window (top-level MAX_CONVERSATION_TOKENS) is mandatory; always
+    # written, defaulting to the template's value (or 65536 if missing).
+    ctx = _ask(
+        "Max context window",
+        _get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
+    )
+    text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
     # --- Vision model (optional) ---
     print("\n  -- Vision model (image description) --")
@@ -351,6 +463,7 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
             text = _set_or_add_in_section(
                 text, "VISION_MODEL_ID", "API_PROTOCOL", _MANTLE_PROTOCOLS[vchoice][0]
             )
+        text = _prompt_max_tokens(text, "VISION_MODEL_ID")
     else:
         # Drop the vision section entirely; image description stays disabled
         # until the user adds VISION_MODEL_ID back (e.g. via /config or /model).
@@ -427,10 +540,12 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     print("  holds the rest of your runtime data (plans, tasks, conversations,")
     print("  RAG indexes, episodic memory, and the ACE playbook).")
     print("\n  Only the most common settings were configured here. The file")
-    print("  contains many more options you can edit any time — embedding model,")
-    print("  RAG / episodic-memory / playbook tuning, retry and compaction limits,")
-    print("  and the routing / orchestrator / system prompts. See the README's")
-    print("  Configuration section for the full reference.")
+    print("  contains many more options you can edit any time — per-model")
+    print("  inference parameters (temperature, top_p, penalties, …), the")
+    print("  embedding model, RAG / episodic-memory / playbook tuning, retry and")
+    print("  compaction limits, and the routing / orchestrator / system prompts.")
+    print("  See the README's 'Model Parameters' and 'Configuration' sections")
+    print("  for the full list of arguments per provider.")
     print("=" * 64 + "\n")
     return dest
 
@@ -494,7 +609,8 @@ def run_reconfigure() -> Optional[Path]:
 
 
 # Model sections that /model can override: key -> (config section, label,
-# whether MAX_TOKENS applies). Embeddings lives nested under RAG.
+# whether it's the chat LLM — which gets the context-window prompt).
+# Embeddings lives nested under RAG.
 _MODEL_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)", True),
     "2": ("VISION_MODEL_ID", "Vision model", False),
@@ -526,6 +642,24 @@ def _section_summary(text: str, section: str) -> Optional[str]:
     return f"{typ} / {name}{suffix}"
 
 
+def _prompt_max_tokens(text: str, section: str) -> str:
+    """Prompt for the optional MAX_TOKENS of a model section.
+
+    MAX_TOKENS (max output tokens) is optional and model-specific, so it
+    defaults to ``none`` (the provider default) rather than carrying over the
+    previous model's value. Convention:
+      * Enter / 'none' -> no MAX_TOKENS (provider default; key removed)
+      * a number       -> set it
+    """
+    answer = _ask("Max output tokens (number, or 'none' for provider default)", "none")
+    if answer is None:
+        return text
+    answer = answer.strip().lower()
+    if answer in ("none", ""):
+        return _remove_field(text, section, "MAX_TOKENS")
+    return _set_field(text, section, "MAX_TOKENS", answer)
+
+
 def _print_current_setup(text: str) -> None:
     """Print the current chat/vision/embeddings models. Vision and embeddings
     are optional and only shown when present in the config.
@@ -538,13 +672,15 @@ def _print_current_setup(text: str) -> None:
     print(f"    Embeddings:  {embeddings if embeddings else '(not configured)'}")
 
 
-def _prompt_model_section(text: str, section: str, has_max_tokens: bool) -> str:
+def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     """Prompt for one model section's fields and patch them into ``text``.
 
     Defaults are read from the current config so the user can press Enter to
     keep a value. The provider type itself is editable, so a section can be
     switched between providers (e.g. ollama -> bedrock). Connection prompts
-    follow the chosen type.
+    follow the chosen type. MAX_TOKENS is prompted for the chat (LLM) and
+    vision models; the context window (MAX_CONVERSATION_TOKENS) only for the
+    chat model (``is_llm``). Embeddings has neither.
     """
     cur_type = (_get_field(text, section, "TYPE") or "ollama").lower()
     print(f"\n  Provider type for this model (current: {cur_type})")
@@ -582,10 +718,35 @@ def _prompt_model_section(text: str, section: str, has_max_tokens: bool) -> str:
             if chosen != existing and not (existing is None and chosen == "chat_completions"):
                 text = _set_field(text, section, "API_PROTOCOL", chosen)
 
-    if has_max_tokens:
-        max_tokens = _ask("Max output tokens", _get_field(text, section, "MAX_TOKENS"))
-        if max_tokens:
-            text = _set_field(text, section, "MAX_TOKENS", max_tokens)
+    # On a provider switch, strip every parameter the new provider doesn't
+    # consume (connection, auth, and inference alike), per the model layer's
+    # supported-key registry — so no stale, unsupported keys are left behind
+    # (e.g. REGION/API_PROTOCOL after mantle -> ollama, HOST/PORT/penalties
+    # after ollama -> bedrock). The keys just written for the new provider are
+    # in its allowed set, so they survive.
+    if new_type != cur_type:
+        text = _prune_unsupported_params(text, section, new_type)
+
+    if new_type != "ollama":
+        print(
+            f"  Note: provider '{new_type}' may accept different inference "
+            "parameters\n  (temperature, penalties, etc.). Edit config.yaml "
+            f"directly to tune the\n  {section} section — see the README's "
+            "'Model Parameters' section for the\n  full list of supported "
+            "parameters per provider."
+        )
+
+    # MAX_TOKENS (output tokens) is optional, for chat and vision (not embeddings).
+    if section in ("MODEL_ID", "VISION_MODEL_ID"):
+        text = _prompt_max_tokens(text, section)
+
+    if is_llm:
+        # Max context window is the top-level MAX_CONVERSATION_TOKENS (feeds
+        # Ollama num_ctx and the compaction budget). It is mandatory and
+        # model-specific, so it defaults to 65536 rather than carrying over the
+        # previous model's value.
+        ctx = _ask("Max context window", "65536")
+        text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
     return text
 
@@ -635,9 +796,9 @@ def run_model_override() -> Optional[Path]:
             print(f"  {section_label} is not configured. Cancelled.")
             return None
 
-        section, label, has_max_tokens = _MODEL_SECTIONS[choice]
+        section, label, is_llm = _MODEL_SECTIONS[choice]
         print(f"\n  -- {label} --")
-        new_text = _prompt_model_section(text, section, has_max_tokens)
+        new_text = _prompt_model_section(text, section, is_llm)
     except KeyboardInterrupt:
         print("\n  Cancelled. Config left untouched.")
         return None
@@ -648,5 +809,7 @@ def run_model_override() -> Optional[Path]:
 
     dest.write_text(new_text)
     print(f"\n  Updated {label} in:\n    {dest}")
+    print("  For the full list of parameters you can set per provider, see the")
+    print("  README's 'Model Parameters' section.")
     print("=" * 64 + "\n")
     return dest

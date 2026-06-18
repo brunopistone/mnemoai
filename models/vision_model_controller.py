@@ -1,10 +1,11 @@
 """LangChain-based vision model controller for multi-provider support."""
 
 import base64
-from typing import Union, Optional, Any
+from typing import Optional, Any
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 from models.base_model_controller import BaseModelController
+from models.provider_params import build_kwargs
 from utils.config import config
 from utils.logger import logger
 
@@ -54,13 +55,7 @@ class VisionModelController(BaseModelController):
 
         logger.debug("Initializing Bedrock vision model via LangChain...")
 
-        model_kwargs = {}
-        if self.temperature is not None:
-            model_kwargs["temperature"] = self.temperature
-        if self.top_p is not None:
-            model_kwargs["top_p"] = self.top_p
-        if self.max_tokens is not None:
-            model_kwargs["max_tokens"] = self.max_tokens
+        _, model_kwargs = build_kwargs("VISION_MODEL_ID", "bedrock", self)
 
         region = self.model_id.get("REGION", "us-east-1")
 
@@ -85,21 +80,12 @@ class VisionModelController(BaseModelController):
         port = self.model_id.get("PORT", 11434)
         base_url = f"http://{host}:{port}"
 
+        passthrough, _ = build_kwargs("VISION_MODEL_ID", "ollama", self)
         kwargs = {
             "model": self.model_name,
             "base_url": base_url,
+            **passthrough,
         }
-
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-        if self.top_k is not None:
-            kwargs["top_k"] = self.top_k
-        if self.max_tokens is not None:
-            kwargs["num_predict"] = self.max_tokens
-        if self.stop:
-            kwargs["stop"] = self.stop
 
         self.model = ChatOllama(**kwargs)
 
@@ -109,16 +95,11 @@ class VisionModelController(BaseModelController):
 
         logger.debug("Initializing OpenAI vision model via LangChain...")
 
+        passthrough, _ = build_kwargs("VISION_MODEL_ID", "openai", self)
         kwargs = {
             "model": self.model_name,
+            **passthrough,
         }
-
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
 
         self.model = ChatOpenAI(**kwargs)
 

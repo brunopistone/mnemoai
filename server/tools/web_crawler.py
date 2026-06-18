@@ -19,6 +19,41 @@ except ImportError:
     _rag_available = False
     logger.debug("RAG module not available")
 
+# crawl4ai drives a headless Chromium via Playwright. The browser binary is a
+# separate download that pip / `uv tool install` don't fetch, so the first
+# crawl after a fresh install fails with "Executable doesn't exist". We install
+# it lazily on that first failure, then retry. Guarded so we try at most once
+# per process.
+_browser_install_attempted = False
+
+
+def _is_missing_browser_error(exc: Exception) -> bool:
+    """True if the exception is Playwright's missing-browser launch error."""
+    msg = str(exc).lower()
+    return "executable doesn't exist" in msg or "playwright install" in msg
+
+
+def _install_playwright_chromium() -> bool:
+    """Download the Playwright Chromium build into the current environment.
+
+    Returns True on success. Uses the running interpreter so it lands in the
+    same (possibly isolated `uv tool`) environment as the server.
+    """
+    import subprocess
+
+    logger.info("Installing Playwright Chromium (one-time, ~260MB)...")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True,
+            capture_output=True,
+        )
+        logger.info("Playwright Chromium installed.")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to install Playwright Chromium: {e}")
+        return False
+
 
 def register_web_crawler_tools(mcp: FastMCP) -> None:
     """Register web search tools.
@@ -47,17 +82,37 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
         if not url or not url.startswith(("http://", "https://")):
             return json.dumps({"error": True, "message": "Invalid URL"})
 
-        try:
+        async def _crawl():
+            """Run the crawl with stdout muted; returns the crawl result."""
             old_stdout = sys.stdout
             sys.stdout = StringIO()
-
             try:
                 async with AsyncWebCrawler(
                     browser_type="none", verbose=False
                 ) as crawler:
-                    result = await crawler.arun(url=url)
+                    return await crawler.arun(url=url)
             finally:
                 sys.stdout = old_stdout
+
+        try:
+            global _browser_install_attempted
+            try:
+                result = await _crawl()
+            except Exception as e:
+                # First crawl after a fresh install: the Chromium binary is
+                # missing. Install it once, then retry.
+                if _is_missing_browser_error(e) and not _browser_install_attempted:
+                    _browser_install_attempted = True
+                    if _install_playwright_chromium():
+                        result = await _crawl()
+                    else:
+                        return json.dumps({
+                            "error": True,
+                            "message": "Web crawling needs the Playwright browser. "
+                            "Run: python -m playwright install chromium",
+                        })
+                else:
+                    raise
 
             if not result.success:
                 return json.dumps(
@@ -108,6 +163,5 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
             )
 
         except Exception as e:
-            sys.stdout = old_stdout
             logger.error(f"Error during web crawling: {str(e)}", exc_info=True)
             return json.dumps({"error": True, "message": str(e)})
