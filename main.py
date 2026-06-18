@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 from typing import Optional
 from client.client import LangGraphClient
 from client.ui.chat_interface import ChatInterface
@@ -53,6 +54,22 @@ def cli() -> None:
         help="Disable verbose mode (hide thinking process)",
     )
     args = parser.parse_args()
+
+    # First-run setup: if no config can be resolved, walk the user through
+    # creating one. Interactive only — non-TTY runs fall through to the
+    # existing "no config found" message so scripted/CI use isn't blocked.
+    from utils.configurator import config_exists, run_first_run_setup
+
+    if not config_exists() and sys.stdin.isatty():
+        if run_first_run_setup() is not None:
+            from utils.config import config
+
+            config.reload()
+        elif not config_exists():
+            # Setup was declined/cancelled and there's still no config to run
+            # with — exit cleanly rather than crashing deep in client init.
+            print("No config available. Exiting.")
+            return
 
     # Default is verbose=True, unless --no-verbose is specified
     verbose = not args.no_verbose

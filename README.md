@@ -362,6 +362,16 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
+**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle) plus chat model, connection details (for Mantle, the AWS region and API protocol — chat_completions / responses / anthropic), and max output tokens; the vision model (reusing the chat model's host/region, with its own Mantle protocol); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.personal-ai-assistant/config.yaml` from the matching template. Just run:
+
+```bash
+personal-ai-assistant      # or: python main.py  (from a checkout)
+```
+
+and follow the prompts. You can re-edit the generated file any time to fine-tune models, prompts, and feature toggles.
+
+**Manual setup.** Prefer to write it yourself? Copy a template:
+
 ```bash
 cp utils/config.yaml.example utils/config.yaml
 ```
@@ -465,14 +475,15 @@ Assistant: [Uses fs_read tool and displays content]
 
 ### Commands
 
-| Command            | Description                                                           |
-| ------------------ | --------------------------------------------------------------------- |
-| `/exit` or `/quit` | Exit the application                                                  |
-| `/clear`           | Clear conversation history and RAG index                              |
-| `/save`            | Save current conversation                                             |
-| `/load <path>`     | Load a saved conversation                                             |
-| `/good`            | Mark last response as good (for SFT training)                         |
-| `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions) |
+| Command            | Description                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| `/exit` or `/quit` | Exit the application                                                                                    |
+| `/clear`           | Clear conversation history and RAG index                                                                |
+| `/save`            | Save current conversation                                                                               |
+| `/load <path>`     | Load a saved conversation                                                                               |
+| `/good`            | Mark last response as good (for SFT training)                                                           |
+| `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions)                                   |
+| `/config`          | Re-run the interactive configurator (overwrites `config.yaml`, then restarts the app in place to apply) |
 
 ### Keyboard Shortcuts
 

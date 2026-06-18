@@ -1,6 +1,8 @@
 """Chat interface handling for the application."""
 
 import asyncio
+import os
+import sys
 from client.memory.episodic_memory import (
     is_task_successful,
     extract_tools_from_messages,
@@ -69,6 +71,9 @@ class ChatInterface:
         print("\033[90m├" + "─" * 58 + "┤\033[0m")
         print(
             "\033[90m│\033[97m Available commands:                                      \033[90m│\033[0m"
+        )
+        print(
+            "\033[90m│\033[97m   \033[92m/config\033[97m - Reconfigure config.yaml (overwrites it)      \033[90m│\033[0m"
         )
         print(
             "\033[90m│\033[97m   \033[92m/clear\033[97m - Clear conversation context                    \033[90m│\033[0m"
@@ -218,6 +223,32 @@ class ChatInterface:
         else:
             logger.debug("✗ Task not marked as successful - skipping storage")
 
+    def _restart_in_place(self) -> None:
+        """Restart the current process so reloaded config takes full effect.
+
+        Replaces the running process image with a fresh one via ``os.execv``
+        (same command, same terminal — no new window, nothing to re-type).
+        This is the only way to reliably apply *every* setting, since the MCP
+        server subprocess decides its tool set at boot and the model/memory
+        are wired at startup. The in-memory conversation is intentionally
+        dropped (a model switch shouldn't carry old history forward).
+
+        ``os.execv`` does not reap child processes, so the MCP subprocess is
+        shut down explicitly first to avoid orphaning it.
+        """
+        print("\nRestarting to apply the new configuration...\n")
+        try:
+            self.client.mcp_client.shutdown()
+        except Exception as e:
+            logger.debug(f"MCP shutdown before restart failed: {e}")
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        # Re-exec with the original interpreter + argv (preserves --no-verbose).
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
     def run_chat_loop(self) -> None:
         """Run the main chat loop.
 
@@ -284,6 +315,16 @@ class ChatInterface:
                 self.client.save_conversation_with_quality(
                     timestamp, self.interaction_quality
                 )
+                continue
+
+            # Reconfigure: rewrite config.yaml via the interactive configurator,
+            # then restart the process in place so every setting (including MCP
+            # tool toggles, which are decided at subprocess boot) takes effect.
+            if query.lower() == "/config":
+                from utils.configurator import run_reconfigure
+
+                if run_reconfigure() is not None:
+                    self._restart_in_place()
                 continue
 
             # Manually compact the conversation: /compact [focus instructions]

@@ -343,8 +343,20 @@ class MCPClientWrapper:
         return self._tools
 
     def shutdown(self) -> None:
-        """Shutdown the background loop and disconnect."""
+        """Shutdown the background loop and disconnect.
+
+        Disconnects first so the MCP server subprocess is terminated (its
+        stdio context is exited) before the loop stops. This matters for an
+        in-process restart (os.execv), which does NOT reap child processes:
+        without the explicit disconnect the server subprocess would be
+        orphaned.
+        """
         if self._loop:
+            if self._connected:
+                try:
+                    self._run_coroutine(self._disconnect(), timeout=5)
+                except Exception as e:
+                    logger.debug(f"MCP disconnect during shutdown failed: {e}")
             self._loop.call_soon_threadsafe(self._loop.stop)
             if self._thread:
                 self._thread.join(timeout=5)
