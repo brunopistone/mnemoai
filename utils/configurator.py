@@ -497,10 +497,12 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     print("  holds the rest of your runtime data (plans, tasks, conversations,")
     print("  RAG indexes, episodic memory, and the ACE playbook).")
     print("\n  Only the most common settings were configured here. The file")
-    print("  contains many more options you can edit any time — embedding model,")
-    print("  RAG / episodic-memory / playbook tuning, retry and compaction limits,")
-    print("  and the routing / orchestrator / system prompts. See the README's")
-    print("  Configuration section for the full reference.")
+    print("  contains many more options you can edit any time — per-model")
+    print("  inference parameters (temperature, top_p, penalties, …), the")
+    print("  embedding model, RAG / episodic-memory / playbook tuning, retry and")
+    print("  compaction limits, and the routing / orchestrator / system prompts.")
+    print("  See the README's 'Model Parameters' and 'Configuration' sections")
+    print("  for the full list of arguments per provider.")
     print("=" * 64 + "\n")
     return dest
 
@@ -689,8 +691,9 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         print(
             f"  Note: provider '{new_type}' may accept different inference "
             "parameters\n  (temperature, penalties, etc.). Edit config.yaml "
-            f"directly to tune the\n  {section} section for what this "
-            "provider/model supports."
+            f"directly to tune the\n  {section} section — see the README's "
+            "'Model Parameters' section for the\n  full list of supported "
+            "parameters per provider."
         )
 
     # MAX_TOKENS (output tokens) is optional, for chat and vision (not embeddings).
@@ -768,5 +771,7 @@ def run_model_override() -> Optional[Path]:
 
     dest.write_text(new_text)
     print(f"\n  Updated {label} in:\n    {dest}")
+    print("  For the full list of parameters you can set per provider, see the")
+    print("  README's 'Model Parameters' section.")
     print("=" * 64 + "\n")
     return dest

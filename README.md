@@ -1076,23 +1076,62 @@ VISION_MODEL_ID:
 
 ### Model Parameters
 
-All `MODEL_ID` configurations support these optional parameters:
+This is the full reference for what you can put under `MODEL_ID`,
+`VISION_MODEL_ID`, and `RAG.EMBED_MODEL_ID`. Only `NAME` and `TYPE` are
+required; everything else is optional and omitted keys fall back to the
+provider/model default. The interactive configurator (`/config`, `/model`)
+sets the common ones — use this reference to hand-tune `config.yaml` for
+anything else a provider or model supports.
 
-| Parameter            | Description                           | Default       |
-| -------------------- | ------------------------------------- | ------------- |
-| `TEMPERATURE`        | Sampling temperature                  | `0.1`         |
-| `MAX_TOKENS`         | Maximum tokens to generate            | Model default |
-| `TOP_P`              | Top-p (nucleus) sampling              | `None`        |
-| `TOP_K`              | Top-k sampling (Ollama/SageMaker)     | `None`        |
-| `MIN_P`              | Min-P sampling (Ollama)               | `None`        |
-| `STOP`               | Stop sequences (list)                 | `None`        |
-| `STREAM`             | Enable streaming responses            | `true`        |
-| `REPETITION_PENALTY` | Repetition penalty (Ollama/SageMaker) | `None`        |
-| `PRESENCE_PENALTY`   | Presence penalty (Ollama)             | `None`        |
-| `FREQUENCY_PENALTY`  | Frequency penalty (Ollama)            | `None`        |
-| `REASONING`          | Enable thinking/reasoning mode        | `false`       |
-| `THINKING_TOKENS`    | Token budget for reasoning (Bedrock)  | `2048`        |
-| `REASONING_EFFORT`   | Reasoning effort level (OpenAI o1/o3) | `None`        |
+#### Identity, connection & auth
+
+| Parameter      | Applies to `TYPE`                | Description                                                                                                              |
+| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `NAME`         | all (**required**)               | Model id / Ollama model / Bedrock model id / Mantle bare id / SageMaker endpoint name                                    |
+| `TYPE`         | all (**required**)               | `ollama`, `bedrock`, `mantle`, `openai`, `sagemaker`, `litellm` (embeddings: `ollama`, `bedrock`, `openai`, `sagemaker`) |
+| `HOST`         | `ollama`                         | Ollama host (default `localhost`)                                                                                        |
+| `PORT`         | `ollama`                         | Ollama port (default `11434`)                                                                                            |
+| `REGION`       | `bedrock`, `mantle`, `sagemaker` | AWS region (default `us-east-1`)                                                                                         |
+| `API_PROTOCOL` | `mantle`                         | `chat_completions` (default), `responses`, or `anthropic`                                                                |
+| `ENDPOINT_URL` | `bedrock`, `mantle`              | Override the default endpoint URL                                                                                        |
+| `API_KEY`      | `mantle`, `litellm`              | Mantle: Bedrock API key (else `BEDROCK_API_KEY` env / minted token). LiteLLM: provider key                               |
+| `API_BASE`     | `litellm`                        | LiteLLM API base URL                                                                                                     |
+| `INPUT_FORMAT` | `sagemaker`                      | `openai_chat` (default) or `huggingface`                                                                                 |
+
+> Standard Bedrock also reads the `AWS_BEARER_TOKEN_BEDROCK` env var, and all AWS
+> providers honor `AWS_PROFILE` — see the API-key/profile notes under Amazon Bedrock.
+
+#### Inference parameters
+
+Optional generation settings. The **Honored by** column lists the providers that
+actually send each one (others ignore it). These apply to `MODEL_ID` and
+`VISION_MODEL_ID`; **`EMBED_MODEL_ID` takes none of them** (embeddings only use
+`NAME`/`TYPE` + connection).
+
+| Parameter            | Description                            | Honored by                                 |
+| -------------------- | -------------------------------------- | ------------------------------------------ |
+| `MAX_TOKENS`         | Max output tokens to generate          | all                                        |
+| `TEMPERATURE`        | Sampling temperature                   | ollama, bedrock, openai, sagemaker, mantle |
+| `TOP_P`              | Top-p (nucleus) sampling               | ollama, bedrock, openai, sagemaker, mantle |
+| `TOP_K`              | Top-k sampling                         | ollama, sagemaker                          |
+| `MIN_P`              | Min-p sampling                         | ollama, sagemaker                          |
+| `STOP`               | Stop sequences (YAML list)             | ollama, bedrock, sagemaker                 |
+| `STREAM`             | Stream tokens (default `true`)         | openai, sagemaker                          |
+| `PRESENCE_PENALTY`   | Presence penalty                       | ollama, openai, sagemaker                  |
+| `FREQUENCY_PENALTY`  | Frequency penalty                      | ollama                                     |
+| `REPETITION_PENALTY` | Repetition penalty                     | ollama, sagemaker                          |
+| `REASONING`          | Enable extended thinking (boolean)     | bedrock                                    |
+| `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock                                    |
+| `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai, mantle (`responses`), bedrock      |
+
+> **Provider-appropriate tuning matters.** Newer Claude and GPT models reject
+> `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K`/`MIN_P` are largely
+> Ollama/SageMaker concepts. When `/model` switches a section away from Ollama it
+> strips the Ollama-only params for you, but for everything else edit
+> `config.yaml` to match what your specific provider/model accepts.
+
+The context window is set separately, at the top level (it's not part of a model
+section): `MAX_CONVERSATION_TOKENS` (see General Parameters below).
 
 ### General Parameters
 
