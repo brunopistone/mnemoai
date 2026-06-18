@@ -326,6 +326,12 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
     if max_tokens:
         text = _set_in_section(text, "MODEL_ID", "MAX_TOKENS", max_tokens)
 
+    # Max context window (top-level MAX_CONVERSATION_TOKENS); defaults to the
+    # template's current value.
+    ctx = _ask("Max context window", _get_top_level(text, "MAX_CONVERSATION_TOKENS"))
+    if ctx:
+        text = _set_top_level(text, "MAX_CONVERSATION_TOKENS", ctx)
+
     # --- Vision model (optional) ---
     print("\n  -- Vision model (image description) --")
     if _ask_bool("Configure a vision model (for image description)?", True):
@@ -586,6 +592,12 @@ def _prompt_model_section(text: str, section: str, has_max_tokens: bool) -> str:
         max_tokens = _ask("Max output tokens", _get_field(text, section, "MAX_TOKENS"))
         if max_tokens:
             text = _set_field(text, section, "MAX_TOKENS", max_tokens)
+        # Max context window is the top-level MAX_CONVERSATION_TOKENS (feeds
+        # Ollama num_ctx and the compaction budget); it's tied to the chat
+        # model, so set it here. Default to the current value.
+        ctx = _ask("Max context window", _get_top_level(text, "MAX_CONVERSATION_TOKENS"))
+        if ctx:
+            text = _set_top_level(text, "MAX_CONVERSATION_TOKENS", ctx)
 
     return text
 
