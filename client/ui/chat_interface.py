@@ -76,6 +76,9 @@ class ChatInterface:
             "\033[90m│\033[97m   \033[92m/config\033[97m - Reconfigure config.yaml (overwrites it)      \033[90m│\033[0m"
         )
         print(
+            "\033[90m│\033[97m   \033[92m/model\033[97m - Override one model (LLM/vision/embeddings)    \033[90m│\033[0m"
+        )
+        print(
             "\033[90m│\033[97m   \033[92m/clear\033[97m - Clear conversation context                    \033[90m│\033[0m"
         )
         print(
@@ -324,6 +327,15 @@ class ChatInterface:
                 from utils.configurator import run_reconfigure
 
                 if run_reconfigure() is not None:
+                    self._restart_in_place()
+                continue
+
+            # Override just one model section (LLM / vision / embeddings),
+            # leaving the rest of config.yaml untouched, then restart in place.
+            if query.lower() == "/model":
+                from utils.configurator import run_model_override
+
+                if run_model_override() is not None:
                     self._restart_in_place()
                 continue
 
