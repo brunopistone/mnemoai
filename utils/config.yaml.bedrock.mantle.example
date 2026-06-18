@@ -12,25 +12,38 @@ MODEL_ID:
   MAX_TOKENS: 8192
 # Responses-API model example (GPT-5.4 lives in us-west-2, not us-east-1):
 # MODEL_ID:
-#   NAME: openai.gpt-5.4
+#   NAME: openai.gpt-5.5
 #   TYPE: mantle
 #   REGION: us-west-2
 #   API_PROTOCOL: responses
-#   MAX_TOKENS: 8192
+#   MAX_TOKENS: 128000
 # Anthropic (Claude) model example:
 # MODEL_ID:
-#   NAME: anthropic.claude-haiku-4-5
+#   NAME: anthropic.claude-opus-4-8
 #   TYPE: mantle
 #   REGION: us-east-1
 #   API_PROTOCOL: anthropic
-#   MAX_TOKENS: 8192
+#   MAX_TOKENS: 128000
 # Vision via Mantle (vision-capable models):
 VISION_MODEL_ID:
   NAME: qwen.qwen3-vl-235b-a22b-instruct
   TYPE: mantle
   REGION: us-east-1
+# VISION_MODEL_ID:
+#   NAME: openai.gpt-5.5
+#   TYPE: mantle
+#   REGION: us-east-1
+#   API_PROTOCOL: responses
+# VISION_MODEL_ID:
+#   NAME: anthropic.claude-opus-4-8
+#   TYPE: mantle
+#   REGION: us-east-1
+#   API_PROTOCOL: anthropic
 # Model parameters
+#Anthropic max context window
 MAX_CONVERSATION_TOKENS: 1000000
+#GPT max context window
+#MAX_CONVERSATION_TOKENS: 272000
 DOC_MAX_TOKENS: 524288
 # RAG Configuration
 ENABLE_RAG: true
