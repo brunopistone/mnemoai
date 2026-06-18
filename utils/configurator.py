@@ -151,22 +151,44 @@ def _set_field(text: str, section: str, key: str, value: str) -> str:
     if idx < 0:
         return text  # section not present; nothing to do
     header_indent = _indent_of(lines[idx])
-    body_indent = header_indent + 2
-    end = len(lines)
+    body_indent = None  # the section's direct-child indent (first body line)
     for j in range(idx + 1, len(lines)):
         line = lines[j]
         if line.strip() and _indent_of(line) <= header_indent:
-            end = j
-            break
-        if _indent_of(line) > header_indent:
-            body_indent = _indent_of(line)  # adopt the body's actual indent
+            break  # left the section body
+        # Capture the body's indent from its FIRST indented line only — deeper
+        # lines (e.g. a nested STOP: list's items) must not shift it.
+        if body_indent is None and line.strip() and _indent_of(line) > header_indent:
+            body_indent = _indent_of(line)
         m = re.match(rf"(\s+){re.escape(key)}:(?:\s.*)?$", line)
         if m:
             lines[j] = f"{m.group(1)}{key}: {value}"
             return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-    # Not found in body -> insert just after the header.
-    lines.insert(idx + 1, f"{' ' * body_indent}{key}: {value}")
+    # Not found in body -> insert just after the header at the body indent.
+    indent = body_indent if body_indent is not None else header_indent + 2
+    lines.insert(idx + 1, f"{' ' * indent}{key}: {value}")
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _remove_field(text: str, section: str, key: str) -> str:
+    """Remove ``key`` from within ``section`` at any depth, if present.
+
+    No-op when the section or key is absent. Used to make an optional field
+    (e.g. MAX_TOKENS) fall back to the provider default by dropping the line.
+    """
+    lines = text.splitlines()
+    idx = _find_section(lines, section)
+    if idx < 0:
+        return text
+    header_indent = _indent_of(lines[idx])
+    for j in range(idx + 1, len(lines)):
+        line = lines[j]
+        if line.strip() and _indent_of(line) <= header_indent:
+            break  # left the section body
+        if re.match(rf"\s+{re.escape(key)}:(?:\s.*)?$", line):
+            del lines[j]
+            return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return text
 
 
 def _remove_top_section(text: str, section: str) -> str:
@@ -211,6 +233,14 @@ def _set_top_level(text: str, key: str, value: str) -> str:
         else:
             out.append(line)
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
+def _set_top_level_or_add(text: str, key: str, value: str) -> str:
+    """Set a top-level ``key``, appending it if the config doesn't have it yet."""
+    if _get_top_level(text, key) is not None:
+        return _set_top_level(text, key, value)
+    sep = "" if text.endswith("\n") or not text else "\n"
+    return f"{text}{sep}{key}: {value}\n"
 
 
 def _get_in_section(text: str, section: str, key: str) -> Optional[str]:
@@ -322,15 +352,17 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
     elif provider == "bedrock":
         print("  Note: Bedrock uses your AWS credentials (run `aws configure`).")
 
-    max_tokens = _ask("Max output tokens", _get_in_section(text, "MODEL_ID", "MAX_TOKENS"))
-    if max_tokens:
-        text = _set_in_section(text, "MODEL_ID", "MAX_TOKENS", max_tokens)
+    # MAX_TOKENS (output tokens) is optional — 'none' / blank drops it so the
+    # provider default applies.
+    text = _prompt_max_tokens(text, "MODEL_ID")
 
-    # Max context window (top-level MAX_CONVERSATION_TOKENS); defaults to the
-    # template's current value.
-    ctx = _ask("Max context window", _get_top_level(text, "MAX_CONVERSATION_TOKENS"))
-    if ctx:
-        text = _set_top_level(text, "MAX_CONVERSATION_TOKENS", ctx)
+    # Max context window (top-level MAX_CONVERSATION_TOKENS) is mandatory; always
+    # written, defaulting to the template's value (or 65536 if missing).
+    ctx = _ask(
+        "Max context window",
+        _get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
+    )
+    text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
     # --- Vision model (optional) ---
     print("\n  -- Vision model (image description) --")
@@ -357,14 +389,7 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
             text = _set_or_add_in_section(
                 text, "VISION_MODEL_ID", "API_PROTOCOL", _MANTLE_PROTOCOLS[vchoice][0]
             )
-        v_max_tokens = _ask(
-            "Max output tokens (optional)",
-            _get_in_section(text, "VISION_MODEL_ID", "MAX_TOKENS") or "",
-        )
-        if v_max_tokens:
-            text = _set_or_add_in_section(
-                text, "VISION_MODEL_ID", "MAX_TOKENS", v_max_tokens
-            )
+        text = _prompt_max_tokens(text, "VISION_MODEL_ID")
     else:
         # Drop the vision section entirely; image description stays disabled
         # until the user adds VISION_MODEL_ID back (e.g. via /config or /model).
@@ -541,6 +566,26 @@ def _section_summary(text: str, section: str) -> Optional[str]:
     return f"{typ} / {name}{suffix}"
 
 
+def _prompt_max_tokens(text: str, section: str) -> str:
+    """Prompt for the optional MAX_TOKENS of a model section.
+
+    MAX_TOKENS (max output tokens) is optional — when unset the provider's own
+    default applies. Convention:
+      * Enter  -> keep the current value (or stay unset if there is none)
+      * a number -> set it
+      * 'none' -> remove the key (fall back to the provider default)
+    """
+    current = _get_field(text, section, "MAX_TOKENS")
+    default = current if current else "none"
+    answer = _ask("Max output tokens (number, or 'none' for provider default)", default)
+    if answer is None:
+        return text
+    answer = answer.strip().lower()
+    if answer in ("none", ""):
+        return _remove_field(text, section, "MAX_TOKENS")
+    return _set_field(text, section, "MAX_TOKENS", answer)
+
+
 def _print_current_setup(text: str) -> None:
     """Print the current chat/vision/embeddings models. Vision and embeddings
     are optional and only shown when present in the config.
@@ -599,19 +644,19 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
             if chosen != existing and not (existing is None and chosen == "chat_completions"):
                 text = _set_field(text, section, "API_PROTOCOL", chosen)
 
-    # MAX_TOKENS (output tokens) applies to chat and vision, not embeddings.
+    # MAX_TOKENS (output tokens) is optional, for chat and vision (not embeddings).
     if section in ("MODEL_ID", "VISION_MODEL_ID"):
-        max_tokens = _ask("Max output tokens", _get_field(text, section, "MAX_TOKENS"))
-        if max_tokens:
-            text = _set_field(text, section, "MAX_TOKENS", max_tokens)
+        text = _prompt_max_tokens(text, section)
 
     if is_llm:
         # Max context window is the top-level MAX_CONVERSATION_TOKENS (feeds
-        # Ollama num_ctx and the compaction budget); it's tied to the chat
-        # model, so set it here. Default to the current value.
-        ctx = _ask("Max context window", _get_top_level(text, "MAX_CONVERSATION_TOKENS"))
-        if ctx:
-            text = _set_top_level(text, "MAX_CONVERSATION_TOKENS", ctx)
+        # Ollama num_ctx and the compaction budget). It is mandatory, so it's
+        # always written; default to the current value (or 65536 if unset).
+        ctx = _ask(
+            "Max context window",
+            _get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
+        )
+        text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
     return text
 

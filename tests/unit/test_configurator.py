@@ -15,6 +15,7 @@ from utils.configurator import (
     _get_field,
     _get_in_section,
     _get_top_level,
+    _remove_field,
     _remove_top_section,
     _section_summary,
     _set_bool,
@@ -22,6 +23,7 @@ from utils.configurator import (
     _set_in_section,
     _set_or_add_in_section,
     _set_top_level,
+    _set_top_level_or_add,
     _truthy,
 )
 
@@ -222,6 +224,54 @@ def test_set_field_switches_provider_type_in_nested_section():
 def test_set_field_noop_when_section_absent():
     out = _set_field(NESTED, "NONEXISTENT_SECTION", "NAME", "x")
     assert out == NESTED
+
+
+def test_set_field_inserts_at_body_indent_with_nested_list_present():
+    # Regression: a nested list (deeper indent) inside the section must not
+    # shift where a new key is inserted. MODEL_ID's body is 2-space; STOP's
+    # items are 4-space.
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: m
+          TYPE: ollama
+          STOP:
+            - "<|im_end|>"
+            - "<|endoftext|>"
+        """
+    )
+    out = _set_field(text, "MODEL_ID", "MAX_TOKENS", "4096")
+    d = yaml.safe_load(out)  # must stay valid YAML
+    assert d["MODEL_ID"]["MAX_TOKENS"] == 4096
+    assert "\n  MAX_TOKENS: 4096" in out  # 2-space, not 4
+    assert d["MODEL_ID"]["STOP"] == ["<|im_end|>", "<|endoftext|>"]
+
+
+def test_remove_field_drops_key_in_nested_section():
+    out = _remove_field(NESTED, "EMBED_MODEL_ID", "PORT")
+    d = yaml.safe_load(out)
+    assert "PORT" not in d["RAG"]["EMBED_MODEL_ID"]
+    assert d["RAG"]["EMBED_MODEL_ID"]["NAME"] == "embed-model"
+
+
+def test_remove_field_absent_is_noop():
+    assert _remove_field(NESTED, "MODEL_ID", "MAX_TOKENS") == NESTED
+    assert _remove_field(NESTED, "NOPE", "NAME") == NESTED
+
+
+def test_set_top_level_or_add_appends_when_missing():
+    text = "MODEL_ID:\n  NAME: m\n"
+    out = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", "65536")
+    d = yaml.safe_load(out)
+    assert d["MAX_CONVERSATION_TOKENS"] == 65536
+
+
+def test_set_top_level_or_add_replaces_when_present():
+    text = "MAX_CONVERSATION_TOKENS: 1000\nMODEL_ID:\n  NAME: m\n"
+    out = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", "65536")
+    d = yaml.safe_load(out)
+    assert d["MAX_CONVERSATION_TOKENS"] == 65536
+    assert out.count("MAX_CONVERSATION_TOKENS:") == 1
 
 
 # --- Optional-section removal and current-setup summary (used by /config, /model) ---
