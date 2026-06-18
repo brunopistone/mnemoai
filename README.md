@@ -160,7 +160,8 @@ ai-assistant/
 │           └── chunking_helper.py          # Document chunking utilities
 │
 ├── models/                                 # Model layer
-│   ├── base_model_controller.py            # Base controller class
+│   ├── base_model_controller.py            # Minimal shared base for the controllers
+│   ├── provider_params.py                  # Single source of truth: per-provider config keys
 │   ├── llm_controller.py                   # LangChain LLM initialization
 │   ├── vision_model_controller.py          # Vision model initialization
 │   ├── embeddings_controller.py            # Embeddings initialization
@@ -171,9 +172,11 @@ ai-assistant/
 │
 ├── utils/                                  # Utilities
 │   ├── config.py                           # Config loader
+│   ├── configurator.py                     # First-run setup + /config & /model interactive flows
 │   ├── paths.py                            # Central path helper (single ~/.personal-ai-assistant home)
-│   ├── config.yaml.example                 # Config template (copy to config.yaml)
+│   ├── config.yaml.example                 # Config template (copy to config.yaml; also .bedrock / .bedrock.mantle)
 │   ├── logger.py                           # Logging utilities
+│   ├── bm25.py                             # Lightweight BM25 (hybrid search)
 │   └── formatting/                         # Text formatting
 │       ├── code_formatter.py               # Code syntax highlighting
 │       ├── url_formatter.py                # URL highlighting
@@ -188,7 +191,7 @@ ai-assistant/
 ├── requirements-dev.txt                    # Dev/test dependencies
 │
 └── bash/                                   # Helper scripts
-    ├── personal-ai-assistant-wrapper.sh    # System command wrapper
+    ├── system-command-app/                 # `personal-ai-assistant` wrapper script
     ├── ollama-freeup-vram/                 # VRAM management
     └── ollama-env-mac/                     # Ollama config
 ```
@@ -575,10 +578,12 @@ MCP server that provides tools to the LLM.
 Model controllers and custom implementations.
 
 - **Controllers** (centralized model initialization):
-  - `base_model_controller.py`: Base class with shared parameter setup
-  - `llm_controller.py`: LLM model initialization (Bedrock, Ollama, OpenAI, SageMaker AI)
+  - `base_model_controller.py`: Minimal shared base type for the controllers
+  - `provider_params.py`: Single source of truth for the config keys each provider consumes (per modality); controllers build their client kwargs from it via `build_kwargs`, and `/model` prunes unsupported keys from it
+  - `llm_controller.py`: LLM model initialization (Bedrock, Mantle, Ollama, OpenAI, SageMaker AI, LiteLLM)
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
+  - `mantle_factory.py`: Bedrock Mantle factory (chat_completions / responses / anthropic protocols), shared by the LLM and vision controllers
 - **Custom implementations** (`classes/`):
   - `chat_ollama_wrapper.py`: Extends ChatOllama with `presence_penalty` and `frequency_penalty` support
   - `sagemaker_chat.py`: Full LangChain `BaseChatModel` for SageMaker endpoints (streaming, tool calling, reasoning)
@@ -588,8 +593,10 @@ Model controllers and custom implementations.
 Shared utilities and configuration.
 
 - `config.py`: Configuration loader
+- `configurator.py`: First-run interactive setup (when no config resolves) and the `/config` (full reconfigure) and `/model` (override one model section) chat commands
 - `paths.py`: Central path helper — single source of truth for the app home (`~/.personal-ai-assistant`, override with `$PERSONAL_AI_ASSISTANT_HOME`) and all runtime subdirectories (config, plans, tasks, per-profile, per-model)
-- `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings)
+- `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings; `.bedrock` and `.bedrock.mantle` variants also provided)
+- `bm25.py`: Lightweight BM25 implementation for hybrid (semantic + keyword) search
 - `logger.py`: Logging utilities (stderr output)
 - **`formatting/`**: Text formatting
   - `code_formatter.py`: Code syntax highlighting
@@ -1108,27 +1115,34 @@ actually send each one (others ignore it). These apply to `MODEL_ID` and
 `VISION_MODEL_ID`; **`EMBED_MODEL_ID` takes none of them** (embeddings only use
 `NAME`/`TYPE` + connection).
 
-| Parameter            | Description                            | Honored by                                 |
-| -------------------- | -------------------------------------- | ------------------------------------------ |
-| `MAX_TOKENS`         | Max output tokens to generate          | all                                        |
-| `TEMPERATURE`        | Sampling temperature                   | ollama, bedrock, openai, sagemaker, mantle |
-| `TOP_P`              | Top-p (nucleus) sampling               | ollama, bedrock, openai, sagemaker, mantle |
-| `TOP_K`              | Top-k sampling                         | ollama, sagemaker                          |
-| `MIN_P`              | Min-p sampling                         | ollama, sagemaker                          |
-| `STOP`               | Stop sequences (YAML list)             | ollama, bedrock, sagemaker                 |
-| `STREAM`             | Stream tokens (default `true`)         | openai, sagemaker                          |
-| `PRESENCE_PENALTY`   | Presence penalty                       | ollama, openai, sagemaker                  |
-| `FREQUENCY_PENALTY`  | Frequency penalty                      | ollama                                     |
-| `REPETITION_PENALTY` | Repetition penalty                     | ollama, sagemaker                          |
-| `REASONING`          | Enable extended thinking (boolean)     | bedrock                                    |
-| `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock                                    |
-| `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai, mantle (`responses`), bedrock      |
+This table is derived from `models/provider_params.py` — the single source of
+truth that the controllers build their client kwargs from — so it reflects
+exactly what each provider's init path forwards. (`mantle` reads
+`TEMPERATURE`/`MAX_TOKENS`/`TOP_P` via the Mantle factory.)
+
+| Parameter            | Description                            | Honored by (`MODEL_ID`)                             |
+| -------------------- | -------------------------------------- | --------------------------------------------------- |
+| `MAX_TOKENS`         | Max output tokens to generate          | ollama, bedrock, mantle, openai, sagemaker, litellm |
+| `TEMPERATURE`        | Sampling temperature                   | ollama, bedrock, mantle, openai, sagemaker, litellm |
+| `TOP_P`              | Top-p (nucleus) sampling               | ollama, bedrock, mantle, openai, sagemaker, litellm |
+| `TOP_K`              | Top-k sampling                         | ollama, sagemaker                                   |
+| `STOP`               | Stop sequences (YAML list)             | ollama, bedrock, sagemaker, litellm                 |
+| `STREAM`             | Stream tokens (default `true`)         | mantle, openai, litellm                             |
+| `PRESENCE_PENALTY`   | Presence penalty                       | ollama, openai                                      |
+| `FREQUENCY_PENALTY`  | Frequency penalty                      | ollama                                              |
+| `REPETITION_PENALTY` | Repetition penalty                     | ollama, litellm                                     |
+| `REASONING`          | Enable extended thinking (boolean)     | bedrock                                             |
+| `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock                                             |
+| `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai (also maps to Bedrock thinking budget)       |
+
+`VISION_MODEL_ID` accepts a subset: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` on
+bedrock/ollama/openai/mantle, plus `TOP_K`/`STOP` on ollama.
 
 > **Provider-appropriate tuning matters.** Newer Claude and GPT models reject
-> `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K`/`MIN_P` are largely
-> Ollama/SageMaker concepts. When `/model` switches a section away from Ollama it
-> strips the Ollama-only params for you, but for everything else edit
-> `config.yaml` to match what your specific provider/model accepts.
+> `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K` are largely
+> Ollama/SageMaker concepts. When `/model` switches a section's provider it
+> drops the keys the new provider doesn't consume for you, but for everything
+> else edit `config.yaml` to match what your specific provider/model accepts.
 
 The context window is set separately, at the top level (it's not part of a model
 section): `MAX_CONVERSATION_TOKENS` (see General Parameters below).

@@ -7,6 +7,7 @@ from langchain_litellm import ChatLiteLLM
 from models.base_model_controller import BaseModelController
 from models.classes.chat_ollama_wrapper import ChatOllamaWrapper
 from models.classes.sagemaker_chat import ChatSageMaker
+from models.provider_params import build_kwargs
 from utils.config import config
 from utils.logger import logger
 
@@ -73,25 +74,18 @@ class LangChainLLMController(BaseModelController):
 
         logger.info("Initializing Bedrock model via LangChain...")
 
+        passthrough, _ = build_kwargs("MODEL_ID", "bedrock", self)
         kwargs = {
             "model": self.model_name,
             "region_name": self.region,
             "callbacks": callbacks,
+            **passthrough,
         }
 
         # Route to a custom Bedrock endpoint (e.g. Bedrock Mantle) when set.
         if self.endpoint_url:
             kwargs["endpoint_url"] = self.endpoint_url
             logger.info(f"Using custom Bedrock endpoint: {self.endpoint_url}")
-
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.stop:
-            kwargs["stop"] = self.stop
 
         # Enable thinking/reasoning for Claude models
         if self.reasoning_model:
@@ -147,29 +141,18 @@ class LangChainLLMController(BaseModelController):
         """Initialize LiteLLM model using langchain-litellm."""
         logger.info("Initializing LiteLLM model...")
 
+        passthrough, model_kwargs = build_kwargs("MODEL_ID", "litellm", self)
         kwargs = {
             "model": self.model_name,
             "callbacks": callbacks,
             "streaming": self.stream,
+            **passthrough,
         }
-
-        model_kwargs = dict()
 
         if self.model_id.get("API_BASE"):
             kwargs["api_base"] = self.model_id["API_BASE"]
         if self.model_id.get("API_KEY"):
             kwargs["api_key"] = self.model_id["API_KEY"]
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-
-        if self.stop:
-            model_kwargs["stop"] = self.stop
-        if self.repetition_penalty is not None:
-            model_kwargs["repeat_penalty"] = self.repetition_penalty
 
         self.model = ChatLiteLLM(model_kwargs=model_kwargs, **kwargs)
 
@@ -182,28 +165,13 @@ class LangChainLLMController(BaseModelController):
         base_url = f"http://{host}:{port}"
 
         # Build kwargs
+        passthrough, _ = build_kwargs("MODEL_ID", "ollama", self)
         kwargs = {
             "model": self.model_name,
             "base_url": base_url,
             "callbacks": callbacks,
+            **passthrough,
         }
-
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-        if self.top_k is not None:
-            kwargs["top_k"] = self.top_k
-        if self.max_tokens is not None:
-            kwargs["num_predict"] = self.max_tokens
-        if self.stop:
-            kwargs["stop"] = self.stop
-        if self.repetition_penalty is not None:
-            kwargs["repeat_penalty"] = self.repetition_penalty
-        if self.presence_penalty is not None:
-            kwargs["presence_penalty"] = self.presence_penalty
-        if self.frequency_penalty is not None:
-            kwargs["frequency_penalty"] = self.frequency_penalty
 
         # Set context window
         kwargs["num_ctx"] = self.max_conversation_tokens
@@ -220,24 +188,16 @@ class LangChainLLMController(BaseModelController):
 
         logger.info("Initializing OpenAI model...")
 
+        passthrough, model_kwargs = build_kwargs("MODEL_ID", "openai", self)
         kwargs = {
             "model": self.model_name,
             "callbacks": callbacks,
             "streaming": self.stream,
+            **passthrough,
         }
-
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-        if self.presence_penalty is not None:
-            kwargs["presence_penalty"] = self.presence_penalty
-
-        # For reasoning models like o1
-        if self.reasoning_effort is not None:
-            kwargs["model_kwargs"] = {"reasoning_effort": self.reasoning_effort}
+        # reasoning_effort (o1/o3 models) goes in model_kwargs.
+        if model_kwargs:
+            kwargs["model_kwargs"] = model_kwargs
 
         self.model = ChatOpenAI(**kwargs)
 
@@ -249,23 +209,14 @@ class LangChainLLMController(BaseModelController):
         endpoint_name = self.model_name
         input_format = self.model_id.get("INPUT_FORMAT", "openai_chat")
 
+        passthrough, _ = build_kwargs("MODEL_ID", "sagemaker", self)
         kwargs = {
             "endpoint_name": endpoint_name,
             "region_name": self.region,
             "input_format": input_format,
             "callbacks": callbacks,
+            **passthrough,
         }
-
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.max_tokens is not None:
-            kwargs["max_tokens"] = self.max_tokens
-        if self.top_p is not None:
-            kwargs["top_p"] = self.top_p
-        if self.top_k is not None:
-            kwargs["top_k"] = self.top_k
-        if self.stop:
-            kwargs["stop"] = self.stop
 
         self.model = ChatSageMaker(**kwargs)
 

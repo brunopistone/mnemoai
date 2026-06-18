@@ -32,28 +32,11 @@ _MANTLE_PROTOCOLS = {
     "3": ("anthropic", "Anthropic Messages (/anthropic) — Claude models"),
 }
 
-# Inference params the templates set for Ollama specifically. Other providers
-# vary in what they accept (e.g. newer Claude/GPT models reject TEMPERATURE),
-# so the configurator only writes these for ollama and strips them when
-# switching a section away from ollama — pointing the user to config.yaml for
-# provider-appropriate tuning.
-_OLLAMA_ONLY_PARAMS = ("TEMPERATURE", "FREQUENCY_PENALTY", "PRESENCE_PENALTY", "STOP")
-
-# Connection/auth keys each provider TYPE understands. When /model switches a
-# section's provider, keys not in the new provider's set are stripped so no
-# stale, unsupported parameters (e.g. a leftover REGION/API_PROTOCOL after
-# mantle -> ollama) are left behind. NAME/TYPE are always kept.
-_PROVIDER_CONNECTION_KEYS = {
-    "ollama": {"HOST", "PORT"},
-    "bedrock": {"REGION", "ENDPOINT_URL"},
-    "mantle": {"REGION", "API_PROTOCOL", "ENDPOINT_URL", "API_KEY"},
-    "openai": set(),
-    "sagemaker": {"REGION", "INPUT_FORMAT"},
-    "litellm": {"API_BASE", "API_KEY"},
-}
-
-# Union of all provider connection/auth keys — the candidates to prune from.
-_ALL_CONNECTION_KEYS = set().union(*_PROVIDER_CONNECTION_KEYS.values())
+# Which config keys each provider actually consumes is owned by the model layer
+# (models/provider_params.py), derived from the controller init methods. The
+# configurator imports it so the two never drift; see _prune_unsupported_params.
+# MAX_CONVERSATION_TOKENS is a top-level key (not part of a model section), so
+# it's never pruned by the section-level logic.
 
 
 def _templates_dir() -> Path:
@@ -229,6 +212,50 @@ def _remove_field(text: str, section: str, key: str) -> str:
                 end += 1
             del lines[start:end]
             return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return text
+
+
+def _list_section_keys(text: str, section: str) -> list:
+    """Return the direct child keys present in ``section`` (at any depth)."""
+    lines = text.splitlines()
+    idx = _find_section(lines, section)
+    if idx < 0:
+        return []
+    header_indent = _indent_of(lines[idx])
+    body_indent = None
+    keys = []
+    for line in lines[idx + 1:]:
+        if line.strip() and _indent_of(line) <= header_indent:
+            break  # left the section body
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if body_indent is None:
+            body_indent = _indent_of(line)
+        if _indent_of(line) != body_indent:
+            continue  # nested deeper (e.g. a list item) — not a direct key
+        m = re.match(r"\s*([A-Za-z0-9_]+):", line)
+        if m:
+            keys.append(m.group(1))
+    return keys
+
+
+def _prune_unsupported_params(text: str, section: str, provider: str) -> str:
+    """Drop keys the ``provider`` doesn't consume for ``section``.
+
+    The supported-key registry lives in ``models.provider_params`` (derived
+    from the controller init methods), so this prunes any stale parameter left
+    over from a previous provider — connection, auth, and inference alike.
+    ``NAME``/``TYPE`` are always kept; an unknown provider prunes nothing.
+    """
+    from models.provider_params import supported_keys
+
+    allowed = supported_keys(section, provider)
+    if allowed is None:
+        return text  # unknown provider/section — don't touch anything
+    keep = allowed | {"NAME", "TYPE"}
+    for key in _list_section_keys(text, section):
+        if key not in keep:
+            text = _remove_field(text, section, key)
     return text
 
 
@@ -691,19 +718,14 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
             if chosen != existing and not (existing is None and chosen == "chat_completions"):
                 text = _set_field(text, section, "API_PROTOCOL", chosen)
 
-    # On a provider switch, strip parameters the new provider doesn't support so
-    # no stale, unsupported keys are left behind (e.g. a leftover REGION /
-    # API_PROTOCOL after mantle -> ollama, or HOST/PORT after ollama -> bedrock).
+    # On a provider switch, strip every parameter the new provider doesn't
+    # consume (connection, auth, and inference alike), per the model layer's
+    # supported-key registry — so no stale, unsupported keys are left behind
+    # (e.g. REGION/API_PROTOCOL after mantle -> ollama, HOST/PORT/penalties
+    # after ollama -> bedrock). The keys just written for the new provider are
+    # in its allowed set, so they survive.
     if new_type != cur_type:
-        # Connection/auth keys not valid for the new provider.
-        keep = _PROVIDER_CONNECTION_KEYS.get(new_type, set())
-        for param in _ALL_CONNECTION_KEYS - keep:
-            text = _remove_field(text, section, param)
-        # Ollama-only inference params (TEMPERATURE, penalties, STOP) when
-        # leaving Ollama — other providers/models may reject them.
-        if cur_type == "ollama":
-            for param in _OLLAMA_ONLY_PARAMS:
-                text = _remove_field(text, section, param)
+        text = _prune_unsupported_params(text, section, new_type)
 
     if new_type != "ollama":
         print(
