@@ -102,6 +102,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 ```yaml
 ai-assistant/
 ├── main.py                                 # Entry point
+├── pyproject.toml                          # Packaging + `personal-ai-assistant` CLI entry point
 ├── requirements.txt                        # Dependencies
 ├── README.md                               # This file
 │
@@ -170,6 +171,7 @@ ai-assistant/
 │
 ├── utils/                                  # Utilities
 │   ├── config.py                           # Config loader
+│   ├── paths.py                            # Central path helper (single ~/.personal-ai-assistant home)
 │   ├── config.yaml.example                 # Config template (copy to config.yaml)
 │   ├── logger.py                           # Logging utilities
 │   └── formatting/                         # Text formatting
@@ -259,7 +261,30 @@ git clone https://github.com/brunopistone/personal-ai-assistant.git
 cd personal-ai-assistant
 ```
 
-2. **Set up Python environment** (choose one):
+2. **Install the assistant** (choose one):
+
+#### Recommended: install as a CLI command (`uv tool install`)
+
+This installs the project into its own isolated environment and puts `personal-ai-assistant` on your PATH, so you can run it from any directory (macOS and Linux) without activating anything:
+
+```bash
+uv tool install .        # or: pipx install .
+```
+
+Then configure a user config (see step 4) and run:
+
+```bash
+personal-ai-assistant            # verbose (shows thinking)
+personal-ai-assistant --no-verbose
+```
+
+To upgrade after pulling changes: `uv tool install --force .`. To remove: `uv tool uninstall personal-ai-assistant`.
+
+> This is the best choice for everyday use. Pick a "run from a checkout" option below instead if you plan to actively edit the code, since those run your working tree directly with no reinstall step.
+
+#### Alternative: run from a checkout
+
+Set up an environment (choose one), which lets you run the assistant directly from the repo with `python main.py` while editing the source live:
 
 **Option A: venv**
 
@@ -283,6 +308,17 @@ conda create -n personal-ai-assistant python=3.11
 conda activate personal-ai-assistant
 pip install -r requirements.txt
 ```
+
+**Get the `personal-ai-assistant` command for a checkout install**
+
+So you don't have to `cd` into the repo and run `python main.py` every time, symlink the bundled wrapper script onto your PATH. It activates the project environment, then runs `main.py`:
+
+```bash
+chmod +x bash/system-command-app/personal-ai-assistant-wrapper.sh
+ln -sf "$(pwd)/bash/system-command-app/personal-ai-assistant-wrapper.sh" /usr/local/bin/personal-ai-assistant
+```
+
+Now `personal-ai-assistant` works from any directory and always reflects your latest edits. The wrapper auto-activates a project-local `.venv` (Options A and B) if present, otherwise it falls back to a conda env named `personal-ai-assistant` (Option C) — edit the script if your environment differs.
 
 3. **Install ripgrep (optional but recommended for fast search)**:
 
@@ -332,7 +368,25 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 cp utils/config.yaml.example utils/config.yaml
 ```
 
-Edit `utils/config.yaml` with your settings. This file is git-ignored to protect your API keys. At minimum, configure your LLM provider:
+Edit `utils/config.yaml` with your settings. This file is git-ignored to protect your API keys. At minimum, configure your LLM provider.
+
+The config file is resolved in this order (first match wins):
+
+1. `$PERSONAL_AI_ASSISTANT_CONFIG` — explicit path (handy for switching between provider configs)
+2. `~/.personal-ai-assistant/config.yaml` — **user config used by the installed `personal-ai-assistant` command**
+3. `./utils/config.yaml` — repo-relative fallback (used when running `python main.py` from a checkout)
+
+If you installed the CLI with `uv tool install` (the recommended option), put your config in the user location instead:
+
+```bash
+mkdir -p ~/.personal-ai-assistant
+cp utils/config.yaml.example ~/.personal-ai-assistant/config.yaml
+# or, for Bedrock / Mantle:
+# cp utils/config.yaml.bedrock.example        ~/.personal-ai-assistant/config.yaml
+# cp utils/config.yaml.bedrock.mantle.example ~/.personal-ai-assistant/config.yaml
+```
+
+At minimum, configure your LLM provider:
 
 **For Ollama (quickest setup):**
 
@@ -366,26 +420,19 @@ See [Configuration](#-configuration) for all options and [Feature Toggles](#-fea
 
 5. **Run the assistant**:
 
-```bash
-python main.py
-```
-
-### Optional: Create System Command
-
-Make the assistant accessible from anywhere in your terminal. The wrapper automatically detects your Python environment (venv, uv, or conda).
-
-```bash
-chmod +x bash/system-command-app/personal-ai-assistant-wrapper.sh
-ln -sf $(pwd)/bash/system-command-app/personal-ai-assistant-wrapper.sh /usr/local/bin/personal-ai-assistant
-```
-
-Then run from anywhere:
+If you installed with `uv tool install` (recommended), run the command from anywhere:
 
 ```bash
 personal-ai-assistant
 ```
 
-See `bash/system-command-app/README.md` for details.
+If you set up a checkout and symlinked the wrapper, the same command works. Otherwise, run it from the repo directory:
+
+```bash
+python main.py
+```
+
+See `bash/system-command-app/README.md` for details on the wrapper script.
 
 ## 🔀 Feature Toggles
 
@@ -529,6 +576,7 @@ Model controllers and custom implementations.
 Shared utilities and configuration.
 
 - `config.py`: Configuration loader
+- `paths.py`: Central path helper — single source of truth for the app home (`~/.personal-ai-assistant`, override with `$PERSONAL_AI_ASSISTANT_HOME`) and all runtime subdirectories (config, plans, tasks, per-profile, per-model)
 - `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings)
 - `logger.py`: Logging utilities (stderr output)
 - **`formatting/`**: Text formatting
@@ -556,10 +604,10 @@ Each chat session has a unique ID used for:
 - Chunk caching for file summarization
 - Training data collection (SFT markers)
 
-Session data is stored in `~/agent-conversations/{profile_name}/`:
+Session data is stored in `~/.personal-ai-assistant/{profile_name}/`:
 
 ```
-~/agent-conversations/
+~/.personal-ai-assistant/
 └── {profile_name}/
     ├── conversations/           # Saved conversations
     ├── profiles/                # User profiles
@@ -605,7 +653,7 @@ Track multi-step tasks with automatic status management:
 - Three states: `pending`, `in_progress`, `completed`
 - Enforces exactly ONE task in progress at a time
 - Real-time progress tracking
-- Stored in `~/agent-conversations/{profile}/todos/current_todos.json`
+- Stored in `~/.personal-ai-assistant/{profile}/todos/current_todos.json`
 
 **Usage Example:**
 
@@ -788,8 +836,8 @@ Implementation planning workflow for complex tasks:
 - Multi-step refactoring
 - Unclear requirements
 
-**Plan Storage:** `~/.claude/current_plan.json`
-**Task Output:** `~/.claude/tasks/`
+**Plan Storage:** `~/.personal-ai-assistant/plans/current_plan.json`
+**Task Output:** `~/.personal-ai-assistant/tasks/`
 
 ### 🔄 Background Tasks
 
@@ -826,7 +874,7 @@ get_task_status(task_id="abc123")
 get_task_output(task_id="abc123", tail_lines=50)
 ```
 
-**Task Storage:** Output logs saved to `~/.claude/tasks/`
+**Task Storage:** Output logs saved to `~/.personal-ai-assistant/tasks/`
 
 ## 🔧 Configuration
 
@@ -1013,7 +1061,7 @@ DOC_MAX_TOKENS: 16384
 
 # Profile configuration
 PROFILE:
-  NAME: default # Used for session data isolation (~/agent-conversations/{NAME}/)
+  NAME: default # Used for session data isolation (~/.personal-ai-assistant/{NAME}/)
   USE_PROFILING: true # Enable automatic user profiling
 ```
 
@@ -1356,8 +1404,8 @@ The episodic memory system learns from successful task completions and retrieves
 
 **Storage Location:**
 
-- FAISS: `~/agent-conversations/{profile}/models/{model}/episodic_memory/episodic.index`
-- ChromaDB: `~/agent-conversations/{profile}/models/{model}/episodic_memory/`
+- FAISS: `~/.personal-ai-assistant/{profile}/models/{model}/episodic_memory/episodic.index`
+- ChromaDB: `~/.personal-ai-assistant/{profile}/models/{model}/episodic_memory/`
 
 **Configuration:**
 
@@ -1435,8 +1483,8 @@ PLAYBOOK:
 
 **Storage Location:**
 
-- Strategies: `~/agent-conversations/{profile}/models/{model}/playbook/playbook.json`
-- Metrics: `~/agent-conversations/{profile}/models/{model}/playbook/metrics.json`
+- Strategies: `~/.personal-ai-assistant/{profile}/models/{model}/playbook/playbook.json`
+- Metrics: `~/.personal-ai-assistant/{profile}/models/{model}/playbook/metrics.json`
 
 ### Training Data Collection
 
@@ -1676,8 +1724,8 @@ See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for 
 
 **Permission Errors**
 
-- Ensure write permissions for `~/agent-conversations/`
-- Ensure write permissions for `~/.claude/` (used by plan mode and background tasks)
+- Ensure write permissions for `~/.personal-ai-assistant/`
+- Ensure write permissions for `~/.personal-ai-assistant/` (the app home: config, plans, tasks, per-profile state)
 - Check file paths in configuration
 
 **Import Errors on Startup**
