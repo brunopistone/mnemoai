@@ -35,19 +35,63 @@ class Config:
         self._load_config()
         self._initialized = True
 
+    @staticmethod
+    def _resolve_config_path() -> "Path | None":
+        """Find the config.yaml to load, checking locations in priority order.
+
+        Resolution order (first existing wins):
+          1. ``$PERSONAL_AI_ASSISTANT_CONFIG`` — explicit override (handy for
+             switching between provider configs, e.g. ollama vs bedrock vs mantle)
+          2. ``<app_home>/config.yaml`` — the user config used by the installed
+             CLI; app home defaults to ``~/.personal-ai-assistant`` and honors
+             ``$PERSONAL_AI_ASSISTANT_HOME``
+          3. ``<repo>/utils/config.yaml`` — repo-relative fallback, so running
+             from a checkout (``python main.py``) keeps working unchanged
+
+        Returns:
+            The resolved Path, or None if no config exists in any location.
+        """
+        env_path = os.environ.get("PERSONAL_AI_ASSISTANT_CONFIG")
+        if env_path:
+            return Path(env_path).expanduser()
+
+        from utils.paths import config_path as home_config_path
+
+        user_config = home_config_path()
+        if user_config.is_file():
+            return user_config
+
+        repo_config = Path(os.path.dirname(__file__)) / "config.yaml"
+        if repo_config.is_file():
+            return repo_config
+
+        return None
+
     def _load_config(self) -> None:
         """Load configuration from file and environment variables.
 
         Returns:
             None
         """
-        # Load from config file
-        config_path = Path(os.path.dirname(__file__)) / "config.yaml"
+        config_path = self._resolve_config_path()
+        if config_path is None:
+            print(
+                "No config.yaml found. Create one at "
+                "~/.personal-ai-assistant/config.yaml (or set "
+                "PERSONAL_AI_ASSISTANT_CONFIG). Copy a template to start, e.g.:\n"
+                "  mkdir -p ~/.personal-ai-assistant && \\\n"
+                "  cp utils/config.yaml.example "
+                "~/.personal-ai-assistant/config.yaml"
+            )
+            self._config_data = {}
+            return
+
         try:
             with open(config_path, "r") as f:
                 self._config_data = yaml.safe_load(f) or {}
+            logger.debug(f"Loaded config from {config_path}")
         except (FileNotFoundError, yaml.YAMLError) as e:
-            print(f"Error loading config file: {e}")
+            print(f"Error loading config file ({config_path}): {e}")
             self._config_data = {}
 
         # Set environment variables (only log once)

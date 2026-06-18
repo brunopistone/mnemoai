@@ -12,9 +12,10 @@ import json
 import os
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
+from utils.paths import plans_dir
 
-# Plan storage location
-PLAN_DIR = os.path.expanduser("~/.claude")
+# Plan storage location (under the app home, created on demand)
+PLAN_DIR = str(plans_dir())
 CURRENT_PLAN_FILE = os.path.join(PLAN_DIR, "current_plan.json")
 
 

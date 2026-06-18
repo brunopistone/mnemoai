@@ -20,6 +20,7 @@ sys.path.append(
 from utils.bm25 import BM25
 from utils.config import config
 from utils.logger import logger
+from utils.paths import profile_dir
 from models.embeddings_controller import EmbeddingsController
 
 
@@ -54,10 +55,8 @@ def get_rag_session() -> Optional[Any]:
 
     # MCP subprocess: read session_id from file and create session
     try:
-        # Get profile-specific directory in agent-conversations
-        user_home = os.path.expanduser("~")
-        profile_name = config.get("PROFILE", {}).get("NAME", "default")
-        rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+        # Profile-specific directory under the app home
+        rag_dir = str(profile_dir())
         session_file = os.path.join(rag_dir, "rag_session_id.txt")
 
         if os.path.exists(session_file):
@@ -86,9 +85,7 @@ def reset_session_rag() -> None:
         _rag_session = None
 
     # Also remove session file
-    user_home = os.path.expanduser("~")
-    profile_name = config.get("PROFILE", {}).get("NAME", "default")
-    rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+    rag_dir = str(profile_dir())
     session_file = os.path.join(rag_dir, "rag_session_id.txt")
 
     if os.path.exists(session_file):

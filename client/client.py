@@ -13,6 +13,7 @@ from client.mcp_tool_wrapper import MCPClientWrapper
 from client.memory.episodic_memory import EpisodicMemoryManager
 from client.memory.reflector import Reflector
 from client.memory.playbook_store import PlaybookStore
+from client.router import QueryRouter, ROUTE_TOOLS
 from client.ui.spinner import Spinner
 from datetime import date, datetime
 import json
@@ -23,6 +24,7 @@ import numpy as np
 import os
 import re
 from server.tools import count_tokens
+from utils.paths import model_dir, profile_dir, sanitize_model_name
 import shutil
 import sqlite3
 import sys
@@ -185,32 +187,20 @@ class LangGraphClient:
     def _sanitize_for_path(name: str) -> str:
         """Make a model id safe to use as a directory name.
 
-        Model ids contain characters that are awkward or illegal in paths
-        (``/``, ``:``, spaces, etc.), e.g. ``brnpistone/Qwen3.5-4B:latest`` or
-        ``global.anthropic.claude-fable-5``. Collapse anything outside
-        ``[A-Za-z0-9._-]`` to ``_``.
+        Thin delegate to ``utils.paths.sanitize_model_name`` (kept for callers
+        and tests that reference it on the client).
         """
-        if not name:
-            return "default"
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name)).strip("_")
-        return safe or "default"
+        return sanitize_model_name(name)
 
     def _model_scoped_dir(self) -> str:
-        """Return ~/agent-conversations/{profile}/{model}/ (created).
+        """Return ``<app_home>/{profile}/models/{model}/`` (created).
 
         Episodic memory and the ACE playbook are scoped per chat model so
         switching models doesn't contaminate memory/strategies built with a
         different one. Conversations, RAG, and todos remain profile-scoped.
         """
-        user_home = os.path.expanduser("~")
-        profile_name = config.get("PROFILE", {}).get("NAME", "default")
         model_name = config.get("MODEL_ID", {}).get("NAME", "default")
-        model_dir = self._sanitize_for_path(model_name)
-        path = os.path.join(
-            user_home, "agent-conversations", profile_name, "models", model_dir
-        )
-        os.makedirs(path, exist_ok=True)
-        return path
+        return str(model_dir(model_name))
 
     def _initialize_episodic_memory(self) -> None:
         """Initialize episodic memory if enabled."""
@@ -311,8 +301,6 @@ class LangGraphClient:
                 router = None
                 tool_routes = None
                 if config.get("ENABLE_ROUTING", False):
-                    from client.router import QueryRouter, ROUTE_TOOLS
-
                     router = QueryRouter(self.model)
                     tool_routes = ROUTE_TOOLS
                     logger.info("Query routing enabled")
@@ -691,9 +679,7 @@ class LangGraphClient:
     def _initialize_rag_session(self) -> None:
         """Initialize RAG session at application startup."""
         try:
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+            rag_dir = str(profile_dir())
             os.makedirs(rag_dir, exist_ok=True)
 
             session_file = os.path.join(rag_dir, "rag_session_id.txt")
@@ -707,9 +693,7 @@ class LangGraphClient:
     def _initialize_chunk_cache(self) -> None:
         """Initialize chunk cache DB at application startup."""
         try:
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+            rag_dir = str(profile_dir())
             os.makedirs(rag_dir, exist_ok=True)
 
             session_file = os.path.join(rag_dir, "chunk_session_id.txt")
@@ -743,9 +727,7 @@ class LangGraphClient:
 
             reset_session_chunk_cache()
 
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+            rag_dir = str(profile_dir())
 
             if os.path.exists(rag_dir):
                 for file in os.listdir(rag_dir):
@@ -768,9 +750,7 @@ class LangGraphClient:
 
             reset_session_rag()
 
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+            rag_dir = str(profile_dir())
 
             if os.path.exists(rag_dir):
                 for file in os.listdir(rag_dir):
@@ -800,11 +780,7 @@ class LangGraphClient:
             return
 
         try:
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            conversations_dir = os.path.join(
-                user_home, "agent-conversations", profile_name
-            )
+            conversations_dir = str(profile_dir())
             os.makedirs(conversations_dir, exist_ok=True)
 
             timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -846,11 +822,7 @@ class LangGraphClient:
             return
 
         try:
-            user_home = os.path.expanduser("~")
-            profile_name = config.get("PROFILE", {}).get("NAME", "default")
-            save_dir = os.path.join(
-                user_home, "agent-conversations", profile_name, "conversations"
-            )
+            save_dir = str(profile_dir() / "conversations")
             os.makedirs(save_dir, exist_ok=True)
 
             timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")

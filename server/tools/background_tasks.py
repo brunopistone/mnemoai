@@ -16,13 +16,14 @@ import uuid
 from datetime import datetime
 from typing import Dict, Optional
 from mcp.server.fastmcp import FastMCP
+from utils.paths import tasks_dir
 
 # Store for background tasks
 _background_tasks: Dict[str, dict] = {}
 _task_lock = threading.Lock()
 
-# Task output directory
-TASK_OUTPUT_DIR = os.path.expanduser("~/.claude/tasks")
+# Task output directory (under the app home, created on demand)
+TASK_OUTPUT_DIR = str(tasks_dir())
 
 
 def ensure_task_dir():
