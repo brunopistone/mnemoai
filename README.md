@@ -905,6 +905,14 @@ MODEL_ID:
 
 > **Note:** Newer Claude models on Bedrock reject `temperature` as deprecated. Omit `TEMPERATURE` for those — it is only sent when explicitly configured.
 
+> **Using a named AWS profile (Bedrock, SageMaker, Mantle).** These providers use the standard boto3 credential chain (default profile / env vars / instance role). To select a specific named profile instead, set `AWS_PROFILE` via the config `ENV:` section — values there are exported as environment variables at startup, and boto3 picks them up automatically. No model-level config key is needed:
+>
+> ```yaml
+> ENV:
+>   AWS_PROFILE: my-bedrock-profile
+>   # AWS_REGION: us-east-1   # any AWS env var works here too
+> ```
+
 #### Amazon Bedrock Mantle
 
 Bedrock Mantle is an **OpenAI-compatible** API (not the Bedrock Converse API). It authenticates with a short-lived bearer token minted from your standard AWS credentials via [`aws-bedrock-token-generator`](https://pypi.org/project/aws-bedrock-token-generator/), so your normal `aws configure` / SSO setup works — no extra keys to manage. Use `TYPE: mantle` and a bare model ID from the Mantle catalog.

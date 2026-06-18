@@ -1,3 +1,6 @@
+# Credentials: Bedrock/SageMaker use the standard boto3 credential chain
+# (default profile / env vars / instance role). To use a named AWS profile,
+# set AWS_PROFILE in the ENV section at the bottom of this file.
 MODEL_ID:
   NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock
@@ -283,6 +286,12 @@ ENABLE_WEB_CRAWL: true
 PROFILE:
   NAME: bpistone
   USE_PROFILING: true
+# Environment variables exported at startup. Use this to select a named AWS
+# profile for Bedrock/SageMaker without changing your shell, or to set any
+# other env var the providers read.
+# ENV:
+#   AWS_PROFILE: my-bedrock-profile
+#   AWS_REGION: us-east-1
 SYSTEM_PROMPT: |
   <identity>
     TODAY'S DATE: {current_date}

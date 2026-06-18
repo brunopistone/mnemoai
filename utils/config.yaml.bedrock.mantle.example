@@ -328,6 +328,11 @@ ENABLE_WEB_CRAWL: true
 PROFILE:
   NAME: bpistone
   USE_PROFILING: true
+# Environment variables exported at startup. Mantle mints its bearer token from
+# the standard AWS credential chain; set AWS_PROFILE here to use a named profile.
+# ENV:
+#   AWS_PROFILE: my-bedrock-profile
+#   AWS_REGION: us-east-1
 SYSTEM_PROMPT: |
   <identity>
     TODAY'S DATE: {current_date}
