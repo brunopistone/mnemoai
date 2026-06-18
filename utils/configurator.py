@@ -169,6 +169,37 @@ def _set_field(text: str, section: str, key: str, value: str) -> str:
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
 
 
+def _remove_top_section(text: str, section: str) -> str:
+    """Remove a top-level ``section:`` block (header + its indented body).
+
+    Also drops immediately-preceding comment lines that belong to the section.
+    Used to drop an optional section (e.g. VISION_MODEL_ID) when the user opts
+    out. Only top-level sections are handled.
+    """
+    lines = text.splitlines()
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(rf"{re.escape(section)}:\s*$", line) or (
+            re.match(rf"{re.escape(section)}:", line)
+            and not line.split(":", 1)[1].strip()
+        ):
+            # Drop any contiguous comment lines we already emitted for it.
+            while out and out[-1].lstrip().startswith("#"):
+                out.pop()
+            i += 1
+            # Skip the indented body.
+            while i < len(lines) and (not lines[i].strip() or lines[i][0].isspace()):
+                if lines[i].strip() and not lines[i][0].isspace():
+                    break
+                i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
+
+
 def _set_top_level(text: str, key: str, value: str) -> str:
     """Replace the first top-level ``key: ...`` line (column 0)."""
     out = []
@@ -295,30 +326,36 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
     if max_tokens:
         text = _set_in_section(text, "MODEL_ID", "MAX_TOKENS", max_tokens)
 
-    # --- Vision model ---
+    # --- Vision model (optional) ---
     print("\n  -- Vision model (image description) --")
-    vision = _ask("Vision model name", _get_in_section(text, "VISION_MODEL_ID", "NAME"))
-    if vision:
-        text = _set_in_section(text, "VISION_MODEL_ID", "NAME", vision)
-    # Mirror the chat model's connection (host/port or region) into the vision
-    # section — the vision model usually runs on the same host/region.
-    for k, v in conn.items():
-        if _get_in_section(text, "VISION_MODEL_ID", k) is not None:
-            text = _set_in_section(text, "VISION_MODEL_ID", k, v)
-    # Mantle vision protocol is per-model too, so ask for it separately.
-    if provider == "mantle":
-        current = _get_in_section(text, "VISION_MODEL_ID", "API_PROTOCOL") or "chat_completions"
-        default_key = next((k for k, (val, _) in _MANTLE_PROTOCOLS.items() if val == current), "1")
-        print("  Vision API protocol:")
-        for k, (_, desc) in _MANTLE_PROTOCOLS.items():
-            print(f"    {k}) {desc}")
-        vchoice = _ask("Protocol", default_key) or default_key
-        if vchoice not in _MANTLE_PROTOCOLS:
-            print(f"  '{vchoice}' is not valid; defaulting to chat_completions.")
-            vchoice = "1"
-        text = _set_or_add_in_section(
-            text, "VISION_MODEL_ID", "API_PROTOCOL", _MANTLE_PROTOCOLS[vchoice][0]
-        )
+    if _ask_bool("Configure a vision model (for image description)?", True):
+        vision = _ask("Vision model name", _get_in_section(text, "VISION_MODEL_ID", "NAME"))
+        if vision:
+            text = _set_in_section(text, "VISION_MODEL_ID", "NAME", vision)
+        # Mirror the chat model's connection (host/port or region) into the
+        # vision section — it usually runs on the same host/region.
+        for k, v in conn.items():
+            if _get_in_section(text, "VISION_MODEL_ID", k) is not None:
+                text = _set_in_section(text, "VISION_MODEL_ID", k, v)
+        # Mantle vision protocol is per-model too, so ask for it separately.
+        if provider == "mantle":
+            current = _get_in_section(text, "VISION_MODEL_ID", "API_PROTOCOL") or "chat_completions"
+            default_key = next((k for k, (val, _) in _MANTLE_PROTOCOLS.items() if val == current), "1")
+            print("  Vision API protocol:")
+            for k, (_, desc) in _MANTLE_PROTOCOLS.items():
+                print(f"    {k}) {desc}")
+            vchoice = _ask("Protocol", default_key) or default_key
+            if vchoice not in _MANTLE_PROTOCOLS:
+                print(f"  '{vchoice}' is not valid; defaulting to chat_completions.")
+                vchoice = "1"
+            text = _set_or_add_in_section(
+                text, "VISION_MODEL_ID", "API_PROTOCOL", _MANTLE_PROTOCOLS[vchoice][0]
+            )
+    else:
+        # Drop the vision section entirely; image description stays disabled
+        # until the user adds VISION_MODEL_ID back (e.g. via /config or /model).
+        text = _remove_top_section(text, "VISION_MODEL_ID")
+        print("  -> Vision disabled (no VISION_MODEL_ID).")
 
     # --- Profile ---
     print("\n  -- Profile --")
@@ -465,6 +502,42 @@ _MODEL_SECTIONS = {
 }
 
 
+def _section_summary(text: str, section: str) -> Optional[str]:
+    """One-line summary of a model section, or None if it isn't configured.
+
+    Example: ``mantle / anthropic.claude-haiku-4-5 (us-east-1, anthropic)``.
+    """
+    name = _get_field(text, section, "NAME")
+    if not name:
+        return None
+    typ = _get_field(text, section, "TYPE") or "?"
+    extras = []
+    host = _get_field(text, section, "HOST")
+    port = _get_field(text, section, "PORT")
+    if host:
+        extras.append(f"{host}:{port}" if port else host)
+    region = _get_field(text, section, "REGION")
+    if region:
+        extras.append(region)
+    protocol = _get_field(text, section, "API_PROTOCOL")
+    if protocol:
+        extras.append(protocol)
+    suffix = f" ({', '.join(extras)})" if extras else ""
+    return f"{typ} / {name}{suffix}"
+
+
+def _print_current_setup(text: str) -> None:
+    """Print the current chat/vision/embeddings models. Vision and embeddings
+    are optional and only shown when present in the config.
+    """
+    print("  Current setup:")
+    print(f"    Chat (LLM):  {_section_summary(text, 'MODEL_ID') or '(not set)'}")
+    vision = _section_summary(text, "VISION_MODEL_ID")
+    print(f"    Vision:      {vision if vision else '(not configured)'}")
+    embeddings = _section_summary(text, "EMBED_MODEL_ID")
+    print(f"    Embeddings:  {embeddings if embeddings else '(not configured)'}")
+
+
 def _prompt_model_section(text: str, section: str, has_max_tokens: bool) -> str:
     """Prompt for one model section's fields and patch them into ``text``.
 
@@ -534,17 +607,21 @@ def run_model_override() -> Optional[Path]:
 
     text = dest.read_text()
 
-    # Embeddings is only offered when the section exists in the config.
-    embeddings_available = _get_field(text, "EMBED_MODEL_ID", "NAME") is not None
+    # Vision and embeddings are optional; only offer them when present in the
+    # config (chat/LLM is always present). Track which choices are available.
+    available = {"1": True}
+    available["2"] = _get_field(text, "VISION_MODEL_ID", "NAME") is not None
+    available["3"] = _get_field(text, "EMBED_MODEL_ID", "NAME") is not None
 
     print()
     print("=" * 64)
     print("  Override a model")
     print("=" * 64)
-    print("  Which model do you want to change? Only that section is edited;")
+    _print_current_setup(text)
+    print("\n  Which model do you want to change? Only that section is edited;")
     print("  everything else in your config is left as-is.\n")
     for k, (_, label, _) in _MODEL_SECTIONS.items():
-        if k == "3" and not embeddings_available:
+        if not available.get(k):
             continue
         print(f"    {k}) {label}")
 
@@ -553,8 +630,9 @@ def run_model_override() -> Optional[Path]:
         if choice not in _MODEL_SECTIONS:
             print(f"  '{choice}' is not a valid choice. Cancelled.")
             return None
-        if choice == "3" and not embeddings_available:
-            print("  Embeddings is not configured (no RAG.EMBED_MODEL_ID). Cancelled.")
+        if not available.get(choice):
+            section_label = _MODEL_SECTIONS[choice][1]
+            print(f"  {section_label} is not configured. Cancelled.")
             return None
 
         section, label, has_max_tokens = _MODEL_SECTIONS[choice]

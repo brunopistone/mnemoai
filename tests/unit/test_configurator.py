@@ -15,6 +15,8 @@ from utils.configurator import (
     _get_field,
     _get_in_section,
     _get_top_level,
+    _remove_top_section,
+    _section_summary,
     _set_bool,
     _set_field,
     _set_in_section,
@@ -220,3 +222,63 @@ def test_set_field_switches_provider_type_in_nested_section():
 def test_set_field_noop_when_section_absent():
     out = _set_field(NESTED, "NONEXISTENT_SECTION", "NAME", "x")
     assert out == NESTED
+
+
+# --- Optional-section removal and current-setup summary (used by /config, /model) ---
+
+
+def test_remove_top_section_drops_block_and_keeps_others():
+    out = _remove_top_section(NESTED, "VISION_MODEL_ID")
+    d = yaml.safe_load(out)
+    assert "VISION_MODEL_ID" not in d
+    assert d["MODEL_ID"]["NAME"] == "qwen3.5:4b"
+    assert d["RAG"]["EMBED_MODEL_ID"]["NAME"] == "embed-model"
+
+
+def test_remove_top_section_absent_is_noop():
+    out = _remove_top_section(NESTED, "NOPE")
+    assert yaml.safe_load(out) == yaml.safe_load(NESTED)
+
+
+def test_remove_top_section_drops_leading_comment():
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: m
+          TYPE: ollama
+        # vision is optional
+        VISION_MODEL_ID:
+          NAME: v
+          TYPE: ollama
+        PROFILE:
+          NAME: bob
+        """
+    )
+    out = _remove_top_section(text, "VISION_MODEL_ID")
+    assert "vision is optional" not in out
+    d = yaml.safe_load(out)
+    assert "VISION_MODEL_ID" not in d and d["PROFILE"]["NAME"] == "bob"
+
+
+def test_section_summary_formats_present_section():
+    summary = _section_summary(NESTED, "MODEL_ID")
+    assert summary == "ollama / qwen3.5:4b (localhost:11434)"
+
+
+def test_section_summary_none_when_absent():
+    out = _remove_top_section(NESTED, "VISION_MODEL_ID")
+    assert _section_summary(out, "VISION_MODEL_ID") is None
+
+
+def test_section_summary_includes_region_and_protocol():
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: anthropic.claude-haiku-4-5
+          TYPE: mantle
+          REGION: us-east-1
+          API_PROTOCOL: anthropic
+        """
+    )
+    summary = _section_summary(text, "MODEL_ID")
+    assert summary == "mantle / anthropic.claude-haiku-4-5 (us-east-1, anthropic)"
