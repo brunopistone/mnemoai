@@ -32,6 +32,13 @@ _MANTLE_PROTOCOLS = {
     "3": ("anthropic", "Anthropic Messages (/anthropic) — Claude models"),
 }
 
+# Inference params the templates set for Ollama specifically. Other providers
+# vary in what they accept (e.g. newer Claude/GPT models reject TEMPERATURE),
+# so the configurator only writes these for ollama and strips them when
+# switching a section away from ollama — pointing the user to config.yaml for
+# provider-appropriate tuning.
+_OLLAMA_ONLY_PARAMS = ("TEMPERATURE", "FREQUENCY_PENALTY", "PRESENCE_PENALTY", "STOP")
+
 
 def _templates_dir() -> Path:
     """Directory holding the packaged config templates (ships next to this module)."""
@@ -171,10 +178,13 @@ def _set_field(text: str, section: str, key: str, value: str) -> str:
 
 
 def _remove_field(text: str, section: str, key: str) -> str:
-    """Remove ``key`` from within ``section`` at any depth, if present.
+    """Remove ``key`` (and its block) from within ``section`` at any depth.
 
-    No-op when the section or key is absent. Used to make an optional field
-    (e.g. MAX_TOKENS) fall back to the provider default by dropping the line.
+    Drops the ``key:`` line plus any deeper-indented continuation lines (a
+    list like ``STOP:`` or a nested mapping) and any immediately-preceding
+    comment lines describing it. No-op when the section or key is absent. Used
+    to make an optional field fall back to the provider default, or to strip
+    provider-specific params when switching providers.
     """
     lines = text.splitlines()
     idx = _find_section(lines, section)
@@ -185,8 +195,23 @@ def _remove_field(text: str, section: str, key: str) -> str:
         line = lines[j]
         if line.strip() and _indent_of(line) <= header_indent:
             break  # left the section body
-        if re.match(rf"\s+{re.escape(key)}:(?:\s.*)?$", line):
-            del lines[j]
+        m = re.match(rf"(\s+){re.escape(key)}:(?:\s.*)?$", line)
+        if m:
+            key_indent = len(m.group(1))
+            start = j
+            # Absorb preceding comment lines that belong to this key.
+            while start - 1 > idx and lines[start - 1].strip().startswith("#"):
+                start -= 1
+            # Absorb the key line + any deeper-indented continuation lines.
+            end = j + 1
+            while end < len(lines):
+                nxt = lines[end]
+                if not nxt.strip():
+                    break
+                if _indent_of(nxt) <= key_indent and not nxt.lstrip().startswith("#"):
+                    break
+                end += 1
+            del lines[start:end]
             return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
     return text
 
@@ -315,6 +340,12 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
     user can press Enter through the whole flow.
     """
     text = template_text
+
+    # STOP sequences are kept in the example template for documentation, but
+    # not written into a generated config (they're easy to get wrong and only
+    # apply to some models). Drop them from both model sections up front.
+    text = _remove_field(text, "MODEL_ID", "STOP")
+    text = _remove_field(text, "VISION_MODEL_ID", "STOP")
 
     # --- Chat model ---
     print("\n  -- Chat model --")
@@ -643,6 +674,24 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
             # Enters through, so "no input" stays a true no-op.
             if chosen != existing and not (existing is None and chosen == "chat_completions"):
                 text = _set_field(text, section, "API_PROTOCOL", chosen)
+
+    # Ollama-specific inference params (TEMPERATURE, penalties, STOP) are only
+    # valid for Ollama; other providers/models may reject them (e.g. grok/GPT-5
+    # reject 'temperature'). Strip them when switching away from Ollama, and
+    # drop the now-stale HOST/PORT.
+    if cur_type == "ollama" and new_type != "ollama":
+        for param in _OLLAMA_ONLY_PARAMS:
+            text = _remove_field(text, section, param)
+        for param in ("HOST", "PORT"):
+            text = _remove_field(text, section, param)
+
+    if new_type != "ollama":
+        print(
+            f"  Note: provider '{new_type}' may accept different inference "
+            "parameters\n  (temperature, penalties, etc.). Edit config.yaml "
+            f"directly to tune the\n  {section} section for what this "
+            "provider/model supports."
+        )
 
     # MAX_TOKENS (output tokens) is optional, for chat and vision (not embeddings).
     if section in ("MODEL_ID", "VISION_MODEL_ID"):

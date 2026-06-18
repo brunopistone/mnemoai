@@ -259,6 +259,30 @@ def test_remove_field_absent_is_noop():
     assert _remove_field(NESTED, "NOPE", "NAME") == NESTED
 
 
+def test_remove_field_drops_multiline_list_block():
+    # A list value (e.g. STOP) and its items must be removed together, and a
+    # preceding comment describing it absorbed — leaving valid YAML.
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: m
+          TYPE: ollama
+          # stop sequences for this chat template
+          STOP:
+            - "<|im_start|>"
+            - "<|im_end|>"
+          TEMPERATURE: 0.6
+        """
+    )
+    out = _remove_field(text, "MODEL_ID", "STOP")
+    d = yaml.safe_load(out)
+    assert "STOP" not in d["MODEL_ID"]
+    assert "<|im_start|>" not in out and "stop sequences" not in out
+    # Surrounding keys survive.
+    assert d["MODEL_ID"]["NAME"] == "m"
+    assert d["MODEL_ID"]["TEMPERATURE"] == 0.6
+
+
 def test_set_top_level_or_add_appends_when_missing():
     text = "MODEL_ID:\n  NAME: m\n"
     out = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", "65536")
