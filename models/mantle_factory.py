@@ -15,6 +15,7 @@ Both the chat LLM controller and the vision controller delegate here so the
 provider behaves identically for text and image inputs.
 """
 
+import os
 from typing import Any, Dict, List, Optional
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -60,8 +61,6 @@ def build_mantle_model(
     Returns:
         An initialized ChatOpenAI or ChatAnthropic instance.
     """
-    from aws_bedrock_token_generator import provide_token
-
     name = model_id["NAME"]
     region = model_id.get("REGION", "us-east-1")
     protocol = model_id.get("API_PROTOCOL", "chat_completions")
@@ -72,8 +71,19 @@ def build_mantle_model(
         )
 
     base_url = _mantle_base_url(region, protocol, model_id.get("ENDPOINT_URL"))
-    # Short-lived bearer token (default ~12h) minted from AWS credentials.
-    token = provide_token(region=region)
+
+    # Bearer token used as the API key for all three protocols. Prefer an
+    # explicit Bedrock API key (e.g. the short-term `bedrock-api-key-...`
+    # exported as BEDROCK_API_KEY) so the app works without local AWS
+    # credentials; fall back to minting a short-lived token (~12h) from the
+    # standard AWS SigV4 credential chain.
+    token = model_id.get("API_KEY") or os.environ.get("BEDROCK_API_KEY")
+    if token:
+        logger.info("Using Bedrock Mantle API key for authentication")
+    else:
+        from aws_bedrock_token_generator import provide_token
+
+        token = provide_token(region=region)
 
     logger.info(f"Initializing Bedrock Mantle model '{name}' (protocol={protocol})")
 

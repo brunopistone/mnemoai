@@ -323,3 +323,68 @@ class TestMantleFactory:
         )
         # Anthropic requires max_tokens; factory supplies a default.
         assert patch_mantle["max_tokens"] == 4096
+
+
+class TestMantleApiKeyAuth:
+    def test_config_api_key_used_without_minting(self, patch_mantle, monkeypatch):
+        # An explicit API_KEY must be used directly, and provide_token must NOT
+        # be called (would raise here, proving the mint path is skipped).
+        import aws_bedrock_token_generator
+
+        def _boom(*a, **k):
+            raise AssertionError("provide_token should not be called when a key is set")
+
+        monkeypatch.setattr(aws_bedrock_token_generator, "provide_token", _boom)
+        monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+
+        from models.mantle_factory import build_mantle_model
+
+        build_mantle_model(
+            {
+                "NAME": "qwen.qwen3-32b",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_KEY": "bedrock-api-key-explicit",
+            }
+        )
+        assert patch_mantle["api_key"] == "bedrock-api-key-explicit"
+
+    def test_env_bedrock_api_key_used_without_minting(self, patch_mantle, monkeypatch):
+        import aws_bedrock_token_generator
+
+        def _boom(*a, **k):
+            raise AssertionError("provide_token should not be called when a key is set")
+
+        monkeypatch.setattr(aws_bedrock_token_generator, "provide_token", _boom)
+        monkeypatch.setenv("BEDROCK_API_KEY", "bedrock-api-key-from-env")
+
+        from models.mantle_factory import build_mantle_model
+
+        build_mantle_model(
+            {"NAME": "qwen.qwen3-32b", "TYPE": "mantle", "REGION": "us-east-1"}
+        )
+        assert patch_mantle["api_key"] == "bedrock-api-key-from-env"
+
+    def test_config_api_key_takes_precedence_over_env(self, patch_mantle, monkeypatch):
+        monkeypatch.setenv("BEDROCK_API_KEY", "from-env")
+        from models.mantle_factory import build_mantle_model
+
+        build_mantle_model(
+            {
+                "NAME": "qwen.qwen3-32b",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_KEY": "from-config",
+            }
+        )
+        assert patch_mantle["api_key"] == "from-config"
+
+    def test_falls_back_to_minting_when_no_key(self, patch_mantle, monkeypatch):
+        # No key set anywhere -> mints via the (mocked) token generator.
+        monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
+        from models.mantle_factory import build_mantle_model
+
+        build_mantle_model(
+            {"NAME": "qwen.qwen3-32b", "TYPE": "mantle", "REGION": "us-east-1"}
+        )
+        assert patch_mantle["api_key"] == "bedrock-api-fake-token"
