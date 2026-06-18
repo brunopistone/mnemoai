@@ -298,6 +298,20 @@ def test_set_top_level_or_add_replaces_when_present():
     assert out.count("MAX_CONVERSATION_TOKENS:") == 1
 
 
+def test_provider_connection_keys_partition():
+    # The per-provider connection/auth key sets must be self-consistent: the
+    # union used for pruning must contain every provider's keys, so switching
+    # to any provider strips exactly the others' keys.
+    from utils.configurator import _ALL_CONNECTION_KEYS, _PROVIDER_CONNECTION_KEYS
+
+    for keys in _PROVIDER_CONNECTION_KEYS.values():
+        assert keys <= _ALL_CONNECTION_KEYS
+    # Spot-check the switch that motivated this: mantle keys removed for ollama.
+    pruned_for_ollama = _ALL_CONNECTION_KEYS - _PROVIDER_CONNECTION_KEYS["ollama"]
+    assert {"REGION", "API_PROTOCOL"} <= pruned_for_ollama
+    assert "HOST" not in pruned_for_ollama and "PORT" not in pruned_for_ollama
+
+
 # --- Optional-section removal and current-setup summary (used by /config, /model) ---
 
 

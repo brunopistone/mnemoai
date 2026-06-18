@@ -39,6 +39,22 @@ _MANTLE_PROTOCOLS = {
 # provider-appropriate tuning.
 _OLLAMA_ONLY_PARAMS = ("TEMPERATURE", "FREQUENCY_PENALTY", "PRESENCE_PENALTY", "STOP")
 
+# Connection/auth keys each provider TYPE understands. When /model switches a
+# section's provider, keys not in the new provider's set are stripped so no
+# stale, unsupported parameters (e.g. a leftover REGION/API_PROTOCOL after
+# mantle -> ollama) are left behind. NAME/TYPE are always kept.
+_PROVIDER_CONNECTION_KEYS = {
+    "ollama": {"HOST", "PORT"},
+    "bedrock": {"REGION", "ENDPOINT_URL"},
+    "mantle": {"REGION", "API_PROTOCOL", "ENDPOINT_URL", "API_KEY"},
+    "openai": set(),
+    "sagemaker": {"REGION", "INPUT_FORMAT"},
+    "litellm": {"API_BASE", "API_KEY"},
+}
+
+# Union of all provider connection/auth keys — the candidates to prune from.
+_ALL_CONNECTION_KEYS = set().union(*_PROVIDER_CONNECTION_KEYS.values())
+
 
 def _templates_dir() -> Path:
     """Directory holding the packaged config templates (ships next to this module)."""
@@ -675,15 +691,19 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
             if chosen != existing and not (existing is None and chosen == "chat_completions"):
                 text = _set_field(text, section, "API_PROTOCOL", chosen)
 
-    # Ollama-specific inference params (TEMPERATURE, penalties, STOP) are only
-    # valid for Ollama; other providers/models may reject them (e.g. grok/GPT-5
-    # reject 'temperature'). Strip them when switching away from Ollama, and
-    # drop the now-stale HOST/PORT.
-    if cur_type == "ollama" and new_type != "ollama":
-        for param in _OLLAMA_ONLY_PARAMS:
+    # On a provider switch, strip parameters the new provider doesn't support so
+    # no stale, unsupported keys are left behind (e.g. a leftover REGION /
+    # API_PROTOCOL after mantle -> ollama, or HOST/PORT after ollama -> bedrock).
+    if new_type != cur_type:
+        # Connection/auth keys not valid for the new provider.
+        keep = _PROVIDER_CONNECTION_KEYS.get(new_type, set())
+        for param in _ALL_CONNECTION_KEYS - keep:
             text = _remove_field(text, section, param)
-        for param in ("HOST", "PORT"):
-            text = _remove_field(text, section, param)
+        # Ollama-only inference params (TEMPERATURE, penalties, STOP) when
+        # leaving Ollama — other providers/models may reject them.
+        if cur_type == "ollama":
+            for param in _OLLAMA_ONLY_PARAMS:
+                text = _remove_field(text, section, param)
 
     if new_type != "ollama":
         print(
