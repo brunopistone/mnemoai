@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "personal-ai-assistant"
+version = "0.1.0"
+description = "Local agentic AI assistant built on LangGraph + MCP, with multi-provider model support."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Bruno Pistone" }]
+keywords = ["llm", "agent", "mcp", "langgraph", "bedrock", "ollama"]
+
+dependencies = [
+    "aws-bedrock-token-generator>=1.1.0",
+    "boto3>=1.42.78",
+    "brave-search-python-client>=0.4.27",
+    "chromadb>=1.5.5",
+    "crawl4ai>=0.8.6",
+    "faiss-cpu>=1.13.2",
+    "httpx>=0.28.1",
+    "langchain-anthropic>=1.4.4",
+    "langchain-aws>=1.4.1",
+    "langchain-core>=1.2.23",
+    "langchain-litellm>=0.3.5",
+    "langchain-ollama>=1.0.1",
+    "langchain-openai>=1.1.12",
+    "langgraph>=1.1.3",
+    "litellm>=1.81.1",
+    "mcp[cli]>=1.26.0",
+    "mem0ai>=1.0.9",
+    "mypy-boto3-sagemaker-runtime>=1.42.54",
+    "numpy>=2.4.4",
+    "ollama>=0.6.1",
+    "openai>=2.30.0",
+    "prompt_toolkit>=3.0.52",
+    "psutil>=7.2.2",
+    "Pygments>=2.20.0",
+    "PyPDF2>=3.0.1",
+    "python-docx>=1.2.0",
+    "qdrant-client>=1.17.1",
+    "tiktoken>=0.12.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[project.scripts]
+# Installs the `personal-ai-assistant` terminal command (uv tool install . / pipx install .)
+personal-ai-assistant = "main:cli"
+
+[tool.hatch.build.targets.wheel]
+# Flat layout: ship the top-level module + each package. server/ is launched as
+# an MCP subprocess (path resolved from main.py's __file__), so it must be in
+# the wheel. config.yaml.* examples ship as onboarding templates.
+include = [
+    "main.py",
+    "client/**/*.py",
+    "server/**/*.py",
+    "models/**/*.py",
+    "utils/**/*.py",
+    "utils/config.yaml.example",
+    "utils/config.yaml.bedrock.example",
+    "utils/config.yaml.bedrock.mantle.example",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Ensure the MCP server entry script is present at the same relative path the
+# client expects when launching the subprocess.
+"server/server.py" = "server/server.py"
