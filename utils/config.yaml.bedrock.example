@@ -1,12 +1,12 @@
 MODEL_ID:
-  NAME: global.anthropic.claude-fable-5
+  NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock
   MAX_TOKENS: 128000
   # Omit TEMPERATURE for newer Claude models that reject it as deprecated.
   # REASONING: true            # enable extended thinking
   # REASONING_EFFORT: medium   # low | medium | high | max
 VISION_MODEL_ID:
-  NAME: global.anthropic.claude-fable-5
+  NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock
 # Model parameters
 MAX_CONVERSATION_TOKENS: 1000000
