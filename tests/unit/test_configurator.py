@@ -12,9 +12,11 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 from utils.configurator import (
+    _get_field,
     _get_in_section,
     _get_top_level,
     _set_bool,
+    _set_field,
     _set_in_section,
     _set_or_add_in_section,
     _set_top_level,
@@ -149,3 +151,72 @@ def test_set_or_add_only_touches_named_section():
     d = yaml.safe_load(out)
     assert d["VISION_MODEL_ID"]["API_PROTOCOL"] == "responses"
     assert "API_PROTOCOL" not in d["MODEL_ID"]
+
+
+# --- Depth-agnostic field helpers (used by /model), incl. nested embeddings ---
+
+NESTED = textwrap.dedent(
+    """\
+    MODEL_ID:
+      NAME: qwen3.5:4b
+      TYPE: ollama
+      HOST: localhost
+      PORT: 11434
+    RAG:
+      MAX_TOKENS: 8192
+      EMBED_MODEL_ID:
+        NAME: embed-model
+        TYPE: ollama
+        HOST: localhost
+        PORT: 11434
+      CHUNK_TOKENS: 1024
+    VISION_MODEL_ID:
+      NAME: vlm
+      TYPE: ollama
+    """
+)
+
+
+def test_get_field_reads_top_level_section():
+    assert _get_field(NESTED, "MODEL_ID", "NAME") == "qwen3.5:4b"
+    assert _get_field(NESTED, "MODEL_ID", "TYPE") == "ollama"
+
+
+def test_get_field_reads_nested_section():
+    assert _get_field(NESTED, "EMBED_MODEL_ID", "NAME") == "embed-model"
+    assert _get_field(NESTED, "EMBED_MODEL_ID", "PORT") == "11434"
+
+
+def test_get_field_missing_returns_none():
+    assert _get_field(NESTED, "EMBED_MODEL_ID", "REGION") is None
+
+
+def test_set_field_replaces_in_nested_section():
+    out = _set_field(NESTED, "EMBED_MODEL_ID", "NAME", "amazon.titan-embed-text-v2:0")
+    d = yaml.safe_load(out)
+    assert d["RAG"]["EMBED_MODEL_ID"]["NAME"] == "amazon.titan-embed-text-v2:0"
+    # Sibling RAG keys and other sections untouched.
+    assert d["RAG"]["MAX_TOKENS"] == 8192
+    assert d["RAG"]["CHUNK_TOKENS"] == 1024
+    assert d["MODEL_ID"]["NAME"] == "qwen3.5:4b"
+
+
+def test_set_field_inserts_into_nested_section_at_right_indent():
+    out = _set_field(NESTED, "EMBED_MODEL_ID", "REGION", "us-west-2")
+    d = yaml.safe_load(out)
+    assert d["RAG"]["EMBED_MODEL_ID"]["REGION"] == "us-west-2"
+    # Inserted at the nested body's 4-space indent.
+    assert "\n    REGION: us-west-2" in out
+
+
+def test_set_field_switches_provider_type_in_nested_section():
+    out = _set_field(NESTED, "EMBED_MODEL_ID", "TYPE", "bedrock")
+    d = yaml.safe_load(out)
+    assert d["RAG"]["EMBED_MODEL_ID"]["TYPE"] == "bedrock"
+    # The top-level MODEL_ID TYPE must not change.
+    assert d["MODEL_ID"]["TYPE"] == "ollama"
+
+
+def test_set_field_noop_when_section_absent():
+    out = _set_field(NESTED, "NONEXISTENT_SECTION", "NAME", "x")
+    assert out == NESTED

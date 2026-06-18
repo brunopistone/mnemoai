@@ -488,6 +488,7 @@ Assistant: [Uses fs_read tool and displays content]
 | `/good`            | Mark last response as good (for SFT training)                                                           |
 | `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions)                                   |
 | `/config`          | Re-run the interactive configurator (overwrites `config.yaml`, then restarts the app in place to apply) |
+| `/model`           | Override just one model — chat (LLM), vision, or embeddings — leaving the rest of `config.yaml` untouched, then restart in place |
 
 ### Keyboard Shortcuts
 
