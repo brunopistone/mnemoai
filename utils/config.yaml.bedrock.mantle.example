@@ -6,7 +6,7 @@
 #   anthropic                  -> base /anthropic (Anthropic Messages); Claude models
 # Works for both MODEL_ID (chat) and VISION_MODEL_ID (image description).
 MODEL_ID:
-  NAME: qwen.qwen3-32b   # bare Mantle model id
+  NAME: qwen.qwen3-32b # bare Mantle model id
   TYPE: mantle
   REGION: us-east-1
   MAX_TOKENS: 8192
@@ -24,6 +24,12 @@ MODEL_ID:
 #   REGION: us-east-1
 #   API_PROTOCOL: anthropic
 #   MAX_TOKENS: 128000
+# MODEL_ID:
+#   NAME: xai.grok-4.3
+#   TYPE: mantle
+#   REGION: us-west-2
+#   API_PROTOCOL: responses
+#   MAX_TOKENS: 30000
 # Vision via Mantle (vision-capable models):
 VISION_MODEL_ID:
   NAME: qwen.qwen3-vl-235b-a22b-instruct
@@ -39,6 +45,11 @@ VISION_MODEL_ID:
 #   TYPE: mantle
 #   REGION: us-east-1
 #   API_PROTOCOL: anthropic
+# VISION_MODEL_ID:
+#   NAME: xai.grok-4.3
+#   TYPE: mantle
+#   REGION: us-west-2
+#   API_PROTOCOL: responses
 # Model parameters
 #Anthropic max context window
 MAX_CONVERSATION_TOKENS: 1000000
