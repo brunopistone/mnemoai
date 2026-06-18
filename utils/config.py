@@ -100,6 +100,19 @@ class Config:
                 os.environ[key] = str(value)
             self._env_vars_set = True
 
+    def reload(self) -> None:
+        """Re-read config from disk into the existing singleton instance.
+
+        Used after first-run setup writes a fresh config.yaml: every module
+        holds a reference to this one object, so we mutate it in place rather
+        than swap the instance.
+        """
+        self._config_data = {}
+        # Allow ENV vars to be re-applied for the newly resolved config.
+        if hasattr(self, "_env_vars_set"):
+            del self._env_vars_set
+        self._load_config()
+
     def get(self, key: str, default: Any = None) -> Any:
         """Get a configuration value.
 
