@@ -541,14 +541,18 @@ Session data is stored in `~/agent-conversations/{profile_name}/`:
 ~/agent-conversations/
 └── {profile_name}/
     ├── conversations/           # Saved conversations
-    ├── profiles/               # User profiles
-    ├── episodic_memory/        # Episodic memory store (FAISS or ChromaDB)
-    ├── playbook/               # ACE playbook strategies and metrics
-    ├── todos/                  # Todo list data
-    ├── rag_session_id.txt      # Current RAG session
-    ├── rag_store_*.faiss       # FAISS vector index (or ChromaDB directory)
-    └── chunk_cache_*.db        # SQLite chunk cache
+    ├── profiles/                # User profiles
+    ├── todos/                   # Todo list data
+    ├── rag_session_id.txt       # Current RAG session
+    ├── rag_store_*.faiss        # FAISS vector index (or ChromaDB directory)
+    ├── chunk_cache_*.db         # SQLite chunk cache
+    └── models/                  # Per-model memory (isolated by chat model)
+        └── {sanitized_model}/   # e.g. global.anthropic.claude-fable-5
+            ├── episodic_memory/ # Episodic memory store (FAISS or ChromaDB)
+            └── playbook/        # ACE playbook strategies and metrics
 ```
+
+> **Model-scoped memory:** episodic memory and the playbook live under `models/{model}/` so trying a different chat model doesn't contaminate the memory/strategies learned with another. Conversations, todos, RAG, and the user profile remain shared across models.
 
 ## 🚀 Productivity Tools
 
@@ -1274,8 +1278,8 @@ The episodic memory system learns from successful task completions and retrieves
 
 **Storage Location:**
 
-- FAISS: `~/agent-conversations/{profile}/episodic_memory/episodic.index`
-- ChromaDB: `~/agent-conversations/{profile}/episodic_memory/`
+- FAISS: `~/agent-conversations/{profile}/models/{model}/episodic_memory/episodic.index`
+- ChromaDB: `~/agent-conversations/{profile}/models/{model}/episodic_memory/`
 
 **Configuration:**
 
@@ -1351,8 +1355,8 @@ PLAYBOOK:
 
 **Storage Location:**
 
-- Strategies: `~/agent-conversations/{profile}/playbook/playbook.json`
-- Metrics: `~/agent-conversations/{profile}/playbook/metrics.json`
+- Strategies: `~/agent-conversations/{profile}/models/{model}/playbook/playbook.json`
+- Metrics: `~/agent-conversations/{profile}/models/{model}/playbook/metrics.json`
 
 ### Training Data Collection
 

@@ -87,7 +87,7 @@ main.py → ChatInterface → StrandsClient.query()
 | `client/memory/chroma_store.py`    | ChromaDB-backed episodic store with hybrid search (semantic + BM25 re-ranking).                                                                                                                                       |
 | `client/memory/faiss_store.py`     | FAISS-backed episodic store (alternative to ChromaDB).                                                                                                                                                                |
 | `client/memory/reflector.py`       | **ACE Reflector.** Analyzes tool execution trajectories, detects failure patterns, extracts reusable strategies as playbook entries.                                                                                  |
-| `client/memory/playbook_store.py`  | **ACE Playbook.** Append-only store for learned strategies with lazy semantic dedup. Retrieves relevant entries by task context for system prompt injection. Persists at `~/agent-conversations/{profile}/playbook/`. |
+| `client/memory/playbook_store.py`  | **ACE Playbook.** Append-only store for learned strategies with lazy semantic dedup. Retrieves relevant entries by task context for system prompt injection. Persists at `~/agent-conversations/{profile}/models/{model}/playbook/` (model-scoped). |
 
 ### `client/ui/` — User Interface
 
@@ -172,7 +172,7 @@ Keeps the conversation under `MAX_CONVERSATION_TOKENS` by summarizing older mess
 
 **Environment variables:** `OPENAI_API_KEY` (OpenAI), `LOG_LEVEL`, AWS credentials via `aws configure` for Bedrock/SageMaker/Mantle (Mantle mints a bearer token from these).
 
-**Runtime data:** `~/agent-conversations/{profile_name}/`.
+**Runtime data:** `~/agent-conversations/{profile_name}/` (conversations, todos, RAG, profile). **Episodic memory and the ACE playbook are model-scoped** under `~/agent-conversations/{profile_name}/models/{sanitized_model_name}/` so switching the chat model doesn't contaminate memory/strategies built with a different one (`MODEL_ID.NAME` is sanitized to a filesystem-safe directory via `StrandsClient._sanitize_for_path`).
 
 ## Testing
 
