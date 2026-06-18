@@ -21,6 +21,7 @@ from mcp import StdioServerParameters
 from models.llm_controller import LangChainLLMController
 import numpy as np
 import os
+import re
 from server.tools import count_tokens
 import shutil
 import sqlite3
@@ -180,6 +181,37 @@ class LangGraphClient:
 
         return system_prompt
 
+    @staticmethod
+    def _sanitize_for_path(name: str) -> str:
+        """Make a model id safe to use as a directory name.
+
+        Model ids contain characters that are awkward or illegal in paths
+        (``/``, ``:``, spaces, etc.), e.g. ``brnpistone/Qwen3.5-4B:latest`` or
+        ``global.anthropic.claude-fable-5``. Collapse anything outside
+        ``[A-Za-z0-9._-]`` to ``_``.
+        """
+        if not name:
+            return "default"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name)).strip("_")
+        return safe or "default"
+
+    def _model_scoped_dir(self) -> str:
+        """Return ~/agent-conversations/{profile}/{model}/ (created).
+
+        Episodic memory and the ACE playbook are scoped per chat model so
+        switching models doesn't contaminate memory/strategies built with a
+        different one. Conversations, RAG, and todos remain profile-scoped.
+        """
+        user_home = os.path.expanduser("~")
+        profile_name = config.get("PROFILE", {}).get("NAME", "default")
+        model_name = config.get("MODEL_ID", {}).get("NAME", "default")
+        model_dir = self._sanitize_for_path(model_name)
+        path = os.path.join(
+            user_home, "agent-conversations", profile_name, "models", model_dir
+        )
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def _initialize_episodic_memory(self) -> None:
         """Initialize episodic memory if enabled."""
         logger.debug("Initializing episodic memory...")
@@ -190,11 +222,9 @@ class LangGraphClient:
                 "RAG.EMBED_MODEL_ID must be configured for episodic memory"
             )
 
-        user_home = os.path.expanduser("~")
-        profile_name = config.get("PROFILE", {}).get("NAME", "default")
-        episodic_path = os.path.join(
-            user_home, "agent-conversations", profile_name, "episodic_memory"
-        )
+        # Scope episodic memory per chat model so switching models doesn't
+        # contaminate the vector store built with a different one.
+        episodic_path = os.path.join(self._model_scoped_dir(), "episodic_memory")
         os.makedirs(episodic_path, exist_ok=True)
 
         store_type = (
@@ -217,11 +247,9 @@ class LangGraphClient:
         """Initialize ACE Reflector and Playbook store."""
         logger.debug("Initializing ACE Playbook...")
 
-        user_home = os.path.expanduser("~")
-        profile_name = config.get("PROFILE", {}).get("NAME", "default")
-        playbook_path = os.path.join(
-            user_home, "agent-conversations", profile_name, "playbook"
-        )
+        # Scope the playbook per chat model: strategies learned from one model's
+        # successes/failures shouldn't leak into a different model's runs.
+        playbook_path = os.path.join(self._model_scoped_dir(), "playbook")
         os.makedirs(playbook_path, exist_ok=True)
 
         # Get embeddings for semantic deduplication if available
