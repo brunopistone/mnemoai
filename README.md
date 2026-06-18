@@ -1418,6 +1418,14 @@ When enabled, the `web_crawler` tool:
 - Automatically ingests large pages (>8K tokens) into RAG (if enabled)
 - Uses the same chunking configuration as PDF/DOCX readers
 
+> **Browser dependency.** Crawling uses a headless Chromium via Playwright,
+> whose browser binary is a separate ~260MB download not pulled in by
+> `pip` / `uv tool install`. The tool installs it automatically on the first
+> crawl after a fresh install/upgrade. If that auto-install fails (e.g.
+> offline), run it manually in the same environment:
+> `python -m playwright install chromium` (for an installed CLI:
+> `~/.local/share/uv/tools/personal-ai-assistant/bin/python -m playwright install chromium`).
+
 ### RAG (Retrieval-Augmented Generation)
 
 The RAG system automatically indexes documents for semantic search with **hybrid search** (semantic embeddings + BM25 keyword scoring).
