@@ -23,6 +23,7 @@ sys.path.append(
 from models.llm_controller import LangChainLLMController
 from utils.config import config
 from utils.logger import logger
+from utils.paths import profile_dir
 
 MODEL_ID = "gpt-4"
 
@@ -35,9 +36,7 @@ def _get_cache_db_path() -> str:
     """
 
     # Read session_id from file (written by client)
-    user_home = os.path.expanduser("~")
-    profile_name = config.get("PROFILE", {}).get("NAME", "default")
-    rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+    rag_dir = str(profile_dir())
     session_file = os.path.join(rag_dir, "chunk_session_id.txt")
 
     if os.path.exists(session_file):
@@ -57,9 +56,7 @@ def _get_cache_db_path() -> str:
 def reset_session_chunk_cache() -> None:
     """Reset the session Chunk cache instance (called on /clear or app exit)."""
 
-    user_home = os.path.expanduser("~")
-    profile_name = config.get("PROFILE", {}).get("NAME", "default")
-    rag_dir = os.path.join(user_home, "agent-conversations", profile_name)
+    rag_dir = str(profile_dir())
     session_file = os.path.join(rag_dir, "chunk_session_id.txt")
 
     if os.path.exists(session_file):

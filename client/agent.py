@@ -16,7 +16,13 @@ from langchain_core.tools import BaseTool
 from langgraph.graph import StateGraph, END
 from langgraph.errors import GraphRecursionError
 
+from client.orchestrator import (
+    get_aggregator_prompt,
+    get_orchestrator_prompt,
+    parse_subtasks,
+)
 from client.reasoning_utils import disable_reasoning, restore_reasoning
+from client.router import ROUTE_TOOLS
 from utils.config import config
 from utils.formatting.code_formatter import CodeFormatter
 from utils.logger import logger
@@ -198,13 +204,6 @@ class LangGraphAgent:
         Returns:
             Updated state with the final aggregated response
         """
-        from client.orchestrator import (
-            get_orchestrator_prompt,
-            get_aggregator_prompt,
-            parse_subtasks,
-        )
-        from client.router import ROUTE_TOOLS
-
         messages = state["messages"]
         # Extract user query (skip system prompt)
         query = ""
@@ -321,8 +320,6 @@ class LangGraphAgent:
         Returns:
             List of subtask dicts
         """
-        from client.orchestrator import parse_subtasks
-
         messages = [
             SystemMessage(content=orchestrator_prompt),
             HumanMessage(content=query),

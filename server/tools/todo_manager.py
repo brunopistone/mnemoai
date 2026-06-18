@@ -12,12 +12,9 @@ sys.path.append(
 
 from utils.config import config
 from utils.logger import logger
+from utils.paths import profile_dir
 
-user_home = os.path.expanduser("~")
-profile_name = config.get("PROFILE", {}).get("NAME", "default")
-save_dir = os.path.join(user_home, "agent-conversations", profile_name)
-
-TODO_FILE = os.path.expanduser(os.path.join(save_dir, "todos", "current_todos.json"))
+TODO_FILE = str(profile_dir() / "todos" / "current_todos.json")
 
 
 def register_todo_tools(mcp: FastMCP) -> None:

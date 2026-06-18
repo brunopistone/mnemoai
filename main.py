@@ -40,8 +40,12 @@ def main(verbose: bool = False) -> None:
     chat_interface.run_chat_loop()
 
 
-if __name__ == "__main__":
-    # Parse command line arguments
+def cli() -> None:
+    """Console-script entry point (used by the ``personal-ai-assistant`` command).
+
+    Parses CLI args and starts the app. Kept zero-arg so it can be referenced
+    as ``main:cli`` in pyproject's [project.scripts].
+    """
     parser = argparse.ArgumentParser(description="AI Chat Application")
     parser.add_argument(
         "--no-verbose",
@@ -53,3 +57,7 @@ if __name__ == "__main__":
     # Default is verbose=True, unless --no-verbose is specified
     verbose = not args.no_verbose
     main(verbose=verbose)
+
+
+if __name__ == "__main__":
+    cli()

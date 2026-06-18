@@ -6,8 +6,9 @@ import os
 import re
 import textwrap
 from typing import Dict, List, Any, Optional
-from utils.logger import logger
 from utils.config import config
+from utils.logger import logger
+from utils.paths import profile_dir
 
 
 class UserProfileManager:
@@ -66,12 +67,8 @@ class UserProfileManager:
             profile_path: Optional path to profile file
         """
         if profile_path is None:
-            profile_config = config.get("PROFILE", {})
-            profile_name = profile_config.get("NAME", "default")
-            user_home = os.path.expanduser("~")
-            profile_dir = os.path.join(user_home, "agent-conversations", profile_name)
-            os.makedirs(profile_dir, exist_ok=True)
-            profile_path = os.path.join(profile_dir, f"{profile_name}.json")
+            profile_name = config.get("PROFILE", {}).get("NAME", "default")
+            profile_path = os.path.join(str(profile_dir()), f"{profile_name}.json")
 
         self.profile_path = profile_path
         self.profile = self._load_profile()
