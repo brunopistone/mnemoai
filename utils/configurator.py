@@ -602,15 +602,13 @@ def _section_summary(text: str, section: str) -> Optional[str]:
 def _prompt_max_tokens(text: str, section: str) -> str:
     """Prompt for the optional MAX_TOKENS of a model section.
 
-    MAX_TOKENS (max output tokens) is optional — when unset the provider's own
-    default applies. Convention:
-      * Enter  -> keep the current value (or stay unset if there is none)
-      * a number -> set it
-      * 'none' -> remove the key (fall back to the provider default)
+    MAX_TOKENS (max output tokens) is optional and model-specific, so it
+    defaults to ``none`` (the provider default) rather than carrying over the
+    previous model's value. Convention:
+      * Enter / 'none' -> no MAX_TOKENS (provider default; key removed)
+      * a number       -> set it
     """
-    current = _get_field(text, section, "MAX_TOKENS")
-    default = current if current else "none"
-    answer = _ask("Max output tokens (number, or 'none' for provider default)", default)
+    answer = _ask("Max output tokens (number, or 'none' for provider default)", "none")
     if answer is None:
         return text
     answer = answer.strip().lower()
@@ -702,12 +700,10 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
 
     if is_llm:
         # Max context window is the top-level MAX_CONVERSATION_TOKENS (feeds
-        # Ollama num_ctx and the compaction budget). It is mandatory, so it's
-        # always written; default to the current value (or 65536 if unset).
-        ctx = _ask(
-            "Max context window",
-            _get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
-        )
+        # Ollama num_ctx and the compaction budget). It is mandatory and
+        # model-specific, so it defaults to 65536 rather than carrying over the
+        # previous model's value.
+        ctx = _ask("Max context window", "65536")
         text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
     return text
