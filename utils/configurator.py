@@ -22,6 +22,12 @@ _PROVIDERS = {
     "1": ("ollama", "config.yaml.example", "Ollama (local models)", "qwen3.5:4b"),
     "2": ("bedrock", "config.yaml.bedrock.example", "AWS Bedrock", "global.anthropic.claude-opus-4-8"),
     "3": ("mantle", "config.yaml.bedrock.mantle.example", "AWS Bedrock Mantle", "qwen.qwen3-32b"),
+    # OpenAI / SageMaker / LiteLLM reuse the base template and transform its
+    # model sections for the chosen provider (set TYPE, prune Ollama-only keys,
+    # prompt provider-specific connection keys).
+    "4": ("openai", "config.yaml.example", "OpenAI", "gpt-5-mini"),
+    "5": ("sagemaker", "config.yaml.example", "Amazon SageMaker AI", "your-endpoint-name"),
+    "6": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
 }
 
 # Mantle API protocol choice -> (value, description). Mirrors
@@ -374,15 +380,108 @@ def _truthy(value: Optional[str]) -> bool:
     return (value or "true").strip().lower() in ("true", "yes", "on", "1")
 
 
-def _build_config(provider: str, default_model: str, template_text: str) -> str:
+def _prompt_mantle_protocol(text: str, section: str) -> str:
+    """Prompt for the Mantle API protocol of ``section`` and set it.
+
+    Skips writing an explicit ``chat_completions`` (the implicit default) when
+    it wasn't already present, so an Enter-through stays a no-op.
+    """
+    existing = _get_field(text, section, "API_PROTOCOL")
+    current = existing or "chat_completions"
+    default_key = next((k for k, (v, _) in _MANTLE_PROTOCOLS.items() if v == current), "1")
+    print("  Mantle API protocol:")
+    for k, (_, desc) in _MANTLE_PROTOCOLS.items():
+        print(f"    {k}) {desc}")
+    choice = _ask("Protocol", default_key) or default_key
+    if choice not in _MANTLE_PROTOCOLS:
+        print(f"  '{choice}' is not valid; defaulting to chat_completions.")
+        choice = "1"
+    chosen = _MANTLE_PROTOCOLS[choice][0]
+    if chosen != existing and not (existing is None and chosen == "chat_completions"):
+        text = _set_field(text, section, "API_PROTOCOL", chosen)
+    return text
+
+
+def _prompt_provider_connection(text: str, section: str, provider: str):
+    """Prompt the connection/auth keys ``provider`` needs for ``section``.
+
+    Section-aware via the ``provider_params`` registry: a key is only prompted
+    when the provider actually consumes it for this section (e.g. ``INPUT_FORMAT``
+    for SageMaker chat but not embeddings; ``HOST``/``PORT`` only for Ollama).
+    Used by BOTH ``/config`` and ``/model`` so the two ask the same things.
+
+    Returns ``(text, conn)`` where ``conn`` holds the mirrorable connection
+    values (HOST/PORT/REGION) the vision section can reuse.
+    """
+    from models.provider_params import supported_keys
+
+    allowed = supported_keys(section, provider) or set()
+    conn = {}
+
+    if "HOST" in allowed:
+        host = _ask("Ollama host", _get_field(text, section, "HOST") or "localhost")
+        text = _set_field(text, section, "HOST", host)
+        conn["HOST"] = host
+    if "PORT" in allowed:
+        port = _ask("Ollama port", _get_field(text, section, "PORT") or "11434")
+        text = _set_field(text, section, "PORT", port)
+        conn["PORT"] = port
+    if "REGION" in allowed:
+        region = _ask("AWS region", _get_field(text, section, "REGION") or "us-east-1")
+        text = _set_field(text, section, "REGION", region)
+        conn["REGION"] = region
+    if "INPUT_FORMAT" in allowed:
+        fmt = _ask(
+            "Input format (openai_chat | huggingface)",
+            _get_field(text, section, "INPUT_FORMAT") or "openai_chat",
+        ) or "openai_chat"
+        text = _set_field(text, section, "INPUT_FORMAT", fmt)
+    if "API_PROTOCOL" in allowed:
+        text = _prompt_mantle_protocol(text, section)
+    if provider == "litellm":
+        if "API_BASE" in allowed:
+            v = _ask("LiteLLM API base URL (optional)", _get_field(text, section, "API_BASE") or "")
+            if v:
+                text = _set_field(text, section, "API_BASE", v)
+        if "API_KEY" in allowed:
+            v = _ask("LiteLLM API key (optional, or via the provider's env var)", _get_field(text, section, "API_KEY") or "")
+            if v:
+                text = _set_field(text, section, "API_KEY", v)
+
+    # Credential notes (env-based auth the configurator can't set for the user).
+    if provider == "bedrock":
+        print("  Note: Bedrock uses your AWS credentials (`aws configure`) or a")
+        print("  Bedrock API key (AWS_BEARER_TOKEN_BEDROCK env var).")
+    elif provider == "mantle":
+        print("  Note: Mantle uses your AWS credentials, or a Bedrock API key")
+        print("  (BEDROCK_API_KEY env var / MODEL_ID.API_KEY).")
+    elif provider == "sagemaker":
+        print("  Note: SageMaker uses your AWS credentials; NAME is the endpoint name.")
+    elif provider == "openai":
+        print("  Note: OpenAI reads the OPENAI_API_KEY environment variable")
+        print("  (set it in your shell or the config ENV section).")
+
+    return text, conn
+
+
+def _build_config(
+    provider: str, default_model: str, template_text: str, template_file: str = ""
+) -> str:
     """Prompt for the fields that vary and patch them into the template text.
 
     Only fields a typical user needs to change are prompted; everything else
     (RAG/episodic/playbook tuning, the large prompt blocks, etc.) keeps the
     template's values. Each prompt's default is read from the template so a
     user can press Enter through the whole flow.
+
+    ``template_file`` identifies the source template; openai/sagemaker/litellm
+    reuse the Ollama-shaped base (``config.yaml.example``) and have their model
+    sections transformed for the chosen provider.
     """
     text = template_text
+    transform_from_base = (
+        template_file == "config.yaml.example" and provider != "ollama"
+    )
 
     # STOP sequences are kept in the example template for documentation, but
     # not written into a generated config (they're easy to get wrong and only
@@ -390,41 +489,28 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
     text = _remove_field(text, "MODEL_ID", "STOP")
     text = _remove_field(text, "VISION_MODEL_ID", "STOP")
 
+    # The base template (config.yaml.example) is Ollama-shaped. For providers
+    # that reuse it (openai/sagemaker/litellm), set TYPE and prune the keys the
+    # new provider doesn't consume so we start from a clean section. The vision
+    # section: OpenAI supports vision, so set it to openai; SageMaker/LiteLLM
+    # have no vision path, so leave vision as Ollama (the user can keep or drop
+    # it in the vision step below).
+    if transform_from_base:
+        text = _set_in_section(text, "MODEL_ID", "TYPE", provider)
+        text = _prune_unsupported_params(text, "MODEL_ID", provider)
+        if provider == "openai" and _find_section(text.splitlines(), "VISION_MODEL_ID") >= 0:
+            text = _set_in_section(text, "VISION_MODEL_ID", "TYPE", "openai")
+            text = _prune_unsupported_params(text, "VISION_MODEL_ID", "openai")
+
     # --- Chat model ---
     print("\n  -- Chat model --")
     model = _ask("Chat model name", default_model)
     if model:
         text = _set_in_section(text, "MODEL_ID", "NAME", model)
 
-    # Connection details (reused for the vision model, which usually runs on
-    # the same host/region).
-    conn = {}
-    if provider == "ollama":
-        conn["HOST"] = _ask("Ollama host", _get_in_section(text, "MODEL_ID", "HOST") or "localhost")
-        conn["PORT"] = _ask("Ollama port", _get_in_section(text, "MODEL_ID", "PORT") or "11434")
-        for k, v in conn.items():
-            text = _set_in_section(text, "MODEL_ID", k, v)
-    elif provider == "mantle":
-        conn["REGION"] = _ask("AWS region", _get_in_section(text, "MODEL_ID", "REGION") or "us-east-1")
-        text = _set_in_section(text, "MODEL_ID", "REGION", conn["REGION"])
-
-        # API protocol (which wire format Mantle serves the model under).
-        current = _get_in_section(text, "MODEL_ID", "API_PROTOCOL") or "chat_completions"
-        default_key = next((k for k, (v, _) in _MANTLE_PROTOCOLS.items() if v == current), "1")
-        print("  Mantle API protocol:")
-        for k, (_, desc) in _MANTLE_PROTOCOLS.items():
-            print(f"    {k}) {desc}")
-        pchoice = _ask("Protocol", default_key) or default_key
-        if pchoice not in _MANTLE_PROTOCOLS:
-            print(f"  '{pchoice}' is not valid; defaulting to chat_completions.")
-            pchoice = "1"
-        # Protocol is per-model (the vision model may differ), so it's set on
-        # MODEL_ID only — not mirrored into the vision section via `conn`.
-        text = _set_or_add_in_section(
-            text, "MODEL_ID", "API_PROTOCOL", _MANTLE_PROTOCOLS[pchoice][0]
-        )
-    elif provider == "bedrock":
-        print("  Note: Bedrock uses your AWS credentials (run `aws configure`).")
+    # Connection/auth prompts for the provider (shared with /model), plus the
+    # mirrorable connection values (HOST/PORT/REGION) for the vision section.
+    text, conn = _prompt_provider_connection(text, "MODEL_ID", provider)
 
     # MAX_TOKENS (output tokens) is optional — 'none' / blank drops it so the
     # provider default applies.
@@ -449,20 +535,9 @@ def _build_config(provider: str, default_model: str, template_text: str) -> str:
         for k, v in conn.items():
             if _get_in_section(text, "VISION_MODEL_ID", k) is not None:
                 text = _set_in_section(text, "VISION_MODEL_ID", k, v)
-        # Mantle vision protocol is per-model too, so ask for it separately.
-        if provider == "mantle":
-            current = _get_in_section(text, "VISION_MODEL_ID", "API_PROTOCOL") or "chat_completions"
-            default_key = next((k for k, (val, _) in _MANTLE_PROTOCOLS.items() if val == current), "1")
-            print("  Vision API protocol:")
-            for k, (_, desc) in _MANTLE_PROTOCOLS.items():
-                print(f"    {k}) {desc}")
-            vchoice = _ask("Protocol", default_key) or default_key
-            if vchoice not in _MANTLE_PROTOCOLS:
-                print(f"  '{vchoice}' is not valid; defaulting to chat_completions.")
-                vchoice = "1"
-            text = _set_or_add_in_section(
-                text, "VISION_MODEL_ID", "API_PROTOCOL", _MANTLE_PROTOCOLS[vchoice][0]
-            )
+        # If the vision section is Mantle, its protocol is per-model — ask for it.
+        if (_get_in_section(text, "VISION_MODEL_ID", "TYPE") or "").lower() == "mantle":
+            text = _prompt_mantle_protocol(text, "VISION_MODEL_ID")
         text = _prompt_max_tokens(text, "VISION_MODEL_ID")
     else:
         # Drop the vision section entirely; image description stays disabled
@@ -530,7 +605,7 @@ def _run_configurator(dest: Path) -> Optional[Path]:
 
     print(f"\n  Configuring for: {label}\n")
     template_text = template_path.read_text()
-    config_text = _build_config(provider, default_model, template_text)
+    config_text = _build_config(provider, default_model, template_text, template_file)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(config_text)
@@ -692,31 +767,10 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     if name:
         text = _set_field(text, section, "NAME", name)
 
-    if new_type == "ollama":
-        host = _ask("Ollama host", _get_field(text, section, "HOST") or "localhost")
-        port = _ask("Ollama port", _get_field(text, section, "PORT") or "11434")
-        text = _set_field(text, section, "HOST", host)
-        text = _set_field(text, section, "PORT", port)
-    elif new_type in ("bedrock", "mantle", "sagemaker"):
-        region = _ask("AWS region", _get_field(text, section, "REGION") or "us-east-1")
-        text = _set_field(text, section, "REGION", region)
-        if new_type == "mantle":
-            existing = _get_field(text, section, "API_PROTOCOL")
-            current = existing or "chat_completions"
-            default_key = next((k for k, (v, _) in _MANTLE_PROTOCOLS.items() if v == current), "1")
-            print("  Mantle API protocol:")
-            for k, (_, desc) in _MANTLE_PROTOCOLS.items():
-                print(f"    {k}) {desc}")
-            pchoice = _ask("Protocol", default_key) or default_key
-            if pchoice not in _MANTLE_PROTOCOLS:
-                print(f"  '{pchoice}' is not valid; defaulting to chat_completions.")
-                pchoice = "1"
-            chosen = _MANTLE_PROTOCOLS[pchoice][0]
-            # Only write when it changes — avoids inserting an explicit
-            # chat_completions line (the implicit default) when the user just
-            # Enters through, so "no input" stays a true no-op.
-            if chosen != existing and not (existing is None and chosen == "chat_completions"):
-                text = _set_field(text, section, "API_PROTOCOL", chosen)
+    # Prompt the provider's connection/auth keys (shared with /config), so
+    # /model asks the same mandatory params — region, Mantle protocol,
+    # SageMaker input format, LiteLLM API base/key, etc.
+    text, _ = _prompt_provider_connection(text, section, new_type)
 
     # On a provider switch, strip every parameter the new provider doesn't
     # consume (connection, auth, and inference alike), per the model layer's
