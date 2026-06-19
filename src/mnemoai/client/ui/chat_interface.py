@@ -1,21 +1,24 @@
 """Chat interface handling for the application."""
 
 import asyncio
-from mnemoai.client.memory.episodic_memory import (
-    is_task_successful,
-    extract_tools_from_messages,
-)
-from mnemoai.utils.config import config
-from mnemoai.utils.logger import logger
 import os
 import re
 import sys
+import time
+from typing import Any, Iterable
+
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-import time
-from typing import Any
+
+from mnemoai.client.memory.episodic_memory import (
+    extract_tools_from_messages,
+    is_task_successful,
+)
+from mnemoai.utils.config import config
+from mnemoai.utils.logger import logger
 
 
 class ChatInterface:
@@ -54,6 +57,8 @@ class ChatInterface:
             history=self.command_history,
             key_bindings=bindings,
             multiline=False,
+            completer=self._SlashCommandCompleter(self._COMMANDS),
+            complete_while_typing=True,
         )
 
         try:
@@ -90,6 +95,22 @@ class ChatInterface:
         ]),
     ]
 
+    # Slash commands available for autocomplete: (command, description),
+    # derived from the welcome-box groups so the two never drift. The display
+    # labels there carry arg hints / alternates (e.g. "/compact [focus]",
+    # "/exit, /quit"); here we list the actual insertable command tokens.
+    _COMMANDS = [
+        ("/config", "Reconfigure config.yaml (overwrites it)"),
+        ("/model", "Override one model (LLM/vision/embeddings)"),
+        ("/clear", "Clear conversation context"),
+        ("/compact", "Summarize & shrink context (optional focus)"),
+        ("/save", "Save current conversation"),
+        ("/load", "Load a saved conversation (/load <path>)"),
+        ("/good", "Mark last response as good (training data)"),
+        ("/exit", "Exit the application"),
+        ("/quit", "Exit the application"),
+    ]
+
     # ANSI color codes
     _C = {
         "border": "\033[90m",   # grey
@@ -99,6 +120,32 @@ class ChatInterface:
         "dim": "\033[90m",      # dim
         "reset": "\033[0m",
     }
+
+    class _SlashCommandCompleter(Completer):
+        """Suggest slash commands, but only when the line starts with '/'.
+
+        Keeps autocomplete out of the way of normal chat: a message that
+        doesn't begin with '/' yields no completions. Matches the typed prefix
+        against the command list and shows each command's description as meta.
+        """
+
+        def __init__(self, commands):
+            self._commands = commands
+
+        def get_completions(self, document, complete_event) -> Iterable[Completion]:
+            text = document.text_before_cursor
+            # Only complete a single leading token that starts with '/'
+            # (don't fire mid-sentence or after a space).
+            if not text.startswith("/") or " " in text:
+                return
+            for cmd, desc in self._commands:
+                if cmd.startswith(text):
+                    yield Completion(
+                        cmd,
+                        start_position=-len(text),  # replace the typed prefix
+                        display=cmd,
+                        display_meta=desc,
+                    )
 
     _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
