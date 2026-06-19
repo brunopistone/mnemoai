@@ -76,19 +76,33 @@ class LangGraphAgent:
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
 
+        # External (mcp.json) tools aren't named in any route allowlist, so
+        # they'd be filtered out of every specific route. Treat any tool not
+        # referenced by a route as external. Kept as an attribute so the
+        # orchestrator can describe them when decomposing tasks.
+        self.external_tools: List[BaseTool] = []
+
         # Build per-route tool subsets and model bindings
         self.tools_by_route: Optional[Dict[str, List[BaseTool]]] = None
         self.models_by_route: Optional[Dict[str, BaseChatModel]] = None
         if router and tool_routes:
             self.tools_by_route = {}
             self.models_by_route = {}
+            # Append external tools to each non-empty specific route so
+            # configured MCP tools are always reachable, not just via 'full'.
+            known_names = {
+                n for names in tool_routes.values() if names for n in names
+            }
+            external_tools = [t for t in tools if t.name not in known_names]
+            self.external_tools = external_tools
             for route_name, tool_names in tool_routes.items():
                 if tool_names is None:
                     route_tools = tools
                 elif not tool_names:
                     route_tools = []
                 else:
-                    route_tools = [t for t in tools if t.name in tool_names]
+                    matched = [t for t in tools if t.name in tool_names]
+                    route_tools = matched + external_tools
                 self.tools_by_route[route_name] = route_tools
                 self.models_by_route[route_name] = (
                     model.bind_tools(route_tools) if route_tools else model
@@ -215,10 +229,15 @@ class LangGraphAgent:
         if not query:
             return {"messages": [AIMessage(content="No query found.")]}
 
-        # Step 1: Decompose task into subtasks
+        # Step 1: Decompose task into subtasks. If external (mcp.json) tools are
+        # configured, tell the decomposer about them so it can deliberately
+        # route subtasks needing them to the 'full' category (which binds every
+        # tool) — otherwise the decomposer, unaware they exist, can't target them.
+        orchestrator_prompt = get_orchestrator_prompt()
+        orchestrator_prompt += self._external_tools_prompt_block()
         logger.debug("Orchestrator: decomposing task")
         subtasks = self._decompose_task(
-            query, get_orchestrator_prompt(), set(ROUTE_TOOLS.keys())
+            query, orchestrator_prompt, set(ROUTE_TOOLS.keys())
         )
         logger.debug(f"Orchestrator: {len(subtasks)} subtasks")
 
@@ -306,6 +325,36 @@ class LangGraphAgent:
                 )
 
         return {"messages": all_worker_messages + [AIMessage(content=final_content)]}
+
+    def _external_tools_prompt_block(self) -> str:
+        """Prompt fragment listing external MCP tools for the decomposer.
+
+        The orchestrator prompt only knows the built-in categories. External
+        (mcp.json) tools don't belong to any of them, so without this the
+        decomposer can't deliberately route a subtask toward one. We list the
+        external tool names + descriptions and instruct it to use the 'full'
+        category for subtasks that need them ('full' binds every tool). Empty
+        string when there are no external tools, so the prompt is unchanged.
+        """
+        if not self.external_tools:
+            return ""
+
+        lines = []
+        for t in self.external_tools:
+            desc = (t.description or "").strip().replace("\n", " ")
+            if len(desc) > 120:
+                desc = desc[:117] + "..."
+            lines.append(f'  - "{t.name}": {desc}' if desc else f'  - "{t.name}"')
+        tools_list = "\n".join(lines)
+        return (
+            "\n\n  <external_tools>\n"
+            "  These additional tools are available via category \"full\" "
+            "(which binds every tool):\n"
+            f"{tools_list}\n"
+            "  For any subtask that needs one of these tools, set its category "
+            'to "full".\n'
+            "  </external_tools>"
+        )
 
     def _decompose_task(
         self, query: str, orchestrator_prompt: str, valid_categories: set
