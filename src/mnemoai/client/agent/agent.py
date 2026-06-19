@@ -395,6 +395,12 @@ class LangGraphAgent:
 
             # Execute tools
             self._stop_spinner()
+            if self.verbose:
+                for tc in response.tool_calls:
+                    print(
+                        f"\n\033[90m[⚙ {self._format_tool_call(tc)}]\033[0m\n",
+                        flush=True,
+                    )
             for tc in response.tool_calls:
                 tool_name = tc["name"]
                 tool_id = tc["id"]
@@ -812,6 +818,23 @@ class LangGraphAgent:
 
         return chunk_content, reasoning_content
 
+    @staticmethod
+    def _format_tool_call(tool_call: dict) -> str:
+        """Compact one-line ``name(arg=value, …)`` rendering of a tool call.
+
+        Argument values are stringified and truncated so a large payload (e.g.
+        file content for a write) doesn't flood the marker line.
+        """
+        name = tool_call.get("name", "tool")
+        args = tool_call.get("args") or {}
+        parts = []
+        for key, value in args.items():
+            text = str(value).replace("\n", " ")
+            if len(text) > 60:
+                text = text[:57] + "..."
+            parts.append(f"{key}={text}")
+        return f"{name}({', '.join(parts)})"
+
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
         """Execute tools based on the last AI message.
 
@@ -829,6 +852,16 @@ class LangGraphAgent:
         self._stop_spinner()
 
         route_tools = self._get_route_tools(state)
+
+        # Print a visible tool-invocation marker so reasoning before a tool call
+        # is separated from reasoning after it (otherwise the two run together).
+        # Mirrors the gray "[Step …]" markers the orchestrator prints.
+        if self.verbose:
+            for tool_call in last_message.tool_calls:
+                print(
+                    f"\n\033[90m[⚙ {self._format_tool_call(tool_call)}]\033[0m\n",
+                    flush=True,
+                )
 
         tool_results = []
         for tool_call in last_message.tool_calls:
