@@ -37,19 +37,20 @@ Assistant: [Uses fs_read tool and displays content]
 
 ### Commands
 
-| Command            | Description                                                                                                                                                                              |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/exit` or `/quit` | Exit the application                                                                                                                                                                     |
-| `/clear`           | Clear conversation history and RAG index                                                                                                                                                 |
-| `/save`            | Save current conversation                                                                                                                                                                |
-| `/load <path>`     | Load a saved conversation                                                                                                                                                                |
-| `/good`            | Mark last response as good (for SFT training)                                                                                                                                            |
-| `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions)                                                                                                                    |
-| `/config`          | Re-run the interactive configurator (overwrites `config.yaml`, then restarts the app in place to apply)                                                                                  |
-| `/model`           | Override just one model — chat (LLM), vision, or embeddings — leaving the rest of `config.yaml` untouched, then restart in place                                                         |
-| `/params`          | Tune a model's inference parameters (temperature, top_p, top_k, penalties, reasoning, stop, stream, …) — only the params the chosen provider supports are offered, then restart in place |
-| `/mcp`             | List the configured MCP servers (built-in + any from `mcp.json`), their connection status, and tool counts                                                                               |
-| `/memory`          | View the curated persistent memory (`MEMORY.md`); `/memory clear` wipes it (with a y/N confirm)                                                                                          |
+| Command            | Description                                                                                                                                                                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/exit` or `/quit` | Exit the application                                                                                                                                                                                                                            |
+| `/clear`           | Clear conversation history and RAG index                                                                                                                                                                                                        |
+| `/save`            | Save current conversation                                                                                                                                                                                                                       |
+| `/load <path>`     | Load a saved conversation                                                                                                                                                                                                                       |
+| `/good`            | Mark last response as good (for SFT training)                                                                                                                                                                                                   |
+| `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions)                                                                                                                                                                           |
+| `/config`          | Re-run the interactive configurator (overwrites `config.yaml`, then restarts the app in place to apply)                                                                                                                                         |
+| `/model`           | Override just one model — chat (LLM), vision, or embeddings — leaving the rest of `config.yaml` untouched, then restart in place                                                                                                                |
+| `/params`          | Tune a model's inference parameters (temperature, top_p, top_k, penalties, reasoning, stop, stream, …) — only the params the chosen provider supports are offered, then restart in place                                                        |
+| `/mcp`             | List the configured MCP servers (built-in + any from `mcp.json`), their connection status, and tool counts                                                                                                                                      |
+| `/memory`          | View the curated persistent memory (`MEMORY.md`); `/memory clear` wipes it (with a y/N confirm)                                                                                                                                                 |
+| `/plan`            | Toggle **plan mode** — an enforced read-only mode. While ON, the agent investigates with read-only tools and presents a plan; file edits, shell commands, git writes, and background tasks are **hard-blocked** until you `/plan` again to exit |
 
 ### Keyboard Shortcuts
 

@@ -153,6 +153,11 @@ class LangGraphClient:
         self.tools = None
         self.model = None
 
+        # Plan mode (user-toggled, enforced client-side): when True the agent
+        # hard-blocks mutating/exec tools and is told to research + present a
+        # plan instead of acting. Toggled by the /plan chat command.
+        self.plan_mode_active: bool = False
+
         # LLM controller
         self.llm_controller = LangChainLLMController(verbose=self.verbose_mode)
 
@@ -350,6 +355,7 @@ class LangGraphClient:
                     router=router,
                     tool_routes=tool_routes,
                     orchestrator_enabled=orchestrator_enabled,
+                    plan_mode_provider=lambda: self.plan_mode_active,
                 )
 
         except Exception as e:
@@ -375,6 +381,17 @@ class LangGraphClient:
         try:
             if self.episodic_memory:
                 prompt = self._inject_episodic_context(prompt)
+
+            # Plan mode: remind the model every turn that it's read-only (the
+            # system prompt is frozen at session start, so inject per-query).
+            if self.plan_mode_active:
+                prompt = (
+                    "[PLAN MODE ACTIVE] You are in read-only planning mode. "
+                    "Investigate the task using read-only tools (file reads, "
+                    "search, web) and PRESENT A PLAN for the user to review. Do "
+                    "NOT edit files or run shell commands — those tools are "
+                    "blocked until the user exits plan mode.\n\n" + prompt
+                )
 
             with self.mcp_client:
                 response = self.agent(prompt)

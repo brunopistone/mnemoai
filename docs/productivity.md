@@ -212,6 +212,21 @@ Implementation planning workflow for complex tasks:
 **Plan Storage:** `~/.mnemoai/plans/current_plan.json`
 **Task Output:** `~/.mnemoai/tasks/`
 
+**Enforced read-only plan mode (`/plan`).** The tools above are _bookkeeping_ the
+agent can use to record a structured plan, but they don't restrict it. For a hard
+guarantee — like Claude Code — toggle plan mode with the **`/plan`** command:
+
+- While ON, the agent can only use **read-only** tools (file reads, glob/grep
+  search, web search, document readers) and its own memory notebook. Any attempt to
+  edit files (`fs_write`/`file_edit`), run shell commands (`execute_bash`), perform
+  git writes, or start background tasks is **hard-blocked client-side** and the agent
+  is told to present a plan instead — regardless of what the model tries to do.
+- Toggle it off by running `/plan` again, then tell the agent to proceed.
+
+This is enforced at the same client-side chokepoint as the action-confirmation gate,
+so it holds across both the normal loop and the orchestrator workers, and even a
+misbehaving local model cannot mutate anything while plan mode is on.
+
 ### 🔄 Background Tasks
 
 Run long operations in parallel without blocking:
