@@ -1,6 +1,6 @@
-# Personal AI Assistant - System Command Wrapper
+# Mnemo AI - System Command Wrapper
 
-To make the Personal AI Assistant easily accessible from anywhere in your terminal, you can create a symbolic link to the wrapper script.
+To make Mnemo AI easily accessible from anywhere in your terminal, you can create a symbolic link to the wrapper script.
 
 ## Prerequisites
 

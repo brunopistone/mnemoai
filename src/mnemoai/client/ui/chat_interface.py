@@ -65,7 +65,7 @@ class ChatInterface:
         print("\n\033[90m┌" + "─" * 58 + "┐\033[0m")
         print(
             "\033[90m│\033[96m"
-            + "Welcome to Personal AI Assistant Application!".center(58)
+            + "Welcome to Mnemo AI!".center(58)
             + "\033[90m│\033[0m"
         )
         print("\033[90m├" + "─" * 58 + "┤\033[0m")

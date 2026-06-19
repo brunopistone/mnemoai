@@ -43,7 +43,9 @@ def cli() -> None:
     Parses CLI args and starts the app. Kept zero-arg so it can be referenced
     as ``main:cli`` in pyproject's [project.scripts].
     """
-    parser = argparse.ArgumentParser(description="AI Chat Application")
+    parser = argparse.ArgumentParser(
+        prog="mnemoai", description="Mnemo AI — local agentic AI assistant"
+    )
     parser.add_argument(
         "--no-verbose",
         action="store_true",

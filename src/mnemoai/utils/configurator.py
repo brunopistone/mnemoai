@@ -635,7 +635,7 @@ def run_first_run_setup() -> Optional[Path]:
 
     print()
     print("=" * 64)
-    print("  Welcome to mnemoai — first-run setup")
+    print("  Welcome to Mnemo AI — first-run setup")
     print("=" * 64)
     print(f"  No config found. Let's create one at:\n    {dest}\n")
 
@@ -662,7 +662,7 @@ def run_reconfigure() -> Optional[Path]:
 
     print()
     print("=" * 64)
-    print("  Reconfigure mnemoai")
+    print("  Reconfigure Mnemo AI")
     print("=" * 64)
     if dest.is_file():
         print(f"  WARNING: this will OVERWRITE your existing config at:\n    {dest}")
