@@ -454,7 +454,7 @@ class LangGraphAgent:
             for tc in response.tool_calls:
                 tool_name = tc["name"]
                 tool_id = tc["id"]
-                tool_args = tc["args"]
+                tool_args = self._normalize_tool_args(tc["args"])
 
                 tool = next((t for t in worker_tools if t.name == tool_name), None)
                 # Fall back to all tools if not found in worker subset
@@ -893,6 +893,39 @@ class LangGraphAgent:
             parts.append(f"{key}={text}")
         return f"{name}({', '.join(parts)})"
 
+    # Matches a key that is really a ``field="value"`` (or field='value', or
+    # bare field=value) expression — a common small-model malformation where
+    # the model emits Python-call syntax as a single JSON arg key.
+    _ARG_KEY_EXPR = re.compile(r'^\s*([A-Za-z_]\w*)\s*=\s*(.*?)\s*$', re.DOTALL)
+
+    @classmethod
+    def _normalize_tool_args(cls, args: Any) -> Any:
+        """Repair a common malformed tool-args shape from smaller models.
+
+        Models sometimes emit ``{'query="USPTO fees"': ''}`` instead of
+        ``{'query': 'USPTO fees'}`` — i.e. they pack a ``field=value`` expression
+        into a single dict KEY with an empty value. Detect that exact shape and
+        rebuild it into the intended ``{field: value}``, stripping surrounding
+        quotes from the value. Anything that doesn't match is returned unchanged,
+        so well-formed args are never touched.
+        """
+        if not isinstance(args, dict) or len(args) != 1:
+            return args
+        (key, value), = args.items()
+        # Only attempt a repair when the value is empty (the tell-tale sign);
+        # a real single-arg call has its value populated, not in the key.
+        if value not in ("", None):
+            return args
+        m = cls._ARG_KEY_EXPR.match(str(key))
+        if not m:
+            return args
+        field, raw = m.group(1), m.group(2)
+        if (raw.startswith('"') and raw.endswith('"')) or (
+            raw.startswith("'") and raw.endswith("'")
+        ):
+            raw = raw[1:-1]
+        return {field: raw}
+
     # Tools gated by a hard confirmation prompt, keyed by category. Each entry:
     # (config toggle, default). The toggle defaults to True (gate on).
     _CONFIRM_BASH_TOOLS = {"execute_bash"}
@@ -976,7 +1009,7 @@ class LangGraphAgent:
         tool_results = []
         for tool_call in last_message.tool_calls:
             tool_name = tool_call["name"]
-            tool_args = tool_call["args"]
+            tool_args = self._normalize_tool_args(tool_call["args"])
             tool_id = tool_call["id"]
 
             # Look up in route tools first, fall back to all tools
