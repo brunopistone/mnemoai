@@ -44,11 +44,13 @@ class Config:
         Resolution order (first existing wins):
           1. ``$MNEMOAI_CONFIG`` — explicit override (handy for
              switching between provider configs, e.g. ollama vs bedrock vs mantle)
-          2. ``<app_home>/config.yaml`` — the user config used by the installed
-             CLI; app home defaults to ``~/.mnemoai`` and honors
+          2. ``<app_home>/config/config.yaml`` — the user config used by the
+             installed CLI; app home defaults to ``~/.mnemoai`` and honors
              ``$MNEMOAI_HOME``
-          3. ``<package>/utils/config.yaml`` — package-relative fallback, so running
-             from a checkout (``python main.py``) keeps working unchanged
+          3. ``<app_home>/config.yaml`` — legacy pre-subfolder location, so
+             installs created before the ``config/`` subfolder still load
+          4. ``<package>/utils/config.yaml`` — package-relative fallback, so
+             running from a checkout (``python main.py``) keeps working unchanged
 
         Returns:
             The resolved Path, or None if no config exists in any location.
@@ -57,11 +59,20 @@ class Config:
         if env_path:
             return Path(env_path).expanduser()
 
-        from mnemoai.utils.paths import config_path as home_config_path
+        from mnemoai.utils.paths import (
+            config_path as home_config_path,
+        )
+        from mnemoai.utils.paths import (
+            legacy_config_path,
+        )
 
         user_config = home_config_path()
         if user_config.is_file():
             return user_config
+
+        legacy = legacy_config_path()
+        if legacy.is_file():
+            return legacy
 
         repo_config = Path(os.path.dirname(__file__)) / "config.yaml"
         if repo_config.is_file():
@@ -79,11 +90,12 @@ class Config:
         if config_path is None:
             print(
                 "No config.yaml found. Create one at "
-                "~/.mnemoai/config.yaml (or set "
-                "MNEMOAI_CONFIG). Copy a template to start, e.g.:\n"
-                "  mkdir -p ~/.mnemoai && \\\n"
-                "  cp src/mnemoai/utils/config.yaml.example "
-                "~/.mnemoai/config.yaml"
+                "~/.mnemoai/config/config.yaml (or set "
+                "MNEMOAI_CONFIG). An example is copied to "
+                "~/.mnemoai/config/config.yaml.example on first run — "
+                "copy it to config.yaml and edit, e.g.:\n"
+                "  cp ~/.mnemoai/config/config.yaml.example "
+                "~/.mnemoai/config/config.yaml"
             )
             self._config_data = {}
             return

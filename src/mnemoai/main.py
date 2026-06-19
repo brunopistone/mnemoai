@@ -55,6 +55,12 @@ def cli() -> None:
     )
     args = parser.parse_args()
 
+    # Seed the app home with browsable copies of the bundled config/mcp
+    # examples (idempotent, non-destructive — never touches live files).
+    from mnemoai.utils.paths import seed_example_files
+
+    seed_example_files()
+
     # First-run setup: if no config can be resolved, walk the user through
     # creating one. Interactive only — non-TTY runs fall through to the
     # existing "no config found" message so scripted/CI use isn't blocked.
