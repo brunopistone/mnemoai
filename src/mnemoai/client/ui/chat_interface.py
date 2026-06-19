@@ -1,20 +1,21 @@
 """Chat interface handling for the application."""
 
 import asyncio
-import os
-import sys
 from mnemoai.client.memory.episodic_memory import (
     is_task_successful,
     extract_tools_from_messages,
 )
+from mnemoai.utils.config import config
+from mnemoai.utils.logger import logger
+import os
+import re
+import sys
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 import time
 from typing import Any
-from mnemoai.utils.config import config
-from mnemoai.utils.logger import logger
 
 
 class ChatInterface:
@@ -60,47 +61,87 @@ class ChatInterface:
         except KeyboardInterrupt:
             raise
 
+    # ASCII wordmark shown on launch (ANSI "Shadow" style). Rendered in the
+    # brand indigo. Kept as data so the banner is easy to restyle/replace.
+    _BANNER = [
+        "███╗   ███╗███╗   ██╗███████╗███╗   ███╗ ██████╗      █████╗ ██╗",
+        "████╗ ████║████╗  ██║██╔════╝████╗ ████║██╔═══██╗    ██╔══██╗██║",
+        "██╔████╔██║██╔██╗ ██║█████╗  ██╔████╔██║██║   ██║    ███████║██║",
+        "██║╚██╔╝██║██║╚██╗██║██╔══╝  ██║╚██╔╝██║██║   ██║    ██╔══██║██║",
+        "██║ ╚═╝ ██║██║ ╚████║███████╗██║ ╚═╝ ██║╚██████╔╝    ██║  ██║██║",
+        "╚═╝     ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚═╝ ╚═════╝     ╚═╝  ╚═╝╚═╝",
+    ]
+
+    # Command groups for the welcome box: (heading, [(command, description)]).
+    _COMMAND_GROUPS = [
+        ("Configure", [
+            ("/config", "Reconfigure config.yaml (overwrites it)"),
+            ("/model", "Override one model (LLM/vision/embeddings)"),
+        ]),
+        ("Conversation", [
+            ("/clear", "Clear conversation context"),
+            ("/compact [focus]", "Summarize & shrink context"),
+            ("/save", "Save current conversation"),
+            ("/load <path>", "Load a saved conversation"),
+        ]),
+        ("Data & exit", [
+            ("/good", "Mark last response as good (training data)"),
+            ("/exit, /quit", "Exit the application"),
+        ]),
+    ]
+
+    # ANSI color codes
+    _C = {
+        "border": "\033[90m",   # grey
+        "head": "\033[95m",     # magenta (group headings)
+        "cmd": "\033[92m",      # green (commands)
+        "text": "\033[97m",     # white
+        "dim": "\033[90m",      # dim
+        "reset": "\033[0m",
+    }
+
+    _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
     def __welcome_message(self) -> None:
-        """Display welcome message with available commands."""
-        print("\n\033[90m┌" + "─" * 58 + "┐\033[0m")
-        print(
-            "\033[90m│\033[96m"
-            + "Welcome to Mnemo AI!".center(58)
-            + "\033[90m│\033[0m"
-        )
-        print("\033[90m├" + "─" * 58 + "┤\033[0m")
-        print(
-            "\033[90m│\033[97m Available commands:                                      \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/config\033[97m - Reconfigure config.yaml (overwrites it)      \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/model\033[97m - Override one model (LLM/vision/embeddings)    \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/clear\033[97m - Clear conversation context                    \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/load <path>\033[97m - Load a saved conversation               \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/exit\033[97m or \033[92m/quit\033[97m - Exit the application                  \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/save\033[97m - Save current conversation                      \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/good\033[97m - Mark last response as good (training data)     \033[90m│\033[0m"
-        )
-        print(
-            "\033[90m│\033[97m   \033[92m/compact [focus]\033[97m - Summarize & shrink context          \033[90m│\033[0m"
-        )
-        print("\033[90m├" + "─" * 58 + "┤\033[0m")
-        print(
-            "\033[90m│\033[97m Use \033[92mCtrl+J\033[97m for new lines, Enter to submit                \033[90m│\033[0m"
-        )
-        print("\033[90m└" + "─" * 58 + "┘\033[0m\n")
+        """Display the launch banner + a framed, grouped command list."""
+        C = self._C
+        W = 64  # inner width; matches the wordmark banner width
+
+        def vlen(s: str) -> int:
+            """Visible length (ANSI escapes don't occupy columns)."""
+            return len(self._ANSI_RE.sub("", s))
+
+        def row(content: str = "") -> None:
+            """Print one framed row, padding to the visible inner width."""
+            pad = " " * max(0, W - vlen(content))
+            print(f"{C['border']}│{C['reset']} {content}{pad} {C['border']}│{C['reset']}")
+
+        top = f"{C['border']}╭{'─' * (W + 2)}╮{C['reset']}"
+        sep = f"{C['border']}├{'─' * (W + 2)}┤{C['reset']}"
+        bot = f"{C['border']}╰{'─' * (W + 2)}╯{C['reset']}"
+
+        # --- Wordmark banner (indigo ≈ #5f5fff via 256-color 63) ---
+        print()
+        for line in self._BANNER:
+            print(f"\033[38;5;63m{line}\033[0m")
+        print(f"{C['dim']}" + "local agentic AI assistant · learns & remembers".center(W + 4) + C["reset"])
+        print()
+
+        # --- Framed command list ---
+        print(top)
+
+        cmd_w = max(vlen(c) for _, items in self._COMMAND_GROUPS for c, _ in items)
+        for gi, (heading, items) in enumerate(self._COMMAND_GROUPS):
+            if gi:
+                row()  # blank spacer between groups
+            row(f"{C['head']}{heading}{C['reset']}")
+            for cmd, desc in items:
+                padded_cmd = cmd + " " * (cmd_w - vlen(cmd))
+                row(f"  {C['cmd']}{padded_cmd}{C['reset']}  {C['text']}{desc}{C['reset']}")
+
+        print(sep)
+        row(f"{C['dim']}Ctrl+J{C['reset']} for new lines · {C['dim']}Enter{C['reset']} to submit")
+        print(bot + "\n")
 
     def __store_episode_in_episodic_memory(self, query: str) -> None:
         """Evaluate and store previous interaction in episodic memory if successful.
