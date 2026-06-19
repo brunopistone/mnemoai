@@ -11,7 +11,7 @@ import asyncio
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from personal_ai_assistant.client.managers.agent_conversation_manager import (
+from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
     messages_to_dict_list,
 )
@@ -119,7 +119,7 @@ def _llm_config(**overrides):
 
 class TestCompactKeepsRecent:
     def test_manual_compact_keeps_recent_window_verbatim(self, monkeypatch):
-        import personal_ai_assistant.client.managers.agent_conversation_manager as mod
+        import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(
             mod.config, "get", _llm_config(MANUAL_COMPACT_KEEP_RECENT=3)
@@ -139,7 +139,7 @@ class TestCompactKeepsRecent:
         assert _run(mgr.compact(_FakeClient(), _FakeAsyncModel(), _FakeAgent([]))) is False
 
     def test_compact_returns_false_when_nothing_older(self, monkeypatch):
-        import personal_ai_assistant.client.managers.agent_conversation_manager as mod
+        import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(
             mod.config, "get", _llm_config(MANUAL_COMPACT_KEEP_RECENT=6)
@@ -152,7 +152,7 @@ class TestCompactKeepsRecent:
         assert agent.messages == msgs
 
     def test_internal_compact_keep_window(self, monkeypatch):
-        import personal_ai_assistant.client.managers.agent_conversation_manager as mod
+        import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(mod.config, "get", _llm_config())
         msgs = [AIMessage(f"a{i}") for i in range(8)]
@@ -168,7 +168,7 @@ class TestTokenAwareRetention:
         # The LAST message is a huge document. Even though the count window
         # (3) would keep it, the token budget must push it into 'older' so it
         # gets summarized rather than kept verbatim.
-        import personal_ai_assistant.client.managers.agent_conversation_manager as mod
+        import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(
             mod.config,
@@ -194,7 +194,7 @@ class TestTokenAwareRetention:
 
     def test_token_budget_caps_kept_window_below_count(self, monkeypatch):
         # Count window allows 6, but token budget only fits ~2 small messages.
-        import personal_ai_assistant.client.managers.agent_conversation_manager as mod
+        import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(
             mod.config,

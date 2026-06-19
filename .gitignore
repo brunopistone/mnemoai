@@ -1,5 +1,5 @@
 # Configuration (contains API keys)
-src/personal_ai_assistant/utils/config.yaml
+src/mnemoai/utils/config.yaml
 utils/config.yaml
 
 # IDE

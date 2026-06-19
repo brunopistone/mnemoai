@@ -1,21 +1,21 @@
 """Unit tests for the centralized path helper (utils/paths.py).
 
 All persistent state lives under a single app-home dir
-(~/.personal-ai-assistant by default, overridable via
-$PERSONAL_AI_ASSISTANT_HOME).
+(~/.mnemoai by default, overridable via
+$MNEMOAI_HOME).
 """
 
 import os
 
 import pytest
 
-from personal_ai_assistant.utils import paths
+from mnemoai.utils import paths
 
 
 @pytest.fixture
 def tmp_home(tmp_path, monkeypatch):
     """Point the app home at a temp dir for the duration of a test."""
-    monkeypatch.setenv("PERSONAL_AI_ASSISTANT_HOME", str(tmp_path))
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
     return tmp_path
 
 
@@ -25,12 +25,12 @@ class TestAppHome:
         assert home == tmp_home
         assert home.is_dir()
 
-    def test_default_is_dot_personal_ai_assistant(self, monkeypatch):
-        monkeypatch.delenv("PERSONAL_AI_ASSISTANT_HOME", raising=False)
+    def test_default_is_dot_mnemoai(self, monkeypatch):
+        monkeypatch.delenv("MNEMOAI_HOME", raising=False)
         # Don't actually create it in the real home; just check the path shape.
         from pathlib import Path
 
-        expected = Path.home() / ".personal-ai-assistant"
+        expected = Path.home() / ".mnemoai"
         # app_home() creates it; tolerate that but assert location.
         assert paths.app_home() == expected
 

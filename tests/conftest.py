@@ -1,6 +1,6 @@
 """Shared pytest fixtures and path setup.
 
-Puts the repo's ``src/`` dir on ``sys.path`` so ``import personal_ai_assistant``
+Puts the repo's ``src/`` dir on ``sys.path`` so ``import mnemoai``
 resolves when running the tests from a checkout (no install step needed).
 """
 

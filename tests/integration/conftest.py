@@ -20,7 +20,7 @@ def _config_exists() -> bool:
     # The repo-relative runtime config now lives inside the package.
     return os.path.isfile(
         os.path.join(
-            REPO_ROOT, "src", "personal_ai_assistant", "utils", "config.yaml"
+            REPO_ROOT, "src", "mnemoai", "utils", "config.yaml"
         )
     )
 
@@ -28,7 +28,7 @@ def _config_exists() -> bool:
 def _ollama_reachable() -> bool:
     """Return True if the Ollama HTTP API answers on the configured host:port."""
     try:
-        from personal_ai_assistant.utils.config import config
+        from mnemoai.utils.config import config
 
         model_id = config.get("MODEL_ID", {}) or {}
         host = model_id.get("HOST", "localhost")
@@ -60,7 +60,7 @@ def live_client():
     if _SKIP_REASON:
         pytest.skip(_SKIP_REASON)
 
-    from personal_ai_assistant.client.client import LangGraphClient
+    from mnemoai.client.client import LangGraphClient
 
     client = LangGraphClient(verbose=False)
     client.start()
