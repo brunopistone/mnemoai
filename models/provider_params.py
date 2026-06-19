@@ -142,6 +142,26 @@ _VISION = {
         "connection": {"REGION", "API_PROTOCOL", "ENDPOINT_URL", "API_KEY"},
         "special": {"TEMPERATURE", "MAX_TOKENS", "TOP_P"},
     },
+    "sagemaker": {
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("TOP_K", "top_k", "top_k"),
+            _p("STOP", "stop", "stop"),
+        ],
+        "connection": {"REGION", "INPUT_FORMAT"},
+        "special": set(),
+    },
+    "litellm": {
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+        ],
+        "connection": {"API_BASE", "API_KEY"},
+        "special": set(),
+    },
 }
 
 # --- RAG.EMBED_MODEL_ID: mirrors embeddings_controller -----------------------
@@ -152,6 +172,7 @@ _EMBED = {
     "bedrock": {"params": [], "connection": {"REGION"}, "special": set()},
     "openai": {"params": [], "connection": set(), "special": set()},
     "sagemaker": {"params": [], "connection": {"REGION"}, "special": set()},
+    "litellm": {"params": [], "connection": {"API_BASE", "API_KEY"}, "special": set()},
 }
 
 _TABLES = {

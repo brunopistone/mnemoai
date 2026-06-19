@@ -24,6 +24,17 @@ def register_edit_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Perform exact string replacement in a file.
 
+        PREFER THIS TOOL over fs_write for modifying existing files. Reserve
+        fs_write for creating new files or wholesale rewrites; use file_edit for
+        any targeted change to a file that already exists.
+
+        WORKFLOW:
+        1. Read the file first with fs_read
+        2. Copy the exact text to replace, including whitespace and indentation
+        3. Call file_edit(file_path, old_string, new_string)
+        4. If you get a "not unique" error, include more surrounding context in
+           old_string until it matches exactly one location (or set replace_all=True)
+
         CRITICAL REQUIREMENTS:
         1. You MUST read the file with fs_read BEFORE calling this tool
         2. The old_string must match EXACTLY as it appears in the file

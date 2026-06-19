@@ -33,6 +33,13 @@ class VisionModelController(BaseModelController):
         self.top_p = self.model_id.get("TOP_P", None)
         self.top_k = self.model_id.get("TOP_K", None)
         self.stop = self.model_id.get("STOP", None)
+        # SageMaker / LiteLLM connection.
+        self.region = self.model_id.get("REGION", "us-east-1")
+        self.input_format = self.model_id.get("INPUT_FORMAT", "openai_chat")
+        self.api_base = self.model_id.get("API_BASE")
+        self.api_key = self.model_id.get("API_KEY")
+        # ChatSageMaker requires concrete numeric defaults.
+        self.stream = self.model_id.get("STREAM", True)
 
         self.model: Optional[BaseChatModel] = None
 
@@ -46,6 +53,10 @@ class VisionModelController(BaseModelController):
             self._initialize_ollama_model()
         elif self.model_type == "openai":
             self._initialize_openai_model()
+        elif self.model_type == "sagemaker":
+            self._initialize_sagemaker_model()
+        elif self.model_type == "litellm":
+            self._initialize_litellm_model()
         else:
             raise ValueError(f"Unsupported vision model type: {self.model_type}")
 
@@ -120,6 +131,62 @@ class VisionModelController(BaseModelController):
             max_tokens=self.max_tokens,
             top_p=self.top_p,
         )
+
+    def _initialize_sagemaker_model(self) -> None:
+        """Initialize a SageMaker vision model.
+
+        Reuses ``ChatSageMaker`` with the ``openai_chat`` input format, which
+        passes the multimodal ``content`` list (text + ``image_url`` blocks
+        from ``format_request``) straight through to the endpoint. The endpoint
+        must serve a vision-capable model that accepts the OpenAI image format.
+        """
+        from models.classes.sagemaker_chat import ChatSageMaker
+
+        logger.debug("Initializing SageMaker vision model via ChatSageMaker...")
+
+        kwargs = {
+            "endpoint_name": self.model_name,
+            "region_name": self.region,
+            "input_format": self.input_format,
+        }
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.top_k is not None:
+            kwargs["top_k"] = self.top_k
+        if self.stop:
+            kwargs["stop"] = self.stop
+
+        self.model = ChatSageMaker(**kwargs)
+
+    def _initialize_litellm_model(self) -> None:
+        """Initialize a LiteLLM vision model.
+
+        ``ChatLiteLLM`` forwards the OpenAI-style multimodal ``content`` list
+        (text + ``image_url`` base64 data URI) that ``format_request`` produces,
+        so any LiteLLM vision-capable model works. ``API_BASE``/``API_KEY`` are
+        optional — omitted, LiteLLM uses the provider's own env vars.
+        """
+        from langchain_litellm import ChatLiteLLM
+
+        logger.debug("Initializing LiteLLM vision model via ChatLiteLLM...")
+
+        kwargs = {"model": self.model_name}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.api_base:
+            kwargs["api_base"] = self.api_base
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+
+        self.model = ChatLiteLLM(**kwargs)
 
     def get_model(self) -> BaseChatModel:
         """Get the initialized vision model instance.

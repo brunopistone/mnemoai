@@ -113,6 +113,10 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
         - User says "save this to a file", "create a file with this code"
         - User wants to modify an existing file: "update file.py", "change the config"
 
+        For targeted edits to an EXISTING file, prefer file_edit (exact string
+        replacement) over the str_replace command here — it validates the match
+        and is safer. Use fs_write mainly for creating new files or full rewrites.
+
         This tool handles all file creation and modification operations with proper formatting and error handling.
 
         COMMANDS (choose the appropriate one):

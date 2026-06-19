@@ -43,6 +43,11 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
 
         Use this tool when users ask to read, examine, analyze, view, or check file content.
 
+        READ vs WRITE: Read-intent commands (read, show, view, check, display) use
+        this tool only. Write-intent commands (create, modify, update, fix, change)
+        belong to file_edit (existing files) or fs_write (new files). If the intent
+        is unclear, ask for clarification rather than guessing.
+
         Important: For data files (JSON, JSONL, CSV): Before reading, check the file size with `ls -lh` and line count with `wc -l`. If the file has more than 1000 lines or is larger than 1MB, For large datasets, use execute_bash with "head -n 3 <path>" to show samples instead of reading the entire file.
 
         For large files (>1MB), check file size first using execute_bash with "ls -lh <path>".

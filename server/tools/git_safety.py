@@ -217,6 +217,15 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
         This tool wraps git commands with safety validations to prevent
         accidental data loss or repository corruption.
 
+        ALWAYS use this (or git_status_safe / git_commit_safe) for git operations
+        instead of running git through execute_bash.
+
+        CONFIRMATION FLOW: If a call returns requires_confirmation=True, do not
+        retry blindly — explain the risk to the user, get their approval, then
+        call again with allow_dangerous=True and reason="user confirmed". Note
+        that force-push to main/master is blocked outright and cannot be
+        overridden here.
+
         Args:
             command: The git command to execute (without 'git' prefix)
                      Example: "status", "commit -m 'message'", "push origin main"

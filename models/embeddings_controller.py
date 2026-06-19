@@ -24,6 +24,9 @@ class EmbeddingsController:
         self.embed_model_type = self.embed_model_config.get("TYPE", "ollama")
         self.embed_model_name = self.embed_model_config.get("NAME", "mxbai-embed-large")
         self.region = self.embed_model_config.get("REGION", "us-east-1")
+        # LiteLLM connection (optional): OpenAI-compatible base URL + key.
+        self.api_base = self.embed_model_config.get("API_BASE")
+        self.api_key = self.embed_model_config.get("API_KEY")
 
         # Set expected dimension based on model
         model_dims = {
@@ -159,6 +162,8 @@ class EmbeddingsController:
             return self._embed_openai(texts)
         elif self.embed_model_type == "sagemaker":
             return self._embed_sagemaker(texts)
+        elif self.embed_model_type == "litellm":
+            return self._embed_litellm(texts)
         else:
             raise ValueError(
                 f"Unsupported embedding model type: {self.embed_model_type}"
@@ -256,6 +261,40 @@ class EmbeddingsController:
         except Exception:
             logger.exception(
                 "SageMaker embed failed, falling back to deterministic embeddings"
+            )
+            return self._embed_fallback(texts)
+
+    def _embed_litellm(self, texts: List[str]) -> np.ndarray:
+        """Embed using LiteLLM (100+ providers via one OpenAI-style API).
+
+        `litellm.embedding(model, input, api_base, api_key)` returns an
+        OpenAI-shaped response: vectors live at `response.data[i]["embedding"]`.
+        `API_BASE`/`API_KEY` are optional — omitted keys fall back to the
+        provider's own env vars (e.g. OPENAI_API_KEY).
+
+        Args:
+            texts: List of text strings to embed
+
+        Returns:
+            NumPy array of embeddings
+        """
+        try:
+            from litellm import embedding as litellm_embedding
+
+            kwargs = {"model": self.embed_model_name, "input": texts}
+            if self.api_base:
+                kwargs["api_base"] = self.api_base
+            if self.api_key:
+                kwargs["api_key"] = self.api_key
+
+            response = litellm_embedding(**kwargs)
+            # response.data is ordered by input index; sort defensively.
+            items = sorted(response.data, key=lambda d: d.get("index", 0))
+            embeddings = [item["embedding"] for item in items]
+            return np.array(embeddings, dtype=np.float32)
+        except Exception:
+            logger.exception(
+                "LiteLLM embed failed, falling back to deterministic embeddings"
             )
             return self._embed_fallback(texts)
 

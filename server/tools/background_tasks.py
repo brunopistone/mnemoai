@@ -94,6 +94,11 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Start a command running in the background.
 
+        Use this for operations expected to take more than ~30 seconds, so the
+        conversation isn't blocked. After starting, tell the user the task is
+        running, then poll get_task_status / get_task_output and report the
+        results when it completes.
+
         Use this for long-running operations like:
         - Running test suites
         - Building projects

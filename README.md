@@ -1071,14 +1071,25 @@ VISION_MODEL_ID:
   REASONING_EFFORT: medium
 ```
 
-For SageMaker AI:
+For SageMaker AI (endpoint must serve a vision-capable model accepting the OpenAI image format):
 
 ```yaml
 VISION_MODEL_ID:
   NAME: your-endpoint-name
   TYPE: sagemaker
   REGION: us-east-1
+  INPUT_FORMAT: openai_chat
   TEMPERATURE: 0.3
+```
+
+For LiteLLM (any of its vision-capable models):
+
+```yaml
+VISION_MODEL_ID:
+  NAME: openai/gpt-4o # provider-prefixed model id
+  TYPE: litellm
+  API_BASE: http://localhost:4000 # optional (proxy / self-hosted)
+  API_KEY: your-api-key # optional (else the provider's env var)
 ```
 
 ### Model Parameters
@@ -1135,8 +1146,11 @@ exactly what each provider's init path forwards. (`mantle` reads
 | `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock                                             |
 | `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai (also maps to Bedrock thinking budget)       |
 
-`VISION_MODEL_ID` accepts a subset: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` on
-bedrock/ollama/openai/mantle, plus `TOP_K`/`STOP` on ollama.
+`VISION_MODEL_ID` supports the same six providers as `MODEL_ID`. It accepts a
+subset of params: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` across providers, plus
+`TOP_K`/`STOP` on ollama and sagemaker. Connection keys follow the provider
+(host/port, region, Mantle protocol, SageMaker `INPUT_FORMAT`, LiteLLM
+`API_BASE`/`API_KEY`).
 
 > **Provider-appropriate tuning matters.** Newer Claude and GPT models reject
 > `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K` are largely
@@ -1325,6 +1339,17 @@ RAG:
     NAME: your-endpoint-name
     TYPE: sagemaker
     REGION: us-east-1
+```
+
+For LiteLLM (any of its 100+ providers via one OpenAI-style API):
+
+```yaml
+RAG:
+  EMBED_MODEL_ID:
+    NAME: openai/text-embedding-3-small # provider-prefixed model id
+    TYPE: litellm
+    API_BASE: http://localhost:4000 # optional (proxy / self-hosted)
+    API_KEY: your-api-key # optional (else the provider's env var)
 ```
 
 **Vector Store Options:**

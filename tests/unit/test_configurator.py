@@ -363,11 +363,19 @@ def test_provider_params_registry_shape():
     assert set(providers("MODEL_ID")) == {
         "ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"
     }
-    assert set(providers("VISION_MODEL_ID")) == {"ollama", "bedrock", "mantle", "openai"}
-    assert set(providers("EMBED_MODEL_ID")) == {"ollama", "bedrock", "openai", "sagemaker"}
+    assert set(providers("VISION_MODEL_ID")) == {
+        "ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"
+    }
+    assert supported_keys("VISION_MODEL_ID", "litellm") == {
+        "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P"
+    }
+    assert set(providers("EMBED_MODEL_ID")) == {
+        "ollama", "bedrock", "openai", "sagemaker", "litellm"
+    }
     # Embeddings take no inference params — only connection keys.
     assert supported_keys("EMBED_MODEL_ID", "ollama") == {"HOST", "PORT"}
     assert supported_keys("EMBED_MODEL_ID", "openai") == set()
+    assert supported_keys("EMBED_MODEL_ID", "litellm") == {"API_BASE", "API_KEY"}
     # Unknown provider -> None (configurator then prunes nothing).
     assert supported_keys("MODEL_ID", "bogus") is None
 

@@ -28,6 +28,9 @@ def register_todo_tools(mcp: FastMCP) -> None:
     async def todo_write(todos: str) -> str:
         """Update the current todo list.
 
+        Use this for tasks with 3 or more steps; skip it for simple, single-step
+        requests.
+
         Use this to:
         - Break down complex tasks into steps
         - Track progress on multi-step tasks

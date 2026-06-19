@@ -56,6 +56,15 @@ def register_plan_mode_tools(mcp: FastMCP) -> None:
     async def enter_plan_mode(task_description: str, context: str = "") -> str:
         """Enter plan mode to design an implementation approach.
 
+        Use this for complex implementations — multiple files, architectural
+        decisions, or unclear requirements. Skip it for simple fixes, single-file
+        changes, and clear requests.
+
+        Full workflow: enter_plan_mode() -> explore with search tools ->
+        add_plan_step() / add_plan_file() / add_plan_risk() -> present_plan() for
+        approval -> approve_plan() -> exit_plan_mode() -> implement, tracking
+        progress with todo_write.
+
         Use this BEFORE starting complex implementations to:
         - Analyze the task requirements
         - Explore relevant code
