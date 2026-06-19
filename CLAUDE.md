@@ -137,7 +137,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 | `AGGREGATOR_PROMPT`   | Result synthesis prompt                                                                                                                                                                                                                                                                             |
 
 **Feature toggles** (all boolean in config root):
-`ENABLE_RAG`, `ENABLE_EPISODIC_MEMORY`, `ENABLE_PLAYBOOK`, `ENABLE_WEB_SEARCH`, `ENABLE_WEB_CRAWL`, `ENABLE_ROUTING`, `ENABLE_ORCHESTRATION`
+`ENABLE_RAG`, `ENABLE_EPISODIC_MEMORY`, `ENABLE_PLAYBOOK`, `ENABLE_WEB_SEARCH`, `ENABLE_WEB_CRAWL`, `ENABLE_ROUTING`, `ENABLE_ORCHESTRATION`, `REQUIRE_BASH_CONFIRMATION` (default true), `REQUIRE_WRITE_CONFIRMATION` (default true)
 
 **Environment variables:**
 
@@ -152,6 +152,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 
 - **Tests** — pytest unit suite in `tests/` covers pure-logic modules (no LLM/Ollama needed). Run with `python -m pytest`. See the Testing section below
 - **Error handling in tools** — `@tool_error_handler` decorator (`server/error_handler.py`) for standardized responses
+- **Action confirmation** — destructive tools (`execute_bash`; `fs_write`/`file_edit`) are hard-gated by `LangGraphAgent._confirm_tool()` in BOTH `_execute_tools` and `_run_worker_loop`, before `tool.invoke()`. It must live client-side: the MCP server is a piped subprocess and can't prompt the terminal. Toggles `REQUIRE_BASH_CONFIRMATION` / `REQUIRE_WRITE_CONFIRMATION` (default true); non-TTY auto-proceeds; `fs_write` dry-run previews aren't gated
 - **Async/sync bridge** — MCP client uses a background thread with `asyncio.new_event_loop()` in `client/mcp_tool_wrapper.py`; sync callers use `run_coroutine_threadsafe`
 - **Imports** — relative within packages, absolute across packages
 - **Type hints** — used for LangChain/LangGraph state schemas (`TypedDict`), model classes; not enforced everywhere

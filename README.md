@@ -37,7 +37,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
   - [🔎 Fast Search Tools](#-fast-search-tools)
   - [✏️ Precise File Editing](#️-precise-file-editing)
   - [🛡️ Enhanced Error Handling](#️-enhanced-error-handling)
-  - [📁 File Write Confirmation](#-file-write-confirmation)
+  - [🔐 Action Confirmation (bash & file writes)](#-action-confirmation-bash--file-writes)
   - [🛡️ Git Safety](#️-git-safety)
   - [📝 Plan Mode](#-plan-mode)
   - [🔄 Background Tasks](#-background-tasks)
@@ -475,16 +475,18 @@ See `bash/system-command-app/README.md` for details on the wrapper script.
 
 All advanced features can be independently enabled or disabled in your local `utils/config.yaml` (copied from `config.yaml.example`). Here is a quick reference:
 
-| Feature                                                  | Config Key                     | Default             | Dependencies                              |
-| -------------------------------------------------------- | ------------------------------ | ------------------- | ----------------------------------------- |
-| **RAG** (document indexing & search)                     | `ENABLE_RAG: true`             | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
-| **Episodic Memory** (learn from past tasks)              | `ENABLE_EPISODIC_MEMORY: true` | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
-| **ACE Playbook** (learn strategies from success/failure) | `ENABLE_PLAYBOOK: true`        | `true`              | None (embeddings optional for refinement) |
-| **User Profiling** (personalized responses)              | `PROFILE.USE_PROFILING: true`  | `true`              | Activates after 5+ interactions           |
-| **Web Search**                                           | `ENABLE_WEB_SEARCH: true`      | `true`              | `BRAVE_API_KEY` configured                |
-| **Web Crawler**                                          | `ENABLE_WEB_CRAWL: true`       | `true`              | None                                      |
-| **Vision** (image analysis)                              | Configure `VISION_MODEL_ID`    | Disabled if not set | Vision-capable model                      |
-| **Verbose Mode** (show thinking process)                 | CLI flag `--no-verbose`        | Enabled             | Supported by model                        |
+| Feature                                                  | Config Key                         | Default             | Dependencies                              |
+| -------------------------------------------------------- | ---------------------------------- | ------------------- | ----------------------------------------- |
+| **RAG** (document indexing & search)                     | `ENABLE_RAG: true`                 | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
+| **Episodic Memory** (learn from past tasks)              | `ENABLE_EPISODIC_MEMORY: true`     | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
+| **ACE Playbook** (learn strategies from success/failure) | `ENABLE_PLAYBOOK: true`            | `true`              | None (embeddings optional for refinement) |
+| **User Profiling** (personalized responses)              | `PROFILE.USE_PROFILING: true`      | `true`              | Activates after 5+ interactions           |
+| **Web Search**                                           | `ENABLE_WEB_SEARCH: true`          | `true`              | `BRAVE_API_KEY` configured                |
+| **Web Crawler**                                          | `ENABLE_WEB_CRAWL: true`           | `true`              | None                                      |
+| **Vision** (image analysis)                              | Configure `VISION_MODEL_ID`        | Disabled if not set | Vision-capable model                      |
+| **Bash Confirmation** (prompt before each shell command) | `REQUIRE_BASH_CONFIRMATION: true`  | `true`              | None (auto-skips when non-interactive)    |
+| **Write Confirmation** (prompt before each file write)   | `REQUIRE_WRITE_CONFIRMATION: true` | `true`              | None (auto-skips when non-interactive)    |
+| **Verbose Mode** (show thinking process)                 | CLI flag `--no-verbose`            | Enabled             | Supported by model                        |
 
 **Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `RAG.EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](#embeddings-model)).
 
@@ -577,7 +579,7 @@ MCP server that provides tools to the LLM.
 - **`tools/`**: Tool implementations
   - `tools_manager.py`: Centralized tool registration and utilities
   - `fs_read.py`: File reading (text, CSV, JSON, PDF, DOCX)
-  - `fs_write.py`: File writing with mandatory user confirmation (dry-run preview)
+  - `fs_write.py`: File writing (dry-run preview); writes are hard-gated client-side by `REQUIRE_WRITE_CONFIRMATION`
   - `file_edit.py`: Precise string replacement with validation and uniqueness checking
   - `execute_bash.py`: Shell command execution with intelligent error handling
   - `file_search.py`: Fast file/content search (glob patterns + ripgrep)
@@ -815,17 +817,24 @@ All tools now provide intelligent error messages with troubleshooting guidance:
 - Command execution errors
 - Timeout errors
 
-### 📁 File Write Confirmation
+### 🔐 Action Confirmation (bash & file writes)
 
-`fs_write` now requires mandatory user confirmation:
+Destructive tools ask for explicit confirmation before they run (Claude Code-style) — shell commands (`execute_bash`) and file modifications (`fs_write`, `file_edit`):
 
-**Two-Step Process:**
+```
+▶ Run shell command?
+  rm -rf build/
+  Proceed? (y/N):
 
-1. **Preview (dry_run=True)**: Shows what will happen
-2. **Confirm**: User explicitly approves
-3. **Execute (confirmed=True)**: Actually performs the operation
+▶ Write to file?
+  create ~/script.py
+  Proceed? (y/N):
+```
 
-This prevents accidental file overwrites and gives users control over file system modifications.
+Only an explicit `y`/`yes` proceeds; anything else (including Enter) declines, and the model is told the user declined. This is a **hard gate enforced client-side** — the prompt always fires regardless of what the model does, because the client owns the terminal (the MCP server is a piped subprocess and can't prompt). For `fs_write` only the actual write is gated, not its `dry_run` preview.
+
+- Toggles: `REQUIRE_BASH_CONFIRMATION` and `REQUIRE_WRITE_CONFIRMATION` (both default `true`). Set either to `false` for trusted/automation setups.
+- Non-interactive runs (no TTY — tests, pipes, CI) auto-proceed so they don't hang.
 
 ### 🛡️ Git Safety
 
