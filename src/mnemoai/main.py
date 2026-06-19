@@ -6,6 +6,7 @@ from typing import Optional
 
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.ui.chat_interface import ChatInterface
+from mnemoai.utils.console import print_error
 
 # Global client reference for cleanup
 _client: Optional[LangGraphClient] = None
@@ -67,7 +68,7 @@ def cli() -> None:
         elif not config_exists():
             # Setup was declined/cancelled and there's still no config to run
             # with — exit cleanly rather than crashing deep in client init.
-            print("No config available. Exiting.")
+            print_error("No config available. Exiting.")
             return
 
     # Default is verbose=True, unless --no-verbose is specified

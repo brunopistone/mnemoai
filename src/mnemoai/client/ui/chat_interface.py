@@ -18,6 +18,7 @@ from mnemoai.client.memory.episodic_memory import (
     is_task_successful,
 )
 from mnemoai.utils.config import config
+from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger
 
 
@@ -447,7 +448,7 @@ class ChatInterface:
                 if self.client.load_conversation(file_path):
                     print("Conversation loaded successfully!")
                 else:
-                    print("Failed to load conversation. Check the file path.")
+                    print_error("Failed to load conversation. Check the file path.")
                 continue
 
             # Training data commands
@@ -494,5 +495,7 @@ class ChatInterface:
             except KeyboardInterrupt:
                 continue
             except Exception as e:
+                # Full traceback to the logger (stderr, LOG_LEVEL=DEBUG to see);
+                # the user gets a concise red line with the actual cause.
                 logger.error(f"Error processing query: {str(e)}", exc_info=True)
-                print(f"Error: Unable to process your request. Please try again.")
+                print_error(f"Error: {e}")

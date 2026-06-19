@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from mnemoai.utils.console import print_error
 from mnemoai.utils.paths import config_path
 
 # Provider key -> (template filename, human label, default chat model)
@@ -600,7 +601,7 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     provider, template_file, label, default_model = _PROVIDERS[choice]
     template_path = _templates_dir() / template_file
     if not template_path.is_file():
-        print(f"  Template not found: {template_path}. Cannot continue setup.")
+        print_error(f"Template not found: {template_path}. Cannot continue setup.")
         return None
 
     print(f"\n  Configuring for: {label}\n")
@@ -817,7 +818,7 @@ def run_model_override() -> Optional[Path]:
 
     dest = config_path()
     if not dest.is_file():
-        print("  No config.yaml found. Run /config to create one first.")
+        print_error("No config.yaml found. Run /config to create one first.")
         return None
 
     text = dest.read_text()
