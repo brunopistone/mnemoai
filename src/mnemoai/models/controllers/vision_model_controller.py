@@ -1,9 +1,11 @@
 """LangChain-based vision model controller for multi-provider support."""
 
 import base64
-from typing import Optional, Any
+from typing import Any, Optional
+
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
+
 from mnemoai.models.controllers.base_model_controller import BaseModelController
 from mnemoai.models.provider_params import build_kwargs
 from mnemoai.utils.config import config

@@ -1,8 +1,9 @@
-from crawl4ai import *
-from io import StringIO
 import json
-from mcp.server.fastmcp import FastMCP
 import sys
+from io import StringIO
+
+from crawl4ai import *
+from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger

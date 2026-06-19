@@ -6,7 +6,9 @@ plain string. VisionModelController._content_to_text must flatten any shape to
 text and skip non-text blocks.
 """
 
-from mnemoai.models.controllers.vision_model_controller import VisionModelController as V
+from mnemoai.models.controllers.vision_model_controller import (
+    VisionModelController as V,
+)
 
 
 class TestContentToText:

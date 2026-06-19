@@ -1,11 +1,12 @@
 """Simplified user profile learning system with EMA-based tracking."""
 
-from datetime import datetime
 import json
 import os
 import re
 import textwrap
-from typing import Dict, List, Any, Optional
+from datetime import datetime
+from typing import Any, Dict, List
+
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import profile_dir

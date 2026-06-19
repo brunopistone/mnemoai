@@ -1,3 +1,5 @@
 # Development / test dependencies (not needed at runtime).
 # Install with: pip install -r requirements-dev.txt
 pytest>=8.0.0
+# Import sorting + linting. Sort imports with: ruff check --fix .
+ruff>=0.6.0

@@ -10,7 +10,6 @@ from mnemoai.client.agent.reasoning_utils import disable_reasoning, restore_reas
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
-
 # Route definitions: maps route names to tool name lists.
 # None means all tools (fallback).
 ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {

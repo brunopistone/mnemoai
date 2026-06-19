@@ -11,7 +11,9 @@ Plan mode allows the AI to:
 import json
 import os
 from datetime import datetime
+
 from mcp.server.fastmcp import FastMCP
+
 from mnemoai.utils.paths import plans_dir
 
 # Plan storage location (under the app home, created on demand)

@@ -1,16 +1,18 @@
 """Conversation manager that uses simple text-based summaries."""
 
-from datetime import date
 import json
 import textwrap
-import tiktoken
+from datetime import date
 from typing import Any, Dict, List, Union
-from mnemoai.utils.logger import logger
+
+import tiktoken
+
 from mnemoai.utils.config import config
+from mnemoai.utils.logger import logger
 
 # Try to import LangChain message types for compatibility
 try:
-    from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
@@ -23,14 +25,18 @@ RESET = "\033[0m"
 
 
 def log_green(message: str, level: str = "info") -> None:
-    """Log message in green color.
+    """Print a user-facing status line in green (e.g. compaction progress).
+
+    These are results/progress the user asked for, not diagnostics, so they go
+    to stdout via ``print()`` — clean, no timestamp/level prefix, and always
+    visible regardless of ``LOG_LEVEL``. ``level`` is accepted for backward
+    compatibility but ignored. Operational diagnostics should use ``logger``.
 
     Args:
-        message: Message to log
-        level: Log level (info, error, etc.)
+        message: Message to show the user
+        level: Ignored (kept for backward compatibility)
     """
-    colored_message = f"{GREEN}{message}{RESET}"
-    getattr(logger, level)(colored_message)
+    print(f"{GREEN}{message}{RESET}")
 
 
 def messages_to_dict_list(messages: List[Any]) -> List[Dict]:

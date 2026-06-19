@@ -2,8 +2,8 @@
 
 from mnemoai.client.agent.reasoning_utils import (
     disable_reasoning,
-    restore_reasoning,
     extract_visible_text,
+    restore_reasoning,
 )
 
 

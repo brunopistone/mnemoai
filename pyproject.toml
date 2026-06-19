@@ -44,7 +44,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
 
 [project.scripts]
 # Installs the `mnemoai` terminal command (uv tool install . / pipx install .)
@@ -57,3 +57,14 @@ mnemoai = "mnemoai.main:cli"
 # invocation (`python -m mnemoai.server.server`), so it just needs
 # to be importable — no force-include of a script path required.
 packages = ["src/mnemoai"]
+
+[tool.ruff]
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Import sorting (isort rules). Run: `ruff check --fix .`
+extend-select = ["I"]
+
+[tool.ruff.lint.isort]
+# Group our package as first-party so it sorts after third-party imports.
+known-first-party = ["mnemoai"]

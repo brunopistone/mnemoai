@@ -2,7 +2,8 @@
 
 from pygments import highlight
 from pygments.formatters import Terminal256Formatter
-from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
+from pygments.lexers import TextLexer, get_lexer_by_name, guess_lexer
+
 from mnemoai.utils.formatting.url_formatter import make_urls_clickable
 
 

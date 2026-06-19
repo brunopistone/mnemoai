@@ -1,13 +1,16 @@
 """DOCX reading functionality."""
 
-from .. import validate_file_path
 import json
-from docx import Document
 import os
+
+from docx import Document
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
-from .chunking_helper import __count_tokens as count_tokens, process_large_content
+
+from .. import validate_file_path
+from .chunking_helper import __count_tokens as count_tokens
+from .chunking_helper import process_large_content
 
 try:
     from ..rag.session import get_rag_session

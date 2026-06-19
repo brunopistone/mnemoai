@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import List, Dict
+from typing import Dict, List
 
 
 async def read_directory(path: str, depth: int) -> str:

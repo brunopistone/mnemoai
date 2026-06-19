@@ -9,9 +9,10 @@ This tool wraps git commands with safety checks to prevent:
 """
 
 import json
-import subprocess
-import re
 import os
+import re
+import subprocess
+
 from mcp.server.fastmcp import FastMCP
 
 # Protected branches that should never receive force pushes

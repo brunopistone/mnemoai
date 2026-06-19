@@ -39,9 +39,9 @@ def patch_mantle(monkeypatch):
     Returns a dict of the kwargs the constructed model was built with, plus a
     ``_class`` key naming which class was used.
     """
-    import langchain_openai
-    import langchain_anthropic
     import aws_bedrock_token_generator
+    import langchain_anthropic
+    import langchain_openai
 
     captured = {}
 

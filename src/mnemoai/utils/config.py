@@ -1,9 +1,11 @@
 """Configuration management for the AI application."""
 
 import os
-import yaml
 from pathlib import Path
 from typing import Any
+
+import yaml
+
 from mnemoai.utils.logger import logger
 
 

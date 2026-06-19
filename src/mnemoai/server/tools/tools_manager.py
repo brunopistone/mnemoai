@@ -1,9 +1,9 @@
 """Tools manager that handles common functions and objects across tools"""
 
 import os
-import tiktoken
 from typing import Any, Optional
 
+import tiktoken
 
 from mnemoai.models.controllers.vision_model_controller import VisionModelController
 from mnemoai.utils.config import config
