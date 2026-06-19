@@ -56,6 +56,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
   - [Orchestrator-Workers](#orchestrator-workers)
   - [Web Search Configuration](#web-search-configuration)
   - [Web Crawler Configuration](#web-crawler-configuration)
+  - [External MCP Servers](#external-mcp-servers)
   - [RAG (Retrieval-Augmented Generation)](#rag-retrieval-augmented-generation)
   - [User Profile Learning](#user-profile-learning)
   - [Episodic Memory](#episodic-memory)
@@ -117,7 +118,8 @@ mnemoai/                      # repo root
 │   │
 │   ├── client/                             # Client layer
 │   │   ├── client.py                       # LangGraphClient facade (lifecycle, MCP, query)
-│   │   ├── mcp_tool_wrapper.py             # MCP to LangChain tool adapter
+│   │   ├── mcp_tool_wrapper.py             # MCP→LangChain adapter + MultiMCPClient (built-in + external servers)
+│   │   ├── mcp_config.py                   # Loads external MCP servers from mcp.json
 │   │   ├── agent/                          # Agent loop
 │   │   │   ├── agent.py                    # LangGraph StateGraph agent with streaming
 │   │   │   ├── router.py                   # Query classifier and routing
@@ -167,6 +169,7 @@ mnemoai/                      # repo root
 │       ├── logger.py                       # Logging utilities
 │       ├── bm25.py                         # Lightweight BM25 (hybrid search)
 │       ├── config.yaml.example             # Config templates (also .bedrock / .bedrock.mantle)
+│       ├── mcp.json.example                # External MCP servers template
 │       └── formatting/                     # Text formatting (code/url/response)
 │
 ├── tests/                                  # Test suite (pytest)
@@ -387,7 +390,7 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
-**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle / OpenAI / Anthropic / Amazon SageMaker AI / LiteLLM) plus chat model, connection details (Ollama host/port; AWS region; for Mantle the API protocol — chat_completions / responses / anthropic; SageMaker region + input format; LiteLLM API base/key; OpenAI uses `OPENAI_API_KEY`; Anthropic uses `ANTHROPIC_API_KEY` with an optional base URL), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.mnemoai/config.yaml` from the matching template. Just run:
+**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle / OpenAI / Anthropic / Amazon SageMaker AI / LiteLLM) plus chat model, connection details (Ollama host/port; AWS region; for Mantle the API protocol — chat_completions / responses / anthropic; SageMaker region + input format; LiteLLM API base/key; OpenAI uses `OPENAI_API_KEY`; Anthropic uses `ANTHROPIC_API_KEY` with an optional base URL), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.mnemoai/config/config.yaml` from the matching template. Just run:
 
 ```bash
 mnemoai      # or, from a checkout: PYTHONPATH=src python -m mnemoai
@@ -406,17 +409,18 @@ Edit that `config.yaml` with your settings. This file is git-ignored to protect 
 The config file is resolved in this order (first match wins):
 
 1. `$MNEMOAI_CONFIG` — explicit path (handy for switching between provider configs)
-2. `~/.mnemoai/config.yaml` — **user config used by the installed `mnemoai` command**
-3. `<package>/utils/config.yaml` — package-relative fallback (used when running from a checkout)
+2. `~/.mnemoai/config/config.yaml` — **user config used by the installed `mnemoai` command**
+3. `~/.mnemoai/config.yaml` — legacy pre-subfolder location (still read if present)
+4. `<package>/utils/config.yaml` — package-relative fallback (used when running from a checkout)
 
-If you installed the CLI with `uv tool install` (the recommended option), put your config in the user location instead:
+On first run mnemoai seeds `~/.mnemoai/config/` and `~/.mnemoai/mcp/` with copies of the bundled examples (`config.yaml*.example`, `mcp.json.example`) so you have them to read right next to your live files. If you installed the CLI with `uv tool install` (the recommended option), put your config in the user location:
 
 ```bash
-mkdir -p ~/.mnemoai
-cp src/mnemoai/utils/config.yaml.example ~/.mnemoai/config.yaml
+# Examples are auto-copied on first run; just copy one to config.yaml and edit:
+cp ~/.mnemoai/config/config.yaml.example        ~/.mnemoai/config/config.yaml
 # or, for Bedrock / Mantle:
-# cp src/mnemoai/utils/config.yaml.bedrock.example        ~/.mnemoai/config.yaml
-# cp src/mnemoai/utils/config.yaml.bedrock.mantle.example ~/.mnemoai/config.yaml
+# cp ~/.mnemoai/config/config.yaml.bedrock.example        ~/.mnemoai/config/config.yaml
+# cp ~/.mnemoai/config/config.yaml.bedrock.mantle.example ~/.mnemoai/config/config.yaml
 ```
 
 At minimum, configure your LLM provider:
@@ -511,6 +515,7 @@ Assistant: [Uses fs_read tool and displays content]
 | `/config`          | Re-run the interactive configurator (overwrites `config.yaml`, then restarts the app in place to apply)                                                                                  |
 | `/model`           | Override just one model — chat (LLM), vision, or embeddings — leaving the rest of `config.yaml` untouched, then restart in place                                                         |
 | `/params`          | Tune a model's inference parameters (temperature, top_p, top_k, penalties, reasoning, stop, stream, …) — only the params the chosen provider supports are offered, then restart in place |
+| `/mcp`             | List the configured MCP servers (built-in + any from `mcp.json`), their connection status, and tool counts                                                                               |
 
 ### Keyboard Shortcuts
 
@@ -1496,6 +1501,54 @@ When enabled, the `web_crawler` tool:
 > offline), run it manually in the same environment:
 > `python -m playwright install chromium` (for an installed CLI:
 > `~/.local/share/uv/tools/mnemoai/bin/python -m playwright install chromium`).
+
+### External MCP Servers
+
+mnemoai always runs its own built-in MCP server (file ops, bash, git, web, RAG,
+vision, planning). You can add **more** MCP servers by creating
+`~/.mnemoai/mcp/mcp.json` with the standard `mcpServers` schema (an
+`mcp.json.example` is seeded there on first run). Their tools are merged with the
+built-in ones and made available to the agent.
+
+```json
+{
+  "mcpServers": {
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": { "BRAVE_API_KEY": "your_brave_api_key" }
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"],
+      "disabled": true
+    }
+  }
+}
+```
+
+Per-server fields: `command` (required), `args` (optional list), `env`
+(optional; merged over the process environment), and `disabled` (optional;
+`true` skips the server). A template ships at
+`~/.mnemoai/mcp/mcp.json.example` (seeded on first run from the bundled
+`src/mnemoai/utils/mcp.json.example`).
+
+Behavior:
+
+- **Additive** — the built-in server is always on; external servers run
+  alongside it. Tools from all servers are merged into one list.
+- **Resilient** — if an external server fails to start (bad command, missing
+  binary, crash), it's logged in red and skipped; the app still runs with the
+  built-in server and any others that connected.
+- **No shadowing** — if an external tool's name collides with a built-in one,
+  the external tool is exposed as `servername__tool` so core tools are never
+  overridden (the server is still called with the original tool name).
+- **Works with routing & orchestration** — external tools are appended to every
+  non-empty query route, and when orchestration is enabled the task decomposer
+  is told which external tools exist and steers subtasks that need them to the
+  `full` category (which binds every tool). So external tools stay reachable
+  whether routing/orchestration is on or off.
+- Run **`/mcp`** in the chat to see configured servers, status, and tool counts.
 
 ### RAG (Retrieval-Augmented Generation)
 

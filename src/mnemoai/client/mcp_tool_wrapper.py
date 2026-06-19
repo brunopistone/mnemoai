@@ -14,6 +14,7 @@ from mcp.types import Tool as MCPTool
 from pydantic import BaseModel, Field, create_model
 
 from mnemoai.utils.config import config
+from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger
 
 # Upper bound for any single MCP tool call, in seconds. Must comfortably exceed
@@ -106,7 +107,9 @@ class MCPToolWrapper(BaseTool):
             Tool execution result as string
         """
         try:
-            return self.mcp_client.call_tool_sync(self.name, kwargs)
+            # Call by the server-side tool name (mcp_tool.name), which is stable
+            # even when `.name` is namespaced for collisions (e.g. server__tool).
+            return self.mcp_client.call_tool_sync(self.mcp_tool.name, kwargs)
         except Exception as e:
             logger.error(f"Tool execution error: {e}")
             raise ToolException(f"Error executing tool {self.name}: {e}")
@@ -126,7 +129,7 @@ class MCPToolWrapper(BaseTool):
             Tool execution result as string
         """
         try:
-            return await self.mcp_client.call_tool(self.name, kwargs)
+            return await self.mcp_client.call_tool(self.mcp_tool.name, kwargs)
         except Exception as e:
             logger.error(f"Async tool execution error: {e}")
             raise ToolException(f"Error executing tool {self.name}: {e}")
@@ -365,3 +368,99 @@ class MCPClientWrapper:
             self._connected = False
             self._session = None
             self._client_cm = None
+
+
+class MultiMCPClient:
+    """Aggregates the built-in MCP server with optional external ones.
+
+    Presents the SAME interface the client already uses for a single server —
+    the context-manager protocol (``with mcp_client:``) and
+    ``list_tools_sync()`` — so callers don't change. Internally it owns one
+    :class:`MCPClientWrapper` per server (built-in first, then each external
+    server from ``mcp.json``), connects/disconnects them together, and merges
+    their tools into one list.
+
+    Resilience: a server that fails to connect (bad command, missing binary,
+    crash on startup) is logged and skipped; the app still runs with the
+    servers that did connect. Tool-name collisions are resolved by namespacing
+    the EXTERNAL tool as ``servername__tool`` — the built-in tools keep their
+    names so the app's core tools are never shadowed.
+    """
+
+    def __init__(self, builtin_params, external_servers=None) -> None:
+        """Initialize with the built-in server params and optional externals.
+
+        Args:
+            builtin_params: StdioServerParameters for mnemoai's own server.
+            external_servers: list of ExternalServer (name, params) from mcp.json.
+        """
+        # (display_name, wrapper). The built-in server has no namespace prefix.
+        self._members = [("builtin", MCPClientWrapper(builtin_params))]
+        for server in external_servers or []:
+            self._members.append((server.name, MCPClientWrapper(server.params)))
+        self._tools: List[MCPToolWrapper] = []
+
+    def __enter__(self):
+        """Connect every server; skip (with a warning) any that fail."""
+        live = []
+        for name, wrapper in self._members:
+            try:
+                wrapper.__enter__()
+                live.append((name, wrapper))
+            except Exception as e:
+                if name == "builtin":
+                    # The built-in server is essential — re-raise.
+                    raise
+                print_error(f"MCP server '{name}' failed to start; skipping. ({e})")
+        self._members = live
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit every connected server's context."""
+        for _, wrapper in self._members:
+            try:
+                wrapper.__exit__(exc_type, exc_val, exc_tb)
+            except Exception as e:
+                logger.debug(f"MCP server exit error (ignored): {e}")
+
+    def list_tools_sync(self) -> List[MCPToolWrapper]:
+        """List tools across all connected servers, namespacing collisions.
+
+        Built-in tool names win; an external tool whose name already exists is
+        renamed ``servername__tool`` so it stays callable without shadowing a
+        core tool. The server-side call still uses the original name (see
+        ``MCPToolWrapper._run``).
+        """
+        merged: List[MCPToolWrapper] = []
+        seen = set()
+        for name, wrapper in self._members:
+            try:
+                tools = wrapper.list_tools_sync()
+            except Exception as e:
+                print_error(f"MCP server '{name}': could not list tools; skipping. ({e})")
+                continue
+            for tool in tools:
+                display = tool.name
+                if display in seen:
+                    display = f"{name}__{tool.name}"
+                    logger.info(
+                        "Tool name collision: '%s' from '%s' exposed as '%s'.",
+                        tool.name, name, display,
+                    )
+                tool.name = display
+                seen.add(display)
+                merged.append(tool)
+        self._tools = merged
+        return self._tools
+
+    def get_tools(self) -> List[MCPToolWrapper]:
+        """Return the cached merged tool list."""
+        return self._tools
+
+    def shutdown(self) -> None:
+        """Shut down every server's background loop."""
+        for _, wrapper in self._members:
+            try:
+                wrapper.shutdown()
+            except Exception as e:
+                logger.debug(f"MCP server shutdown error (ignored): {e}")

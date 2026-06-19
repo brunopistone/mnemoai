@@ -1,10 +1,15 @@
 """Centralized filesystem paths for the assistant.
 
 All persistent state lives under a single app-home directory so it's easy to
-find, back up, or relocate (similar to Claude Code's ``~/.claude``):
+find, back up, or relocate:
 
     ~/.mnemoai/
-    ├── config.yaml                         # user config (installed CLI)
+    ├── config/                             # config.yaml + provider examples
+    │   ├── config.yaml                     # user config (installed CLI)
+    │   └── config.yaml*.example            # bundled examples (copied here to read)
+    ├── mcp/                                # external MCP servers
+    │   ├── mcp.json                        # optional, user-created
+    │   └── mcp.json.example                # bundled example (copied here to read)
     ├── plans/current_plan.json             # plan-mode state
     ├── tasks/                              # background-task output
     └── {profile}/                          # per-user-profile data
@@ -19,6 +24,7 @@ can additionally be overridden with ``$MNEMOAI_CONFIG``.
 
 import os
 import re
+import shutil
 from pathlib import Path
 
 DEFAULT_HOME_DIRNAME = ".mnemoai"
@@ -35,9 +41,73 @@ def app_home() -> Path:
     return home
 
 
+def config_dir() -> Path:
+    """Directory holding config.yaml and the bundled config examples (created)."""
+    d = app_home() / "config"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def mcp_dir() -> Path:
+    """Directory holding mcp.json and the bundled mcp example (created)."""
+    d = app_home() / "mcp"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def config_path() -> Path:
-    """Default config.yaml location inside the app home (not auto-created)."""
+    """Default config.yaml location: ``<app_home>/config/config.yaml`` (not auto-created)."""
+    return config_dir() / "config.yaml"
+
+
+def legacy_config_path() -> Path:
+    """Pre-subfolder config location (``<app_home>/config.yaml``), read-only fallback.
+
+    Kept so installs created before the ``config/`` subfolder still load without
+    re-running setup. New configs are always written to :func:`config_path`.
+    """
     return app_home() / "config.yaml"
+
+
+def mcp_config_path() -> Path:
+    """Location of the external MCP servers config: ``<app_home>/mcp/mcp.json``.
+
+    Holds extra MCP servers to launch alongside mnemoai's built-in server, in
+    the same ``{"mcpServers": {...}}`` schema. ``$MNEMOAI_HOME`` moves it with 
+    the rest of the app home. Not auto-created.
+    """
+    return mcp_dir() / "mcp.json"
+
+
+def legacy_mcp_config_path() -> Path:
+    """Pre-subfolder mcp.json location (``<app_home>/mcp.json``), read-only fallback."""
+    return app_home() / "mcp.json"
+
+
+def seed_example_files() -> None:
+    """Copy the package's bundled ``*.example`` templates into the app home.
+
+    Gives users browsable examples right next to their live files:
+    ``config/`` gets the ``config.yaml*.example`` templates and ``mcp/`` gets
+    ``mcp.json.example``. Idempotent and non-destructive — only copies an
+    example that isn't already present, and never touches ``config.yaml`` /
+    ``mcp.json``. The configurator still reads the canonical templates from the
+    package, so these copies are purely for the user to read.
+    """
+    pkg_templates = Path(__file__).resolve().parent  # mnemoai/utils/
+    try:
+        for example in pkg_templates.glob("config.yaml*.example"):
+            dest = config_dir() / example.name
+            if not dest.exists():
+                shutil.copyfile(example, dest)
+        mcp_example = pkg_templates / "mcp.json.example"
+        if mcp_example.is_file():
+            dest = mcp_dir() / mcp_example.name
+            if not dest.exists():
+                shutil.copyfile(mcp_example, dest)
+    except OSError:
+        # Seeding examples is a convenience; never let it block startup.
+        pass
 
 
 def plans_dir() -> Path:

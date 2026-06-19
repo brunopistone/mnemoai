@@ -678,9 +678,10 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     dest.write_text(config_text)
 
     print(f"\n  Config written to:\n    {dest}")
-    print(f"\n  This file lives in your app home ({dest.parent}), which also")
-    print("  holds the rest of your runtime data (plans, tasks, conversations,")
-    print("  RAG indexes, episodic memory, and the ACE playbook).")
+    print(f"\n  This file lives in the config/ folder of your app home ({dest.parent.parent}),")
+    print("  which also holds the rest of your runtime data (plans, tasks,")
+    print("  conversations, RAG indexes, episodic memory, the ACE playbook, and")
+    print("  an mcp/ folder for external MCP servers).")
     print("\n  Only the most common settings were configured here. The file")
     print("  contains many more options you can edit any time — per-model")
     print("  inference parameters (temperature, top_p, penalties, …), the")

@@ -84,6 +84,7 @@ class ChatInterface:
             ("/config", "Reconfigure config.yaml (overwrites it)"),
             ("/model", "Override one model (LLM/vision/embeddings)"),
             ("/params", "Tune model inference params (temp, top_p, …)"),
+            ("/mcp", "List configured MCP servers & tools"),
         ]),
         ("Conversation", [
             ("/clear", "Clear conversation context"),
@@ -105,6 +106,7 @@ class ChatInterface:
         ("/config", "Reconfigure config.yaml (overwrites it)"),
         ("/model", "Override one model (LLM/vision/embeddings)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
+        ("/mcp", "List configured MCP servers & their tools"),
         ("/clear", "Clear conversation context"),
         ("/compact", "Summarize & shrink context (optional focus)"),
         ("/save", "Save current conversation"),
@@ -317,6 +319,37 @@ class ChatInterface:
         else:
             logger.debug("✗ Task not marked as successful - skipping storage")
 
+    def _print_mcp_status(self) -> None:
+        """Show the configured MCP servers (built-in + external) and tool counts.
+
+        Reads the live ``MultiMCPClient`` members for connection status and the
+        loaded tool list, plus ``mcp.json`` so the user sees where to declare
+        more servers. External tools may appear namespaced as ``server__tool``
+        when their name collides with a built-in one.
+        """
+        from mnemoai.utils.paths import mcp_config_path
+
+        members = getattr(self.client.mcp_client, "_members", [])
+        tools = self.client.tools or []
+        print("\nMCP servers:")
+        if members:
+            for name, _ in members:
+                # External tools that collided are exposed as "name__tool".
+                prefix = f"{name}__"
+                count = sum(
+                    1 for t in tools if t.name.startswith(prefix)
+                ) if name != "builtin" else None
+                label = "built-in" if name == "builtin" else "external"
+                if count is None:
+                    print(f"  • {name} ({label}, connected)")
+                else:
+                    print(f"  • {name} ({label}, connected) — {count} namespaced tool(s)")
+        else:
+            print("  (none connected)")
+        print(f"\n  Total tools available: {len(tools)}")
+        print(f"\n  Declare more servers in:\n    {mcp_config_path()}")
+        print('  Format: {"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}\n')
+
     def _restart_in_place(self) -> None:
         """Restart the current process so reloaded config takes full effect.
 
@@ -438,6 +471,11 @@ class ChatInterface:
 
                 if run_params_override() is not None:
                     self._restart_in_place()
+                continue
+
+            # List configured MCP servers (built-in + external from mcp.json).
+            if query.lower() == "/mcp":
+                self._print_mcp_status()
                 continue
 
             # Manually compact the conversation: /compact [focus instructions]

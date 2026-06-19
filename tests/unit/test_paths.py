@@ -5,8 +5,6 @@ All persistent state lives under a single app-home dir
 $MNEMOAI_HOME).
 """
 
-import os
-
 import pytest
 
 from mnemoai.utils import paths
@@ -37,7 +35,31 @@ class TestAppHome:
 
 class TestSubdirs:
     def test_config_path_under_home(self, tmp_home):
-        assert paths.config_path() == tmp_home / "config.yaml"
+        # config.yaml now lives in the config/ subfolder (created on access).
+        assert paths.config_path() == tmp_home / "config" / "config.yaml"
+        assert (tmp_home / "config").is_dir()
+
+    def test_legacy_config_path_is_flat(self, tmp_home):
+        # The pre-subfolder fallback still points at the flat location.
+        assert paths.legacy_config_path() == tmp_home / "config.yaml"
+
+    def test_mcp_paths_under_home(self, tmp_home):
+        assert paths.mcp_config_path() == tmp_home / "mcp" / "mcp.json"
+        assert paths.legacy_mcp_config_path() == tmp_home / "mcp.json"
+        assert (tmp_home / "mcp").is_dir()
+
+    def test_seed_example_files_copies_examples(self, tmp_home):
+        paths.seed_example_files()
+        # Examples land in the subfolders; live files are NOT created.
+        assert (tmp_home / "config" / "config.yaml.example").is_file()
+        assert (tmp_home / "mcp" / "mcp.json.example").is_file()
+        assert not (tmp_home / "config" / "config.yaml").exists()
+        assert not (tmp_home / "mcp" / "mcp.json").exists()
+        # Idempotent + non-destructive: a user edit survives a re-seed.
+        edited = tmp_home / "config" / "config.yaml.example"
+        edited.write_text("EDITED")
+        paths.seed_example_files()
+        assert edited.read_text() == "EDITED"
 
     def test_plans_and_tasks_created(self, tmp_home):
         assert paths.plans_dir() == tmp_home / "plans"
