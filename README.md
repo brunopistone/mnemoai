@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="images/mnemoai-logo.png" alt="Mnemo AI" width="120">
+  <img src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/mnemoai-logo.png" alt="Mnemo AI" width="120">
 </p>
 
 <h1 align="center">Mnemo AI</h1>
@@ -10,7 +10,7 @@
 
 A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Amazon SageMaker AI, LiteLLM).
 
-![Demo](images/assistant-demo.gif)
+![Demo](https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/assistant-demo.gif)
 
 ## 📑 Table of Contents
 
