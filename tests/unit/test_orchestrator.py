@@ -1,6 +1,6 @@
 """Unit tests for subtask parsing (client/orchestrator.py)."""
 
-from client.orchestrator import parse_subtasks
+from personal_ai_assistant.client.agent.orchestrator import parse_subtasks
 
 VALID = {"simple_qa", "code", "research", "knowledge", "full"}
 FALLBACK = "original query"

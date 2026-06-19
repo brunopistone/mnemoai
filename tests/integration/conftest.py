@@ -17,13 +17,18 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 
 
 def _config_exists() -> bool:
-    return os.path.isfile(os.path.join(REPO_ROOT, "utils", "config.yaml"))
+    # The repo-relative runtime config now lives inside the package.
+    return os.path.isfile(
+        os.path.join(
+            REPO_ROOT, "src", "personal_ai_assistant", "utils", "config.yaml"
+        )
+    )
 
 
 def _ollama_reachable() -> bool:
     """Return True if the Ollama HTTP API answers on the configured host:port."""
     try:
-        from utils.config import config
+        from personal_ai_assistant.utils.config import config
 
         model_id = config.get("MODEL_ID", {}) or {}
         host = model_id.get("HOST", "localhost")
@@ -55,10 +60,9 @@ def live_client():
     if _SKIP_REASON:
         pytest.skip(_SKIP_REASON)
 
-    from client.client import LangGraphClient
+    from personal_ai_assistant.client.client import LangGraphClient
 
-    server_path = os.path.join(REPO_ROOT, "server", "server.py")
-    client = LangGraphClient(server_path=server_path, verbose=False)
+    client = LangGraphClient(verbose=False)
     client.start()
     yield client
     # Best-effort teardown; the MCP wrapper also registers an atexit shutdown.
