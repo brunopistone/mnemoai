@@ -4,6 +4,33 @@ import logging
 import os
 import sys
 
+# ANSI colors per level. ERROR/CRITICAL red, WARNING yellow; DEBUG/INFO plain.
+_LEVEL_COLORS = {
+    logging.WARNING: "\033[93m",   # yellow
+    logging.ERROR: "\033[91m",     # red
+    logging.CRITICAL: "\033[91m",  # red
+}
+_RESET = "\033[0m"
+
+
+class _ColorFormatter(logging.Formatter):
+    """Formatter that colors the whole record by level when writing to a TTY.
+
+    Colors are applied only when the stream is a terminal (``use_color``), so
+    redirected/piped logs stay free of ANSI escape codes.
+    """
+
+    def __init__(self, fmt: str, use_color: bool) -> None:
+        super().__init__(fmt)
+        self.use_color = use_color
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        color = _LEVEL_COLORS.get(record.levelno)
+        if self.use_color and color:
+            return f"{color}{text}{_RESET}"
+        return text
+
 
 def setup_logger(name: str = "ai_app", level: int = None) -> logging.Logger:
     """Set up and configure a logger.
@@ -37,9 +64,12 @@ def setup_logger(name: str = "ai_app", level: int = None) -> logging.Logger:
         console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setLevel(level)
 
-        # Create formatter
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        # Color the record by level on a TTY (red for errors, yellow for
+        # warnings); stay plain when stderr is redirected to a file/pipe.
+        use_color = hasattr(sys.stderr, "isatty") and sys.stderr.isatty()
+        formatter = _ColorFormatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            use_color=use_color,
         )
 
         # Add formatter to handler
