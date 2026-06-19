@@ -90,6 +90,7 @@ class ChatInterface:
             ("/clear", "Clear conversation context"),
             ("/compact [focus]", "Summarize & shrink context"),
             ("/memory [clear]", "View (or clear) persistent memory"),
+            ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
             ("/save", "Save current conversation"),
             ("/load <path>", "Load a saved conversation"),
         ]),
@@ -111,6 +112,7 @@ class ChatInterface:
         ("/clear", "Clear conversation context"),
         ("/compact", "Summarize & shrink context (optional focus)"),
         ("/memory", "View persistent memory (/memory clear to wipe)"),
+        ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/save", "Save current conversation"),
         ("/load", "Load a saved conversation (/load <path>)"),
         ("/good", "Mark last response as good (training data)"),
@@ -524,6 +526,21 @@ class ChatInterface:
             # View or clear the curated persistent memory (MEMORY.md).
             if query.lower() == "/memory" or query.lower().startswith("/memory "):
                 self._handle_memory_command(query[len("/memory"):].strip())
+                continue
+
+            # Toggle enforced, read-only plan mode (mutating/exec tools blocked).
+            if query.lower() == "/plan":
+                self.client.plan_mode_active = not self.client.plan_mode_active
+                if self.client.plan_mode_active:
+                    print(
+                        "\n\033[93m🔒 Plan mode ON\033[0m — read-only. I'll research "
+                        "and present a plan; file edits and shell commands are "
+                        "blocked. Type /plan again to exit and allow changes.\n"
+                    )
+                else:
+                    print(
+                        "\n\033[92m🔓 Plan mode OFF\033[0m — changes allowed again.\n"
+                    )
                 continue
 
             # Manually compact the conversation: /compact [focus instructions]

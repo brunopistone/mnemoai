@@ -3,7 +3,7 @@
 import operator
 import re
 import sys
-from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
+from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
@@ -45,6 +45,18 @@ class LangGraphAgent:
     # memory tool regardless of how the query was classified.
     _ALWAYS_AVAILABLE_TOOLS = {"memory"}
 
+    # Mutating / shell-executing tools hard-blocked while plan mode is active
+    # (Claude-Code-style read-only planning). Read-only tools (fs_read, glob/grep
+    # search, web, document readers) and the `memory` notebook are allowed.
+    _PLAN_BLOCKED_TOOLS = {
+        "execute_bash",
+        "fs_write",
+        "file_edit",
+        "git_safe",
+        "git_commit_safe",
+        "start_background_task",
+    }
+
     def __init__(
         self,
         model: BaseChatModel,
@@ -55,6 +67,7 @@ class LangGraphAgent:
         router=None,
         tool_routes: Optional[Dict[str, Optional[List[str]]]] = None,
         orchestrator_enabled: bool = False,
+        plan_mode_provider: Optional[Callable[[], bool]] = None,
     ) -> None:
         """Initialize the LangGraph agent.
 
@@ -67,7 +80,10 @@ class LangGraphAgent:
             router: Optional QueryRouter for query classification
             tool_routes: Optional dict mapping route names to tool name lists
             orchestrator_enabled: Enable orchestrator for 'full' route
+            plan_mode_provider: Optional callable returning True while the user
+                has plan mode active; gates the mutating tools client-side.
         """
+        self._plan_mode_provider = plan_mode_provider or (lambda: False)
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
@@ -477,7 +493,19 @@ class LangGraphAgent:
                 if not tool:
                     tool = next((t for t in self.tools if t.name == tool_name), None)
 
-                if tool and not self._confirm_tool(tool_name, tool_args):
+                if tool and self._is_blocked_by_plan_mode(tool_name):
+                    worker_messages.append(
+                        ToolMessage(
+                            content=(
+                                "Blocked: plan mode is active (read-only). Present "
+                                "a plan for the user to review; the user must exit "
+                                "plan mode (/plan) before this tool can run."
+                            ),
+                            tool_call_id=tool_id,
+                            name=tool_name,
+                        )
+                    )
+                elif tool and not self._confirm_tool(tool_name, tool_args):
                     worker_messages.append(
                         ToolMessage(
                             content="User declined to run this command.",
@@ -942,6 +970,14 @@ class LangGraphAgent:
             raw = raw[1:-1]
         return {field: raw}
 
+    def _is_blocked_by_plan_mode(self, tool_name: str) -> bool:
+        """True when plan mode is active and this tool mutates/executes.
+
+        Enforced client-side at the tool chokepoints (the MCP server can't see
+        client state) — read-only tools and the memory notebook stay allowed.
+        """
+        return self._plan_mode_provider() and tool_name in self._PLAN_BLOCKED_TOOLS
+
     # Tools gated by a hard confirmation prompt, keyed by category.
     _CONFIRM_BASH_TOOLS = {"execute_bash"}
     _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
@@ -1050,6 +1086,20 @@ class LangGraphAgent:
                 tool = next((t for t in self.tools if t.name == tool_name), None)
 
             if tool:
+                # Plan mode: hard-block mutating/exec tools (read-only planning).
+                if self._is_blocked_by_plan_mode(tool_name):
+                    tool_results.append(
+                        ToolMessage(
+                            content=(
+                                "Blocked: plan mode is active (read-only). Present "
+                                "a plan for the user to review; the user must exit "
+                                "plan mode (/plan) before this tool can run."
+                            ),
+                            tool_call_id=tool_id,
+                            name=tool_name,
+                        )
+                    )
+                    continue
                 # Hard gate: ask the user before running a shell command.
                 if not self._confirm_tool(tool_name, tool_args):
                     tool_results.append(
