@@ -1,4 +1,4 @@
-# Personal AI Assistant
+# Mnemo AI
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -100,16 +100,16 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 ## 📖 Project Structure
 
 ```yaml
-personal-ai-assistant/                      # repo root
-├── pyproject.toml                          # Packaging + `personal-ai-assistant` CLI entry point
+mnemoai/                      # repo root
+├── pyproject.toml                          # Packaging + `mnemoai` CLI entry point
 ├── requirements.txt                        # Dependencies
 ├── README.md                               # This file
 ├── pytest.ini                              # Pytest configuration
 ├── requirements-dev.txt                    # Dev/test dependencies
 │
-├── src/personal_ai_assistant/              # The single package (src layout)
+├── src/mnemoai/              # The single package (src layout)
 │   ├── __init__.py
-│   ├── __main__.py                         # `python -m personal_ai_assistant`
+│   ├── __main__.py                         # `python -m mnemoai`
 │   ├── main.py                             # Entry point (cli())
 │   │
 │   ├── client/                             # Client layer
@@ -160,7 +160,7 @@ personal-ai-assistant/                      # repo root
 │   └── utils/                              # Utilities
 │       ├── config.py                       # Config loader
 │       ├── configurator.py                 # First-run setup + /config & /model flows
-│       ├── paths.py                        # Central path helper (~/.personal-ai-assistant)
+│       ├── paths.py                        # Central path helper (~/.mnemoai)
 │       ├── logger.py                       # Logging utilities
 │       ├── bm25.py                         # Lightweight BM25 (hybrid search)
 │       ├── config.yaml.example             # Config templates (also .bedrock / .bedrock.mantle)
@@ -173,7 +173,7 @@ personal-ai-assistant/                      # repo root
 │
 ├── docs/                                   # ARCHITECTURE.md (detailed file map)
 └── bash/                                   # Helper scripts
-    ├── system-command-app/                 # `personal-ai-assistant` wrapper script
+    ├── system-command-app/                 # `mnemoai` wrapper script
     ├── ollama-freeup-vram/                 # VRAM management
     └── ollama-env-mac/                     # Ollama config
 ```
@@ -242,15 +242,15 @@ personal-ai-assistant/                      # repo root
 1. **Clone the repository**:
 
 ```bash
-git clone https://github.com/brunopistone/personal-ai-assistant.git
-cd personal-ai-assistant
+git clone https://github.com/brunopistone/mnemoai.git
+cd mnemoai
 ```
 
 2. **Install the assistant** (choose one):
 
 #### Recommended: install as a CLI command (`uv tool install`)
 
-This installs the project into its own isolated environment and puts `personal-ai-assistant` on your PATH, so you can run it from any directory (macOS and Linux) without activating anything:
+This installs the project into its own isolated environment and puts `mnemoai` on your PATH, so you can run it from any directory (macOS and Linux) without activating anything:
 
 ```bash
 uv tool install .        # or: pipx install .
@@ -259,11 +259,11 @@ uv tool install .        # or: pipx install .
 Then configure a user config (see step 4) and run:
 
 ```bash
-personal-ai-assistant            # verbose (shows thinking)
-personal-ai-assistant --no-verbose
+mnemoai            # verbose (shows thinking)
+mnemoai --no-verbose
 ```
 
-To upgrade after pulling changes: `uv tool install --force .`. To remove: `uv tool uninstall personal-ai-assistant`.
+To upgrade after pulling changes: `uv tool install --force .`. To remove: `uv tool uninstall mnemoai`.
 
 > This is the best choice for everyday use. Pick a "run from a checkout" option below instead if you plan to actively edit the code, since those run your working tree directly with no reinstall step.
 
@@ -272,11 +272,11 @@ To upgrade after pulling changes: `uv tool install --force .`. To remove: `uv to
 Set up an environment (choose one), which lets you run the assistant directly from the repo while editing the source live. Because the code uses a `src/` layout, run it as a module with `src/` on the path:
 
 ```bash
-PYTHONPATH=src python -m personal_ai_assistant            # verbose
-PYTHONPATH=src python -m personal_ai_assistant --no-verbose
+PYTHONPATH=src python -m mnemoai            # verbose
+PYTHONPATH=src python -m mnemoai --no-verbose
 ```
 
-(Or `pip install -e .` once, then just `personal-ai-assistant`.)
+(Or `pip install -e .` once, then just `mnemoai`.)
 
 **Option A: venv**
 
@@ -296,21 +296,21 @@ uv pip install -r requirements.txt
 **Option C: conda**
 
 ```bash
-conda create -n personal-ai-assistant python=3.11
-conda activate personal-ai-assistant
+conda create -n mnemoai python=3.11
+conda activate mnemoai
 pip install -r requirements.txt
 ```
 
-**Get the `personal-ai-assistant` command for a checkout install**
+**Get the `mnemoai` command for a checkout install**
 
-So you don't have to `cd` into the repo every time, symlink the bundled wrapper script onto your PATH. It activates the project environment, then runs the app (`PYTHONPATH=src python -m personal_ai_assistant`):
+So you don't have to `cd` into the repo every time, symlink the bundled wrapper script onto your PATH. It activates the project environment, then runs the app (`PYTHONPATH=src python -m mnemoai`):
 
 ```bash
-chmod +x bash/system-command-app/personal-ai-assistant-wrapper.sh
-ln -sf "$(pwd)/bash/system-command-app/personal-ai-assistant-wrapper.sh" /usr/local/bin/personal-ai-assistant
+chmod +x bash/system-command-app/mnemoai-wrapper.sh
+ln -sf "$(pwd)/bash/system-command-app/mnemoai-wrapper.sh" /usr/local/bin/mnemoai
 ```
 
-Now `personal-ai-assistant` works from any directory and always reflects your latest edits. The wrapper auto-activates a project-local `.venv` (Options A and B) if present, otherwise it falls back to a conda env named `personal-ai-assistant` (Option C) — edit the script if your environment differs.
+Now `mnemoai` works from any directory and always reflects your latest edits. The wrapper auto-activates a project-local `.venv` (Options A and B) if present, otherwise it falls back to a conda env named `mnemoai` (Option C) — edit the script if your environment differs.
 
 3. **Install ripgrep (optional but recommended for fast search)**:
 
@@ -356,36 +356,36 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
-**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle / OpenAI / Amazon SageMaker AI / LiteLLM) plus chat model, connection details (Ollama host/port; AWS region; for Mantle the API protocol — chat_completions / responses / anthropic; SageMaker region + input format; LiteLLM API base/key; OpenAI uses `OPENAI_API_KEY`), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.personal-ai-assistant/config.yaml` from the matching template. Just run:
+**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle / OpenAI / Amazon SageMaker AI / LiteLLM) plus chat model, connection details (Ollama host/port; AWS region; for Mantle the API protocol — chat_completions / responses / anthropic; SageMaker region + input format; LiteLLM API base/key; OpenAI uses `OPENAI_API_KEY`), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.mnemoai/config.yaml` from the matching template. Just run:
 
 ```bash
-personal-ai-assistant      # or, from a checkout: PYTHONPATH=src python -m personal_ai_assistant
+mnemoai      # or, from a checkout: PYTHONPATH=src python -m mnemoai
 ```
 
 and follow the prompts. You can re-edit the generated file any time to fine-tune models, prompts, and feature toggles.
 
-**Manual setup.** Prefer to write it yourself? Copy a template (they live inside the package, under `src/personal_ai_assistant/utils/`):
+**Manual setup.** Prefer to write it yourself? Copy a template (they live inside the package, under `src/mnemoai/utils/`):
 
 ```bash
-cp src/personal_ai_assistant/utils/config.yaml.example src/personal_ai_assistant/utils/config.yaml
+cp src/mnemoai/utils/config.yaml.example src/mnemoai/utils/config.yaml
 ```
 
 Edit that `config.yaml` with your settings. This file is git-ignored to protect your API keys. At minimum, configure your LLM provider.
 
 The config file is resolved in this order (first match wins):
 
-1. `$PERSONAL_AI_ASSISTANT_CONFIG` — explicit path (handy for switching between provider configs)
-2. `~/.personal-ai-assistant/config.yaml` — **user config used by the installed `personal-ai-assistant` command**
+1. `$MNEMOAI_CONFIG` — explicit path (handy for switching between provider configs)
+2. `~/.mnemoai/config.yaml` — **user config used by the installed `mnemoai` command**
 3. `<package>/utils/config.yaml` — package-relative fallback (used when running from a checkout)
 
 If you installed the CLI with `uv tool install` (the recommended option), put your config in the user location instead:
 
 ```bash
-mkdir -p ~/.personal-ai-assistant
-cp src/personal_ai_assistant/utils/config.yaml.example ~/.personal-ai-assistant/config.yaml
+mkdir -p ~/.mnemoai
+cp src/mnemoai/utils/config.yaml.example ~/.mnemoai/config.yaml
 # or, for Bedrock / Mantle:
-# cp src/personal_ai_assistant/utils/config.yaml.bedrock.example        ~/.personal-ai-assistant/config.yaml
-# cp src/personal_ai_assistant/utils/config.yaml.bedrock.mantle.example ~/.personal-ai-assistant/config.yaml
+# cp src/mnemoai/utils/config.yaml.bedrock.example        ~/.mnemoai/config.yaml
+# cp src/mnemoai/utils/config.yaml.bedrock.mantle.example ~/.mnemoai/config.yaml
 ```
 
 At minimum, configure your LLM provider:
@@ -425,13 +425,13 @@ See [Configuration](#-configuration) for all options and [Feature Toggles](#-fea
 If you installed with `uv tool install` (recommended), run the command from anywhere:
 
 ```bash
-personal-ai-assistant
+mnemoai
 ```
 
 If you set up a checkout and symlinked the wrapper, the same command works. Otherwise, run it from the repo directory:
 
 ```bash
-PYTHONPATH=src python -m personal_ai_assistant
+PYTHONPATH=src python -m mnemoai
 ```
 
 See `bash/system-command-app/README.md` for details on the wrapper script.
@@ -493,9 +493,9 @@ Assistant: [Uses fs_read tool and displays content]
 Control thinking process visibility:
 
 ```bash
-personal-ai-assistant              # Verbose mode (shows thinking)
-personal-ai-assistant --no-verbose # Hide thinking process
-# from a checkout: PYTHONPATH=src python -m personal_ai_assistant [--no-verbose]
+mnemoai              # Verbose mode (shows thinking)
+mnemoai --no-verbose # Hide thinking process
+# from a checkout: PYTHONPATH=src python -m mnemoai [--no-verbose]
 ```
 
 ### Component Breakdown
@@ -584,7 +584,7 @@ Shared utilities and configuration.
 
 - `config.py`: Configuration loader
 - `configurator.py`: First-run interactive setup (when no config resolves) and the `/config` (full reconfigure) and `/model` (override one model section) chat commands
-- `paths.py`: Central path helper — single source of truth for the app home (`~/.personal-ai-assistant`, override with `$PERSONAL_AI_ASSISTANT_HOME`) and all runtime subdirectories (config, plans, tasks, per-profile, per-model)
+- `paths.py`: Central path helper — single source of truth for the app home (`~/.mnemoai`, override with `$MNEMOAI_HOME`) and all runtime subdirectories (config, plans, tasks, per-profile, per-model)
 - `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings; `.bedrock` and `.bedrock.mantle` variants also provided)
 - `bm25.py`: Lightweight BM25 implementation for hybrid (semantic + keyword) search
 - `logger.py`: Logging utilities (stderr output)
@@ -613,10 +613,10 @@ Each chat session has a unique ID used for:
 - Chunk caching for file summarization
 - Training data collection (SFT markers)
 
-Session data is stored in `~/.personal-ai-assistant/{profile_name}/`:
+Session data is stored in `~/.mnemoai/{profile_name}/`:
 
 ```
-~/.personal-ai-assistant/
+~/.mnemoai/
 └── {profile_name}/
     ├── conversations/           # Saved conversations
     ├── profiles/                # User profiles
@@ -662,7 +662,7 @@ Track multi-step tasks with automatic status management:
 - Three states: `pending`, `in_progress`, `completed`
 - Enforces exactly ONE task in progress at a time
 - Real-time progress tracking
-- Stored in `~/.personal-ai-assistant/{profile}/todos/current_todos.json`
+- Stored in `~/.mnemoai/{profile}/todos/current_todos.json`
 
 **Usage Example:**
 
@@ -845,8 +845,8 @@ Implementation planning workflow for complex tasks:
 - Multi-step refactoring
 - Unclear requirements
 
-**Plan Storage:** `~/.personal-ai-assistant/plans/current_plan.json`
-**Task Output:** `~/.personal-ai-assistant/tasks/`
+**Plan Storage:** `~/.mnemoai/plans/current_plan.json`
+**Task Output:** `~/.mnemoai/tasks/`
 
 ### 🔄 Background Tasks
 
@@ -883,7 +883,7 @@ get_task_status(task_id="abc123")
 get_task_output(task_id="abc123", tail_lines=50)
 ```
 
-**Task Storage:** Output logs saved to `~/.personal-ai-assistant/tasks/`
+**Task Storage:** Output logs saved to `~/.mnemoai/tasks/`
 
 ## 🔧 Configuration
 
@@ -1162,7 +1162,7 @@ DOC_MAX_TOKENS: 16384
 
 # Profile configuration
 PROFILE:
-  NAME: default # Used for session data isolation (~/.personal-ai-assistant/{NAME}/)
+  NAME: default # Used for session data isolation (~/.mnemoai/{NAME}/)
   USE_PROFILING: true # Enable automatic user profiling
 ```
 
@@ -1439,7 +1439,7 @@ When enabled, the `web_crawler` tool:
 > crawl after a fresh install/upgrade. If that auto-install fails (e.g.
 > offline), run it manually in the same environment:
 > `python -m playwright install chromium` (for an installed CLI:
-> `~/.local/share/uv/tools/personal-ai-assistant/bin/python -m playwright install chromium`).
+> `~/.local/share/uv/tools/mnemoai/bin/python -m playwright install chromium`).
 
 ### RAG (Retrieval-Augmented Generation)
 
@@ -1524,8 +1524,8 @@ The episodic memory system learns from successful task completions and retrieves
 
 **Storage Location:**
 
-- FAISS: `~/.personal-ai-assistant/{profile}/models/{model}/episodic_memory/episodic.index`
-- ChromaDB: `~/.personal-ai-assistant/{profile}/models/{model}/episodic_memory/`
+- FAISS: `~/.mnemoai/{profile}/models/{model}/episodic_memory/episodic.index`
+- ChromaDB: `~/.mnemoai/{profile}/models/{model}/episodic_memory/`
 
 **Configuration:**
 
@@ -1603,8 +1603,8 @@ PLAYBOOK:
 
 **Storage Location:**
 
-- Strategies: `~/.personal-ai-assistant/{profile}/models/{model}/playbook/playbook.json`
-- Metrics: `~/.personal-ai-assistant/{profile}/models/{model}/playbook/metrics.json`
+- Strategies: `~/.mnemoai/{profile}/models/{model}/playbook/playbook.json`
+- Metrics: `~/.mnemoai/{profile}/models/{model}/playbook/metrics.json`
 
 ### Training Data Collection
 
@@ -1844,8 +1844,8 @@ See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for 
 
 **Permission Errors**
 
-- Ensure write permissions for `~/.personal-ai-assistant/`
-- Ensure write permissions for `~/.personal-ai-assistant/` (the app home: config, plans, tasks, per-profile state)
+- Ensure write permissions for `~/.mnemoai/`
+- Ensure write permissions for `~/.mnemoai/` (the app home: config, plans, tasks, per-profile state)
 - Check file paths in configuration
 
 **Import Errors on Startup**
@@ -1858,8 +1858,8 @@ See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for 
 Logs are output to stderr with configurable level:
 
 ```bash
-LOG_LEVEL=DEBUG personal-ai-assistant  # Detailed logs
-LOG_LEVEL=INFO personal-ai-assistant   # Normal logs (default)
+LOG_LEVEL=DEBUG mnemoai  # Detailed logs
+LOG_LEVEL=INFO mnemoai   # Normal logs (default)
 ```
 
 ## 📄 License

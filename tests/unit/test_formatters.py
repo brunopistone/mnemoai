@@ -4,12 +4,12 @@ import re
 
 import pytest
 
-from personal_ai_assistant.utils.formatting.url_formatter import (
+from mnemoai.utils.formatting.url_formatter import (
     make_urls_clickable,
     highlight_urls,
     format_url,
 )
-from personal_ai_assistant.utils.formatting.code_formatter import CodeFormatter
+from mnemoai.utils.formatting.code_formatter import CodeFormatter
 
 # OSC 8 hyperlink introducer used by clickable terminal links.
 OSC8 = "\033]8;;"

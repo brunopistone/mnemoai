@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "personal-ai-assistant"
+name = "mnemoai"
 version = "0.1.0"
 description = "Local agentic AI assistant built on LangGraph + MCP, with multi-provider model support."
 readme = "README.md"
@@ -47,13 +47,13 @@ dependencies = [
 dev = ["pytest>=8.0.0"]
 
 [project.scripts]
-# Installs the `personal-ai-assistant` terminal command (uv tool install . / pipx install .)
-personal-ai-assistant = "personal_ai_assistant.main:cli"
+# Installs the `mnemoai` terminal command (uv tool install . / pipx install .)
+mnemoai = "mnemoai.main:cli"
 
 [tool.hatch.build.targets.wheel]
-# src layout: the single package `personal_ai_assistant` lives under src/. hatch
+# src layout: the single package `mnemoai` lives under src/. hatch
 # ships the whole package (all .py plus the config.yaml.* onboarding templates
 # that sit inside utils/). The MCP server is launched as a subprocess via module
-# invocation (`python -m personal_ai_assistant.server.server`), so it just needs
+# invocation (`python -m mnemoai.server.server`), so it just needs
 # to be importable — no force-include of a script path required.
-packages = ["src/personal_ai_assistant"]
+packages = ["src/mnemoai"]
