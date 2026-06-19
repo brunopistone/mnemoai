@@ -203,6 +203,29 @@ def test_external_tools_appended_to_nonempty_routes():
     by_route = {k: [t.name for t in v] for k, v in agent.tools_by_route.items()}
     # External 'brave_search' reaches the 'code' route despite not being listed.
     assert "brave_search" in by_route["code"]
-    assert by_route["simple_qa"] == []          # no-tools route stays empty
+    assert by_route["simple_qa"] == []          # no tools (no meta tool present)
     assert "brave_search" in by_route["full"]   # full binds everything
     assert agent.external_tools and agent.external_tools[0].name == "brave_search"
+
+
+def test_memory_meta_tool_reachable_on_every_route():
+    # The 'memory' meta tool must be bound on EVERY route, including the
+    # no-tools simple_qa route (a "remember this" request classifies there),
+    # and must NOT be counted as an external tool.
+    from mnemoai.client.agent.agent import LangGraphAgent
+
+    class _StubModel:
+        def bind_tools(self, tools):
+            return self
+
+    tools = [_FakeTool("read_file"), _FakeTool("memory"), _FakeTool("brave_search")]
+    routes = {"simple_qa": [], "code": ["read_file"], "full": None}
+    agent = LangGraphAgent(
+        model=_StubModel(), tools=tools, router=object(), tool_routes=routes,
+    )
+    by_route = {k: [t.name for t in v] for k, v in agent.tools_by_route.items()}
+    assert by_route["simple_qa"] == ["memory"]   # meta-only on the no-tools route
+    assert "memory" in by_route["code"]
+    assert "memory" in by_route["full"]
+    # memory is a meta tool, not external; brave_search still is.
+    assert [t.name for t in agent.external_tools] == ["brave_search"]

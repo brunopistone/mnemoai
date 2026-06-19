@@ -143,6 +143,17 @@ def profile_dir(profile: str = None) -> Path:
     return d
 
 
+def memory_file_path(profile: str = None) -> Path:
+    """Path to the curated ``MEMORY.md`` (profile-scoped, not auto-created).
+
+    A small, bounded markdown file the agent maintains itself (Hermes-style) and
+    that is injected whole into the system prompt at session start. Profile-
+    scoped — shared across chat models — since it holds user/environment facts,
+    not model-specific learnings (those live under :func:`model_dir`).
+    """
+    return profile_dir(profile) / "MEMORY.md"
+
+
 def sanitize_model_name(name: str) -> str:
     """Make a model id safe to use as a directory name.
 

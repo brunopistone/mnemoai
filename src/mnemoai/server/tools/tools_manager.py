@@ -95,6 +95,7 @@ class ToolManager:
         from .fs_read import register_fs_read_tools
         from .fs_write import register_fs_write_tools
         from .git_safety import register_git_safety_tools
+        from .memory_tool import register_memory_tools
         from .plan_mode import register_plan_mode_tools
         from .rag import register_rag_tools
         from .todo_manager import register_todo_tools
@@ -114,6 +115,9 @@ class ToolManager:
 
         if self.get_vision_model() is not None:
             register_image_tools(mcp)
+
+        if config.get("ENABLE_MEMORY", True):
+            register_memory_tools(mcp)
 
         if config.get("ENABLE_RAG", False):
             register_rag_tools(mcp)
