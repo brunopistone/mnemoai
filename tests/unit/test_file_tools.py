@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-from server.tools.file_edit import register_edit_tools
-from server.tools.file_search import register_search_tools
+from personal_ai_assistant.server.tools.file_edit import register_edit_tools
+from personal_ai_assistant.server.tools.file_search import register_search_tools
 
 
 class _CapturingMCP:

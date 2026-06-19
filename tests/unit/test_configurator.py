@@ -11,7 +11,7 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-from utils.configurator import (
+from personal_ai_assistant.utils.configurator import (
     _get_field,
     _get_in_section,
     _get_top_level,
@@ -302,7 +302,7 @@ def test_prune_unsupported_params_mantle_to_ollama():
     # The switch that motivated this: a mantle section carries REGION +
     # API_PROTOCOL; switching to ollama must drop both (ollama doesn't consume
     # them) while NAME/TYPE survive.
-    from utils.configurator import _prune_unsupported_params
+    from personal_ai_assistant.utils.configurator import _prune_unsupported_params
 
     text = textwrap.dedent(
         """\
@@ -326,7 +326,7 @@ def test_prune_unsupported_params_mantle_to_ollama():
 def test_prune_unsupported_params_strips_inference_keys_too():
     # ollama -> bedrock must drop HOST/PORT *and* ollama-only inference params
     # (FREQUENCY_PENALTY), keeping bedrock-valid keys (REGION, TEMPERATURE).
-    from utils.configurator import _prune_unsupported_params
+    from personal_ai_assistant.utils.configurator import _prune_unsupported_params
 
     text = textwrap.dedent(
         """\
@@ -349,7 +349,7 @@ def test_prune_unsupported_params_strips_inference_keys_too():
 
 
 def test_prune_unknown_provider_is_noop():
-    from utils.configurator import _prune_unsupported_params
+    from personal_ai_assistant.utils.configurator import _prune_unsupported_params
 
     text = "MODEL_ID:\n  NAME: m\n  TYPE: weird\n  FOO: bar\n"
     assert _prune_unsupported_params(text, "MODEL_ID", "weird") == text
@@ -358,16 +358,24 @@ def test_prune_unknown_provider_is_noop():
 def test_provider_params_registry_shape():
     # Guard against drift: each section must advertise the provider set the
     # configurator/controllers expect, and supported_keys must report sane sets.
-    from models.provider_params import providers, supported_keys
+    from personal_ai_assistant.models.provider_params import providers, supported_keys
 
     assert set(providers("MODEL_ID")) == {
         "ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"
     }
-    assert set(providers("VISION_MODEL_ID")) == {"ollama", "bedrock", "mantle", "openai"}
-    assert set(providers("EMBED_MODEL_ID")) == {"ollama", "bedrock", "openai", "sagemaker"}
+    assert set(providers("VISION_MODEL_ID")) == {
+        "ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"
+    }
+    assert supported_keys("VISION_MODEL_ID", "litellm") == {
+        "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P"
+    }
+    assert set(providers("EMBED_MODEL_ID")) == {
+        "ollama", "bedrock", "openai", "sagemaker", "litellm"
+    }
     # Embeddings take no inference params — only connection keys.
     assert supported_keys("EMBED_MODEL_ID", "ollama") == {"HOST", "PORT"}
     assert supported_keys("EMBED_MODEL_ID", "openai") == set()
+    assert supported_keys("EMBED_MODEL_ID", "litellm") == {"API_BASE", "API_KEY"}
     # Unknown provider -> None (configurator then prunes nothing).
     assert supported_keys("MODEL_ID", "bogus") is None
 
@@ -376,7 +384,7 @@ def test_build_kwargs_matches_controller_logic():
     # build_kwargs must reproduce the controller init behavior: STOP included
     # only when truthy, others when not-None, mapped to the right client kwarg,
     # routed to main vs model_kwargs.
-    from models.provider_params import build_kwargs
+    from personal_ai_assistant.models.provider_params import build_kwargs
 
     class FakeController:
         temperature = 0.0      # not-None -> included (the bedrock truthy bug is gone)
@@ -401,7 +409,7 @@ def test_build_kwargs_matches_controller_logic():
 
 
 def test_build_kwargs_routes_to_model_kwargs():
-    from models.provider_params import build_kwargs
+    from personal_ai_assistant.models.provider_params import build_kwargs
 
     class FakeController:
         temperature = 0.5
@@ -473,3 +481,119 @@ def test_section_summary_includes_region_and_protocol():
     )
     summary = _section_summary(text, "MODEL_ID")
     assert summary == "mantle / anthropic.claude-haiku-4-5 (us-east-1, anthropic)"
+
+
+# --- /config can create OpenAI / SageMaker / LiteLLM (base-template transform) ---
+
+
+def _run_build(provider, default_model, answers):
+    """Drive _build_config against the base template with scripted answers."""
+    import builtins
+    from personal_ai_assistant.utils import configurator as C
+
+    text = (C._templates_dir() / "config.yaml.example").read_text()
+    it = iter(answers)
+    builtins.input = lambda *a, **k: next(it)
+    return yaml.safe_load(
+        C._build_config(provider, default_model, text, "config.yaml.example")
+    )
+
+
+def test_config_openai_transforms_base_template():
+    d = _run_build(
+        "openai", "gpt-5-mini",
+        ["gpt-5-mini", "none", "65536", "y", "gpt-5-mini", "none", "alice", "",
+         "y", "y", "y", "y", "y", "y", "y"],
+    )
+    m = d["MODEL_ID"]
+    assert m["TYPE"] == "openai" and m["NAME"] == "gpt-5-mini"
+    # Ollama-only keys pruned; OpenAI-valid TEMPERATURE/PRESENCE_PENALTY kept.
+    for bad in ("HOST", "PORT", "TOP_K", "FREQUENCY_PENALTY"):
+        assert bad not in m
+    assert d["VISION_MODEL_ID"]["TYPE"] == "openai"
+
+
+def test_config_sagemaker_sets_region_and_input_format():
+    d = _run_build(
+        "sagemaker", "my-endpoint",
+        ["my-endpoint", "eu-west-1", "huggingface", "none", "65536", "n", "bob", "",
+         "y", "y", "y", "y", "y", "y", "y"],
+    )
+    m = d["MODEL_ID"]
+    assert m["TYPE"] == "sagemaker"
+    assert m["REGION"] == "eu-west-1" and m["INPUT_FORMAT"] == "huggingface"
+    assert "HOST" not in m and "PORT" not in m
+
+
+def test_config_litellm_sets_api_base_and_key():
+    d = _run_build(
+        "litellm", "openai/gpt-4o",
+        ["openai/gpt-4o", "http://localhost:8000/v1", "sk-xyz", "none", "65536", "n",
+         "carol", "", "y", "y", "y", "y", "y", "y", "y"],
+    )
+    m = d["MODEL_ID"]
+    assert m["TYPE"] == "litellm"
+    assert m["API_BASE"] == "http://localhost:8000/v1" and m["API_KEY"] == "sk-xyz"
+    assert "HOST" not in m
+
+
+def test_config_providers_menu_has_all_six():
+    from personal_ai_assistant.utils.configurator import _PROVIDERS
+
+    types = {v[0] for v in _PROVIDERS.values()}
+    assert types == {"ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"}
+
+
+# --- Shared connection-prompt helper: /config and /model ask the same params ---
+
+
+def test_prompt_provider_connection_sagemaker_asks_region_and_format(monkeypatch):
+    from personal_ai_assistant.utils import configurator as C
+
+    answers = iter(["eu-west-1", "huggingface"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    text = "MODEL_ID:\n  NAME: ep\n  TYPE: sagemaker\n"
+    out, conn = C._prompt_provider_connection(text, "MODEL_ID", "sagemaker")
+    d = yaml.safe_load(out)
+    assert d["MODEL_ID"]["REGION"] == "eu-west-1"
+    assert d["MODEL_ID"]["INPUT_FORMAT"] == "huggingface"
+    assert conn["REGION"] == "eu-west-1"
+
+
+def test_prompt_provider_connection_litellm_asks_base_and_key(monkeypatch):
+    from personal_ai_assistant.utils import configurator as C
+
+    answers = iter(["http://localhost:8000/v1", "sk-abc"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    text = "MODEL_ID:\n  NAME: openai/gpt-4o\n  TYPE: litellm\n"
+    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "litellm")
+    d = yaml.safe_load(out)
+    assert d["MODEL_ID"]["API_BASE"] == "http://localhost:8000/v1"
+    assert d["MODEL_ID"]["API_KEY"] == "sk-abc"
+
+
+def test_prompt_provider_connection_openai_asks_nothing(monkeypatch):
+    # OpenAI is env-based (OPENAI_API_KEY); no connection keys to prompt.
+    from personal_ai_assistant.utils import configurator as C
+
+    def _no_input(*a, **k):
+        raise AssertionError("OpenAI should not prompt for connection keys")
+
+    monkeypatch.setattr("builtins.input", _no_input)
+    text = "MODEL_ID:\n  NAME: gpt-5-mini\n  TYPE: openai\n"
+    out, conn = C._prompt_provider_connection(text, "MODEL_ID", "openai")
+    assert conn == {}
+    assert "HOST" not in yaml.safe_load(out)["MODEL_ID"]
+
+
+def test_prompt_provider_connection_embeddings_skips_input_format(monkeypatch):
+    # INPUT_FORMAT is a SageMaker *chat* key; embeddings sagemaker only needs REGION.
+    from personal_ai_assistant.utils import configurator as C
+
+    answers = iter(["us-west-2"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    text = "RAG:\n  EMBED_MODEL_ID:\n    NAME: e\n    TYPE: sagemaker\n"
+    out, _ = C._prompt_provider_connection(text, "EMBED_MODEL_ID", "sagemaker")
+    d = yaml.safe_load(out)
+    assert d["RAG"]["EMBED_MODEL_ID"]["REGION"] == "us-west-2"
+    assert "INPUT_FORMAT" not in d["RAG"]["EMBED_MODEL_ID"]

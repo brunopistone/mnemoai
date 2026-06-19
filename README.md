@@ -98,96 +98,78 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 ## 📖 Project Structure
 
 ```yaml
-ai-assistant/
-├── main.py                                 # Entry point
+personal-ai-assistant/                      # repo root
 ├── pyproject.toml                          # Packaging + `personal-ai-assistant` CLI entry point
 ├── requirements.txt                        # Dependencies
 ├── README.md                               # This file
-│
-├── client/                                 # Client layer
-│   ├── client.py                           # LangGraph client
-│   ├── agent.py                            # LangGraph agent with streaming
-│   ├── router.py                           # Query classifier and routing
-│   ├── orchestrator.py                     # Task decomposition and worker orchestration
-│   ├── reasoning_utils.py                  # Toggle reasoning/thinking for auxiliary LLM calls
-│   ├── mcp_tool_wrapper.py                 # MCP to LangChain tool adapter
-│   ├── ui/                                 # User interface
-│   │   ├── chat_interface.py               # Chat loop
-│   │   └── spinner.py                      # Loading animations
-│   ├── managers/                           # Business logic
-│   │   ├── agent_conversation_manager.py   # Conversation state and token tracking
-│   │   └── user_profile_manager.py         # User profiling and learning
-│   └── memory/                             # Memory systems
-│       ├── episodic_memory.py              # Episodic memory manager
-│       ├── reflector.py                    # ACE Reflector - extracts strategies
-│       ├── playbook_store.py               # ACE Playbook - stores learned strategies
-│       ├── faiss_store.py                  # FAISS episodic store
-│       └── chroma_store.py                 # ChromaDB episodic store
-│
-├── server/                                 # MCP server layer
-│   ├── server.py                           # FastMCP server
-│   └── tools/                              # Tool implementations
-│       ├── tools_manager.py                # Tool registration
-│       ├── fs_read.py                      # File reading
-│       ├── fs_write.py                     # File writing (with confirmation)
-│       ├── file_edit.py                    # Precise file editing
-│       ├── execute_bash.py                 # Bash execution
-│       ├── file_search.py                  # Fast glob and grep search
-│       ├── todo_manager.py                 # Todo list management
-│       ├── error_handler.py                # Standardized error handling
-│       ├── git_safety.py                   # Git operations with safety checks
-│       ├── plan_mode.py                    # Implementation planning workflow
-│       ├── background_tasks.py             # Background task execution
-│       ├── web_crawler.py                  # Web crawler
-│       ├── web_search.py                   # Web search
-│       ├── describe_image.py               # Image analysis
-│       ├── rag_tool.py                     # RAG tools registration
-│       ├── rag/                            # RAG system
-│       │   ├── session.py                  # Session management with hybrid search
-│       │   ├── vector_store_controller.py  # Store abstraction layer
-│       │   ├── chroma_store.py             # ChromaDB implementation
-│       │   └── faiss_store.py              # FAISS implementation
-│       └── readers/                        # File readers
-│           ├── line_reader.py              # Text file reader
-│           ├── directory_reader.py         # Directory listing
-│           ├── search_reader.py            # File search
-│           ├── csv_reader.py               # CSV file reader
-│           ├── json_reader.py              # JSON file reader
-│           ├── pdf_reader.py               # PDF reader with RAG integration
-│           ├── docx_reader.py              # DOCX reader with RAG integration
-│           └── chunking_helper.py          # Document chunking utilities
-│
-├── models/                                 # Model layer
-│   ├── base_model_controller.py            # Minimal shared base for the controllers
-│   ├── provider_params.py                  # Single source of truth: per-provider config keys
-│   ├── llm_controller.py                   # LangChain LLM initialization
-│   ├── vision_model_controller.py          # Vision model initialization
-│   ├── embeddings_controller.py            # Embeddings initialization
-│   ├── mantle_factory.py                   # Bedrock Mantle model factory (multi-protocol)
-│   └── classes/
-│       ├── chat_ollama_wrapper.py           # Ollama model with penalty support
-│       └── sagemaker_chat.py               # SageMaker Handler class for Langchain
-│
-├── utils/                                  # Utilities
-│   ├── config.py                           # Config loader
-│   ├── configurator.py                     # First-run setup + /config & /model interactive flows
-│   ├── paths.py                            # Central path helper (single ~/.personal-ai-assistant home)
-│   ├── config.yaml.example                 # Config template (copy to config.yaml; also .bedrock / .bedrock.mantle)
-│   ├── logger.py                           # Logging utilities
-│   ├── bm25.py                             # Lightweight BM25 (hybrid search)
-│   └── formatting/                         # Text formatting
-│       ├── code_formatter.py               # Code syntax highlighting
-│       ├── url_formatter.py                # URL highlighting
-│       └── response_parser.py              # Response processing
-│
-├── tests/                                  # Test suite (pytest)
-│   ├── conftest.py                         # Shared path setup
-│   ├── unit/                               # Fast, deterministic, no deps
-│   └── integration/                        # Live agent + Ollama + MCP
-│
 ├── pytest.ini                              # Pytest configuration
 ├── requirements-dev.txt                    # Dev/test dependencies
 │
+├── src/personal_ai_assistant/              # The single package (src layout)
+│   ├── __init__.py
+│   ├── __main__.py                         # `python -m personal_ai_assistant`
+│   ├── main.py                             # Entry point (cli())
+│   │
+│   ├── client/                             # Client layer
+│   │   ├── client.py                       # LangGraphClient facade (lifecycle, MCP, query)
+│   │   ├── mcp_tool_wrapper.py             # MCP to LangChain tool adapter
+│   │   ├── agent/                          # Agent loop
+│   │   │   ├── agent.py                    # LangGraph StateGraph agent with streaming
+│   │   │   ├── router.py                   # Query classifier and routing
+│   │   │   ├── orchestrator.py             # Task decomposition and worker orchestration
+│   │   │   └── reasoning_utils.py          # Reasoning/thinking helpers for aux LLM calls
+│   │   ├── ui/                             # User interface
+│   │   │   ├── chat_interface.py           # Chat loop
+│   │   │   └── spinner.py                  # Loading animations
+│   │   ├── managers/                       # Business logic
+│   │   │   ├── agent_conversation_manager.py  # Conversation state and token tracking
+│   │   │   └── user_profile_manager.py     # User profiling and learning
+│   │   └── memory/                         # Memory systems
+│   │       ├── episodic_memory.py          # Episodic memory manager
+│   │       ├── reflector.py                # ACE Reflector - extracts strategies
+│   │       ├── playbook_store.py           # ACE Playbook - stores learned strategies
+│   │       ├── faiss_store.py              # FAISS episodic store
+│   │       └── chroma_store.py             # ChromaDB episodic store
+│   │
+│   ├── server/                             # MCP server layer
+│   │   ├── server.py                       # FastMCP server (run as a subprocess)
+│   │   ├── error_handler.py                # @tool_error_handler decorator (shared)
+│   │   └── tools/                          # Tool implementations
+│   │       ├── tools_manager.py            # Tool registration
+│   │       ├── fs_read.py / fs_write.py / file_edit.py / file_search.py
+│   │       ├── execute_bash.py / git_safety.py / todo_manager.py / plan_mode.py
+│   │       ├── background_tasks.py / web_crawler.py / web_search.py
+│   │       ├── describe_image.py / rag_tool.py
+│   │       ├── rag/                        # RAG system (session, vector_store_controller, stores)
+│   │       └── readers/                    # File readers (csv/json/pdf/docx/line/dir/search + chunking)
+│   │
+│   ├── models/                             # Model layer
+│   │   ├── provider_params.py              # Single source of truth: per-provider config keys
+│   │   ├── mantle_factory.py               # Bedrock Mantle model factory (multi-protocol)
+│   │   ├── controllers/                    # Provider-dispatching controllers
+│   │   │   ├── base_model_controller.py    # Minimal shared base
+│   │   │   ├── llm_controller.py           # LLM initialization
+│   │   │   ├── vision_model_controller.py  # Vision model initialization
+│   │   │   └── embeddings_controller.py    # Embeddings initialization
+│   │   └── chat_models/                    # Concrete LangChain ChatModel subclasses
+│   │       ├── chat_ollama_wrapper.py      # Ollama model with penalty support
+│   │       └── sagemaker_chat.py           # SageMaker ChatModel for LangChain
+│   │
+│   └── utils/                              # Utilities
+│       ├── config.py                       # Config loader
+│       ├── configurator.py                 # First-run setup + /config & /model flows
+│       ├── paths.py                        # Central path helper (~/.personal-ai-assistant)
+│       ├── logger.py                       # Logging utilities
+│       ├── bm25.py                         # Lightweight BM25 (hybrid search)
+│       ├── config.yaml.example             # Config templates (also .bedrock / .bedrock.mantle)
+│       └── formatting/                     # Text formatting (code/url/response)
+│
+├── tests/                                  # Test suite (pytest)
+│   ├── conftest.py                         # Puts src/ on sys.path
+│   ├── unit/                               # Fast, deterministic, no deps
+│   └── integration/                        # Live agent + Ollama + MCP
+│
+├── docs/                                   # ARCHITECTURE.md (detailed file map)
 └── bash/                                   # Helper scripts
     ├── system-command-app/                 # `personal-ai-assistant` wrapper script
     ├── ollama-freeup-vram/                 # VRAM management
@@ -285,7 +267,14 @@ To upgrade after pulling changes: `uv tool install --force .`. To remove: `uv to
 
 #### Alternative: run from a checkout
 
-Set up an environment (choose one), which lets you run the assistant directly from the repo with `python main.py` while editing the source live:
+Set up an environment (choose one), which lets you run the assistant directly from the repo while editing the source live. Because the code uses a `src/` layout, run it as a module with `src/` on the path:
+
+```bash
+PYTHONPATH=src python -m personal_ai_assistant            # verbose
+PYTHONPATH=src python -m personal_ai_assistant --no-verbose
+```
+
+(Or `pip install -e .` once, then just `personal-ai-assistant`.)
 
 **Option A: venv**
 
@@ -312,7 +301,7 @@ pip install -r requirements.txt
 
 **Get the `personal-ai-assistant` command for a checkout install**
 
-So you don't have to `cd` into the repo and run `python main.py` every time, symlink the bundled wrapper script onto your PATH. It activates the project environment, then runs `main.py`:
+So you don't have to `cd` into the repo every time, symlink the bundled wrapper script onto your PATH. It activates the project environment, then runs the app (`PYTHONPATH=src python -m personal_ai_assistant`):
 
 ```bash
 chmod +x bash/system-command-app/personal-ai-assistant-wrapper.sh
@@ -365,36 +354,36 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
-**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle) plus chat model, connection details (for Mantle, the AWS region and API protocol — chat_completions / responses / anthropic), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.personal-ai-assistant/config.yaml` from the matching template. Just run:
+**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle / OpenAI / Amazon SageMaker AI / LiteLLM) plus chat model, connection details (Ollama host/port; AWS region; for Mantle the API protocol — chat_completions / responses / anthropic; SageMaker region + input format; LiteLLM API base/key; OpenAI uses `OPENAI_API_KEY`), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.personal-ai-assistant/config.yaml` from the matching template. Just run:
 
 ```bash
-personal-ai-assistant      # or: python main.py  (from a checkout)
+personal-ai-assistant      # or, from a checkout: PYTHONPATH=src python -m personal_ai_assistant
 ```
 
 and follow the prompts. You can re-edit the generated file any time to fine-tune models, prompts, and feature toggles.
 
-**Manual setup.** Prefer to write it yourself? Copy a template:
+**Manual setup.** Prefer to write it yourself? Copy a template (they live inside the package, under `src/personal_ai_assistant/utils/`):
 
 ```bash
-cp utils/config.yaml.example utils/config.yaml
+cp src/personal_ai_assistant/utils/config.yaml.example src/personal_ai_assistant/utils/config.yaml
 ```
 
-Edit `utils/config.yaml` with your settings. This file is git-ignored to protect your API keys. At minimum, configure your LLM provider.
+Edit that `config.yaml` with your settings. This file is git-ignored to protect your API keys. At minimum, configure your LLM provider.
 
 The config file is resolved in this order (first match wins):
 
 1. `$PERSONAL_AI_ASSISTANT_CONFIG` — explicit path (handy for switching between provider configs)
 2. `~/.personal-ai-assistant/config.yaml` — **user config used by the installed `personal-ai-assistant` command**
-3. `./utils/config.yaml` — repo-relative fallback (used when running `python main.py` from a checkout)
+3. `<package>/utils/config.yaml` — package-relative fallback (used when running from a checkout)
 
 If you installed the CLI with `uv tool install` (the recommended option), put your config in the user location instead:
 
 ```bash
 mkdir -p ~/.personal-ai-assistant
-cp utils/config.yaml.example ~/.personal-ai-assistant/config.yaml
+cp src/personal_ai_assistant/utils/config.yaml.example ~/.personal-ai-assistant/config.yaml
 # or, for Bedrock / Mantle:
-# cp utils/config.yaml.bedrock.example        ~/.personal-ai-assistant/config.yaml
-# cp utils/config.yaml.bedrock.mantle.example ~/.personal-ai-assistant/config.yaml
+# cp src/personal_ai_assistant/utils/config.yaml.bedrock.example        ~/.personal-ai-assistant/config.yaml
+# cp src/personal_ai_assistant/utils/config.yaml.bedrock.mantle.example ~/.personal-ai-assistant/config.yaml
 ```
 
 At minimum, configure your LLM provider:
@@ -440,7 +429,7 @@ personal-ai-assistant
 If you set up a checkout and symlinked the wrapper, the same command works. Otherwise, run it from the repo directory:
 
 ```bash
-python main.py
+PYTHONPATH=src python -m personal_ai_assistant
 ```
 
 See `bash/system-command-app/README.md` for details on the wrapper script.
@@ -500,8 +489,9 @@ Assistant: [Uses fs_read tool and displays content]
 Control thinking process visibility:
 
 ```bash
-python main.py              # Verbose mode (shows thinking)
-python main.py --no-verbose # Hide thinking process
+personal-ai-assistant              # Verbose mode (shows thinking)
+personal-ai-assistant --no-verbose # Hide thinking process
+# from a checkout: PYTHONPATH=src python -m personal_ai_assistant [--no-verbose]
 ```
 
 ### Component Breakdown
@@ -544,6 +534,7 @@ The client manages the conversation flow and user interaction.
 MCP server that provides tools to the LLM.
 
 - **`server.py`**: FastMCP server initialization
+- **`error_handler.py`**: `@tool_error_handler` decorator (shared by all tools)
 - **`tools/`**: Tool implementations
   - `tools_manager.py`: Centralized tool registration and utilities
   - `fs_read.py`: File reading (text, CSV, JSON, PDF, DOCX)
@@ -552,7 +543,6 @@ MCP server that provides tools to the LLM.
   - `execute_bash.py`: Shell command execution with intelligent error handling
   - `file_search.py`: Fast file/content search (glob patterns + ripgrep)
   - `todo_manager.py`: Todo list management for multi-step tasks
-  - `error_handler.py`: Standardized error handling decorator for all tools
   - `web_search.py`: Brave Search integration
   - `web_crawler.py`: Web page content extraction with RAG integration
   - `describe_image.py`: Vision model image analysis
@@ -572,14 +562,14 @@ MCP server that provides tools to the LLM.
 
 Model controllers and custom implementations.
 
-- **Controllers** (centralized model initialization):
+- `provider_params.py`: Single source of truth for the config keys each provider consumes (per modality); controllers build their client kwargs from it via `build_kwargs`, and `/model` prunes unsupported keys from it
+- `mantle_factory.py`: Bedrock Mantle factory (chat_completions / responses / anthropic protocols), shared by the LLM and vision controllers
+- **`controllers/`** (provider-dispatching model initialization):
   - `base_model_controller.py`: Minimal shared base type for the controllers
-  - `provider_params.py`: Single source of truth for the config keys each provider consumes (per modality); controllers build their client kwargs from it via `build_kwargs`, and `/model` prunes unsupported keys from it
   - `llm_controller.py`: LLM model initialization (Bedrock, Mantle, Ollama, OpenAI, SageMaker AI, LiteLLM)
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
-  - `mantle_factory.py`: Bedrock Mantle factory (chat_completions / responses / anthropic protocols), shared by the LLM and vision controllers
-- **Custom implementations** (`classes/`):
+- **`chat_models/`** (concrete LangChain `ChatModel` subclasses):
   - `chat_ollama_wrapper.py`: Extends ChatOllama with `presence_penalty` and `frequency_penalty` support
   - `sagemaker_chat.py`: Full LangChain `BaseChatModel` for SageMaker endpoints (streaming, tool calling, reasoning)
 
@@ -1066,14 +1056,25 @@ VISION_MODEL_ID:
   REASONING_EFFORT: medium
 ```
 
-For SageMaker AI:
+For SageMaker AI (endpoint must serve a vision-capable model accepting the OpenAI image format):
 
 ```yaml
 VISION_MODEL_ID:
   NAME: your-endpoint-name
   TYPE: sagemaker
   REGION: us-east-1
+  INPUT_FORMAT: openai_chat
   TEMPERATURE: 0.3
+```
+
+For LiteLLM (any of its vision-capable models):
+
+```yaml
+VISION_MODEL_ID:
+  NAME: openai/gpt-4o # provider-prefixed model id
+  TYPE: litellm
+  API_BASE: http://localhost:4000 # optional (proxy / self-hosted)
+  API_KEY: your-api-key # optional (else the provider's env var)
 ```
 
 ### Model Parameters
@@ -1130,8 +1131,11 @@ exactly what each provider's init path forwards. (`mantle` reads
 | `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock                                             |
 | `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai (also maps to Bedrock thinking budget)       |
 
-`VISION_MODEL_ID` accepts a subset: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` on
-bedrock/ollama/openai/mantle, plus `TOP_K`/`STOP` on ollama.
+`VISION_MODEL_ID` supports the same six providers as `MODEL_ID`. It accepts a
+subset of params: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` across providers, plus
+`TOP_K`/`STOP` on ollama and sagemaker. Connection keys follow the provider
+(host/port, region, Mantle protocol, SageMaker `INPUT_FORMAT`, LiteLLM
+`API_BASE`/`API_KEY`).
 
 > **Provider-appropriate tuning matters.** Newer Claude and GPT models reject
 > `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K` are largely
@@ -1320,6 +1324,17 @@ RAG:
     NAME: your-endpoint-name
     TYPE: sagemaker
     REGION: us-east-1
+```
+
+For LiteLLM (any of its 100+ providers via one OpenAI-style API):
+
+```yaml
+RAG:
+  EMBED_MODEL_ID:
+    NAME: openai/text-embedding-3-small # provider-prefixed model id
+    TYPE: litellm
+    API_BASE: http://localhost:4000 # optional (proxy / self-hosted)
+    API_KEY: your-api-key # optional (else the provider's env var)
 ```
 
 **Vector Store Options:**
@@ -1838,8 +1853,8 @@ See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for 
 Logs are output to stderr with configurable level:
 
 ```bash
-LOG_LEVEL=DEBUG python main.py  # Detailed logs
-LOG_LEVEL=INFO python main.py   # Normal logs (default)
+LOG_LEVEL=DEBUG personal-ai-assistant  # Detailed logs
+LOG_LEVEL=INFO personal-ai-assistant   # Normal logs (default)
 ```
 
 ## 📄 License

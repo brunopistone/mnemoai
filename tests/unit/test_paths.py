@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from utils import paths
+from personal_ai_assistant.utils import paths
 
 
 @pytest.fixture
