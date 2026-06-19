@@ -55,6 +55,8 @@ class VisionModelController(BaseModelController):
             self._initialize_ollama_model()
         elif self.model_type == "openai":
             self._initialize_openai_model()
+        elif self.model_type == "anthropic":
+            self._initialize_anthropic_model()
         elif self.model_type == "sagemaker":
             self._initialize_sagemaker_model()
         elif self.model_type == "litellm":
@@ -115,6 +117,32 @@ class VisionModelController(BaseModelController):
         }
 
         self.model = ChatOpenAI(**kwargs)
+
+    def _initialize_anthropic_model(self) -> None:
+        """Initialize a direct Anthropic API vision model via ChatAnthropic.
+
+        Claude is multimodal, so the OpenAI-style ``image_url`` content list
+        from ``format_request`` is accepted directly. Uses ``ANTHROPIC_API_KEY``
+        (env) or the config ``API_KEY``; ``ENDPOINT_URL`` overrides the base URL.
+        Distinct from the Mantle ``anthropic`` protocol (Claude via Bedrock).
+        """
+        from langchain_anthropic import ChatAnthropic
+
+        logger.debug("Initializing Anthropic vision model via LangChain...")
+
+        passthrough, _ = build_kwargs("VISION_MODEL_ID", "anthropic", self)
+        # ChatAnthropic requires max_tokens; default when not configured.
+        passthrough.setdefault("max_tokens", self.max_tokens or 4096)
+        kwargs = {
+            "model": self.model_name,
+            **passthrough,
+        }
+        if self.api_key:
+            kwargs["api_key"] = self.api_key
+        if self.endpoint_url:
+            kwargs["base_url"] = self.endpoint_url
+
+        self.model = ChatAnthropic(**kwargs)
 
     def _initialize_mantle_model(self) -> None:
         """Initialize a Bedrock Mantle vision model.

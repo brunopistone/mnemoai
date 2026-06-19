@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). The client spawns an MCP server as a subprocess, routes queries through a StateGraph (classify → orchestrate/call_model ↔ execute_tools), and persists episodic memory, learned strategies (ACE Playbook), and user profiles across sessions. Supports Ollama, AWS Bedrock, OpenAI, SageMaker, and LiteLLM as LLM providers.
+Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). The client spawns an MCP server as a subprocess, routes queries through a StateGraph (classify → orchestrate/call_model ↔ execute_tools), and persists episodic memory, learned strategies (ACE Playbook), and user profiles across sessions. Supports Ollama, AWS Bedrock, OpenAI, Anthropic, SageMaker, and LiteLLM as LLM providers.
 
 ## Quick Commands
 
@@ -46,22 +46,22 @@ Paths below are relative to `src/mnemoai/` (e.g. `client/` is
 also runnable as `python -m mnemoai`. `tests/`, `docs/`, `bash/`
 stay at the repo root.
 
-| Directory                | Role                                                                      |
-| ------------------------ | ------------------------------------------------------------------------- |
-| `client/`                | LangGraphClient facade, MCP bridge                                        |
-| `client/agent/`          | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils |
-| `client/memory/`         | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                 |
-| `client/managers/`       | Conversation token management, user profile learning                      |
-| `client/ui/`             | prompt_toolkit chat loop, spinner                                         |
-| `server/`                | FastMCP server entry point (run as a subprocess)                          |
-| `server/tools/`          | Tool implementations (bash, file ops, git, web, RAG, vision, planning)    |
-| `server/tools/rag/`      | Session-scoped vector store, hybrid search engine                         |
-| `server/tools/readers/`  | File format readers (PDF, DOCX, CSV, JSON, directory, line, search)       |
-| `models/`                | `provider_params` registry + `mantle_factory`                             |
-| `models/controllers/`    | Provider-dispatching LLM/vision/embeddings controllers                    |
-| `models/chat_models/`    | Concrete LangChain ChatModel subclasses (ChatOllamaWrapper, ChatSageMaker)|
-| `utils/`                 | Config singleton, configurator, paths, logger, BM25, text formatting      |
-| `bash/` (repo root)      | Shell scripts (system command wrapper, Ollama VRAM management)            |
+| Directory               | Role                                                                       |
+| ----------------------- | -------------------------------------------------------------------------- |
+| `client/`               | LangGraphClient facade, MCP bridge                                         |
+| `client/agent/`         | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils  |
+| `client/memory/`        | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                  |
+| `client/managers/`      | Conversation token management, user profile learning                       |
+| `client/ui/`            | prompt_toolkit chat loop, spinner                                          |
+| `server/`               | FastMCP server entry point (run as a subprocess)                           |
+| `server/tools/`         | Tool implementations (bash, file ops, git, web, RAG, vision, planning)     |
+| `server/tools/rag/`     | Session-scoped vector store, hybrid search engine                          |
+| `server/tools/readers/` | File format readers (PDF, DOCX, CSV, JSON, directory, line, search)        |
+| `models/`               | `provider_params` registry + `mantle_factory`                              |
+| `models/controllers/`   | Provider-dispatching LLM/vision/embeddings controllers                     |
+| `models/chat_models/`   | Concrete LangChain ChatModel subclasses (ChatOllamaWrapper, ChatSageMaker) |
+| `utils/`                | Config singleton, configurator, paths, logger, BM25, text formatting       |
+| `bash/` (repo root)     | Shell scripts (system command wrapper, Ollama VRAM management)             |
 
 ## Detailed File Map
 
@@ -86,7 +86,7 @@ Used in both episodic memory and RAG. Pattern: get top-N candidates from vector 
 
 ### Multi-provider LLM abstraction (`models/controllers/llm_controller.py`)
 
-`LangChainLLMController.initialize_model()` dispatches on `MODEL_ID.TYPE` (bedrock/mantle/ollama/openai/sagemaker/litellm). Each provider's supported config keys / client-kwarg mapping live in `models/provider_params.py` (consumed via `build_kwargs`).
+`LangChainLLMController.initialize_model()` dispatches on `MODEL_ID.TYPE` (bedrock/mantle/ollama/openai/anthropic/sagemaker/litellm). Each provider's supported config keys / client-kwarg mapping live in `models/provider_params.py` (consumed via `build_kwargs`). Note: `anthropic` is the direct Anthropic API (`ChatAnthropic`, `ANTHROPIC_API_KEY`), distinct from Mantle's `anthropic` _protocol_ (Claude via Bedrock).
 
 ### Bedrock Mantle (`models/mantle_factory.py`)
 
@@ -117,20 +117,20 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 `utils/config.yaml` (gitignored). Copy from one of the provided templates:
 `utils/config.yaml.example` (Ollama/local), `utils/config.yaml.bedrock.example` (standard Bedrock), or `utils/config.yaml.bedrock.mantle.example` (Bedrock Mantle). Each is a complete drop-in config for that provider — keep them in sync when adding shared config keys.
 
-| Section               | Purpose                                                                                                                                                                                                 |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MODEL_ID`            | LLM provider/`TYPE` (bedrock, mantle, ollama, openai, sagemaker, litellm), model name, inference params. Mantle adds `API_PROTOCOL` (chat_completions/responses/anthropic) and optional `ENDPOINT_URL`. |
-| `VISION_MODEL_ID`     | Vision model for image description (same provider types as `MODEL_ID`)                                                                                                                                  |
-| `RAG`                 | Embedding model, chunk size, hybrid weights, vector store type                                                                                                                                          |
-| `EPISODIC_MEMORY`     | Thresholds, search weights, success/error markers                                                                                                                                                       |
-| `PLAYBOOK`            | Max entries, similarity threshold, injection limit                                                                                                                                                      |
-| `LLM`                 | Retry config, thinking toggle, agent `RECURSION_LIMIT`, `MCP_CALL_TIMEOUT`, and compaction (`KEEP_RECENT_MESSAGES`, `MANUAL_COMPACT_KEEP_RECENT`, `KEEP_RECENT_TOKEN_BUDGET`)                           |
-| `PROFILE`             | User name (data isolation), profiling toggle                                                                                                                                                            |
-| `BRAVE_API_KEY`       | Web search API key                                                                                                                                                                                      |
-| `SYSTEM_PROMPT`       | Full system prompt (XML-structured)                                                                                                                                                                     |
-| `ROUTING_PROMPT`      | Query classifier prompt                                                                                                                                                                                 |
-| `ORCHESTRATOR_PROMPT` | Task decomposition prompt                                                                                                                                                                               |
-| `AGGREGATOR_PROMPT`   | Result synthesis prompt                                                                                                                                                                                 |
+| Section               | Purpose                                                                                                                                                                                                                                                                                             |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MODEL_ID`            | LLM provider/`TYPE` (bedrock, mantle, ollama, openai, anthropic, sagemaker, litellm), model name, inference params. Mantle adds `API_PROTOCOL` (chat_completions/responses/anthropic) and optional `ENDPOINT_URL`. Anthropic uses `API_KEY`/`ANTHROPIC_API_KEY` + optional `ENDPOINT_URL` base URL. |
+| `VISION_MODEL_ID`     | Vision model for image description (same provider types as `MODEL_ID`)                                                                                                                                                                                                                              |
+| `RAG`                 | Embedding model, chunk size, hybrid weights, vector store type                                                                                                                                                                                                                                      |
+| `EPISODIC_MEMORY`     | Thresholds, search weights, success/error markers                                                                                                                                                                                                                                                   |
+| `PLAYBOOK`            | Max entries, similarity threshold, injection limit                                                                                                                                                                                                                                                  |
+| `LLM`                 | Retry config, thinking toggle, agent `RECURSION_LIMIT`, `MCP_CALL_TIMEOUT`, and compaction (`KEEP_RECENT_MESSAGES`, `MANUAL_COMPACT_KEEP_RECENT`, `KEEP_RECENT_TOKEN_BUDGET`)                                                                                                                       |
+| `PROFILE`             | User name (data isolation), profiling toggle                                                                                                                                                                                                                                                        |
+| `BRAVE_API_KEY`       | Web search API key                                                                                                                                                                                                                                                                                  |
+| `SYSTEM_PROMPT`       | Full system prompt (XML-structured)                                                                                                                                                                                                                                                                 |
+| `ROUTING_PROMPT`      | Query classifier prompt                                                                                                                                                                                                                                                                             |
+| `ORCHESTRATOR_PROMPT` | Task decomposition prompt                                                                                                                                                                                                                                                                           |
+| `AGGREGATOR_PROMPT`   | Result synthesis prompt                                                                                                                                                                                                                                                                             |
 
 **Feature toggles** (all boolean in config root):
 `ENABLE_RAG`, `ENABLE_EPISODIC_MEMORY`, `ENABLE_PLAYBOOK`, `ENABLE_WEB_SEARCH`, `ENABLE_WEB_CRAWL`, `ENABLE_ROUTING`, `ENABLE_ORCHESTRATION`

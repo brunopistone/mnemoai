@@ -63,6 +63,8 @@ class LangChainLLMController(BaseModelController):
             self._initialize_ollama_model(callbacks)
         elif self.model_type == "openai":
             self._initialize_openai_model(callbacks)
+        elif self.model_type == "anthropic":
+            self._initialize_anthropic_model(callbacks)
         elif self.model_type == "sagemaker":
             self._initialize_sagemaker_model(callbacks)
         elif self.model_type == "litellm":
@@ -202,6 +204,59 @@ class LangChainLLMController(BaseModelController):
             kwargs["model_kwargs"] = model_kwargs
 
         self.model = ChatOpenAI(**kwargs)
+
+    def _initialize_anthropic_model(self, callbacks: list = None) -> None:
+        """Initialize a direct Anthropic API model via langchain-anthropic.
+
+        Talks to ``api.anthropic.com`` (or a custom ``ENDPOINT_URL``) using
+        ``ANTHROPIC_API_KEY`` (env) or the config ``API_KEY``. This is distinct
+        from the Bedrock Mantle ``anthropic`` *protocol*, which reaches Claude
+        through Bedrock. STOP maps to Anthropic's ``stop_sequences``; extended
+        thinking is enabled via REASONING/REASONING_EFFORT/THINKING_TOKENS.
+        """
+        from langchain_anthropic import ChatAnthropic
+
+        logger.info("Initializing Anthropic model via LangChain...")
+
+        passthrough, _ = build_kwargs("MODEL_ID", "anthropic", self)
+        # ChatAnthropic requires max_tokens; default when not configured.
+        passthrough.setdefault("max_tokens", self.max_tokens or 4096)
+        kwargs = {
+            "model": self.model_name,
+            "callbacks": callbacks,
+            "streaming": self.stream,
+            **passthrough,
+        }
+
+        if self.model_id.get("API_KEY"):
+            kwargs["api_key"] = self.model_id["API_KEY"]
+        if self.endpoint_url:
+            kwargs["base_url"] = self.endpoint_url
+            logger.info(f"Using custom Anthropic endpoint: {self.endpoint_url}")
+
+        # Extended thinking for Claude models. Anthropic requires the thinking
+        # budget to be < max_tokens, so bump max_tokens if needed, and (per the
+        # API) temperature must be unset/1 when thinking is enabled.
+        if self.reasoning_model:
+            effort_to_tokens = {
+                "low": 1024,
+                "medium": 8192,
+                "high": 16384,
+                "max": 32768,
+            }
+            budget = (
+                effort_to_tokens.get(self.reasoning_effort, self.thinking_tokens)
+                if self.reasoning_effort
+                else self.thinking_tokens
+            )
+            if kwargs["max_tokens"] <= budget:
+                kwargs["max_tokens"] = budget + 1024
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            kwargs.pop("temperature", None)
+            kwargs.pop("top_p", None)
+            kwargs.pop("top_k", None)
+
+        self.model = ChatAnthropic(**kwargs)
 
     def _initialize_sagemaker_model(self, callbacks: list = None) -> None:
         """Initialize SageMaker model using ChatSageMaker wrapper."""

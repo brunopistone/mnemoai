@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Amazon SageMaker AI, LiteLLM).
+A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
 
 ![Demo](https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/assistant-demo.gif)
 
@@ -80,7 +80,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Amazon SageMaker AI, LiteLLM (100+ providers)
+- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, OpenAI, Anthropic (Claude), Amazon SageMaker AI, LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search (_if enabled_)
 - **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
@@ -231,6 +231,7 @@ mnemoai/                      # repo root
 | **Amazon Bedrock**                                  | AWS CLI configured (`aws configure`) with Bedrock access in your region           |
 | **Amazon SageMaker AI**                             | AWS CLI configured with a deployed SageMaker endpoint                             |
 | **OpenAI**                                          | Set `OPENAI_API_KEY` environment variable                                         |
+| **Anthropic** (Claude API)                          | Set `ANTHROPIC_API_KEY` environment variable                                      |
 | **LiteLLM**                                         | Depends on the underlying provider (see [LiteLLM docs](https://docs.litellm.ai/)) |
 
 **Optional:**
@@ -386,7 +387,7 @@ If ripgrep is not installed, the assistant will automatically fall back to using
 
 4. **Configure the application**:
 
-**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle / OpenAI / Amazon SageMaker AI / LiteLLM) plus chat model, connection details (Ollama host/port; AWS region; for Mantle the API protocol — chat_completions / responses / anthropic; SageMaker region + input format; LiteLLM API base/key; OpenAI uses `OPENAI_API_KEY`), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.mnemoai/config.yaml` from the matching template. Just run:
+**First-run setup (easiest).** If you start the assistant and no config is found, an interactive configurator runs automatically. It walks you through: the LLM provider (Ollama / Bedrock / Mantle / OpenAI / Anthropic / Amazon SageMaker AI / LiteLLM) plus chat model, connection details (Ollama host/port; AWS region; for Mantle the API protocol — chat_completions / responses / anthropic; SageMaker region + input format; LiteLLM API base/key; OpenAI uses `OPENAI_API_KEY`; Anthropic uses `ANTHROPIC_API_KEY` with an optional base URL), optional max output tokens (blank or `none` uses the provider default), and a mandatory max context window (defaults to 65536); the vision model (reusing the chat model's host/region, with its own Mantle protocol and optional max output tokens); your profile name; an optional Brave Search key; and each feature toggle (RAG, episodic memory, ACE playbook, web crawler, query routing, orchestration, user profiling). Every prompt is pre-filled with the template's default, so you can press Enter through the ones you don't care about. It then writes a ready-to-use `~/.mnemoai/config.yaml` from the matching template. Just run:
 
 ```bash
 mnemoai      # or, from a checkout: PYTHONPATH=src python -m mnemoai
@@ -599,7 +600,7 @@ Model controllers and custom implementations.
 - `mantle_factory.py`: Bedrock Mantle factory (chat_completions / responses / anthropic protocols), shared by the LLM and vision controllers
 - **`controllers/`** (provider-dispatching model initialization):
   - `base_model_controller.py`: Minimal shared base type for the controllers
-  - `llm_controller.py`: LLM model initialization (Bedrock, Mantle, Ollama, OpenAI, SageMaker AI, LiteLLM)
+  - `llm_controller.py`: LLM model initialization (Bedrock, Mantle, Ollama, OpenAI, Anthropic, SageMaker AI, LiteLLM)
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
 - **`chat_models/`** (concrete LangChain `ChatModel` subclasses):
@@ -1031,6 +1032,22 @@ MODEL_ID:
 # Requires OPENAI_API_KEY environment variable
 ```
 
+#### Anthropic (Claude API)
+
+The direct Anthropic API (`api.anthropic.com`) via `langchain-anthropic`. This is **distinct from the Bedrock Mantle `anthropic` protocol** (which reaches Claude through Bedrock) — `TYPE: anthropic` talks to Anthropic directly. `STOP` maps to Anthropic's `stop_sequences`, and extended thinking is enabled with `REASONING` (+ optional `REASONING_EFFORT` / `THINKING_TOKENS`).
+
+```yaml
+MODEL_ID:
+  NAME: claude-opus-4-8
+  TYPE: anthropic
+  MAX_TOKENS: 4096
+  TEMPERATURE: 0.4
+  # REASONING: true          # enable extended thinking
+  # REASONING_EFFORT: high   # low | medium | high | max
+  # ENDPOINT_URL: https://...  # optional custom base URL
+# Requires ANTHROPIC_API_KEY env var, or set MODEL_ID.API_KEY
+```
+
 #### Amazon SageMaker AI
 
 ```yaml
@@ -1089,6 +1106,17 @@ VISION_MODEL_ID:
   REASONING_EFFORT: medium
 ```
 
+For Anthropic (Claude is multimodal):
+
+```yaml
+VISION_MODEL_ID:
+  NAME: claude-opus-4-8
+  TYPE: anthropic
+  MAX_TOKENS: 1500
+  TEMPERATURE: 0.3
+# Requires ANTHROPIC_API_KEY env var, or set VISION_MODEL_ID.API_KEY
+```
+
 For SageMaker AI (endpoint must serve a vision-capable model accepting the OpenAI image format):
 
 ```yaml
@@ -1121,18 +1149,18 @@ anything else a provider or model supports.
 
 #### Identity, connection & auth
 
-| Parameter      | Applies to `TYPE`                | Description                                                                                                              |
-| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `NAME`         | all (**required**)               | Model id / Ollama model / Bedrock model id / Mantle bare id / SageMaker endpoint name                                    |
-| `TYPE`         | all (**required**)               | `ollama`, `bedrock`, `mantle`, `openai`, `sagemaker`, `litellm` (embeddings: `ollama`, `bedrock`, `openai`, `sagemaker`) |
-| `HOST`         | `ollama`                         | Ollama host (default `localhost`)                                                                                        |
-| `PORT`         | `ollama`                         | Ollama port (default `11434`)                                                                                            |
-| `REGION`       | `bedrock`, `mantle`, `sagemaker` | AWS region (default `us-east-1`)                                                                                         |
-| `API_PROTOCOL` | `mantle`                         | `chat_completions` (default), `responses`, or `anthropic`                                                                |
-| `ENDPOINT_URL` | `bedrock`, `mantle`              | Override the default endpoint URL                                                                                        |
-| `API_KEY`      | `mantle`, `litellm`              | Mantle: Bedrock API key (else `BEDROCK_API_KEY` env / minted token). LiteLLM: provider key                               |
-| `API_BASE`     | `litellm`                        | LiteLLM API base URL                                                                                                     |
-| `INPUT_FORMAT` | `sagemaker`                      | `openai_chat` (default) or `huggingface`                                                                                 |
+| Parameter      | Applies to `TYPE`                | Description                                                                                                                                      |
+| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NAME`         | all (**required**)               | Model id / Ollama model / Bedrock model id / Mantle bare id / SageMaker endpoint name                                                            |
+| `TYPE`         | all (**required**)               | `ollama`, `bedrock`, `mantle`, `openai`, `anthropic`, `sagemaker`, `litellm` (embeddings: `ollama`, `bedrock`, `openai`, `sagemaker`, `litellm`) |
+| `HOST`         | `ollama`                         | Ollama host (default `localhost`)                                                                                                                |
+| `PORT`         | `ollama`                         | Ollama port (default `11434`)                                                                                                                    |
+| `REGION`       | `bedrock`, `mantle`, `sagemaker` | AWS region (default `us-east-1`)                                                                                                                 |
+| `API_PROTOCOL` | `mantle`                         | `chat_completions` (default), `responses`, or `anthropic`                                                                                        |
+| `ENDPOINT_URL` | `bedrock`, `mantle`, `anthropic` | Override the default endpoint URL (Anthropic: custom base URL)                                                                                   |
+| `API_KEY`      | `mantle`, `anthropic`, `litellm` | Mantle: Bedrock API key (else `BEDROCK_API_KEY` env / minted token). Anthropic: else `ANTHROPIC_API_KEY` env. LiteLLM: provider key              |
+| `API_BASE`     | `litellm`                        | LiteLLM API base URL                                                                                                                             |
+| `INPUT_FORMAT` | `sagemaker`                      | `openai_chat` (default) or `huggingface`                                                                                                         |
 
 > Standard Bedrock also reads the `AWS_BEARER_TOKEN_BEDROCK` env var, and all AWS
 > providers honor `AWS_PROFILE` — see the API-key/profile notes under Amazon Bedrock.
@@ -1149,26 +1177,26 @@ truth that the controllers build their client kwargs from — so it reflects
 exactly what each provider's init path forwards. (`mantle` reads
 `TEMPERATURE`/`MAX_TOKENS`/`TOP_P` via the Mantle factory.)
 
-| Parameter            | Description                            | Honored by (`MODEL_ID`)                             |
-| -------------------- | -------------------------------------- | --------------------------------------------------- |
-| `MAX_TOKENS`         | Max output tokens to generate          | ollama, bedrock, mantle, openai, sagemaker, litellm |
-| `TEMPERATURE`        | Sampling temperature                   | ollama, bedrock, mantle, openai, sagemaker, litellm |
-| `TOP_P`              | Top-p (nucleus) sampling               | ollama, bedrock, mantle, openai, sagemaker, litellm |
-| `TOP_K`              | Top-k sampling                         | ollama, sagemaker                                   |
-| `STOP`               | Stop sequences (YAML list)             | ollama, bedrock, sagemaker, litellm                 |
-| `STREAM`             | Stream tokens (default `true`)         | mantle, openai, litellm                             |
-| `PRESENCE_PENALTY`   | Presence penalty                       | ollama, openai                                      |
-| `FREQUENCY_PENALTY`  | Frequency penalty                      | ollama                                              |
-| `REPETITION_PENALTY` | Repetition penalty                     | ollama, litellm                                     |
-| `REASONING`          | Enable extended thinking (boolean)     | bedrock                                             |
-| `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock                                             |
-| `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai (also maps to Bedrock thinking budget)       |
+| Parameter            | Description                            | Honored by (`MODEL_ID`)                                        |
+| -------------------- | -------------------------------------- | -------------------------------------------------------------- |
+| `MAX_TOKENS`         | Max output tokens to generate          | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
+| `TEMPERATURE`        | Sampling temperature                   | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
+| `TOP_P`              | Top-p (nucleus) sampling               | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
+| `TOP_K`              | Top-k sampling                         | ollama, anthropic, sagemaker                                   |
+| `STOP`               | Stop sequences (YAML list)             | ollama, bedrock, anthropic, sagemaker, litellm                 |
+| `STREAM`             | Stream tokens (default `true`)         | mantle, openai, anthropic, litellm                             |
+| `PRESENCE_PENALTY`   | Presence penalty                       | ollama, openai                                                 |
+| `FREQUENCY_PENALTY`  | Frequency penalty                      | ollama                                                         |
+| `REPETITION_PENALTY` | Repetition penalty                     | ollama, litellm                                                |
+| `REASONING`          | Enable extended thinking (boolean)     | bedrock, anthropic                                             |
+| `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock, anthropic                                             |
+| `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai, anthropic (also maps to Bedrock thinking budget)       |
 
-`VISION_MODEL_ID` supports the same six providers as `MODEL_ID`. It accepts a
+`VISION_MODEL_ID` supports the same seven providers as `MODEL_ID`. It accepts a
 subset of params: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` across providers, plus
-`TOP_K`/`STOP` on ollama and sagemaker. Connection keys follow the provider
-(host/port, region, Mantle protocol, SageMaker `INPUT_FORMAT`, LiteLLM
-`API_BASE`/`API_KEY`).
+`TOP_K` on ollama/anthropic/sagemaker and `STOP` on ollama/sagemaker. Connection
+keys follow the provider (host/port, region, Mantle protocol, SageMaker
+`INPUT_FORMAT`, LiteLLM/Anthropic `API_BASE`/`API_KEY`/base URL).
 
 > **Provider-appropriate tuning matters.** Newer Claude and GPT models reject
 > `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K` are largely

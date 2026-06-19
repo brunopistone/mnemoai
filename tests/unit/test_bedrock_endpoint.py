@@ -203,6 +203,106 @@ class TestMantleModelType:
         assert patch_mantle["anthropic_api_key"] == "bedrock-api-fake-token"
 
 
+class TestAnthropicModelType:
+    """The direct Anthropic API provider (TYPE: anthropic) via ChatAnthropic.
+
+    Distinct from the Mantle 'anthropic' protocol above (Claude via Bedrock):
+    this talks to api.anthropic.com using ChatAnthropic directly.
+    """
+
+    def test_builds_chatanthropic_with_name_and_key(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "claude-opus-4-8",
+                "TYPE": "anthropic",
+                "API_KEY": "sk-ant-xyz",
+                "MAX_TOKENS": 2000,
+                "TEMPERATURE": 0.4,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["model"] == "claude-opus-4-8"
+        assert patch_mantle["api_key"] == "sk-ant-xyz"
+        assert patch_mantle["max_tokens"] == 2000
+        assert patch_mantle["temperature"] == 0.4
+        # No base_url unless ENDPOINT_URL is set (defaults to api.anthropic.com).
+        assert "base_url" not in patch_mantle
+
+    def test_max_tokens_defaults_when_unset(self, patch_mantle, monkeypatch):
+        # ChatAnthropic requires max_tokens; controller defaults it to 4096.
+        ctrl = _make_llm_controller(
+            monkeypatch, {"NAME": "claude-opus-4-8", "TYPE": "anthropic"}
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["max_tokens"] == 4096
+
+    def test_endpoint_url_sets_base_url(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "claude-opus-4-8",
+                "TYPE": "anthropic",
+                "ENDPOINT_URL": "https://proxy.example/v1",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["base_url"] == "https://proxy.example/v1"
+
+    def test_stop_maps_to_stop_sequences(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "claude-opus-4-8",
+                "TYPE": "anthropic",
+                "STOP": ["</done>"],
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["stop_sequences"] == ["</done>"]
+
+    def test_reasoning_enables_thinking_and_drops_temperature(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "claude-opus-4-8",
+                "TYPE": "anthropic",
+                "REASONING": True,
+                "REASONING_EFFORT": "high",
+                "MAX_TOKENS": 2000,
+                "TEMPERATURE": 0.7,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["thinking"] == {
+            "type": "enabled",
+            "budget_tokens": 16384,
+        }
+        # max_tokens bumped above the thinking budget; sampling params dropped.
+        assert patch_mantle["max_tokens"] == 16384 + 1024
+        assert "temperature" not in patch_mantle
+        assert "top_p" not in patch_mantle
+
+    def test_vision_builds_chatanthropic(self, patch_mantle, monkeypatch):
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {
+                "NAME": "claude-opus-4-8",
+                "TYPE": "anthropic",
+                "API_KEY": "sk-ant-vis",
+                "MAX_TOKENS": 1500,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["model"] == "claude-opus-4-8"
+        assert patch_mantle["api_key"] == "sk-ant-vis"
+        assert patch_mantle["max_tokens"] == 1500
+
+
 class TestMantleVisionModelType:
     def test_vision_builds_chatopenai_with_token_and_endpoint(
         self, patch_mantle, monkeypatch

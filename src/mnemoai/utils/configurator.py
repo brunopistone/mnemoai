@@ -27,8 +27,9 @@ _PROVIDERS = {
     # model sections for the chosen provider (set TYPE, prune Ollama-only keys,
     # prompt provider-specific connection keys).
     "4": ("openai", "config.yaml.example", "OpenAI", "gpt-5-mini"),
-    "5": ("sagemaker", "config.yaml.example", "Amazon SageMaker AI", "your-endpoint-name"),
-    "6": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
+    "5": ("anthropic", "config.yaml.example", "Anthropic (Claude API)", "claude-opus-4-8"),
+    "6": ("sagemaker", "config.yaml.example", "Amazon SageMaker AI", "your-endpoint-name"),
+    "7": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
 }
 
 # Human-facing label for each provider TYPE. The stored config value is the
@@ -40,6 +41,7 @@ _PROVIDER_LABELS = {
     "bedrock": "bedrock",
     "mantle": "bedrock-mantle",
     "openai": "openai",
+    "anthropic": "anthropic",
     "sagemaker": "sagemaker",
     "litellm": "litellm",
 }
@@ -499,6 +501,15 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
             v = _ask("LiteLLM API key (optional, or via the provider's env var)", _get_field(text, section, "API_KEY") or "")
             if v:
                 text = _set_field(text, section, "API_KEY", v)
+    if provider == "anthropic":
+        if "API_KEY" in allowed:
+            v = _ask("Anthropic API key (optional, or via ANTHROPIC_API_KEY env var)", _get_field(text, section, "API_KEY") or "")
+            if v:
+                text = _set_field(text, section, "API_KEY", v)
+        if "ENDPOINT_URL" in allowed:
+            v = _ask("Anthropic base URL (optional, blank for api.anthropic.com)", _get_field(text, section, "ENDPOINT_URL") or "")
+            if v:
+                text = _set_field(text, section, "ENDPOINT_URL", v)
 
     # Credential notes (env-based auth the configurator can't set for the user).
     if provider == "bedrock":
@@ -512,6 +523,10 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
     elif provider == "openai":
         print("  Note: OpenAI reads the OPENAI_API_KEY environment variable")
         print("  (set it in your shell or the config ENV section).")
+    elif provider == "anthropic":
+        print("  Note: Anthropic (Claude API) reads the ANTHROPIC_API_KEY env")
+        print("  var, or MODEL_ID.API_KEY. This is the direct api.anthropic.com")
+        print("  API — not Bedrock Mantle's 'anthropic' protocol.")
 
     return text, conn
 
@@ -542,17 +557,17 @@ def _build_config(
     text = _remove_field(text, "VISION_MODEL_ID", "STOP")
 
     # The base template (config.yaml.example) is Ollama-shaped. For providers
-    # that reuse it (openai/sagemaker/litellm), set TYPE and prune the keys the
-    # new provider doesn't consume so we start from a clean section. The vision
-    # section: OpenAI supports vision, so set it to openai; SageMaker/LiteLLM
-    # have no vision path, so leave vision as Ollama (the user can keep or drop
-    # it in the vision step below).
+    # that reuse it (openai/anthropic/sagemaker/litellm), set TYPE and prune the
+    # keys the new provider doesn't consume so we start from a clean section.
+    # The vision section: OpenAI and Anthropic (Claude) are multimodal, so set
+    # vision to the same provider; SageMaker/LiteLLM have no first-class vision
+    # path, so leave vision as Ollama (the user can keep or drop it below).
     if transform_from_base:
         text = _set_in_section(text, "MODEL_ID", "TYPE", provider)
         text = _prune_unsupported_params(text, "MODEL_ID", provider)
-        if provider == "openai" and _find_section(text.splitlines(), "VISION_MODEL_ID") >= 0:
-            text = _set_in_section(text, "VISION_MODEL_ID", "TYPE", "openai")
-            text = _prune_unsupported_params(text, "VISION_MODEL_ID", "openai")
+        if provider in ("openai", "anthropic") and _find_section(text.splitlines(), "VISION_MODEL_ID") >= 0:
+            text = _set_in_section(text, "VISION_MODEL_ID", "TYPE", provider)
+            text = _prune_unsupported_params(text, "VISION_MODEL_ID", provider)
 
     # --- Chat model ---
     print("\n  -- Chat model --")
@@ -1052,8 +1067,6 @@ def run_model_override() -> Optional[Path]:
     place, preserving everything else. Returns the written Path, or None if the
     user cancelled or there's no config to edit.
     """
-    from mnemoai.utils.config import config
-
     dest = config_path()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")

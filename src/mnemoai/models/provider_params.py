@@ -81,6 +81,20 @@ _LLM = {
         "connection": set(),
         "special": {"STREAM"},
     },
+    "anthropic": {
+        # Direct Anthropic API (api.anthropic.com) via langchain-anthropic's
+        # ChatAnthropic. STOP maps to Anthropic's `stop_sequences`. Extended
+        # thinking is handled inline (REASONING/REASONING_EFFORT/THINKING_TOKENS).
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("TOP_K", "top_k", "top_k"),
+            _p("STOP", "stop", "stop_sequences"),
+        ],
+        "connection": {"API_KEY", "ENDPOINT_URL"},
+        "special": {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM"},
+    },
     "sagemaker": {
         "params": [
             _p("TEMPERATURE", "temperature", "temperature"),
@@ -135,6 +149,17 @@ _VISION = {
             _p("TOP_P", "top_p", "top_p"),
         ],
         "connection": set(),
+        "special": set(),
+    },
+    "anthropic": {
+        # Direct Anthropic API vision via ChatAnthropic (Claude is multimodal).
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("TOP_K", "top_k", "top_k"),
+        ],
+        "connection": {"API_KEY", "ENDPOINT_URL"},
         "special": set(),
     },
     "mantle": {

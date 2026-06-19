@@ -360,10 +360,16 @@ def test_provider_params_registry_shape():
     from mnemoai.models.provider_params import providers, supported_keys
 
     assert set(providers("MODEL_ID")) == {
-        "ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"
+        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker", "litellm"
     }
     assert set(providers("VISION_MODEL_ID")) == {
-        "ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"
+        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker", "litellm"
+    }
+    # Anthropic (direct Claude API): STOP-capable, with extended-thinking specials.
+    assert supported_keys("MODEL_ID", "anthropic") == {
+        "TEMPERATURE", "MAX_TOKENS", "TOP_P", "TOP_K", "STOP",
+        "API_KEY", "ENDPOINT_URL",
+        "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
     }
     assert supported_keys("VISION_MODEL_ID", "litellm") == {
         "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P"
@@ -657,11 +663,32 @@ def test_config_litellm_sets_api_base_and_key():
     assert "HOST" not in m
 
 
-def test_config_providers_menu_has_all_six():
+def test_config_anthropic_transforms_base_template():
+    # answers: chat name, API_KEY, base URL (blank), MAX_TOKENS, ctx, configure
+    # vision? (y), vision name, vision MAX_TOKENS, profile, brave (blank), toggles*7
+    d = _run_build(
+        "anthropic", "claude-opus-4-8",
+        ["claude-opus-4-8", "sk-ant-test", "", "none", "65536",
+         "y", "claude-opus-4-8", "none", "dave", "",
+         "y", "y", "y", "y", "y", "y", "y"],
+    )
+    m = d["MODEL_ID"]
+    assert m["TYPE"] == "anthropic" and m["NAME"] == "claude-opus-4-8"
+    assert m["API_KEY"] == "sk-ant-test"
+    # Ollama-only keys pruned; no AWS region leaked in.
+    for bad in ("HOST", "PORT", "FREQUENCY_PENALTY", "REGION"):
+        assert bad not in m
+    # Claude is multimodal -> vision section switched to anthropic too.
+    assert d["VISION_MODEL_ID"]["TYPE"] == "anthropic"
+
+
+def test_config_providers_menu_has_all_seven():
     from mnemoai.utils.configurator import _PROVIDERS
 
     types = {v[0] for v in _PROVIDERS.values()}
-    assert types == {"ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"}
+    assert types == {
+        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker", "litellm"
+    }
 
 
 # --- Shared connection-prompt helper: /config and /model ask the same params ---
