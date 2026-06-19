@@ -216,7 +216,7 @@ class TestAnthropicModelType:
             {
                 "NAME": "claude-opus-4-8",
                 "TYPE": "anthropic",
-                "API_KEY": "sk-ant-xyz",
+                "API_KEY": "fake-anthropic-key",
                 "MAX_TOKENS": 2000,
                 "TEMPERATURE": 0.4,
             },
@@ -224,7 +224,7 @@ class TestAnthropicModelType:
         ctrl.initialize_model()
         assert patch_mantle["_class"] == "ChatAnthropic"
         assert patch_mantle["model"] == "claude-opus-4-8"
-        assert patch_mantle["api_key"] == "sk-ant-xyz"
+        assert patch_mantle["api_key"] == "fake-anthropic-key"
         assert patch_mantle["max_tokens"] == 2000
         assert patch_mantle["temperature"] == 0.4
         # No base_url unless ENDPOINT_URL is set (defaults to api.anthropic.com).
@@ -292,14 +292,14 @@ class TestAnthropicModelType:
             {
                 "NAME": "claude-opus-4-8",
                 "TYPE": "anthropic",
-                "API_KEY": "sk-ant-vis",
+                "API_KEY": "fake-anthropic-vision-key",
                 "MAX_TOKENS": 1500,
             },
         )
         ctrl.initialize_model()
         assert patch_mantle["_class"] == "ChatAnthropic"
         assert patch_mantle["model"] == "claude-opus-4-8"
-        assert patch_mantle["api_key"] == "sk-ant-vis"
+        assert patch_mantle["api_key"] == "fake-anthropic-vision-key"
         assert patch_mantle["max_tokens"] == 1500
 
 

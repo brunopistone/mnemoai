@@ -668,13 +668,13 @@ def test_config_anthropic_transforms_base_template():
     # vision? (y), vision name, vision MAX_TOKENS, profile, brave (blank), toggles*7
     d = _run_build(
         "anthropic", "claude-opus-4-8",
-        ["claude-opus-4-8", "sk-ant-test", "", "none", "65536",
+        ["claude-opus-4-8", "fake-anthropic-key", "", "none", "65536",
          "y", "claude-opus-4-8", "none", "dave", "",
          "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "anthropic" and m["NAME"] == "claude-opus-4-8"
-    assert m["API_KEY"] == "sk-ant-test"
+    assert m["API_KEY"] == "fake-anthropic-key"
     # Ollama-only keys pruned; no AWS region leaked in.
     for bad in ("HOST", "PORT", "FREQUENCY_PENALTY", "REGION"):
         assert bad not in m
