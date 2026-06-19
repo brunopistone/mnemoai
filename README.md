@@ -4,6 +4,7 @@
 
 <h1 align="center">Mnemo AI</h1>
 
+[![PyPI](https://img.shields.io/pypi/v/mnemoai-assistant.svg)](https://pypi.org/project/mnemoai-assistant/)
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
@@ -241,6 +242,33 @@ mnemoai/                      # repo root
 
 ### Installation
 
+#### Recommended: install from PyPI
+
+The published package is **[`mnemoai-assistant`](https://pypi.org/project/mnemoai-assistant/)** (the import name and the CLI command are both `mnemoai`). No clone needed — install it into an isolated environment and get the `mnemoai` command on your PATH:
+
+```bash
+uv tool install mnemoai-assistant     # or: pipx install mnemoai-assistant
+```
+
+Or into the current environment with pip:
+
+```bash
+pip install mnemoai-assistant
+```
+
+Then configure a user config (see step 4 below) and run:
+
+```bash
+mnemoai            # verbose (shows thinking)
+mnemoai --no-verbose
+```
+
+To upgrade: `uv tool upgrade mnemoai-assistant` (or `pip install -U mnemoai-assistant`). To remove: `uv tool uninstall mnemoai-assistant`.
+
+> This is the best choice if you just want to use the assistant. Install from a checkout (below) instead if you plan to edit the source.
+
+#### Install from a checkout
+
 1. **Clone the repository**:
 
 ```bash
@@ -250,7 +278,7 @@ cd mnemoai
 
 2. **Install the assistant** (choose one):
 
-#### Recommended: install as a CLI command (`uv tool install`)
+#### Option 1: install as a CLI command (`uv tool install`)
 
 This installs the project into its own isolated environment and puts `mnemoai` on your PATH, so you can run it from any directory (macOS and Linux) without activating anything:
 
@@ -267,9 +295,9 @@ mnemoai --no-verbose
 
 To upgrade after pulling changes: `uv tool install --force .`. To remove: `uv tool uninstall mnemoai`.
 
-> This is the best choice for everyday use. Pick a "run from a checkout" option below instead if you plan to actively edit the code, since those run your working tree directly with no reinstall step.
+> Pick "run from a checkout" below instead if you plan to actively edit the code, since that runs your working tree directly with no reinstall step.
 
-#### Alternative: run from a checkout
+#### Option 2: run from a checkout
 
 Set up an environment (choose one), which lets you run the assistant directly from the repo while editing the source live. Because the code uses a `src/` layout, run it as a module with `src/` on the path:
 
