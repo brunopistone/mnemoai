@@ -3,3 +3,5 @@
 pytest>=8.0.0
 # Import sorting + linting. Sort imports with: ruff check --fix .
 ruff>=0.6.0
+# Docs site (GitHub Pages). Build/preview with: mkdocs serve
+mkdocs-material>=9.5.0

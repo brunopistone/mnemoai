@@ -1,0 +1,63 @@
+site_name: Mnemo AI
+site_description: A local agentic AI assistant (LangGraph + MCP) that learns and remembers, with multi-provider model support.
+site_url: https://brunopistone.github.io/mnemoai/
+repo_url: https://github.com/brunopistone/mnemoai
+repo_name: brunopistone/mnemoai
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  logo: assets/mnemoai-logo.png
+  favicon: assets/mnemoai-logo.png
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - toc.follow
+    - content.code.copy
+    - search.suggest
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Usage: usage.md
+  - Configuration: configuration.md
+  - Advanced Features: advanced-features.md
+  - Productivity Tools: productivity.md
+  - Architecture: architecture-overview.md
+  - Development: development.md
+  - Architecture Reference: ARCHITECTURE.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+
+plugins:
+  - search
