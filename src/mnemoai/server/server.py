@@ -1,4 +1,5 @@
 from mcp.server.fastmcp import FastMCP
+
 from mnemoai.server.tools import register_tools
 
 mcp = FastMCP("MCP Server")

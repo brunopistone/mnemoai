@@ -4,6 +4,7 @@ import operator
 import re
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -11,10 +12,9 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
-from langgraph.graph import StateGraph, END
 from langgraph.errors import GraphRecursionError
+from langgraph.graph import END, StateGraph
 
 from mnemoai.client.agent.orchestrator import (
     get_aggregator_prompt,

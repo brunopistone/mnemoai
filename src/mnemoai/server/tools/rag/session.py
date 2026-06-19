@@ -3,19 +3,20 @@
 This is a compact, defensive implementation to avoid previous merge/indent issues.
 """
 
-from .vector_store_controller import VectorStoreController
-from ..readers.chunking_helper import __split_into_chunks as split_into_chunks
-from datetime import datetime
-import numpy as np
 import os
-from typing import List, Tuple, Dict, Optional, Any
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
+from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import profile_dir
-from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
 
+from ..readers.chunking_helper import __split_into_chunks as split_into_chunks
+from .vector_store_controller import VectorStoreController
 
 # Global reference to the RAG session (set by chat_interface)
 _rag_session = None

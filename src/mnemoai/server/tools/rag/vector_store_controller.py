@@ -1,6 +1,8 @@
-import numpy as np
 import os
-from typing import List, Dict, Tuple, Optional, Any
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 

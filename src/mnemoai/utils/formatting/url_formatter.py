@@ -1,7 +1,7 @@
 """Utility for formatting clickable URLs in terminal output."""
 
-import re
 import os
+import re
 from typing import Any
 
 

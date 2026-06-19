@@ -1,10 +1,11 @@
 """JSON file reading functionality - simple text-based approach."""
 
-from .. import validate_file_path, count_tokens
 import json
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+
+from .. import count_tokens, validate_file_path
 
 
 async def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:

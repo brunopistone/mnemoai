@@ -1,8 +1,8 @@
 """Logging utilities for the AI application."""
 
 import logging
-import sys
 import os
+import sys
 
 
 def setup_logger(name: str = "ai_app", level: int = None) -> logging.Logger:

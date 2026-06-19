@@ -2,37 +2,39 @@
 
 import ast
 import asyncio
-from mnemoai.client.agent.agent import (
-    LangGraphAgent,
-    convert_strands_messages_to_langchain,
-    convert_langchain_messages_to_strands,
-)
-from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
-from mnemoai.client.managers.user_profile_manager import UserProfileManager
-from mnemoai.client.mcp_tool_wrapper import MCPClientWrapper
-from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
-from mnemoai.client.memory.reflector import Reflector
-from mnemoai.client.memory.playbook_store import PlaybookStore
-from mnemoai.client.agent.router import QueryRouter, ROUTE_TOOLS
-from mnemoai.client.ui.spinner import Spinner
-from datetime import date, datetime
 import json
-from langchain_core.callbacks import BaseCallbackHandler
-from mcp import StdioServerParameters
-from mnemoai.models.controllers.llm_controller import LangChainLLMController
-import numpy as np
 import os
 import re
-from mnemoai.server.tools import count_tokens
-from mnemoai.utils.paths import model_dir, profile_dir, sanitize_model_name
 import shutil
 import sqlite3
 import sys
 import threading
 import traceback
+from datetime import date, datetime
 from typing import Optional
+
+import numpy as np
+from langchain_core.callbacks import BaseCallbackHandler
+from mcp import StdioServerParameters
+
+from mnemoai.client.agent.agent import (
+    LangGraphAgent,
+    convert_langchain_messages_to_strands,
+    convert_strands_messages_to_langchain,
+)
+from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
+from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
+from mnemoai.client.managers.user_profile_manager import UserProfileManager
+from mnemoai.client.mcp_tool_wrapper import MCPClientWrapper
+from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
+from mnemoai.client.memory.playbook_store import PlaybookStore
+from mnemoai.client.memory.reflector import Reflector
+from mnemoai.client.ui.spinner import Spinner
+from mnemoai.models.controllers.llm_controller import LangChainLLMController
+from mnemoai.server.tools import count_tokens
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+from mnemoai.utils.paths import model_dir, profile_dir, sanitize_model_name
 
 
 class StreamingCallbackHandler(BaseCallbackHandler):
@@ -235,7 +237,9 @@ class LangGraphClient:
             config.get("EPISODIC_MEMORY", {}).get("STORE_TYPE", "chromadb").lower()
         )
 
-        from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
+        from mnemoai.models.controllers.embeddings_controller import (
+            EmbeddingsController,
+        )
 
         embeddings_controller = EmbeddingsController(embed_model_config)
 
@@ -260,7 +264,9 @@ class LangGraphClient:
         embeddings = None
         if config.get("RAG", {}).get("EMBED_MODEL_ID"):
             try:
-                from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
+                from mnemoai.models.controllers.embeddings_controller import (
+                    EmbeddingsController,
+                )
 
                 embeddings = EmbeddingsController()
             except Exception as e:
@@ -534,7 +540,9 @@ class LangGraphClient:
         # Try semantic similarity with embeddings
         if config.get("RAG", {}).get("EMBED_MODEL_ID"):
             try:
-                from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
+                from mnemoai.models.controllers.embeddings_controller import (
+                    EmbeddingsController,
+                )
 
                 embeddings = EmbeddingsController()
                 emb = embeddings.embed([text1, text2])
@@ -737,7 +745,9 @@ class LangGraphClient:
     def _flush_chunk_cache_store(self) -> None:
         """Flush the chunk cache database."""
         try:
-            from mnemoai.server.tools.readers.chunking_helper import reset_session_chunk_cache
+            from mnemoai.server.tools.readers.chunking_helper import (
+                reset_session_chunk_cache,
+            )
 
             reset_session_chunk_cache()
 

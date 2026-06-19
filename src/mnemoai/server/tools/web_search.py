@@ -1,8 +1,9 @@
 """Web search tool using Brave Search API."""
 
-from brave_search_python_client import BraveSearch, WebSearchRequest, WebSafeSearchType
 import json
 import os
+
+from brave_search_python_client import BraveSearch, WebSafeSearchType, WebSearchRequest
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger

@@ -1,16 +1,18 @@
 """Conversation manager that uses simple text-based summaries."""
 
-from datetime import date
 import json
 import textwrap
-import tiktoken
+from datetime import date
 from typing import Any, Dict, List, Union
-from mnemoai.utils.logger import logger
+
+import tiktoken
+
 from mnemoai.utils.config import config
+from mnemoai.utils.logger import logger
 
 # Try to import LangChain message types for compatibility
 try:
-    from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
+    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False

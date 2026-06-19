@@ -1,11 +1,12 @@
 """CSV file reading functionality."""
 
-from .. import validate_file_path, count_tokens
 import csv
 import json
 
-from mnemoai.utils.logger import logger
 from mnemoai.utils.config import config
+from mnemoai.utils.logger import logger
+
+from .. import count_tokens, validate_file_path
 
 
 async def read_csv(path: str) -> str:

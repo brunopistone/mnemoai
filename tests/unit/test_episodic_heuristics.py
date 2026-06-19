@@ -5,8 +5,8 @@ the built-in default markers (no config.yaml required).
 """
 
 from mnemoai.client.memory.episodic_memory import (
-    is_task_successful,
     extract_tools_from_messages,
+    is_task_successful,
 )
 
 

@@ -2,9 +2,9 @@
 
 import json
 import os
-from mcp.server.fastmcp import FastMCP
-from typing import List, Dict
+from typing import Dict, List
 
+from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger

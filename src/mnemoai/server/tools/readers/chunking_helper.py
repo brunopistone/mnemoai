@@ -6,13 +6,14 @@ Improvements added:
   `CHUNKING_CONCURRENCY` in config (defaults to 3)
 """
 
-import os
-import textwrap
-import tiktoken
-import hashlib
-import sqlite3
 import asyncio
+import hashlib
+import os
+import sqlite3
+import textwrap
 from datetime import datetime
+
+import tiktoken
 
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config

@@ -27,7 +27,6 @@ from mnemoai.utils.configurator import (
     _truthy,
 )
 
-
 SAMPLE = textwrap.dedent(
     """\
     MODEL_ID:
@@ -489,6 +488,7 @@ def test_section_summary_includes_region_and_protocol():
 def _run_build(provider, default_model, answers):
     """Drive _build_config against the base template with scripted answers."""
     import builtins
+
     from mnemoai.utils import configurator as C
 
     text = (C._templates_dir() / "config.yaml.example").read_text()

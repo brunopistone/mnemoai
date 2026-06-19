@@ -4,8 +4,9 @@ import glob
 import json
 import os
 import subprocess
-from mcp.server.fastmcp import FastMCP
 from typing import Optional
+
+from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
 

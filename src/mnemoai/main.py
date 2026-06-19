@@ -3,6 +3,7 @@
 import argparse
 import sys
 from typing import Optional
+
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.ui.chat_interface import ChatInterface
 

@@ -4,14 +4,15 @@ import logging
 
 logging.getLogger("faiss").setLevel(logging.WARNING)
 
-import faiss
-import numpy as np
 import os
 import pickle
 import sys
 import threading
 import traceback
-from typing import List, Dict, Tuple, Optional, Any
+from typing import Any, Dict, List, Optional, Tuple
+
+import faiss
+import numpy as np
 
 from mnemoai.utils.logger import logger
 

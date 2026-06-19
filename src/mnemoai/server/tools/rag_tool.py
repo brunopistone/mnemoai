@@ -1,9 +1,10 @@
 """RAG tools for managing and querying indexed documents."""
 
-from .rag.session import get_rag_session
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
+
+from .rag.session import get_rag_session
 
 
 def register_rag_tools(mcp: FastMCP) -> None:

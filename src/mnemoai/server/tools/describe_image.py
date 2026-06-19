@@ -1,11 +1,13 @@
 """Image description tool using Ollama vision model."""
 
-from . import validate_file_path, vision_model, vision_model_controller
 import json
-from mcp.server.fastmcp import FastMCP
 from pathlib import Path
 
+from mcp.server.fastmcp import FastMCP
+
 from mnemoai.utils.logger import logger
+
+from . import validate_file_path, vision_model, vision_model_controller
 
 
 def register_image_tools(mcp: FastMCP) -> None:

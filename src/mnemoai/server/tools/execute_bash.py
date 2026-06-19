@@ -1,12 +1,14 @@
 """Execute bash commands tool."""
 
-import subprocess
 import json
-from mcp.server.fastmcp import FastMCP
 import os
 import signal
+import subprocess
+
+from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
+
 from ..error_handler import tool_error_handler
 
 

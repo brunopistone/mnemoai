@@ -1,10 +1,11 @@
 """Search functionality for files."""
 
-from .. import validate_file_path
 import json
 import re
 
 from mnemoai.utils.logger import logger
+
+from .. import validate_file_path
 
 
 async def search_file(path: str, pattern: str, context_lines: int) -> str:

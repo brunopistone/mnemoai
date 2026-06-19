@@ -21,7 +21,6 @@ import os
 import re
 from pathlib import Path
 
-
 DEFAULT_HOME_DIRNAME = ".mnemoai"
 
 

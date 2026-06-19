@@ -1,13 +1,16 @@
 """Episodic memory manager for storing and retrieving task solutions."""
 
-from .chroma_store import ChromaEpisodicStore
-from .faiss_store import FAISSEpisodicStore
-from datetime import datetime
 import re
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 import tiktoken
-from typing import List, Dict, Any, Optional
+
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+
+from .chroma_store import ChromaEpisodicStore
+from .faiss_store import FAISSEpisodicStore
 
 
 class EpisodicMemoryManager:

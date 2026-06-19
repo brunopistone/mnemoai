@@ -4,10 +4,12 @@ import logging
 
 logging.getLogger("chromadb").setLevel(logging.WARNING)
 
-import chromadb
-from typing import List, Dict, Tuple, Optional
-import numpy as np
 import os
+from typing import Dict, List, Optional, Tuple
+
+import chromadb
+import numpy as np
+
 from mnemoai.utils.logger import logger
 
 

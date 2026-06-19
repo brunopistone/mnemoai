@@ -4,10 +4,10 @@ These test the pure command-classification logic (no real git calls).
 """
 
 from mnemoai.server.tools.git_safety import (
-    check_dangerous_command,
-    PROTECTED_BRANCHES,
-    DANGEROUS_PATTERNS,
     BLOCKED_COMMANDS,
+    DANGEROUS_PATTERNS,
+    PROTECTED_BRANCHES,
+    check_dangerous_command,
 )
 
 

@@ -1,10 +1,12 @@
-import boto3
 import hashlib
 import json
+from typing import Any, List
+
+import boto3
 import numpy as np
 import ollama
 from openai import OpenAI
-from typing import List, Any
+
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
