@@ -80,6 +80,10 @@ All configuration flows through `Config()` which loads `utils/config.yaml` (giti
 
 `ToolManager.register_tools(mcp)` conditionally registers tool groups based on config toggles. Each tool file defines functions decorated with `@mcp.tool()`.
 
+### External MCP servers (`client/mcp_config.py`, `MultiMCPClient`)
+
+The built-in server is always launched; additional stdio MCP servers can be declared in `~/.mnemoai/mcp/mcp.json` (standard `mcpServers` schema, same as Claude Code/kiro; legacy flat `~/.mnemoai/mcp.json` still read). `load_external_servers()` parses them (tolerant: missing/bad file or entry → skip, don't crash). `MultiMCPClient` (in `mcp_tool_wrapper.py`) owns the built-in wrapper + one per external server, connects them together, and merges tools — namespacing a colliding external tool as `servername__tool` (built-in names always win; the server is still called with the original name). External tools are appended to every non-empty route in `agent.py` so routing never hides them. When orchestration is enabled, `_external_tools_prompt_block()` injects the external tool names/descriptions into the decomposition prompt and instructs the decomposer to route subtasks needing them to the `full` category (which binds every tool) — otherwise the decomposer, unaware they exist, can't target them. `/mcp` lists status.
+
 ### Hybrid search (semantic + BM25)
 
 Used in both episodic memory and RAG. Pattern: get top-N candidates from vector store, get top-N from BM25, merge with configurable weights (`utils/bm25.py`).
@@ -142,7 +146,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 - AWS credentials via `aws configure` for Bedrock/SageMaker/Mantle (Mantle mints a bearer token from these via `aws-bedrock-token-generator`)
 - Config `ENV` section sets additional env vars at startup
 
-**Runtime data:** All state lives under a single app home, `~/.mnemoai/` (override with `$MNEMOAI_HOME`), resolved centrally in `utils/paths.py`. Layout: `config.yaml`, `plans/`, `tasks/`, and per-profile `{profile_name}/` (conversations, todos, RAG indexes, chunk caches, user profile). **Episodic memory and the ACE playbook are model-scoped** under `{profile_name}/models/{sanitized_model_name}/` so switching the chat model doesn't contaminate memory built with a different one. All path construction goes through `utils/paths.py` (`app_home`, `config_path`, `plans_dir`, `tasks_dir`, `profile_dir`, `model_dir`).
+**Runtime data:** All state lives under a single app home, `~/.mnemoai/` (override with `$MNEMOAI_HOME`), resolved centrally in `utils/paths.py`. Layout: `config/` (config.yaml + bundled `*.example` copies), `mcp/` (optional mcp.json + mcp.json.example), `plans/`, `tasks/`, and per-profile `{profile_name}/` (conversations, todos, RAG indexes, chunk caches, user profile). On first run `seed_example_files()` copies the package's bundled examples into `config/` and `mcp/` (idempotent, never overwrites). Config resolves `config/config.yaml` → legacy flat `config.yaml` → package fallback. **Episodic memory and the ACE playbook are model-scoped** under `{profile_name}/models/{sanitized_model_name}/` so switching the chat model doesn't contaminate memory built with a different one. All path construction goes through `utils/paths.py` (`app_home`, `config_dir`, `config_path`, `mcp_dir`, `mcp_config_path`, `plans_dir`, `tasks_dir`, `profile_dir`, `model_dir`).
 
 ## Code Conventions
 

@@ -25,7 +25,8 @@ from mnemoai.client.agent.agent import (
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
 from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
 from mnemoai.client.managers.user_profile_manager import UserProfileManager
-from mnemoai.client.mcp_tool_wrapper import MCPClientWrapper
+from mnemoai.client.mcp_config import load_external_servers
+from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector
@@ -134,7 +135,10 @@ class LangGraphClient:
             args=["-m", "mnemoai.server.server"],
             env=env,
         )
-        self.mcp_client = MCPClientWrapper(self.server_params)
+        # The built-in server is always launched; any servers declared in
+        # ~/.mnemoai/mcp.json are launched alongside it and their tools merged.
+        external_servers = load_external_servers()
+        self.mcp_client = MultiMCPClient(self.server_params, external_servers)
 
         # System prompt
         self.profile_manager = UserProfileManager()
