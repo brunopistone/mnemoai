@@ -1,4 +1,8 @@
-# Mnemo AI
+<p align="center">
+  <img src="images/mnemoai-logo.png" alt="Mnemo AI" width="120">
+</p>
+
+<h1 align="center">Mnemo AI</h1>
 
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
