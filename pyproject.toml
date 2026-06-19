@@ -3,7 +3,11 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mnemoai"
+# PyPI distribution name. The bare "mnemoai" is rejected by PyPI as too
+# similar to the existing "mnemo-ai" project, so the published package is
+# "mnemoai-assistant" — but the import package and CLI command stay "mnemoai"
+# (pip install mnemoai-assistant → import mnemoai / run `mnemoai`).
+name = "mnemoai-assistant"
 version = "0.1.0"
 description = "Mnemo AI — a local agentic AI assistant (LangGraph + MCP) that learns and remembers, with multi-provider model support."
 readme = "README.md"
