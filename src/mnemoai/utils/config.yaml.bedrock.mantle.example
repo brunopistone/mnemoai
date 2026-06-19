@@ -60,6 +60,12 @@ MAX_CONVERSATION_TOKENS: 1000000
 #GPT max context window
 #MAX_CONVERSATION_TOKENS: 272000
 DOC_MAX_TOKENS: 524288
+# Ask for confirmation before every execute_bash shell command (Claude Code-style).
+# Set to false to run shell commands without prompting (trusted/automation setups).
+REQUIRE_BASH_CONFIRMATION: true
+# Ask for confirmation before every fs_write / file_edit file modification.
+# Set to false to write files without prompting (trusted/automation setups).
+REQUIRE_WRITE_CONFIRMATION: true
 # RAG Configuration
 ENABLE_RAG: true
 RAG:

@@ -2,6 +2,7 @@
 
 import operator
 import re
+import sys
 from typing import Annotated, Any, Dict, List, Optional, Sequence, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -460,7 +461,15 @@ class LangGraphAgent:
                 if not tool:
                     tool = next((t for t in self.tools if t.name == tool_name), None)
 
-                if tool:
+                if tool and not self._confirm_tool(tool_name, tool_args):
+                    worker_messages.append(
+                        ToolMessage(
+                            content="User declined to run this command.",
+                            tool_call_id=tool_id,
+                            name=tool_name,
+                        )
+                    )
+                elif tool:
                     try:
                         logger.debug(f"Worker tool: {tool_name} args: {tool_args}")
                         result = tool.invoke(tool_args)
@@ -884,6 +893,58 @@ class LangGraphAgent:
             parts.append(f"{key}={text}")
         return f"{name}({', '.join(parts)})"
 
+    # Tools gated by a hard confirmation prompt, keyed by category. Each entry:
+    # (config toggle, default). The toggle defaults to True (gate on).
+    _CONFIRM_BASH_TOOLS = {"execute_bash"}
+    _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
+
+    def _confirm_tool(self, tool_name: str, tool_args: dict) -> bool:
+        """Ask the user to approve a destructive tool before it runs (Claude Code-style).
+
+        Returns True to proceed, False if the user declines. Gates shell commands
+        (``execute_bash``, toggle ``REQUIRE_BASH_CONFIRMATION``) and file writes
+        (``fs_write``/``file_edit``, toggle ``REQUIRE_WRITE_CONFIRMATION``); every
+        other tool proceeds. Both toggles default True. The prompt is a hard gate
+        enforced here in the client (which owns the terminal) — the MCP server is
+        a piped subprocess and can't prompt. Non-interactive runs (no TTY, e.g.
+        tests/CI) auto-proceed so they don't hang.
+        """
+        if tool_name in self._CONFIRM_BASH_TOOLS:
+            toggle, header, detail = (
+                "REQUIRE_BASH_CONFIRMATION",
+                "▶ Run shell command?",
+                tool_args.get("command", ""),
+            )
+        elif tool_name in self._CONFIRM_WRITE_TOOLS:
+            # fs_write previews with dry_run=True (no actual write) before the
+            # real call — only gate the write itself, not the harmless preview.
+            if tool_args.get("dry_run") is True:
+                return True
+            path = tool_args.get("path", "")
+            op = tool_args.get("command", "edit")  # fs_write: create/str_replace/…
+            toggle, header, detail = (
+                "REQUIRE_WRITE_CONFIRMATION",
+                "▶ Write to file?",
+                f"{op} {path}".strip(),
+            )
+        else:
+            return True
+
+        if not config.get(toggle, True):
+            return True
+        if not sys.stdin.isatty():
+            return True  # non-interactive: can't prompt, don't block
+
+        self._stop_spinner()
+        # Yellow header + the action detail, then a strict y/N prompt.
+        print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
+        try:
+            answer = input("  Proceed? (y/N): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            answer = ""
+        return answer in ("y", "yes")
+
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
         """Execute tools based on the last AI message.
 
@@ -924,6 +985,16 @@ class LangGraphAgent:
                 tool = next((t for t in self.tools if t.name == tool_name), None)
 
             if tool:
+                # Hard gate: ask the user before running a shell command.
+                if not self._confirm_tool(tool_name, tool_args):
+                    tool_results.append(
+                        ToolMessage(
+                            content="User declined to run this command.",
+                            tool_call_id=tool_id,
+                            name=tool_name,
+                        )
+                    )
+                    continue
                 try:
                     logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
                     result = tool.invoke(tool_args)

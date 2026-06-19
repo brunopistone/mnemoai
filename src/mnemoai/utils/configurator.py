@@ -646,6 +646,9 @@ def _build_config(
 
     text = _set_bool(text, "USE_PROFILING", _ask_bool("Enable user profiling (personalized responses)?", _truthy(_get_in_section(text, "PROFILE", "USE_PROFILING"))), section="PROFILE")
 
+    text = _set_bool(text, "REQUIRE_BASH_CONFIRMATION", _ask_bool("Ask for confirmation before each shell command (execute_bash)?", _truthy(_get_top_level(text, "REQUIRE_BASH_CONFIRMATION"))))
+    text = _set_bool(text, "REQUIRE_WRITE_CONFIRMATION", _ask_bool("Ask for confirmation before each file write (fs_write/file_edit)?", _truthy(_get_top_level(text, "REQUIRE_WRITE_CONFIRMATION"))))
+
     return text
 
 

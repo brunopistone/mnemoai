@@ -629,7 +629,7 @@ def test_config_openai_transforms_base_template():
     d = _run_build(
         "openai", "gpt-5-mini",
         ["gpt-5-mini", "none", "65536", "y", "gpt-5-mini", "none", "alice", "",
-         "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "openai" and m["NAME"] == "gpt-5-mini"
@@ -643,7 +643,7 @@ def test_config_sagemaker_sets_region_and_input_format():
     d = _run_build(
         "sagemaker", "my-endpoint",
         ["my-endpoint", "eu-west-1", "huggingface", "none", "65536", "n", "bob", "",
-         "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "sagemaker"
@@ -655,7 +655,7 @@ def test_config_litellm_sets_api_base_and_key():
     d = _run_build(
         "litellm", "openai/gpt-4o",
         ["openai/gpt-4o", "http://localhost:8000/v1", "sk-xyz", "none", "65536", "n",
-         "carol", "", "y", "y", "y", "y", "y", "y", "y"],
+         "carol", "", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "litellm"
@@ -665,12 +665,13 @@ def test_config_litellm_sets_api_base_and_key():
 
 def test_config_anthropic_transforms_base_template():
     # answers: chat name, API_KEY, base URL (blank), MAX_TOKENS, ctx, configure
-    # vision? (y), vision name, vision MAX_TOKENS, profile, brave (blank), toggles*7
+    # vision? (y), vision name, vision MAX_TOKENS, profile, brave (blank), toggles*9
+    # (last two toggles: REQUIRE_BASH_CONFIRMATION, REQUIRE_WRITE_CONFIRMATION).
     d = _run_build(
         "anthropic", "claude-opus-4-8",
         ["claude-opus-4-8", "fake-anthropic-key", "", "none", "65536",
          "y", "claude-opus-4-8", "none", "dave", "",
-         "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "anthropic" and m["NAME"] == "claude-opus-4-8"
@@ -680,6 +681,9 @@ def test_config_anthropic_transforms_base_template():
         assert bad not in m
     # Claude is multimodal -> vision section switched to anthropic too.
     assert d["VISION_MODEL_ID"]["TYPE"] == "anthropic"
+    # Both confirmation toggles are prompted and written ('y' -> true).
+    assert d["REQUIRE_BASH_CONFIRMATION"] is True
+    assert d["REQUIRE_WRITE_CONFIRMATION"] is True
 
 
 def test_config_providers_menu_has_all_seven():
