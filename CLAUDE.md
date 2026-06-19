@@ -116,6 +116,10 @@ After each interaction, the Reflector analyzes tool execution trajectories, dete
 
 Stores successful task completions with tool usage patterns. Retrieved via hybrid search before each query and injected as context.
 
+### Curated memory (MEMORY.md) (`client/memory/memory_store.py`, `server/tools/memory_tool.py`)
+
+A small, bounded, profile-scoped (shared across models) `~/.mnemoai/{profile}/MEMORY.md` of durable facts (user/environment details, conventions, lessons, tool quirks, completed work) that the agent **curates itself** via the MCP `memory` tool (`add`/`replace`/`remove` over a `§`-delimited list; logic in `MemoryStore`). It is injected **whole** into the system prompt at session start by `_build_system_prompt`/`_inject_memory_context` in `client.py` (a frozen snapshot — writes during a session apply next session). A hard char cap (`MEMORY.MAX_CHARS`, default 2200) forces the agent to consolidate (merge/remove) instead of growing unbounded. Distinct from episodic memory (similarity-retrieved per query) and the ACE playbook (tool strategies); it complements both. Gated by `ENABLE_MEMORY` (default true). The `/memory` command views it (`/memory clear` wipes it); writes are confirmation-gated when `REQUIRE_MEMORY_CONFIRMATION` is true (default false — auto-saves), via the same client-side `_confirm_tool()` gate as bash/file writes.
+
 ## Configuration
 
 `utils/config.yaml` (gitignored). Copy from one of the provided templates:
@@ -137,7 +141,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 | `AGGREGATOR_PROMPT`   | Result synthesis prompt                                                                                                                                                                                                                                                                             |
 
 **Feature toggles** (all boolean in config root):
-`ENABLE_RAG`, `ENABLE_EPISODIC_MEMORY`, `ENABLE_PLAYBOOK`, `ENABLE_WEB_SEARCH`, `ENABLE_WEB_CRAWL`, `ENABLE_ROUTING`, `ENABLE_ORCHESTRATION`, `REQUIRE_BASH_CONFIRMATION` (default true), `REQUIRE_WRITE_CONFIRMATION` (default true)
+`ENABLE_RAG`, `ENABLE_EPISODIC_MEMORY`, `ENABLE_PLAYBOOK`, `ENABLE_WEB_SEARCH`, `ENABLE_WEB_CRAWL`, `ENABLE_ROUTING`, `ENABLE_ORCHESTRATION`, `REQUIRE_BASH_CONFIRMATION` (default true), `REQUIRE_WRITE_CONFIRMATION` (default true), `ENABLE_MEMORY` (default true), `REQUIRE_MEMORY_CONFIRMATION` (default false)
 
 **Environment variables:**
 
@@ -146,7 +150,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 - AWS credentials via `aws configure` for Bedrock/SageMaker/Mantle (Mantle mints a bearer token from these via `aws-bedrock-token-generator`)
 - Config `ENV` section sets additional env vars at startup
 
-**Runtime data:** All state lives under a single app home, `~/.mnemoai/` (override with `$MNEMOAI_HOME`), resolved centrally in `utils/paths.py`. Layout: `config/` (config.yaml + bundled `*.example` copies), `mcp/` (optional mcp.json + mcp.json.example), `plans/`, `tasks/`, and per-profile `{profile_name}/` (conversations, todos, RAG indexes, chunk caches, user profile). On first run `seed_example_files()` copies the package's bundled examples into `config/` and `mcp/` (idempotent, never overwrites). Config resolves `config/config.yaml` → legacy flat `config.yaml` → package fallback. **Episodic memory and the ACE playbook are model-scoped** under `{profile_name}/models/{sanitized_model_name}/` so switching the chat model doesn't contaminate memory built with a different one. All path construction goes through `utils/paths.py` (`app_home`, `config_dir`, `config_path`, `mcp_dir`, `mcp_config_path`, `plans_dir`, `tasks_dir`, `profile_dir`, `model_dir`).
+**Runtime data:** All state lives under a single app home, `~/.mnemoai/` (override with `$MNEMOAI_HOME`), resolved centrally in `utils/paths.py`. Layout: `config/` (config.yaml + bundled `*.example` copies), `mcp/` (optional mcp.json + mcp.json.example), `plans/`, `tasks/`, and per-profile `{profile_name}/` (conversations, todos, RAG indexes, chunk caches, user profile, and `MEMORY.md` — the curated persistent memory). On first run `seed_example_files()` copies the package's bundled examples into `config/` and `mcp/` (idempotent, never overwrites). Config resolves `config/config.yaml` → legacy flat `config.yaml` → package fallback. **Episodic memory and the ACE playbook are model-scoped** under `{profile_name}/models/{sanitized_model_name}/` so switching the chat model doesn't contaminate memory built with a different one. All path construction goes through `utils/paths.py` (`app_home`, `config_dir`, `config_path`, `mcp_dir`, `mcp_config_path`, `plans_dir`, `tasks_dir`, `profile_dir`, `model_dir`, `memory_file_path`).
 
 ## Code Conventions
 

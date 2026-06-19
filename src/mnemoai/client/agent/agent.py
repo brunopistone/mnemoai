@@ -40,6 +40,11 @@ class AgentState(TypedDict):
 class LangGraphAgent:
     """LangGraph-based agent with streaming support."""
 
+    # Task-agnostic "meta" tools bound on EVERY route (incl. the no-tools
+    # simple_qa route), so e.g. a "remember this" request can always reach the
+    # memory tool regardless of how the query was classified.
+    _ALWAYS_AVAILABLE_TOOLS = {"memory"}
+
     def __init__(
         self,
         model: BaseChatModel,
@@ -89,21 +94,32 @@ class LangGraphAgent:
         if router and tool_routes:
             self.tools_by_route = {}
             self.models_by_route = {}
-            # Append external tools to each non-empty specific route so
-            # configured MCP tools are always reachable, not just via 'full'.
+            # Meta tools are task-agnostic and must be reachable on EVERY route,
+            # including the no-tools 'simple_qa' route. The 'memory' tool is one:
+            # a "remember this" request classifies as simple_qa, so without this
+            # it could never be called. These are excluded from external_tools so
+            # the orchestrator doesn't redundantly describe them.
+            always_tools = [t for t in tools if t.name in self._ALWAYS_AVAILABLE_TOOLS]
+            # Any tool not named in a route allowlist AND not a meta tool is
+            # external (mcp.json). Append it to non-empty specific routes so
+            # configured MCP tools are reachable, not just via 'full'.
             known_names = {
                 n for names in tool_routes.values() if names for n in names
             }
-            external_tools = [t for t in tools if t.name not in known_names]
+            external_tools = [
+                t for t in tools
+                if t.name not in known_names
+                and t.name not in self._ALWAYS_AVAILABLE_TOOLS
+            ]
             self.external_tools = external_tools
             for route_name, tool_names in tool_routes.items():
                 if tool_names is None:
-                    route_tools = tools
+                    route_tools = tools  # 'full' already binds everything
                 elif not tool_names:
-                    route_tools = []
+                    route_tools = list(always_tools)  # e.g. simple_qa: meta only
                 else:
                     matched = [t for t in tools if t.name in tool_names]
-                    route_tools = matched + external_tools
+                    route_tools = matched + external_tools + always_tools
                 self.tools_by_route[route_name] = route_tools
                 self.models_by_route[route_name] = (
                     model.bind_tools(route_tools) if route_tools else model
@@ -926,25 +942,28 @@ class LangGraphAgent:
             raw = raw[1:-1]
         return {field: raw}
 
-    # Tools gated by a hard confirmation prompt, keyed by category. Each entry:
-    # (config toggle, default). The toggle defaults to True (gate on).
+    # Tools gated by a hard confirmation prompt, keyed by category.
     _CONFIRM_BASH_TOOLS = {"execute_bash"}
     _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
+    _CONFIRM_MEMORY_TOOLS = {"memory"}
 
     def _confirm_tool(self, tool_name: str, tool_args: dict) -> bool:
         """Ask the user to approve a destructive tool before it runs (Claude Code-style).
 
         Returns True to proceed, False if the user declines. Gates shell commands
-        (``execute_bash``, toggle ``REQUIRE_BASH_CONFIRMATION``) and file writes
-        (``fs_write``/``file_edit``, toggle ``REQUIRE_WRITE_CONFIRMATION``); every
-        other tool proceeds. Both toggles default True. The prompt is a hard gate
-        enforced here in the client (which owns the terminal) — the MCP server is
-        a piped subprocess and can't prompt. Non-interactive runs (no TTY, e.g.
-        tests/CI) auto-proceed so they don't hang.
+        (``execute_bash``, toggle ``REQUIRE_BASH_CONFIRMATION``, default True),
+        file writes (``fs_write``/``file_edit``, ``REQUIRE_WRITE_CONFIRMATION``,
+        default True), and memory writes (``memory``, ``REQUIRE_MEMORY_CONFIRMATION``,
+        default **False** — auto-save like Hermes); every other tool proceeds.
+        The prompt is a hard gate enforced here in the client (which owns the
+        terminal) — the MCP server is a piped subprocess and can't prompt.
+        Non-interactive runs (no TTY, e.g. tests/CI) auto-proceed so they
+        don't hang.
         """
         if tool_name in self._CONFIRM_BASH_TOOLS:
-            toggle, header, detail = (
+            toggle, toggle_default, header, detail = (
                 "REQUIRE_BASH_CONFIRMATION",
+                True,
                 "▶ Run shell command?",
                 tool_args.get("command", ""),
             )
@@ -955,15 +974,28 @@ class LangGraphAgent:
                 return True
             path = tool_args.get("path", "")
             op = tool_args.get("command", "edit")  # fs_write: create/str_replace/…
-            toggle, header, detail = (
+            toggle, toggle_default, header, detail = (
                 "REQUIRE_WRITE_CONFIRMATION",
+                True,
                 "▶ Write to file?",
                 f"{op} {path}".strip(),
+            )
+        elif tool_name in self._CONFIRM_MEMORY_TOOLS:
+            # Only the write actions touch the file; a bad/read action proceeds.
+            action = (tool_args.get("action") or "").strip().lower()
+            if action not in ("add", "replace", "remove"):
+                return True
+            text = tool_args.get("text") or tool_args.get("old_text") or ""
+            toggle, toggle_default, header, detail = (
+                "REQUIRE_MEMORY_CONFIRMATION",
+                False,
+                "▶ Update memory?",
+                f"{action}: {text[:60]}",
             )
         else:
             return True
 
-        if not config.get(toggle, True):
+        if not config.get(toggle, toggle_default):
             return True
         if not sys.stdin.isatty():
             return True  # non-interactive: can't prompt, don't block

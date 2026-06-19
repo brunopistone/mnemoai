@@ -201,6 +201,11 @@ class LangGraphClient:
             if profile_summary:
                 system_prompt = f"{system_prompt}\n\n{profile_summary}"
 
+        # Curated persistent memory (MEMORY.md), injected whole at session start.
+        memory_context = self._inject_memory_context()
+        if memory_context:
+            system_prompt = f"{system_prompt}\n\n{memory_context}"
+
         return system_prompt
 
     @staticmethod
@@ -465,6 +470,22 @@ class LangGraphClient:
                 logger.debug(f"Reflector: learned {len(entries)} strategies")
         except Exception as e:
             logger.error(f"Reflection failed: {e}")
+
+    def _inject_memory_context(self) -> str:
+        """Get the curated MEMORY.md contents, wrapped for the system prompt.
+
+        Hermes-style persistent memory: the whole file is injected once at
+        session start (a frozen snapshot, since this is built at agent
+        construction). Returns "" when disabled or empty.
+        """
+        if not config.get("ENABLE_MEMORY", True):
+            return ""
+        from mnemoai.client.memory.memory_store import MemoryStore
+
+        contents = MemoryStore().read().strip()
+        if not contents:
+            return ""
+        return f"[Persistent Memory]\n{contents}"
 
     def _get_playbook_context(self) -> str:
         """Get formatted playbook context for system prompt.

@@ -23,13 +23,16 @@ VISION_MODEL_ID:
   TEMPERATURE: 0.3
 # Model parameters
 MAX_CONVERSATION_TOKENS: 65536
-DOC_MAX_TOKENS: 16384
-# Ask for confirmation before every execute_bash shell command (Claude Code-style).
+DOC_MAX_TOKENS: 16384# Ask for confirmation before every execute_bash shell command (Claude Code-style).
 # Set to false to run shell commands without prompting (trusted/automation setups).
 REQUIRE_BASH_CONFIRMATION: true
 # Ask for confirmation before every fs_write / file_edit file modification.
 # Set to false to write files without prompting (trusted/automation setups).
 REQUIRE_WRITE_CONFIRMATION: true
+
+# Ask for confirmation before each persistent-memory write (default off:
+# the agent curates MEMORY.md automatically, Hermes-style). Set true to gate.
+REQUIRE_MEMORY_CONFIRMATION: false
 # RAG Configuration
 ENABLE_RAG: true
 RAG:
@@ -99,6 +102,12 @@ EPISODIC_MEMORY:
   # Query Enhancement
   ENABLE_QUERY_EXPANSION: true # Expand queries with synonyms
   QUERY_EXPANSION_TERMS: 3 # Max terms to add per query
+# Persistent curated memory (MEMORY.md): a small, bounded markdown file the
+# agent maintains itself and that is injected whole into the system prompt at
+# session start. Complements episodic memory (which is similarity-retrieved).
+ENABLE_MEMORY: true
+MEMORY:
+  MAX_CHARS: 2200   # hard cap; agent must consolidate when full
 # ACE Playbook Configuration (Agentic Context Engineering)
 ENABLE_PLAYBOOK: true
 PLAYBOOK:

@@ -89,6 +89,7 @@ class ChatInterface:
         ("Conversation", [
             ("/clear", "Clear conversation context"),
             ("/compact [focus]", "Summarize & shrink context"),
+            ("/memory [clear]", "View (or clear) persistent memory"),
             ("/save", "Save current conversation"),
             ("/load <path>", "Load a saved conversation"),
         ]),
@@ -109,6 +110,7 @@ class ChatInterface:
         ("/mcp", "List configured MCP servers & their tools"),
         ("/clear", "Clear conversation context"),
         ("/compact", "Summarize & shrink context (optional focus)"),
+        ("/memory", "View persistent memory (/memory clear to wipe)"),
         ("/save", "Save current conversation"),
         ("/load", "Load a saved conversation (/load <path>)"),
         ("/good", "Mark last response as good (training data)"),
@@ -350,6 +352,47 @@ class ChatInterface:
         print(f"\n  Declare more servers in:\n    {mcp_config_path()}")
         print('  Format: {"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}\n')
 
+    def _handle_memory_command(self, arg: str) -> None:
+        """Handle ``/memory`` (view) and ``/memory clear``.
+
+        The agent normally curates MEMORY.md itself via the memory tool; this
+        command lets the user inspect it, or wipe it. Reuses ``MemoryStore``.
+        """
+        from mnemoai.client.memory.memory_store import MemoryStore
+        from mnemoai.utils.paths import memory_file_path
+
+        store = MemoryStore()
+        sub = arg.strip().lower()
+
+        if sub == "clear":
+            if not store.read().strip():
+                print("Memory is already empty.")
+                return
+            try:
+                answer = input("  Clear ALL persistent memory? (y/N): ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                answer = ""
+            if answer in ("y", "yes"):
+                store.clear()
+                print("Persistent memory cleared.")
+            else:
+                print("Cancelled.")
+            return
+
+        if sub:
+            print(f"Unknown /memory subcommand '{sub}'. Use /memory or /memory clear.")
+            return
+
+        contents = store.read().strip()
+        print(f"\nPersistent memory ({memory_file_path()}):")
+        if contents:
+            for line in contents.splitlines():
+                print(f"  {line}")
+        else:
+            print("  (empty — the agent saves facts here as you work)")
+        print()
+
     def _restart_in_place(self) -> None:
         """Restart the current process so reloaded config takes full effect.
 
@@ -476,6 +519,11 @@ class ChatInterface:
             # List configured MCP servers (built-in + external from mcp.json).
             if query.lower() == "/mcp":
                 self._print_mcp_status()
+                continue
+
+            # View or clear the curated persistent memory (MEMORY.md).
+            if query.lower() == "/memory" or query.lower().startswith("/memory "):
+                self._handle_memory_command(query[len("/memory"):].strip())
                 continue
 
             # Manually compact the conversation: /compact [focus instructions]

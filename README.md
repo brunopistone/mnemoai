@@ -59,6 +59,7 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
   - [External MCP Servers](#external-mcp-servers)
   - [RAG (Retrieval-Augmented Generation)](#rag-retrieval-augmented-generation)
   - [User Profile Learning](#user-profile-learning)
+  - [Persistent Memory (MEMORY.md)](#-persistent-memory-memorymd)
   - [Episodic Memory](#episodic-memory)
   - [ACE Playbook (Agentic Context Engineering)](#ace-playbook-agentic-context-engineering)
   - [Training Data Collection](#training-data-collection)
@@ -133,6 +134,7 @@ mnemoai/                      # repo root
 │   │   │   └── user_profile_manager.py     # User profiling and learning
 │   │   └── memory/                         # Memory systems
 │   │       ├── episodic_memory.py          # Episodic memory manager
+│   │       ├── memory_store.py             # Curated persistent memory (MEMORY.md) store
 │   │       ├── reflector.py                # ACE Reflector - extracts strategies
 │   │       ├── playbook_store.py           # ACE Playbook - stores learned strategies
 │   │       ├── faiss_store.py              # FAISS episodic store
@@ -146,7 +148,7 @@ mnemoai/                      # repo root
 │   │       ├── fs_read.py / fs_write.py / file_edit.py / file_search.py
 │   │       ├── execute_bash.py / git_safety.py / todo_manager.py / plan_mode.py
 │   │       ├── background_tasks.py / web_crawler.py / web_search.py
-│   │       ├── describe_image.py / rag_tool.py
+│   │       ├── describe_image.py / rag_tool.py / memory_tool.py
 │   │       ├── rag/                        # RAG system (session, vector_store_controller, stores)
 │   │       └── readers/                    # File readers (csv/json/pdf/docx/line/dir/search + chunking)
 │   │
@@ -475,18 +477,20 @@ See `bash/system-command-app/README.md` for details on the wrapper script.
 
 All advanced features can be independently enabled or disabled in your local `utils/config.yaml` (copied from `config.yaml.example`). Here is a quick reference:
 
-| Feature                                                  | Config Key                         | Default             | Dependencies                              |
-| -------------------------------------------------------- | ---------------------------------- | ------------------- | ----------------------------------------- |
-| **RAG** (document indexing & search)                     | `ENABLE_RAG: true`                 | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
-| **Episodic Memory** (learn from past tasks)              | `ENABLE_EPISODIC_MEMORY: true`     | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
-| **ACE Playbook** (learn strategies from success/failure) | `ENABLE_PLAYBOOK: true`            | `true`              | None (embeddings optional for refinement) |
-| **User Profiling** (personalized responses)              | `PROFILE.USE_PROFILING: true`      | `true`              | Activates after 5+ interactions           |
-| **Web Search**                                           | `ENABLE_WEB_SEARCH: true`          | `true`              | `BRAVE_API_KEY` configured                |
-| **Web Crawler**                                          | `ENABLE_WEB_CRAWL: true`           | `true`              | None                                      |
-| **Vision** (image analysis)                              | Configure `VISION_MODEL_ID`        | Disabled if not set | Vision-capable model                      |
-| **Bash Confirmation** (prompt before each shell command) | `REQUIRE_BASH_CONFIRMATION: true`  | `true`              | None (auto-skips when non-interactive)    |
-| **Write Confirmation** (prompt before each file write)   | `REQUIRE_WRITE_CONFIRMATION: true` | `true`              | None (auto-skips when non-interactive)    |
-| **Verbose Mode** (show thinking process)                 | CLI flag `--no-verbose`            | Enabled             | Supported by model                        |
+| Feature                                                                 | Config Key                           | Default             | Dependencies                              |
+| ----------------------------------------------------------------------- | ------------------------------------ | ------------------- | ----------------------------------------- |
+| **RAG** (document indexing & search)                                    | `ENABLE_RAG: true`                   | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
+| **Episodic Memory** (learn from past tasks)                             | `ENABLE_EPISODIC_MEMORY: true`       | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)    |
+| **ACE Playbook** (learn strategies from success/failure)                | `ENABLE_PLAYBOOK: true`              | `true`              | None (embeddings optional for refinement) |
+| **User Profiling** (personalized responses)                             | `PROFILE.USE_PROFILING: true`        | `true`              | Activates after 5+ interactions           |
+| **Web Search**                                                          | `ENABLE_WEB_SEARCH: true`            | `true`              | `BRAVE_API_KEY` configured                |
+| **Web Crawler**                                                         | `ENABLE_WEB_CRAWL: true`             | `true`              | None                                      |
+| **Vision** (image analysis)                                             | Configure `VISION_MODEL_ID`          | Disabled if not set | Vision-capable model                      |
+| **Bash Confirmation** (prompt before each shell command)                | `REQUIRE_BASH_CONFIRMATION: true`    | `true`              | None (auto-skips when non-interactive)    |
+| **Write Confirmation** (prompt before each file write)                  | `REQUIRE_WRITE_CONFIRMATION: true`   | `true`              | None (auto-skips when non-interactive)    |
+| **Persistent Memory** (curated memory the agent maintains, `MEMORY.md`) | `ENABLE_MEMORY: true`                | `true`              | None                                      |
+| **Memory Confirmation** (prompt before each memory write)               | `REQUIRE_MEMORY_CONFIRMATION: false` | `false`             | None (auto-skips when non-interactive)    |
+| **Verbose Mode** (show thinking process)                                | CLI flag `--no-verbose`              | Enabled             | Supported by model                        |
 
 **Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `RAG.EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](#embeddings-model)).
 
@@ -518,6 +522,7 @@ Assistant: [Uses fs_read tool and displays content]
 | `/model`           | Override just one model — chat (LLM), vision, or embeddings — leaving the rest of `config.yaml` untouched, then restart in place                                                         |
 | `/params`          | Tune a model's inference parameters (temperature, top_p, top_k, penalties, reasoning, stop, stream, …) — only the params the chosen provider supports are offered, then restart in place |
 | `/mcp`             | List the configured MCP servers (built-in + any from `mcp.json`), their connection status, and tool counts                                                                               |
+| `/memory`          | View the curated persistent memory (`MEMORY.md`); `/memory clear` wipes it (with a y/N confirm)                                                                                          |
 
 ### Keyboard Shortcuts
 
@@ -1602,6 +1607,33 @@ After 5+ interactions, the assistant builds a profile:
 - **Code preferences**: Testing, documentation, type hints
 
 Profile is automatically injected into system prompt for personalization.
+
+### 🧠 Persistent Memory (MEMORY.md)
+
+A small, agent-curated markdown file the assistant maintains itself to remember durable facts across sessions — user/environment details, conventions, lessons learned, tool quirks, and completed work. It lives at `~/.mnemoai/{profile}/MEMORY.md` (profile-scoped, **shared across models**, unlike episodic memory and the playbook).
+
+**How it works:**
+
+1. **Always injected**: The entire file is loaded into the system prompt at the start of every session — a "frozen snapshot". Writes made during a session take effect on the **next** session, not the current one.
+2. **Agent-curated**: The assistant edits its own memory via the `memory` MCP tool (`add` / `replace` / `remove` actions over a `§`-delimited entry list), deciding what is worth remembering.
+3. **Bounded**: A hard character cap (`MEMORY.MAX_CHARS`, default 2200) forces the agent to **consolidate** — merging or removing stale entries instead of growing unbounded.
+
+**How it differs from Episodic Memory:** persistent memory is a curated set of facts that is **always** in context, whereas episodic memory is a store of past task completions **retrieved by similarity** per query. The two complement each other (and the ACE Playbook, which stores tool strategies).
+
+**Command:** Run `/memory` to view the current memory, or `/memory clear` to wipe it (with a y/N confirm).
+
+**Configuration:**
+
+```yaml
+ENABLE_MEMORY: true # Master toggle for the memory tool + injection
+REQUIRE_MEMORY_CONFIRMATION: false # Auto-saves like Hermes; set true to require y/N before each memory write
+MEMORY:
+  MAX_CHARS: 2200 # Hard cap — forces consolidation when exceeded
+```
+
+`REQUIRE_MEMORY_CONFIRMATION` defaults to `false` (the agent auto-saves). Set it to `true` to gate each memory write behind a y/N prompt, reusing the same client-side confirmation gate as bash/file writes.
+
+**Storage Location:** `~/.mnemoai/{profile}/MEMORY.md`
 
 ### Episodic Memory
 

@@ -99,3 +99,36 @@ def test_write_toggle_off_proceeds(agent, monkeypatch):
 
 def test_write_non_interactive_auto_proceeds(agent, monkeypatch):
     assert _run(agent, monkeypatch, "file_edit", {"path": "/tmp/x"}, "n", tty=False) is True
+
+
+# --- Memory tool (REQUIRE_MEMORY_CONFIRMATION, default OFF) ---
+
+
+def _run_memory(agent, monkeypatch, args, answer, *, toggle, tty=True):
+    monkeypatch.setattr(
+        agent_mod.config, "get",
+        lambda k, d=None: toggle if k == "REQUIRE_MEMORY_CONFIRMATION" else d,
+    )
+    monkeypatch.setattr(agent_mod.sys.stdin, "isatty", lambda: tty)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": answer)
+    return agent._confirm_tool("memory", args)
+
+
+def test_memory_default_off_proceeds_without_prompt(agent, monkeypatch):
+    # Default is off (auto-save): even a 'no' answer proceeds (no prompt fires).
+    assert _run_memory(agent, monkeypatch,
+                       {"action": "add", "text": "x"}, "n", toggle=False) is True
+
+
+def test_memory_toggle_on_gates_writes(agent, monkeypatch):
+    assert _run_memory(agent, monkeypatch,
+                       {"action": "add", "text": "x"}, "n", toggle=True) is False
+    assert _run_memory(agent, monkeypatch,
+                       {"action": "replace", "old_text": "a", "text": "b"}, "y",
+                       toggle=True) is True
+
+
+def test_memory_non_write_action_not_gated(agent, monkeypatch):
+    # An unknown/read action touches no file, so it proceeds even with gate on.
+    assert _run_memory(agent, monkeypatch,
+                       {"action": "view"}, "n", toggle=True) is True
