@@ -3,7 +3,7 @@
 These test the pure command-classification logic (no real git calls).
 """
 
-from server.tools.git_safety import (
+from personal_ai_assistant.server.tools.git_safety import (
     check_dangerous_command,
     PROTECTED_BRANCHES,
     DANGEROUS_PATTERNS,

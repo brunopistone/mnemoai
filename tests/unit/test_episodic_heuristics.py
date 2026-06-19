@@ -4,7 +4,7 @@ These cover the pure success-detection and tool-extraction logic. They rely on
 the built-in default markers (no config.yaml required).
 """
 
-from client.memory.episodic_memory import (
+from personal_ai_assistant.client.memory.episodic_memory import (
     is_task_successful,
     extract_tools_from_messages,
 )
@@ -58,7 +58,7 @@ class TestIsTaskSuccessful:
         # Regression: an unquoted `no` in config.yaml parses as bool False,
         # which previously crashed is_task_successful on .lower(). Markers
         # must be coerced to str so this stays robust.
-        import client.memory.episodic_memory as em
+        import personal_ai_assistant.client.memory.episodic_memory as em
 
         bad_config = {
             "SUCCESS_MARKERS": ["thanks", True],

@@ -7,13 +7,15 @@ Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). Th
 ## Quick Commands
 
 ```bash
-# Run (verbose mode — shows thinking process)
-python main.py
+# Run from a checkout (src layout: package under src/, run as a module)
+PYTHONPATH=src python -m personal_ai_assistant            # verbose (shows thinking)
+PYTHONPATH=src python -m personal_ai_assistant --no-verbose
 
-# Run (hide thinking)
-python main.py --no-verbose
+# Or install, then use the console command
+uv tool install .        # or: pip install -e .
+personal-ai-assistant
 
-# Install dependencies
+# Install dependencies (checkout dev)
 pip install -r requirements.txt
 
 # System-wide access (symlink once)
@@ -38,20 +40,28 @@ main.py → ChatInterface → LangGraphClient.query()
 
 ## Directory Structure
 
-| Directory               | Role                                                                      |
-| ----------------------- | ------------------------------------------------------------------------- |
-| `client/`               | LangGraph agent, query routing, orchestrator, MCP bridge, UI              |
-| `client/memory/`        | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                 |
-| `client/managers/`      | Conversation token management, user profile learning                      |
-| `client/ui/`            | prompt_toolkit chat loop, spinner                                         |
-| `server/`               | FastMCP server entry point                                                |
-| `server/tools/`         | Tool implementations (bash, file ops, git, web, RAG, vision, planning)    |
-| `server/tools/rag/`     | Session-scoped vector store, hybrid search engine                         |
-| `server/tools/readers/` | File format readers (PDF, DOCX, CSV, JSON, directory, line, search)       |
-| `models/`               | LLM/embeddings/vision controllers, multi-provider abstraction             |
-| `models/classes/`       | Custom LangChain model implementations (ChatOllamaWrapper, ChatSageMaker) |
-| `utils/`                | Config singleton, logger, BM25, text formatting                           |
-| `bash/`                 | Shell scripts (system command wrapper, Ollama VRAM management)            |
+**src layout:** the single package `personal_ai_assistant` lives under `src/`.
+Paths below are relative to `src/personal_ai_assistant/` (e.g. `client/` is
+`src/personal_ai_assistant/client/`). `main.py` is the package entry (`cli()`),
+also runnable as `python -m personal_ai_assistant`. `tests/`, `docs/`, `bash/`
+stay at the repo root.
+
+| Directory                | Role                                                                      |
+| ------------------------ | ------------------------------------------------------------------------- |
+| `client/`                | LangGraphClient facade, MCP bridge                                        |
+| `client/agent/`          | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils |
+| `client/memory/`         | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                 |
+| `client/managers/`       | Conversation token management, user profile learning                      |
+| `client/ui/`             | prompt_toolkit chat loop, spinner                                         |
+| `server/`                | FastMCP server entry point (run as a subprocess)                          |
+| `server/tools/`          | Tool implementations (bash, file ops, git, web, RAG, vision, planning)    |
+| `server/tools/rag/`      | Session-scoped vector store, hybrid search engine                         |
+| `server/tools/readers/`  | File format readers (PDF, DOCX, CSV, JSON, directory, line, search)       |
+| `models/`                | `provider_params` registry + `mantle_factory`                             |
+| `models/controllers/`    | Provider-dispatching LLM/vision/embeddings controllers                    |
+| `models/chat_models/`    | Concrete LangChain ChatModel subclasses (ChatOllamaWrapper, ChatSageMaker)|
+| `utils/`                 | Config singleton, configurator, paths, logger, BM25, text formatting      |
+| `bash/` (repo root)      | Shell scripts (system command wrapper, Ollama VRAM management)            |
 
 ## Detailed File Map
 
@@ -74,9 +84,9 @@ All configuration flows through `Config()` which loads `utils/config.yaml` (giti
 
 Used in both episodic memory and RAG. Pattern: get top-N candidates from vector store, get top-N from BM25, merge with configurable weights (`utils/bm25.py`).
 
-### Multi-provider LLM abstraction (`models/llm_controller.py`)
+### Multi-provider LLM abstraction (`models/controllers/llm_controller.py`)
 
-`LangChainLLMController.initialize_model()` dispatches on `MODEL_ID.TYPE` (bedrock/mantle/ollama/openai/sagemaker/litellm). Each provider has inference parameter mapping in `BaseModelController`.
+`LangChainLLMController.initialize_model()` dispatches on `MODEL_ID.TYPE` (bedrock/mantle/ollama/openai/sagemaker/litellm). Each provider's supported config keys / client-kwarg mapping live in `models/provider_params.py` (consumed via `build_kwargs`).
 
 ### Bedrock Mantle (`models/mantle_factory.py`)
 
@@ -86,11 +96,11 @@ Used in both episodic memory and RAG. Pattern: get top-N candidates from vector 
 
 Keeps the conversation under `MAX_CONVERSATION_TOKENS` by summarizing older messages into the system prompt while keeping recent turns verbatim. Triggers automatically when over budget, or manually via `/compact`. The kept window is bounded by message count AND a token budget so an oversized recent message (e.g. a pasted document) is summarized, not kept. Tool calls/results are preserved in the summary.
 
-### Query routing (`client/router.py`)
+### Query routing (`client/agent/router.py`)
 
 `QueryRouter.classify()` uses the LLM to categorize queries. Routes map to tool subsets in `ROUTE_TOOLS` dict — only relevant tools are bound per query.
 
-### Orchestrator-workers (`client/orchestrator.py`, `client/agent.py`)
+### Orchestrator-workers (`client/agent/orchestrator.py`, `client/agent/agent.py`)
 
 For "full" complexity tasks: decompose → parse subtasks (JSON) → run worker loop per subtask with category-specific tools → aggregate results.
 
@@ -137,7 +147,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 ## Code Conventions
 
 - **Tests** — pytest unit suite in `tests/` covers pure-logic modules (no LLM/Ollama needed). Run with `python -m pytest`. See the Testing section below
-- **Error handling in tools** — `@tool_error_handler` decorator (`server/tools/error_handler.py`) for standardized responses
+- **Error handling in tools** — `@tool_error_handler` decorator (`server/error_handler.py`) for standardized responses
 - **Async/sync bridge** — MCP client uses a background thread with `asyncio.new_event_loop()` in `client/mcp_tool_wrapper.py`; sync callers use `run_coroutine_threadsafe`
 - **Imports** — relative within packages, absolute across packages
 - **Type hints** — used for LangChain/LangGraph state schemas (`TypedDict`), model classes; not enforced everywhere
@@ -157,7 +167,7 @@ python -m pytest -m "not integration"        # explicitly exclude integration
 ```
 
 - Layout: `tests/unit/` (pure-logic) and `tests/integration/` (live agent). Configured via `pytest.ini` (testpaths=tests). `tests/conftest.py` puts the repo root on `sys.path` so `utils`/`client`/`server` import cleanly.
-- **Unit tier (default):** deterministic, pure-logic tests — no LLM, Ollama, or network needed, runs in seconds. Covers `utils/bm25.py`, `client/reasoning_utils.py`, `utils/formatting/` (response_parser, url_formatter, code_formatter), `client/orchestrator.parse_subtasks`, `server/tools/error_handler.py`, `server/tools/git_safety.py` (command-danger classification), `server/tools/file_edit.py` + `glob_search`, `execute_bash` timeout/process-group behavior, `client/memory/episodic_memory` heuristics, Bedrock/Mantle model wiring (`test_bedrock_endpoint.py`), vision content normalization (`test_vision_content.py`), and conversation compaction incl. token-aware retention (`test_conversation_compaction.py`).
+- **Unit tier (default):** deterministic, pure-logic tests — no LLM, Ollama, or network needed, runs in seconds. Covers `utils/bm25.py`, `client/agent/reasoning_utils.py`, `utils/formatting/` (response_parser, url_formatter, code_formatter), `client/agent/orchestrator.parse_subtasks`, `server/error_handler.py`, `server/tools/git_safety.py` (command-danger classification), `server/tools/file_edit.py` + `glob_search`, `execute_bash` timeout/process-group behavior, `client/memory/episodic_memory` heuristics, Bedrock/Mantle model wiring (`test_bedrock_endpoint.py`), vision content normalization (`test_vision_content.py`), and conversation compaction incl. token-aware retention (`test_conversation_compaction.py`).
 - Unit tests must not require a `config.yaml` — modules degrade gracefully without one. Keep import-time side effects config-independent so new code stays unit-testable.
 - **Integration tier (`tests/integration/`, marked `@pytest.mark.integration`):** drives the real `LangGraphClient` + Ollama + MCP subprocess (greeting/routing, tool calls, bash timeout, no-silent-empty-turn). Auto-skipped unless a runtime `config.yaml` exists AND the configured Ollama host is reachable (see `tests/integration/conftest.py`). The shared client is session-scoped; an autouse fixture calls `clear_context()` between tests for isolation.
 
@@ -168,15 +178,15 @@ python -m pytest -m "not integration"        # explicitly exclude integration
 3. Add `@tool_error_handler` for standardized error responses
 4. Register in `server/tools/tools_manager.py` → `register_tools()` method
 5. If conditionally enabled, gate behind a config toggle
-6. Add route mapping in `client/router.py` → `ROUTE_TOOLS` if it belongs to a specific category
+6. Add route mapping in `client/agent/router.py` → `ROUTE_TOOLS` if it belongs to a specific category
 
 ## Adding a New LLM Provider
 
-1. Add provider case in `models/llm_controller.py` → `initialize_model()`
-2. Add inference parameter method in `models/base_model_controller.py`
-3. If custom LangChain model needed, create class in `models/classes/`
-4. Add embedding support in `models/embeddings_controller.py` if provider offers embeddings
-5. Add vision support in `models/vision_model_controller.py` if applicable
+1. Add provider case in `models/controllers/llm_controller.py` → `initialize_model()`
+2. Register the provider's supported config keys in `models/provider_params.py` (the registry consumed via `build_kwargs` and used by `/model` pruning)
+3. If custom LangChain model needed, create class in `models/chat_models/`
+4. Add embedding support in `models/controllers/embeddings_controller.py` if provider offers embeddings
+5. Add vision support in `models/controllers/vision_model_controller.py` if applicable
 6. Document config structure in all `utils/config.yaml*.example` templates
 
 ## Known Limitations

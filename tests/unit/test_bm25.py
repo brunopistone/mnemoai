@@ -1,6 +1,6 @@
 """Unit tests for the lightweight BM25 scorer (utils/bm25.py)."""
 
-from utils.bm25 import BM25, tokenize
+from personal_ai_assistant.utils.bm25 import BM25, tokenize
 
 
 class TestTokenize:

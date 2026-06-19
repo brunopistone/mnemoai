@@ -48,24 +48,12 @@ dev = ["pytest>=8.0.0"]
 
 [project.scripts]
 # Installs the `personal-ai-assistant` terminal command (uv tool install . / pipx install .)
-personal-ai-assistant = "main:cli"
+personal-ai-assistant = "personal_ai_assistant.main:cli"
 
 [tool.hatch.build.targets.wheel]
-# Flat layout: ship the top-level module + each package. server/ is launched as
-# an MCP subprocess (path resolved from main.py's __file__), so it must be in
-# the wheel. config.yaml.* examples ship as onboarding templates.
-include = [
-    "main.py",
-    "client/**/*.py",
-    "server/**/*.py",
-    "models/**/*.py",
-    "utils/**/*.py",
-    "utils/config.yaml.example",
-    "utils/config.yaml.bedrock.example",
-    "utils/config.yaml.bedrock.mantle.example",
-]
-
-[tool.hatch.build.targets.wheel.force-include]
-# Ensure the MCP server entry script is present at the same relative path the
-# client expects when launching the subprocess.
-"server/server.py" = "server/server.py"
+# src layout: the single package `personal_ai_assistant` lives under src/. hatch
+# ships the whole package (all .py plus the config.yaml.* onboarding templates
+# that sit inside utils/). The MCP server is launched as a subprocess via module
+# invocation (`python -m personal_ai_assistant.server.server`), so it just needs
+# to be importable — no force-include of a script path required.
+packages = ["src/personal_ai_assistant"]
