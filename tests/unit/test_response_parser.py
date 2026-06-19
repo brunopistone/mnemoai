@@ -1,6 +1,6 @@
 """Unit tests for AI response parsing (utils/formatting/response_parser.py)."""
 
-from personal_ai_assistant.utils.formatting.response_parser import (
+from mnemoai.utils.formatting.response_parser import (
     extract_answer,
     extract_thinking,
     format_response,

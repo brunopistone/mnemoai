@@ -5,7 +5,7 @@ Episodic memory and the ACE playbook live under
 chat model doesn't contaminate memory built with a different one.
 """
 
-from personal_ai_assistant.client.client import LangGraphClient
+from mnemoai.client.client import LangGraphClient
 
 
 class TestSanitizeForPath:

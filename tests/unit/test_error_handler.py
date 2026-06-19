@@ -3,7 +3,7 @@
 import asyncio
 import json
 
-from personal_ai_assistant.server.error_handler import tool_error_handler, create_error_response
+from mnemoai.server.error_handler import tool_error_handler, create_error_response
 
 
 def run(coro):

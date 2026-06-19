@@ -67,7 +67,7 @@ def patch_mantle(monkeypatch):
 
 
 def _make_llm_controller(monkeypatch, model_id: dict):
-    import personal_ai_assistant.models.controllers.llm_controller as mod
+    import mnemoai.models.controllers.llm_controller as mod
 
     def fake_get(key, default=None):
         if key == "MODEL_ID":
@@ -81,7 +81,7 @@ def _make_llm_controller(monkeypatch, model_id: dict):
 
 
 def _make_vision_controller(monkeypatch, model_id: dict):
-    import personal_ai_assistant.models.controllers.vision_model_controller as mod
+    import mnemoai.models.controllers.vision_model_controller as mod
 
     def fake_get(key, default=None):
         if key == "VISION_MODEL_ID":
@@ -291,7 +291,7 @@ class TestMantleVisionModelType:
 
 class TestMantleFactory:
     def test_invalid_protocol_raises(self, patch_mantle):
-        from personal_ai_assistant.models.mantle_factory import build_mantle_model
+        from mnemoai.models.mantle_factory import build_mantle_model
 
         with pytest.raises(ValueError, match="Unknown Mantle API_PROTOCOL"):
             build_mantle_model(
@@ -299,7 +299,7 @@ class TestMantleFactory:
             )
 
     def test_explicit_endpoint_url_overrides_anthropic_default(self, patch_mantle):
-        from personal_ai_assistant.models.mantle_factory import build_mantle_model
+        from mnemoai.models.mantle_factory import build_mantle_model
 
         build_mantle_model(
             {
@@ -312,7 +312,7 @@ class TestMantleFactory:
         assert patch_mantle["anthropic_api_url"] == "https://custom.example/anthropic"
 
     def test_anthropic_defaults_max_tokens_when_unset(self, patch_mantle):
-        from personal_ai_assistant.models.mantle_factory import build_mantle_model
+        from mnemoai.models.mantle_factory import build_mantle_model
 
         build_mantle_model(
             {
@@ -337,7 +337,7 @@ class TestMantleApiKeyAuth:
         monkeypatch.setattr(aws_bedrock_token_generator, "provide_token", _boom)
         monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
 
-        from personal_ai_assistant.models.mantle_factory import build_mantle_model
+        from mnemoai.models.mantle_factory import build_mantle_model
 
         build_mantle_model(
             {
@@ -358,7 +358,7 @@ class TestMantleApiKeyAuth:
         monkeypatch.setattr(aws_bedrock_token_generator, "provide_token", _boom)
         monkeypatch.setenv("BEDROCK_API_KEY", "bedrock-api-key-from-env")
 
-        from personal_ai_assistant.models.mantle_factory import build_mantle_model
+        from mnemoai.models.mantle_factory import build_mantle_model
 
         build_mantle_model(
             {"NAME": "qwen.qwen3-32b", "TYPE": "mantle", "REGION": "us-east-1"}
@@ -367,7 +367,7 @@ class TestMantleApiKeyAuth:
 
     def test_config_api_key_takes_precedence_over_env(self, patch_mantle, monkeypatch):
         monkeypatch.setenv("BEDROCK_API_KEY", "from-env")
-        from personal_ai_assistant.models.mantle_factory import build_mantle_model
+        from mnemoai.models.mantle_factory import build_mantle_model
 
         build_mantle_model(
             {
@@ -382,7 +382,7 @@ class TestMantleApiKeyAuth:
     def test_falls_back_to_minting_when_no_key(self, patch_mantle, monkeypatch):
         # No key set anywhere -> mints via the (mocked) token generator.
         monkeypatch.delenv("BEDROCK_API_KEY", raising=False)
-        from personal_ai_assistant.models.mantle_factory import build_mantle_model
+        from mnemoai.models.mantle_factory import build_mantle_model
 
         build_mantle_model(
             {"NAME": "qwen.qwen3-32b", "TYPE": "mantle", "REGION": "us-east-1"}

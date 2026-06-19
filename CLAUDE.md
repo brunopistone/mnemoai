@@ -8,19 +8,19 @@ Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). Th
 
 ```bash
 # Run from a checkout (src layout: package under src/, run as a module)
-PYTHONPATH=src python -m personal_ai_assistant            # verbose (shows thinking)
-PYTHONPATH=src python -m personal_ai_assistant --no-verbose
+PYTHONPATH=src python -m mnemoai            # verbose (shows thinking)
+PYTHONPATH=src python -m mnemoai --no-verbose
 
 # Or install, then use the console command
 uv tool install .        # or: pip install -e .
-personal-ai-assistant
+mnemoai
 
 # Install dependencies (checkout dev)
 pip install -r requirements.txt
 
 # System-wide access (symlink once)
-chmod +x bash/system-command-app/personal-ai-assistant-wrapper.sh
-ln -sf $(pwd)/bash/system-command-app/personal-ai-assistant-wrapper.sh /usr/local/bin/personal-ai-assistant
+chmod +x bash/system-command-app/mnemoai-wrapper.sh
+ln -sf $(pwd)/bash/system-command-app/mnemoai-wrapper.sh /usr/local/bin/mnemoai
 ```
 
 ## Architecture
@@ -40,10 +40,10 @@ main.py → ChatInterface → LangGraphClient.query()
 
 ## Directory Structure
 
-**src layout:** the single package `personal_ai_assistant` lives under `src/`.
-Paths below are relative to `src/personal_ai_assistant/` (e.g. `client/` is
-`src/personal_ai_assistant/client/`). `main.py` is the package entry (`cli()`),
-also runnable as `python -m personal_ai_assistant`. `tests/`, `docs/`, `bash/`
+**src layout:** the single package `mnemoai` lives under `src/`.
+Paths below are relative to `src/mnemoai/` (e.g. `client/` is
+`src/mnemoai/client/`). `main.py` is the package entry (`cli()`),
+also runnable as `python -m mnemoai`. `tests/`, `docs/`, `bash/`
 stay at the repo root.
 
 | Directory                | Role                                                                      |
@@ -142,7 +142,7 @@ Stores successful task completions with tool usage patterns. Retrieved via hybri
 - AWS credentials via `aws configure` for Bedrock/SageMaker/Mantle (Mantle mints a bearer token from these via `aws-bedrock-token-generator`)
 - Config `ENV` section sets additional env vars at startup
 
-**Runtime data:** All state lives under a single app home, `~/.personal-ai-assistant/` (override with `$PERSONAL_AI_ASSISTANT_HOME`), resolved centrally in `utils/paths.py`. Layout: `config.yaml`, `plans/`, `tasks/`, and per-profile `{profile_name}/` (conversations, todos, RAG indexes, chunk caches, user profile). **Episodic memory and the ACE playbook are model-scoped** under `{profile_name}/models/{sanitized_model_name}/` so switching the chat model doesn't contaminate memory built with a different one. All path construction goes through `utils/paths.py` (`app_home`, `config_path`, `plans_dir`, `tasks_dir`, `profile_dir`, `model_dir`).
+**Runtime data:** All state lives under a single app home, `~/.mnemoai/` (override with `$MNEMOAI_HOME`), resolved centrally in `utils/paths.py`. Layout: `config.yaml`, `plans/`, `tasks/`, and per-profile `{profile_name}/` (conversations, todos, RAG indexes, chunk caches, user profile). **Episodic memory and the ACE playbook are model-scoped** under `{profile_name}/models/{sanitized_model_name}/` so switching the chat model doesn't contaminate memory built with a different one. All path construction goes through `utils/paths.py` (`app_home`, `config_path`, `plans_dir`, `tasks_dir`, `profile_dir`, `model_dir`).
 
 ## Code Conventions
 

@@ -1,6 +1,6 @@
 """Unit tests for reasoning model helpers (client/reasoning_utils.py)."""
 
-from personal_ai_assistant.client.agent.reasoning_utils import (
+from mnemoai.client.agent.reasoning_utils import (
     disable_reasoning,
     restore_reasoning,
     extract_visible_text,

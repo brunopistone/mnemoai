@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from personal_ai_assistant.server.tools.execute_bash import register_execute_bash_tools
+from mnemoai.server.tools.execute_bash import register_execute_bash_tools
 
 
 class _CapturingMCP:

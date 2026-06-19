@@ -7,21 +7,21 @@ To make the Personal AI Assistant easily accessible from anywhere in your termin
 The wrapper supports multiple Python environment types:
 
 - **venv/uv**: Automatically detects and activates `.venv` in the project directory
-- **conda**: Falls back to activating a conda environment named `personal-ai-assistant`
+- **conda**: Falls back to activating a conda environment named `mnemoai`
 
 If using conda, create the environment first:
 
 ```bash
-conda create -n personal-ai-assistant python=3.11
-conda activate personal-ai-assistant
+conda create -n mnemoai python=3.11
+conda activate mnemoai
 # Install dependencies...
 ```
 
 ## Installation
 
 ```bash
-chmod +x bash/system-command-app/personal-ai-assistant-wrapper.sh
-ln -sf $(pwd)/bash/system-command-app/personal-ai-assistant-wrapper.sh /usr/local/bin/personal-ai-assistant
+chmod +x bash/system-command-app/mnemoai-wrapper.sh
+ln -sf $(pwd)/bash/system-command-app/mnemoai-wrapper.sh /usr/local/bin/mnemoai
 ```
 
 ## Usage
@@ -29,5 +29,5 @@ ln -sf $(pwd)/bash/system-command-app/personal-ai-assistant-wrapper.sh /usr/loca
 Then run from anywhere:
 
 ```bash
-personal-ai-assistant
+mnemoai
 ```
