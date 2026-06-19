@@ -199,6 +199,21 @@ def supported_keys(section: str, provider: str) -> Optional[set]:
     return {s.config_key for s in entry["params"]} | entry["connection"] | entry["special"]
 
 
+def tunable_params(section: str, provider: str) -> Optional[set]:
+    """Inference/generation keys ``provider`` accepts for ``section``.
+
+    This is :func:`supported_keys` minus the connection/auth keys (HOST, PORT,
+    REGION, API_PROTOCOL, INPUT_FORMAT, API_BASE, API_KEY, ENDPOINT_URL) and
+    NAME/TYPE — i.e. exactly the generation knobs (temperature, top_p, penalties,
+    reasoning, stop, stream, …) the ``/params`` command lets the user tune.
+    Returns None for an unknown section/provider.
+    """
+    entry = _TABLES.get(section, {}).get(provider)
+    if entry is None:
+        return None
+    return {s.config_key for s in entry["params"]} | entry["special"]
+
+
 def build_kwargs(section: str, provider: str, controller: Any) -> Tuple[Dict, Dict]:
     """Build (main_kwargs, model_kwargs) for a provider from a controller.
 

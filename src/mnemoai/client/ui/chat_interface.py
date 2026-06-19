@@ -83,6 +83,7 @@ class ChatInterface:
         ("Configure", [
             ("/config", "Reconfigure config.yaml (overwrites it)"),
             ("/model", "Override one model (LLM/vision/embeddings)"),
+            ("/params", "Tune model inference params (temp, top_p, …)"),
         ]),
         ("Conversation", [
             ("/clear", "Clear conversation context"),
@@ -103,6 +104,7 @@ class ChatInterface:
     _COMMANDS = [
         ("/config", "Reconfigure config.yaml (overwrites it)"),
         ("/model", "Override one model (LLM/vision/embeddings)"),
+        ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/clear", "Clear conversation context"),
         ("/compact", "Summarize & shrink context (optional focus)"),
         ("/save", "Save current conversation"),
@@ -425,6 +427,16 @@ class ChatInterface:
                 from mnemoai.utils.configurator import run_model_override
 
                 if run_model_override() is not None:
+                    self._restart_in_place()
+                continue
+
+            # Tune a model's inference parameters (temperature, top_p, penalties,
+            # reasoning, stop, stream, …) in place, then restart so the new
+            # generation settings take effect.
+            if query.lower() == "/params":
+                from mnemoai.utils.configurator import run_params_override
+
+                if run_params_override() is not None:
                     self._restart_in_place()
                 continue
 

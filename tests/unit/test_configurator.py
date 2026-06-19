@@ -379,6 +379,91 @@ def test_provider_params_registry_shape():
     assert supported_keys("MODEL_ID", "bogus") is None
 
 
+# --- /params: inference-parameter tuning ------------------------------------
+
+
+def test_tunable_params_excludes_connection_keys():
+    # tunable_params == supported_keys minus connection/auth (HOST/PORT/REGION/…).
+    from mnemoai.models.provider_params import supported_keys, tunable_params
+
+    # ollama chat: keeps the inference knobs, drops HOST/PORT.
+    t = tunable_params("MODEL_ID", "ollama")
+    assert "TEMPERATURE" in t and "FREQUENCY_PENALTY" in t and "STOP" in t
+    assert "HOST" not in t and "PORT" not in t
+    # bedrock chat: reasoning specials are tunable; REGION (connection) is not.
+    tb = tunable_params("MODEL_ID", "bedrock")
+    assert {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS"} <= tb
+    assert "REGION" not in tb
+    # mantle: connection (REGION/API_PROTOCOL) excluded, specials kept.
+    tm = tunable_params("MODEL_ID", "mantle")
+    assert "REGION" not in tm and "API_PROTOCOL" not in tm
+    assert {"TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM"} == tm
+    # It's exactly supported minus the connection set.
+    from mnemoai.models.provider_params import _TABLES  # type: ignore
+
+    for prov in ("ollama", "bedrock", "openai", "sagemaker", "litellm"):
+        conn = _TABLES["MODEL_ID"][prov]["connection"]
+        assert tunable_params("MODEL_ID", prov) == supported_keys("MODEL_ID", prov) - conn
+    # Embeddings have nothing to tune.
+    assert tunable_params("EMBED_MODEL_ID", "ollama") == set()
+    # Unknown provider -> None.
+    assert tunable_params("MODEL_ID", "bogus") is None
+
+
+def test_validate_param_coerces_by_kind():
+    from mnemoai.utils.configurator import _validate_param as v
+
+    assert v("TEMPERATURE", "float", "0.7") == "0.7"
+    assert v("TEMPERATURE", "float", "abc") is None
+    assert v("TOP_K", "int", "40") == "40"
+    assert v("TOP_K", "int", "4.5") is None
+    assert v("STREAM", "bool", "yes") == "true"
+    assert v("STREAM", "bool", "off") == "false"
+    assert v("STREAM", "bool", "maybe") is None
+    assert v("REASONING_EFFORT", "enum:minimal,low,medium,high", "high") == "high"
+    assert v("REASONING_EFFORT", "enum:minimal,low,medium,high", "ultra") is None
+    # A list becomes a YAML flow sequence of quoted items.
+    assert v("STOP", "list", "</s>, ###") == '["</s>", "###"]'
+    assert v("STOP", "list", "   ") is None
+
+
+def test_every_tunable_key_has_prompt_metadata():
+    # Guard against drift: any key tunable_params can report must have an entry
+    # in _PARAM_META and a slot in _PARAM_ORDER, else /params would skip/crash.
+    from mnemoai.models.provider_params import tunable_params
+    from mnemoai.utils.configurator import _PARAM_META, _PARAM_ORDER
+
+    keys = set()
+    for section in ("MODEL_ID", "VISION_MODEL_ID"):
+        for prov in ("ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"):
+            keys |= tunable_params(section, prov) or set()
+    assert keys <= set(_PARAM_META)
+    assert keys <= set(_PARAM_ORDER)
+
+
+def test_set_field_replaces_multiline_list_with_inline_scalar():
+    # The /params fix: replacing a block-list value (STOP) with an inline value
+    # must drop the orphaned list items, leaving valid YAML.
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: m
+          TYPE: ollama
+          STOP:
+            - "<|im_start|>"
+            - "<|im_end|>"
+          TEMPERATURE: 0.6
+        """
+    )
+    out = _set_field(text, "MODEL_ID", "STOP", '["</s>"]')
+    d = yaml.safe_load(out)
+    assert d["MODEL_ID"]["STOP"] == ["</s>"]
+    assert "<|im_start|>" not in out
+    # Keys after the replaced block survive untouched.
+    assert d["MODEL_ID"]["TEMPERATURE"] == 0.6
+    assert d["MODEL_ID"]["NAME"] == "m"
+
+
 def test_build_kwargs_matches_controller_logic():
     # build_kwargs must reproduce the controller init behavior: STOP included
     # only when truthy, others when not-None, mapped to the right client kwarg,
@@ -479,7 +564,42 @@ def test_section_summary_includes_region_and_protocol():
         """
     )
     summary = _section_summary(text, "MODEL_ID")
-    assert summary == "mantle / anthropic.claude-haiku-4-5 (us-east-1, anthropic)"
+    # The TYPE is shown with its human label: mantle -> "bedrock-mantle".
+    assert summary == "bedrock-mantle / anthropic.claude-haiku-4-5 (us-east-1, anthropic)"
+
+
+def test_prompt_provider_type_numbered_menu_returns_canonical_value(monkeypatch):
+    # The menu shows labels (bedrock-mantle) but returns the canonical config
+    # value (mantle). Picking option 3 for the chat model -> "mantle".
+    import builtins
+
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "3")
+    assert C._prompt_provider_type("MODEL_ID", "ollama") == "mantle"
+
+
+def test_prompt_provider_type_invalid_keeps_current(monkeypatch):
+    import builtins
+
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "99")
+    assert C._prompt_provider_type("MODEL_ID", "bedrock") == "bedrock"
+
+
+def test_prompt_provider_type_embeddings_has_no_mantle(monkeypatch):
+    # Embeddings provider set excludes mantle; option count reflects that.
+    import builtins
+
+    from mnemoai.models.provider_params import providers
+    from mnemoai.utils import configurator as C
+
+    opts = list(providers("EMBED_MODEL_ID"))
+    assert "mantle" not in opts
+    # Enter keeps the current (default) selection -> ollama.
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "")
+    assert C._prompt_provider_type("EMBED_MODEL_ID", "ollama") == "ollama"
 
 
 # --- /config can create OpenAI / SageMaker / LiteLLM (base-template transform) ---

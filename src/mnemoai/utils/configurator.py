@@ -31,6 +31,19 @@ _PROVIDERS = {
     "6": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
 }
 
+# Human-facing label for each provider TYPE. The stored config value is the
+# canonical key (left); the label (right) is what the menus show — e.g. Mantle
+# is a Bedrock access path, so it reads "bedrock-mantle". Unlisted types fall
+# back to their key.
+_PROVIDER_LABELS = {
+    "ollama": "ollama",
+    "bedrock": "bedrock",
+    "mantle": "bedrock-mantle",
+    "openai": "openai",
+    "sagemaker": "sagemaker",
+    "litellm": "litellm",
+}
+
 # Mantle API protocol choice -> (value, description). Mirrors
 # models.mantle_factory.VALID_PROTOCOLS.
 _MANTLE_PROTOCOLS = {
@@ -175,7 +188,19 @@ def _set_field(text: str, section: str, key: str, value: str) -> str:
             body_indent = _indent_of(line)
         m = re.match(rf"(\s+){re.escape(key)}:(?:\s.*)?$", line)
         if m:
-            lines[j] = f"{m.group(1)}{key}: {value}"
+            key_indent = len(m.group(1))
+            # If the old value was a block (list/mapping), its lines are indented
+            # deeper than the key — drop them so replacing e.g. a multi-line
+            # STOP list with an inline value doesn't leave orphaned items behind.
+            end = j + 1
+            while end < len(lines):
+                nxt = lines[end]
+                if not nxt.strip():
+                    break
+                if _indent_of(nxt) <= key_indent:
+                    break
+                end += 1
+            lines[j:end] = [f"{m.group(1)}{key}: {value}"]
             return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
     # Not found in body -> insert just after the header at the body indent.
     indent = body_indent if body_indent is not None else header_indent + 2
@@ -379,6 +404,32 @@ def _set_bool(text: str, key: str, value: bool, section: Optional[str] = None) -
 def _truthy(value: Optional[str]) -> bool:
     """Interpret a template's YAML scalar string as a bool (default True)."""
     return (value or "true").strip().lower() in ("true", "yes", "on", "1")
+
+
+def _prompt_provider_type(section: str, current: str) -> str:
+    """Prompt for a provider TYPE as a numbered menu, returning the chosen key.
+
+    Options come from the registry (so embeddings, which has no Mantle path,
+    only offers its own providers) and are shown with their human label
+    (``bedrock-mantle`` for ``mantle``). The current type is the default; an
+    invalid choice keeps it. Returns the canonical config value (e.g. ``mantle``).
+    """
+    from mnemoai.models.provider_params import providers
+
+    options = list(providers(section))
+    if current not in options:
+        # Unknown/legacy current value — still offer it so it can be kept.
+        options = [current] + options
+    default_key = str(options.index(current) + 1)
+
+    print(f"\n  Provider type for this model (current: {_PROVIDER_LABELS.get(current, current)})")
+    for i, prov in enumerate(options, 1):
+        print(f"    {i}) {_PROVIDER_LABELS.get(prov, prov)}")
+    choice = _ask("Provider", default_key) or default_key
+    if not choice.isdigit() or not (1 <= int(choice) <= len(options)):
+        print(f"  '{choice}' is not a valid choice; keeping {_PROVIDER_LABELS.get(current, current)}.")
+        return current
+    return options[int(choice) - 1]
 
 
 def _prompt_mantle_protocol(text: str, section: str) -> str:
@@ -702,7 +753,8 @@ def _section_summary(text: str, section: str) -> Optional[str]:
     name = _get_field(text, section, "NAME")
     if not name:
         return None
-    typ = _get_field(text, section, "TYPE") or "?"
+    raw_type = _get_field(text, section, "TYPE") or "?"
+    typ = _PROVIDER_LABELS.get(raw_type, raw_type)
     extras = []
     host = _get_field(text, section, "HOST")
     port = _get_field(text, section, "PORT")
@@ -759,9 +811,7 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     chat model (``is_llm``). Embeddings has neither.
     """
     cur_type = (_get_field(text, section, "TYPE") or "ollama").lower()
-    print(f"\n  Provider type for this model (current: {cur_type})")
-    print("    options: ollama | bedrock | mantle | openai | sagemaker | litellm")
-    new_type = (_ask("Type", cur_type) or cur_type).lower()
+    new_type = _prompt_provider_type(section, cur_type)
     text = _set_field(text, section, "TYPE", new_type)
 
     name = _ask("Model name", _get_field(text, section, "NAME"))
@@ -784,7 +834,7 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
 
     if new_type != "ollama":
         print(
-            f"  Note: provider '{new_type}' may accept different inference "
+            f"  Note: provider '{_PROVIDER_LABELS.get(new_type, new_type)}' may accept different inference "
             "parameters\n  (temperature, penalties, etc.). Edit config.yaml "
             f"directly to tune the\n  {section} section — see the README's "
             "'Model Parameters' section for the\n  full list of supported "
@@ -804,6 +854,194 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
     return text
+
+
+# --- /params: tune the inference/generation parameters of a model -----------
+# Metadata for every tunable key the registry may report (provider_params.
+# tunable_params). Each entry: (kind, hint) where kind drives validation/parsing
+# and hint is shown in the prompt. The *set* of keys offered for a given model
+# is the provider's tunable set from the registry (so we never prompt a key the
+# provider ignores); this table only supplies how to prompt/validate each.
+#   kind: "float" | "int" | "bool" | "list" | one of an enum's allowed values
+_PARAM_META = {
+    "TEMPERATURE": ("float", "sampling temperature, e.g. 0.7"),
+    "TOP_P": ("float", "nucleus sampling, 0-1"),
+    "TOP_K": ("int", "top-k sampling, e.g. 40"),
+    "MAX_TOKENS": ("int", "max output tokens"),
+    "PRESENCE_PENALTY": ("float", "e.g. 0.0-2.0"),
+    "FREQUENCY_PENALTY": ("float", "e.g. 0.0-2.0"),
+    "REPETITION_PENALTY": ("float", "e.g. 1.0-1.3"),
+    "STOP": ("list", "comma-separated stop sequences"),
+    "STREAM": ("bool", "stream tokens as they generate"),
+    "REASONING": ("bool", "enable extended thinking"),
+    "REASONING_EFFORT": ("enum:minimal,low,medium,high", "reasoning effort"),
+    "THINKING_TOKENS": ("int", "budget for thinking tokens"),
+}
+
+# Order params are prompted in (registry membership decides which appear).
+_PARAM_ORDER = [
+    "TEMPERATURE", "TOP_P", "TOP_K", "MAX_TOKENS",
+    "PRESENCE_PENALTY", "FREQUENCY_PENALTY", "REPETITION_PENALTY",
+    "STOP", "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+]
+
+# /params can tune the chat and vision models (embeddings take no inference
+# params). key -> (config section, label).
+_PARAM_SECTIONS = {
+    "1": ("MODEL_ID", "Chat model (LLM)"),
+    "2": ("VISION_MODEL_ID", "Vision model"),
+}
+
+
+def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
+    """Validate/normalize a raw answer for a param, or return None if invalid.
+
+    Returns the YAML scalar string to write (e.g. "0.7", "true",
+    "[\"</s>\"]"), or None when the input doesn't fit the kind (caller re-asks).
+    """
+    raw = raw.strip()
+    if kind == "float":
+        try:
+            float(raw)
+            return raw
+        except ValueError:
+            return None
+    if kind == "int":
+        try:
+            int(raw)
+            return raw
+        except ValueError:
+            return None
+    if kind == "bool":
+        low = raw.lower()
+        if low in ("true", "yes", "y", "on", "1"):
+            return "true"
+        if low in ("false", "no", "n", "off", "0"):
+            return "false"
+        return None
+    if kind == "list":
+        items = [p.strip() for p in raw.split(",") if p.strip()]
+        if not items:
+            return None
+        # YAML flow sequence with double-quoted items.
+        return "[" + ", ".join('"' + it.replace('"', '\\"') + '"' for it in items) + "]"
+    if kind.startswith("enum:"):
+        allowed = kind.split(":", 1)[1].split(",")
+        return raw if raw in allowed else None
+    return raw
+
+
+def _prompt_one_param(text: str, section: str, key: str, kind: str, hint: str) -> str:
+    """Prompt for a single inference param and patch ``text`` accordingly.
+
+    Convention:
+      * Enter        -> keep the current value (no change)
+      * 'none'       -> clear it (remove the key; provider default applies)
+      * a valid value-> set it (re-asks on invalid input)
+    """
+    current = _get_field(text, section, key)
+    cur_disp = current if current is not None else "provider default"
+    if kind.startswith("enum:"):
+        hint = f"{hint} ({kind.split(':', 1)[1].replace(',', ' | ')})"
+    elif kind == "bool":
+        hint = f"{hint} (true/false)"
+    while True:
+        answer = _ask(f"{key} [{hint}] (current: {cur_disp}; 'none' to clear)", "")
+        if answer is None or answer.strip() == "":
+            return text  # keep current
+        if answer.strip().lower() == "none":
+            return _remove_field(text, section, key)
+        value = _validate_param(key, kind, answer)
+        if value is None:
+            print(f"    '{answer}' is not a valid {kind.split(':', 1)[0]} value; try again.")
+            continue
+        return _set_field(text, section, key, value)
+
+
+def _prompt_inference_params(text: str, section: str) -> str:
+    """Prompt every inference param the section's provider accepts.
+
+    The provider TYPE is read from the section; the set of tunable keys comes
+    from the registry (``tunable_params``) so only params the provider actually
+    consumes are offered. MAX_CONVERSATION_TOKENS (context window) and the
+    connection/auth keys are out of scope here — those live in /model.
+    """
+    from mnemoai.models.provider_params import tunable_params
+
+    provider = (_get_field(text, section, "TYPE") or "ollama").lower()
+    tunable = tunable_params(section, provider)
+    if not tunable:
+        print(f"  Provider '{provider}' exposes no tunable inference parameters here.")
+        return text
+
+    print(f"\n  Provider: {provider}. Press Enter to keep a value, type 'none' to")
+    print("  clear it (provider default), or enter a new value.\n")
+    for key in _PARAM_ORDER:
+        if key not in tunable:
+            continue
+        kind, hint = _PARAM_META.get(key, ("str", key))
+        text = _prompt_one_param(text, section, key, kind, hint)
+    return text
+
+
+def run_params_override() -> Optional[Path]:
+    """Tune the inference parameters of a configured model (the ``/params`` command).
+
+    Asks which model to tune — chat (LLM) or vision (whichever are configured) —
+    then walks the generation params that model's provider accepts (temperature,
+    top_p, penalties, reasoning, stop, stream, …), editing only those keys in
+    place. Provider/name/connection are unchanged here — use /model for those.
+    Returns the written Path, or None if cancelled or nothing changed.
+    """
+    dest = config_path()
+    if not dest.is_file():
+        print_error("No config.yaml found. Run /config to create one first.")
+        return None
+
+    text = dest.read_text()
+
+    available = {
+        "1": _get_field(text, "MODEL_ID", "NAME") is not None,
+        "2": _get_field(text, "VISION_MODEL_ID", "NAME") is not None,
+    }
+
+    print()
+    print("=" * 64)
+    print("  Tune inference parameters")
+    print("=" * 64)
+    _print_current_setup(text)
+    print("\n  Which model's parameters do you want to tune? Only inference")
+    print("  params are changed; provider, name, and connection stay as-is")
+    print("  (use /model for those).\n")
+    for k, (_, label) in _PARAM_SECTIONS.items():
+        if available.get(k):
+            print(f"    {k}) {label}")
+
+    try:
+        choice = _ask("Model", "1") or "1"
+        if choice not in _PARAM_SECTIONS:
+            print(f"  '{choice}' is not a valid choice. Cancelled.")
+            return None
+        if not available.get(choice):
+            print(f"  {_PARAM_SECTIONS[choice][1]} is not configured. Cancelled.")
+            return None
+
+        section, label = _PARAM_SECTIONS[choice]
+        print(f"\n  -- {label} parameters --")
+        new_text = _prompt_inference_params(text, section)
+    except KeyboardInterrupt:
+        print("\n  Cancelled. Config left untouched.")
+        return None
+
+    if new_text == text:
+        print("  No changes made.")
+        return None
+
+    dest.write_text(new_text)
+    print(f"\n  Updated {label} parameters in:\n    {dest}")
+    print("  Reload to apply: the change takes effect on the next config reload.")
+    print("=" * 64 + "\n")
+    return dest
 
 
 def run_model_override() -> Optional[Path]:
