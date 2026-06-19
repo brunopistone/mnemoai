@@ -8,17 +8,24 @@ import sys
 def setup_logger(name: str = "ai_app", level: int = None) -> logging.Logger:
     """Set up and configure a logger.
 
+    Operational diagnostics (model init, tool loading, summary generation,
+    etc.) go through this logger to stderr and are **off by default** (level
+    WARNING) so the chat UI stays clean; set ``LOG_LEVEL=INFO`` or
+    ``LOG_LEVEL=DEBUG`` to surface them for troubleshooting. User-facing output
+    (results, prompts, status the user asked for) should use ``print()``
+    instead of this logger.
+
     Args:
         name: The name of the logger
-        level: The logging level (defaults to INFO, or LOG_LEVEL env var)
+        level: The logging level (defaults to WARNING, or the LOG_LEVEL env var)
 
     Returns:
         The configured logger
     """
     # Get log level from environment variable if not specified
     if level is None:
-        log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
-        level = getattr(logging, log_level_str, logging.INFO)
+        log_level_str = os.getenv("LOG_LEVEL", "WARNING").upper()
+        level = getattr(logging, log_level_str, logging.WARNING)
 
     # Create logger
     logger = logging.getLogger(name)
