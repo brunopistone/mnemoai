@@ -33,6 +33,12 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   `MAX_TOKENS`" message instead of an empty reply. Reasoning models spend output
   tokens reasoning before answering, so a low `MAX_TOKENS` could consume the
   whole budget before any answer was produced.
+- Transient empty model responses are now retried. Some endpoints (notably
+  Bedrock Mantle reasoning models on the Responses API) intermittently return a
+  completely empty response — no content, reasoning, or tool call — for the same
+  prompt that succeeds on a retry. Every model call (the main loop, orchestrator
+  workers, and the aggregator) now retries an empty turn up to `LLM.MAX_RETRIES`
+  times. This fixes blank `[Step N/N: …]` turns seen under orchestration.
 
 ## [0.8.0] — 2026-06-22
 

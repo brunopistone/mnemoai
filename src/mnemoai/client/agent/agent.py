@@ -95,6 +95,13 @@ class LangGraphAgent:
         self.router = router
         self.orchestrator_enabled = orchestrator_enabled and router is not None
         self.recursion_limit = config.get("LLM", {}).get("RECURSION_LIMIT", 50)
+        # Some endpoints (notably Bedrock Mantle reasoning models on the
+        # Responses API) intermittently return a completely empty response
+        # — no content, no reasoning, no tool calls. A retry reliably recovers
+        # it. Bounded by LLM.MAX_RETRIES (default 2 extra attempts).
+        self._empty_response_retries = max(
+            0, int(config.get("LLM", {}).get("MAX_RETRIES", 2))
+        )
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
 
@@ -769,6 +776,44 @@ class LangGraphAgent:
             Tuple of (response, had_reasoning)
         """
         active_model = model or self.model_with_tools
+        attempts = getattr(self, "_empty_response_retries", 0) + 1
+        for attempt in range(attempts):
+            response, had_reasoning = self._stream_once(
+                active_model, messages, config, print_reasoning
+            )
+            # Retry only a *completely* empty turn (no content, no reasoning,
+            # no tool calls) — a transient endpoint hiccup, not a real answer.
+            # The reasoning-only case is handled separately by the caller.
+            if not self._is_empty_response(response) or attempt == attempts - 1:
+                return response, had_reasoning
+            logger.debug(
+                "Empty model response (attempt %d/%d); retrying",
+                attempt + 1,
+                attempts,
+            )
+            self._start_spinner()
+        return response, had_reasoning
+
+    def _is_empty_response(self, response) -> bool:
+        """True if a response carries no content, no reasoning, no tool calls."""
+        if response is None:
+            return True
+        if getattr(response, "tool_calls", None):
+            return False
+        if self._extract_visible(response.content):
+            return False
+        if self._extract_thinking(response):
+            return False
+        return True
+
+    def _stream_once(
+        self,
+        active_model,
+        messages: list,
+        config: dict,
+        print_reasoning: bool = True,
+    ) -> tuple:
+        """Single streaming attempt (see _stream_response for the retry wrapper)."""
         self._code_formatter = CodeFormatter()
         first_token = True
         had_reasoning = False

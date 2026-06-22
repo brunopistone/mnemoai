@@ -311,7 +311,7 @@ LLM:
   ENABLE_THINKING: true # Enable thinking tags (verbose mode)
   # Retry Logic
   RETRY_ENABLED: true
-  MAX_RETRIES: 3
+  MAX_RETRIES: 5 # Also caps retries of a transient *empty* model response
   RETRY_DELAY: 1.0 # Seconds between retries
   RETRY_BACKOFF: 2.0 # Exponential backoff multiplier
   # Token Counting (Model-specific)
