@@ -9,6 +9,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-06-22
+
+### Added
+
+- A subtle cyan `●` marker is printed before a streamed answer when the model
+  shows no reasoning, so the reply is visually distinct from the user's prompt
+  instead of butting directly against it. Shown only on user-facing answer
+  turns (main reply, retried answer, aggregated result) — worker streams already
+  carry a `[Step N/N]` header.
+
 ## [0.8.2] — 2026-06-22
 
 ### Fixed
@@ -186,7 +196,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.3...HEAD
+[0.8.3]: https://github.com/brunopistone/mnemoai/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/brunopistone/mnemoai/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/brunopistone/mnemoai/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/brunopistone/mnemoai/compare/v0.7.0...v0.8.0
