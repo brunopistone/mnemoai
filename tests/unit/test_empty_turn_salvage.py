@@ -79,3 +79,34 @@ def test_last_visible_from_skips_empty_ai_turns():
     ]
     # Should return the earlier visible answer, not the empty trailing one.
     assert a._last_visible_from(msgs) == "real answer"
+
+
+def _msg(meta):
+    m = AIMessage(content="")
+    m.response_metadata = meta
+    return m
+
+
+def test_truncation_detected_responses_incomplete():
+    # Reasoning model on the Responses API runs out of tokens mid-reasoning.
+    assert LangGraphAgent._was_truncated_by_tokens(
+        _msg({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}})
+    )
+
+
+def test_truncation_detected_chat_length_finish():
+    assert LangGraphAgent._was_truncated_by_tokens(_msg({"finish_reason": "length"}))
+
+
+def test_truncation_detected_bedrock_max_tokens():
+    assert LangGraphAgent._was_truncated_by_tokens(_msg({"stop_reason": "max_tokens"}))
+
+
+def test_truncation_not_detected_on_normal_completion():
+    assert not LangGraphAgent._was_truncated_by_tokens(
+        _msg({"status": "completed", "finish_reason": "stop"})
+    )
+
+
+def test_truncation_not_detected_without_metadata():
+    assert not LangGraphAgent._was_truncated_by_tokens(AIMessage(content="hi"))

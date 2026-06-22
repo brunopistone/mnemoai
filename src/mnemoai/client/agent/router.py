@@ -114,11 +114,26 @@ class QueryRouter:
             self.model.callbacks = None
             saved_reasoning = disable_reasoning(self.model)
             try:
-                response = self.model.invoke(messages, config={"callbacks": []})
+                # Some endpoints (e.g. Mantle reasoning models) intermittently
+                # return an empty/null response. A single retry recovers the
+                # common case before we fall back to "full".
+                route = ""
+                for _ in range(2):
+                    response = self.model.invoke(messages, config={"callbacks": []})
+                    route = self._parse_route(response.content)
+                    if route:
+                        break
             finally:
                 restore_reasoning(self.model, saved_reasoning)
                 self.model.callbacks = saved_callbacks
-            route = self._parse_route(response.content)
+
+            if not route:
+                # Empty classification is recoverable (we route to "full", which
+                # binds every tool), so this is debug-level, not a warning.
+                logger.debug(
+                    "Router produced no route after retry; falling back to 'full'"
+                )
+                return "full"
 
             logger.debug(f"Router classified query as: {route}")
             return route
@@ -133,12 +148,13 @@ class QueryRouter:
         Handles thinking tags, extra whitespace, quotes, etc.
 
         Args:
-            content: Raw model response
+            content: Raw model response (str or content-block list)
 
         Returns:
-            Valid route name
+            A valid route name, or "" if the response was empty / unrecognized
+            (the caller decides whether to retry or fall back to "full").
         """
-        # Handle Bedrock-style list content blocks (thinking enabled)
+        # Handle Bedrock-/Responses-style list content blocks (reasoning on)
         if isinstance(content, list):
             text = "".join(
                 block.get("text", "")
@@ -158,10 +174,11 @@ class QueryRouter:
 
         route = text.strip().lower().strip("\"'.,!").strip()
 
-        if route not in self._valid_routes:
-            logger.warning(
-                f"Router returned unknown route '{route}', " "falling back to 'full'"
-            )
-            return "full"
+        if route in self._valid_routes:
+            return route
 
-        return route
+        if route:
+            # Non-empty but not a known route: a genuine misclassification,
+            # worth a debug note. Empty content is handled silently upstream.
+            logger.debug(f"Router returned unrecognized route '{route}'")
+        return ""

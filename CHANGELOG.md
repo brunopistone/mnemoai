@@ -9,6 +9,31 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+### Changed
+
+- `/model` now resets a section's inference parameters (temperature, top_p,
+  penalties, reasoning, stop, stream — everything except the separately-prompted
+  `MAX_TOKENS`) whenever the model is changed. These are model-specific, so a
+  value tuned for one model is no longer silently carried into another that may
+  reject it (e.g. newer Claude/GPT reject `temperature`); re-tune via `/params`.
+
+### Fixed
+
+- Reasoning models on the OpenAI Responses API (e.g. Bedrock Mantle Grok /
+  GPT-5) no longer spam `Router returned unknown route '', falling back to
+'full'` on every turn. The query classifier now disables reasoning on these
+  models (`reasoning_effort="none"`) so the one-word route lands in the
+  response instead of being eaten by reasoning, retries once on a transient
+  empty response, and falls back to `full` quietly (debug, not a warning) when
+  classification genuinely yields nothing.
+- No more silent empty turn when a reasoning model is truncated by the
+  output-token limit: if a turn ends with no answer and the response reports a
+  token-limit cutoff (`status: incomplete` / `finish_reason: length` /
+  `stop_reason: max_tokens`), the agent now surfaces a clear "increase
+  `MAX_TOKENS`" message instead of an empty reply. Reasoning models spend output
+  tokens reasoning before answering, so a low `MAX_TOKENS` could consume the
+  whole budget before any answer was produced.
+
 ## [0.8.0] — 2026-06-22
 
 ### Removed

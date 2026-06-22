@@ -652,6 +652,48 @@ class LangGraphAgent:
         thinking = self._extract_thinking(response)
         visible = self._extract_visible(response.content)
 
+        # The streaming path yields chunks with no response_metadata, so a
+        # token-truncated turn (status=incomplete / finish_reason=length) is
+        # invisible while streaming. When the streamed turn comes back empty
+        # (no text, no tool call), do ONE authoritative non-streaming invoke to
+        # get definitive content + metadata before deciding what went wrong.
+        if not visible and not response.tool_calls:
+            authoritative = active_model.invoke(messages, config=config)
+            if authoritative is not None:
+                response = authoritative
+                thinking = self._extract_thinking(response)
+                visible = self._extract_visible(response.content)
+
+        # Turn cut short by the output-token limit before any answer (common
+        # with reasoning models on a low MAX_TOKENS: reasoning consumes the
+        # whole budget). Checked BEFORE the reasoning-retry below — retrying
+        # can't help when the budget itself is the limit, and would just
+        # truncate again. Surface an actionable message, not a silent turn.
+        if (
+            not visible
+            and not response.tool_calls
+            and self._was_truncated_by_tokens(response)
+        ):
+            logger.warning(
+                "Model response truncated by the output-token limit before any "
+                "answer was produced — increase MODEL_ID.MAX_TOKENS (reasoning "
+                "models need headroom to reason and answer)."
+            )
+            truncated = AIMessage(
+                content=(
+                    "My response was cut off by the output-token limit before I "
+                    "could answer. This model reasons before replying, so it "
+                    "needs more room — increase `MAX_TOKENS` (e.g. via /params or "
+                    "in config.yaml) and try again."
+                )
+            )
+            if thinking:
+                truncated.additional_kwargs["reasoning_content"] = thinking
+            print("\n", end="", flush=True)
+            self._stop_spinner()
+            print(truncated.content, flush=True)
+            return {"messages": [truncated], "thinking": thinking}
+
         # If model produced only reasoning with no visible content,
         # retry once with reasoning disabled
         if thinking and not visible and not response.tool_calls:
@@ -844,6 +886,30 @@ class LangGraphAgent:
                 return match.group(1).strip()
 
         return None
+
+    @staticmethod
+    def _was_truncated_by_tokens(response) -> bool:
+        """Detect a turn cut short by the output-token limit.
+
+        Reasoning models on the OpenAI Responses API (e.g. Mantle Grok / GPT-5)
+        spend output tokens reasoning before they answer. With a small
+        ``MAX_TOKENS`` the budget is consumed mid-reasoning and the answer is
+        never emitted: ``response_metadata`` reports ``status: "incomplete"``
+        with ``incomplete_details.reason == "max_output_tokens"``. Chat /
+        Converse providers signal the same via a ``length`` finish reason.
+
+        Args:
+            response: The model response (AIMessage).
+
+        Returns:
+            True if the turn was truncated by the token limit.
+        """
+        meta = getattr(response, "response_metadata", None) or {}
+        details = meta.get("incomplete_details") or {}
+        if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
+            return True
+        finish = meta.get("finish_reason") or meta.get("stop_reason")
+        return finish in ("length", "max_tokens")
 
     def _extract_visible(self, content) -> str:
         """Extract visible content, stripping thinking tags.
