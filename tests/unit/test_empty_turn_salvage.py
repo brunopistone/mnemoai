@@ -232,3 +232,27 @@ def test_answer_marker_printed_once_across_chunks():
 
     a._stream_response(["msg"], {}, model=_MultiChunk(), mark_answer=True)
     assert a._marker_calls == 1
+
+
+def test_answer_marker_printed_after_reasoning():
+    # Reasoning shown first, then the answer: the marker still fires exactly
+    # once, before the first answer chunk (not before the reasoning).
+    a = _harness_counting_marker()
+    a.verbose = True
+    a._extract_content = lambda ch: (
+        getattr(ch, "content", ""),
+        getattr(ch, "reasoning", ""),
+    )
+
+    class _ReasoningChunk(_Chunk):
+        def __init__(self, content="", reasoning=""):
+            super().__init__(content=content)
+            self.reasoning = reasoning
+
+    class _Model:
+        def stream(self, messages, config=None):
+            yield _ReasoningChunk(reasoning="pondering")
+            yield _ReasoningChunk(content="The answer")
+
+    a._stream_response(["msg"], {}, model=_Model(), mark_answer=True)
+    assert a._marker_calls == 1
