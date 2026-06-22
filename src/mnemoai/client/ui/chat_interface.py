@@ -155,6 +155,17 @@ class ChatInterface:
 
     _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
+    def __clear_screen(self) -> None:
+        """Clear the terminal screen and scrollback, cursor to home.
+
+        Skipped when stdout isn't a TTY (piped/redirected) so logs stay clean.
+        """
+        if not (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()):
+            return
+        # \033[3J clears scrollback, \033[H homes the cursor, \033[2J clears
+        # the visible screen.
+        print("\033[3J\033[H\033[2J", end="", flush=True)
+
     def __welcome_message(self) -> None:
         """Display the launch banner + a framed, grouped command list."""
         C = self._C
@@ -484,6 +495,11 @@ class ChatInterface:
                 if config.get("ENABLE_RAG", False):
                     self.client._initialize_rag_session()
                 self.client._initialize_chunk_cache()
+                # Wipe the screen + scrollback and re-show the welcome banner so
+                # /clear is a true fresh start, not "Context cleared!" appended
+                # below the old conversation.
+                self.__clear_screen()
+                self.__welcome_message()
                 print("Context cleared!")
                 continue
 

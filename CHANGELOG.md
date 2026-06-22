@@ -9,6 +9,15 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.8] — 2026-06-22
+
+### Changed
+
+- `/clear` now wipes the terminal screen and scrollback and re-shows the welcome
+  banner, for a true fresh start, instead of appending "Context cleared!" below
+  the old conversation. No-op when stdout isn't a TTY (piped/redirected output
+  stays clean).
+
 ## [0.8.7] — 2026-06-22
 
 ### Removed
@@ -240,7 +249,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.7...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.8...HEAD
+[0.8.8]: https://github.com/brunopistone/mnemoai/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/brunopistone/mnemoai/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/brunopistone/mnemoai/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/brunopistone/mnemoai/compare/v0.8.4...v0.8.5
