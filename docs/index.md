@@ -15,7 +15,6 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 - **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
 - **📖 ACE Playbook**: Learns strategies from successes AND failures via Agentic Context Engineering
-- **📊 Training Data Collection**: Mark high-quality responses for SFT training
 - **🔍 Web Search**: Integrated Brave Search API (_if available_)
 - **🌐 Web Crawler**: Extract and index content from web pages
 - **🖼️ Vision Support**: Image analysis with vision models (_if available_)

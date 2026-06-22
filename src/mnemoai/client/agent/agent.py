@@ -759,17 +759,21 @@ class LangGraphAgent:
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            # A transient streaming error shouldn't lose the whole turn. If we
-            # already have partial output, keep it; otherwise fall back to a
-            # single non-streaming call so the turn can still produce a result.
+            # A streaming error shouldn't lose the whole turn. Any partial
+            # `response` accumulated before the error is, by definition,
+            # truncated — it may be missing content or tool_calls. So always
+            # retry once with a single non-streaming call and prefer its
+            # complete, authoritative result; only keep the partial if the
+            # non-streaming retry yields nothing. (Without this, a mid-stream
+            # parse failure could surface as an empty/incomplete turn.)
             logger.warning(f"Streaming error: {e}; falling back to non-streaming")
             self._stop_spinner()
-            if response is None:
-                try:
-                    response = active_model.invoke(messages, config=config)
-                except Exception as e2:
-                    logger.error(f"Non-streaming fallback also failed: {e2}")
-                    response = None
+            try:
+                full = active_model.invoke(messages, config=config)
+                if full is not None:
+                    response = full
+            except Exception as e2:
+                logger.error(f"Non-streaming fallback also failed: {e2}")
 
         return response, had_reasoning
 
@@ -1217,17 +1221,24 @@ class LangGraphAgent:
         ]
         self._messages.extend(new_messages)
 
+        # Prefer the most recent AI turn that actually has visible text.
         for msg in reversed(final_messages):
             if isinstance(msg, AIMessage) and not msg.tool_calls:
-                content = str(msg.content)
-                if content:
-                    return content
-                # Content is empty but reasoning may exist - return reasoning
-                # so the caller knows the model did respond
-                if self._thinking:
-                    return ""
+                visible = self._extract_visible(msg.content)
+                if visible:
+                    return visible
 
-        return ""
+        # No visible final answer (the model ended on an empty turn — e.g. it
+        # called a tool, got an error/timeout result, then said nothing). Never
+        # return a silent empty string: salvage the last tool result so the user
+        # learns what happened, else fall back to a generic message.
+        last_tool = self._last_tool_result(final_messages)
+        if last_tool:
+            return f"The last tool reported:\n{last_tool}"
+        return (
+            "I wasn't able to produce a response for that. Could you rephrase "
+            "or give me a bit more detail?"
+        )
 
     def _last_visible_from(self, messages: List[BaseMessage]) -> str:
         """Return the most recent visible AI text from a message list.
@@ -1245,6 +1256,20 @@ class LangGraphAgent:
                 visible = self._extract_visible(msg.content)
                 if visible:
                     return visible
+        return ""
+
+    def _last_tool_result(self, messages: List[BaseMessage]) -> str:
+        """Return the most recent ToolMessage content (trimmed), or "".
+
+        Used to salvage a useful answer when the model ends on an empty turn
+        right after a tool ran (e.g. a bash timeout): the tool's result is the
+        most informative thing we can still show the user.
+        """
+        for msg in reversed(messages):
+            if isinstance(msg, ToolMessage):
+                text = str(msg.content).strip()
+                if text:
+                    return text[:500]
         return ""
 
     def get_thinking(self) -> Optional[str]:

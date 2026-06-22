@@ -8,7 +8,7 @@ build-backend = "hatchling.build"
 # "mnemoai-assistant" — but the import package and CLI command stay "mnemoai"
 # (pip install mnemoai-assistant → import mnemoai / run `mnemoai`).
 name = "mnemoai-assistant"
-version = "0.7.0"
+version = "0.8.0"
 description = "Mnemo AI — a local agentic AI assistant (LangGraph + MCP) that learns and remembers, with multi-provider model support."
 readme = "README.md"
 requires-python = ">=3.11"

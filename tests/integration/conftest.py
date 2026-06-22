@@ -1,9 +1,11 @@
 """Fixtures for integration tests.
 
-These tests exercise the real agent against a live Ollama server and the MCP
-subprocess. They are skipped automatically unless BOTH are available:
-  1. A real utils/config.yaml exists (the runtime config, gitignored).
-  2. The configured Ollama host is reachable.
+These tests exercise the real agent against the configured chat model and the
+MCP subprocess. They are skipped automatically unless:
+  1. A real utils/config.yaml exists (the runtime config, gitignored); and
+  2. The configured model looks usable — for a local Ollama model the server
+     must be reachable; for cloud providers (bedrock/mantle/openai/anthropic/
+     sagemaker/litellm) a present config is treated as sufficient.
 
 Run only these with:   python -m pytest -m integration
 Skip them with:        python -m pytest -m "not integration"
@@ -25,33 +27,45 @@ def _config_exists() -> bool:
     )
 
 
-def _ollama_reachable() -> bool:
-    """Return True if the Ollama HTTP API answers on the configured host:port."""
+def _model_reason() -> str:
+    """Return a skip reason if the configured chat model isn't usable, else "".
+
+    Provider-aware: for a local Ollama model we probe the configured host:port
+    (the server must be running). For cloud providers (bedrock, mantle, openai,
+    anthropic, sagemaker, litellm) we can't cheaply verify reachability/creds
+    here, so a present config is treated as sufficient — a genuinely
+    unreachable backend then surfaces as a normal test failure rather than a
+    misleading "Ollama not reachable" skip.
+    """
     try:
         from mnemoai.utils.config import config
 
         model_id = config.get("MODEL_ID", {}) or {}
-        host = model_id.get("HOST", "localhost")
-        port = model_id.get("PORT", 11434)
     except Exception:
-        host, port = "localhost", 11434
+        return "could not load config"
 
+    model_type = str(model_id.get("TYPE", "ollama")).lower()
+    if model_type != "ollama":
+        return ""  # cloud provider: assume usable; failures surface as failures
+
+    host = model_id.get("HOST", "localhost")
+    port = model_id.get("PORT", 11434)
     import socket
 
     try:
         with socket.create_connection((host, int(port)), timeout=2):
-            return True
+            return ""
     except OSError:
-        return False
+        return f"Ollama server not reachable at {host}:{port}"
 
 
 # A single module-scoped skip guard keeps the whole tier inert in CI / dev
-# machines without Ollama, so the default `pytest` run stays fast and green.
+# machines without a usable model, so the default `pytest` run stays fast/green.
 _SKIP_REASON = None
 if not _config_exists():
     _SKIP_REASON = "no utils/config.yaml (runtime config) present"
-elif not _ollama_reachable():
-    _SKIP_REASON = "Ollama server not reachable"
+else:
+    _SKIP_REASON = _model_reason() or None
 
 
 @pytest.fixture(scope="session")
