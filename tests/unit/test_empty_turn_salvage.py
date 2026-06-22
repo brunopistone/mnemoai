@@ -79,3 +79,116 @@ def test_last_visible_from_skips_empty_ai_turns():
     ]
     # Should return the earlier visible answer, not the empty trailing one.
     assert a._last_visible_from(msgs) == "real answer"
+
+
+def _msg(meta):
+    m = AIMessage(content="")
+    m.response_metadata = meta
+    return m
+
+
+def test_truncation_detected_responses_incomplete():
+    # Reasoning model on the Responses API runs out of tokens mid-reasoning.
+    assert LangGraphAgent._was_truncated_by_tokens(
+        _msg({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}})
+    )
+
+
+def test_truncation_detected_chat_length_finish():
+    assert LangGraphAgent._was_truncated_by_tokens(_msg({"finish_reason": "length"}))
+
+
+def test_truncation_detected_bedrock_max_tokens():
+    assert LangGraphAgent._was_truncated_by_tokens(_msg({"stop_reason": "max_tokens"}))
+
+
+def test_truncation_not_detected_on_normal_completion():
+    assert not LangGraphAgent._was_truncated_by_tokens(
+        _msg({"status": "completed", "finish_reason": "stop"})
+    )
+
+
+def test_truncation_not_detected_without_metadata():
+    assert not LangGraphAgent._was_truncated_by_tokens(AIMessage(content="hi"))
+
+
+class _AgentStreamHarness:
+    """Bind just enough of the agent for _stream_response/_is_empty_response."""
+
+    @staticmethod
+    def make(retries):
+        a = _agent()
+        a.callbacks = []
+        a.verbose = False
+        a._empty_response_retries = retries
+        a._code_formatter = type("F", (), {"process_chunk": lambda s, c: None})()
+        a._stop_spinner = lambda: None
+        a._start_spinner = lambda: None
+        a._extract_content = lambda chunk: (getattr(chunk, "content", ""), None)
+        return a
+
+
+class _Chunk:
+    """Minimal streamed chunk that aggregates by replacement."""
+
+    def __init__(self, content="", tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+        self.response_metadata = {}
+        self.additional_kwargs = {}
+
+    def __add__(self, other):
+        return other
+
+
+class _SeqModel:
+    """Yields a queued response per stream() call (one chunk each)."""
+
+    def __init__(self, contents):
+        self._contents = list(contents)
+        self.calls = 0
+
+    def stream(self, messages, config=None):
+        self.calls += 1
+        content = self._contents.pop(0) if self._contents else ""
+        yield _Chunk(content=content)
+
+
+def test_is_empty_response_detects_blank():
+    a = _agent()
+    assert a._is_empty_response(None)
+    assert a._is_empty_response(AIMessage(content=""))
+    assert a._is_empty_response(AIMessage(content=[]))
+
+
+def test_is_empty_response_false_with_text_or_tool():
+    a = _agent()
+    assert not a._is_empty_response(AIMessage(content="hello"))
+    tc = AIMessage(content="")
+    tc.tool_calls = [{"name": "x", "args": {}, "id": "1"}]
+    assert not a._is_empty_response(tc)
+
+
+def test_stream_retries_on_empty_then_succeeds():
+    # First stream returns empty (transient), second returns real text.
+    a = _AgentStreamHarness.make(retries=2)
+    model = _SeqModel(["", "REAL ANSWER"])
+    resp, _ = a._stream_response(["msg"], {}, model=model)
+    assert resp.content == "REAL ANSWER"
+    assert model.calls == 2
+
+
+def test_stream_gives_up_after_retries():
+    a = _AgentStreamHarness.make(retries=2)
+    model = _SeqModel(["", "", ""])  # always empty
+    resp, _ = a._stream_response(["msg"], {}, model=model)
+    assert a._is_empty_response(resp)
+    assert model.calls == 3  # 1 + 2 retries
+
+
+def test_stream_no_retry_when_first_succeeds():
+    a = _AgentStreamHarness.make(retries=2)
+    model = _SeqModel(["GOOD"])
+    resp, _ = a._stream_response(["msg"], {}, model=model)
+    assert resp.content == "GOOD"
+    assert model.calls == 1

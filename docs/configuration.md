@@ -90,6 +90,7 @@ MODEL_ID:
 - The Mantle catalog (Qwen, Mistral, DeepSeek, GLM, Gemma, Claude, GPT-5.4, …) differs from standard Bedrock and varies by account/region.
 - `TYPE: mantle` works for both `MODEL_ID` (chat) and `VISION_MODEL_ID` (image description) — vision-capable models like `qwen.qwen3-vl-235b-a22b-instruct` are supported.
 - **Caveats:** Pick the right `API_PROTOCOL` per model (using the wrong one returns a 400 "does not support the '/v1/…' API" error). `anthropic` requires the `langchain-anthropic` package (in `requirements.txt`). Models like `anthropic.claude-fable-5` also require the account's data-retention mode to be `provider_data_share`, otherwise they report `unavailable`.
+- **Reasoning models need a generous `MAX_TOKENS`.** Reasoning models (e.g. Grok, GPT-5) on the `responses` protocol spend output tokens _reasoning_ before they answer. A small `MAX_TOKENS` can be consumed entirely by reasoning, leaving no answer — the agent detects this and tells you to raise `MAX_TOKENS` rather than returning an empty reply. Set it to a few thousand (e.g. `8192`) for these models.
 
 > For **standard** Bedrock (Converse API), `ENDPOINT_URL` is also accepted on `MODEL_ID`/`VISION_MODEL_ID` with `TYPE: bedrock` to override the default endpoint.
 

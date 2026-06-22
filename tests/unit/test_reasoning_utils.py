@@ -29,6 +29,29 @@ class FakeBedrockConverseModel:
         self.temperature = 0.8
 
 
+class FakeResponsesModel:
+    """Mimics ChatOpenAI on the Responses API (Mantle GPT-5 / Grok).
+
+    Reasoning is controlled via `reasoning_effort`; `use_responses_api` is True.
+    """
+
+    def __init__(self, reasoning_effort=None):
+        self.use_responses_api = True
+        self.reasoning_effort = reasoning_effort
+
+
+class FakeChatCompletionsModel:
+    """ChatOpenAI on the classic chat_completions API (not a reasoning model).
+
+    Has `reasoning_effort` (ChatOpenAI always does) but use_responses_api False,
+    so disable_reasoning must NOT touch it.
+    """
+
+    def __init__(self):
+        self.use_responses_api = False
+        self.reasoning_effort = None
+
+
 class FakePlainModel:
     """A model with no reasoning knobs at all."""
 
@@ -80,6 +103,34 @@ class TestDisableRestoreBedrockConverse:
         assert model.temperature is None
         restore_reasoning(model, saved)
         assert model.temperature is None
+
+
+class TestDisableRestoreResponsesModel:
+    def test_forces_reasoning_effort_none_then_restores(self):
+        # Regression: Mantle Grok/GPT-5 on the Responses API spend their token
+        # budget reasoning, leaving auxiliary calls (classify/decompose) with
+        # empty content. disable_reasoning must set reasoning_effort="none".
+        model = FakeResponsesModel(reasoning_effort="high")
+        saved = disable_reasoning(model)
+        assert model.reasoning_effort == "none"
+        restore_reasoning(model, saved)
+        assert model.reasoning_effort == "high"
+
+    def test_restores_none_effort(self):
+        model = FakeResponsesModel(reasoning_effort=None)
+        saved = disable_reasoning(model)
+        assert model.reasoning_effort == "none"
+        restore_reasoning(model, saved)
+        assert model.reasoning_effort is None
+
+    def test_chat_completions_model_untouched(self):
+        # A non-Responses ChatOpenAI is not forced to reason-none.
+        model = FakeChatCompletionsModel()
+        saved = disable_reasoning(model)
+        assert "reasoning_effort" not in saved
+        assert model.reasoning_effort is None
+        restore_reasoning(model, saved)
+        assert model.reasoning_effort is None
 
 
 class TestDisableRestorePlainModel:

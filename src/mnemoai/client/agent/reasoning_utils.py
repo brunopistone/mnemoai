@@ -48,6 +48,23 @@ def disable_reasoning(model) -> Dict[str, Any]:
             saved["converse_temperature"] = model.temperature
             model.temperature = 0.1
 
+    # ChatOpenAI on the Responses API (e.g. Mantle GPT-5 / Grok). These are
+    # reasoning models: with reasoning on, a short auxiliary call (classify /
+    # decompose) spends its whole token budget reasoning and returns empty
+    # `content`. `reasoning_effort="none"` makes the model answer directly.
+    # We only force it when the model exposes the knob AND speaks the Responses
+    # API, leaving non-reasoning chat_completions models untouched.
+    if getattr(model, "use_responses_api", False) and hasattr(
+        model, "reasoning_effort"
+    ):
+        saved["reasoning_effort"] = getattr(model, "reasoning_effort", None)
+        try:
+            model.reasoning_effort = "none"
+        except Exception:
+            # Some providers reject "none"; leave reasoning as-is rather than
+            # crash the auxiliary call.
+            saved.pop("reasoning_effort", None)
+
     return saved
 
 
@@ -68,6 +85,8 @@ def restore_reasoning(model, saved: Dict[str, Any]) -> None:
             model.temperature = saved["converse_temperature"]
     if "temperature" in saved:
         model.model_kwargs["temperature"] = saved["temperature"]
+    if "reasoning_effort" in saved:
+        model.reasoning_effort = saved["reasoning_effort"]
 
 
 def extract_visible_text(content) -> str:

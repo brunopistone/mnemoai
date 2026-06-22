@@ -293,6 +293,33 @@ def _prune_unsupported_params(text: str, section: str, provider: str) -> str:
     return text
 
 
+def _clear_inference_params(text: str, section: str, keep: set = None) -> str:
+    """Remove model-specific inference/generation params from ``section``.
+
+    Inference params (temperature, top_p, top_k, penalties, reasoning, stop,
+    stream, …) are tuned per model, and a value good for one model can be wrong
+    for or rejected by another. ``/model`` calls this on a model change so the
+    new model starts from its own defaults; the user re-tunes via ``/params``.
+    Connection/auth/identity keys (HOST, REGION, NAME, TYPE, …) are untouched.
+    ``keep`` names inference keys to preserve (e.g. MAX_TOKENS, prompted
+    separately). Uses the union of every provider's tunable set so a leftover
+    from a different provider is cleared too.
+    """
+    from mnemoai.models.provider_params import providers, tunable_params
+
+    keep = keep or set()
+    inference: set = set()
+    for prov in providers(section):
+        t = tunable_params(section, prov)
+        if t:
+            inference |= t
+    present = set(_list_section_keys(text, section))
+    for key in inference - keep:
+        if key in present:
+            text = _remove_field(text, section, key)
+    return text
+
+
 def _remove_top_section(text: str, section: str) -> str:
     """Remove a top-level ``section:`` block (header + its indented body).
 
@@ -852,14 +879,19 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     if new_type != cur_type:
         text = _prune_unsupported_params(text, section, new_type)
 
-    if new_type != "ollama":
-        print(
-            f"  Note: provider '{_PROVIDER_LABELS.get(new_type, new_type)}' may accept different inference "
-            "parameters\n  (temperature, penalties, etc.). Edit config.yaml "
-            f"directly to tune the\n  {section} section — see the README's "
-            "'Model Parameters' section for the\n  full list of supported "
-            "parameters per provider."
-        )
+    # Inference/generation params (temperature, top_p, penalties, reasoning,
+    # stop, stream, …) are MODEL-specific: a value tuned for one model can be
+    # wrong for — or outright rejected by — another (e.g. newer Claude/GPT
+    # models reject `temperature`). So clear them on ANY model change and let
+    # the new model's defaults apply; the user re-tunes deliberately via
+    # /params. MAX_TOKENS is excluded here because it's prompted just below.
+    text = _clear_inference_params(text, section, keep={"MAX_TOKENS"})
+
+    print(
+        f"  Note: inference parameters (temperature, top_p, penalties, …) were "
+        f"reset to the\n  model defaults for this {section} change. Use /params "
+        "to tune them."
+    )
 
     # MAX_TOKENS (output tokens) is optional, for chat and vision (not embeddings).
     if section in ("MODEL_ID", "VISION_MODEL_ID"):
