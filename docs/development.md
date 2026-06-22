@@ -67,6 +67,35 @@ python -m pytest tests/unit/test_bm25.py
 
 When adding new code, keep import-time side effects independent of `config.yaml` so the module stays unit-testable.
 
+**CI.** The `.github/workflows/tests.yml` workflow runs the unit tier (plus a ruff import-sort check) on every push and pull request across Python 3.11–3.13. The integration tier is **not** run in CI (it needs a live Ollama server) — run it locally before a release, per the checklist below.
+
+### Stability & Versioning
+
+Mnemo AI follows [Semantic Versioning](https://semver.org/). The **public surface** that versioning protects is:
+
+- **Config keys** in `config.yaml` (the `MODEL_ID` / `VISION_MODEL_ID` / `RAG.EMBED_MODEL_ID` fields, the `ENABLE_*` / `REQUIRE_*` toggles, and the documented section keys).
+- **The `mcp.json` schema** for external MCP servers (`mcpServers` with `command` / `args` / `env` / `disabled`).
+- **CLI commands** (`/config`, `/model`, `/params`, `/mcp`, `/memory`, `/plan`, `/compact`, `/clear`, `/save`, `/load`) and the `mnemoai` console command + `--no-verbose` flag.
+- **The distribution/import name** (`pip install mnemoai-assistant` → `import mnemoai`).
+
+Pre-1.0.0, minor releases may add features and occasionally adjust these. From **1.0.0** onward, a breaking change to any of the above bumps the **major** version; new backward-compatible features bump the minor; fixes bump the patch. Internal modules (anything under `client/`, `server/`, `models/`, `utils/` not listed above) are **not** part of the public contract and may change between any releases. All changes are recorded in [`CHANGELOG.md`](https://github.com/brunopistone/mnemoai/blob/main/CHANGELOG.md).
+
+### Release Checklist
+
+Before tagging a release:
+
+1. **Unit tests + lint pass** (also enforced by CI): `python -m pytest -m "not integration"` and `ruff check --select I .`.
+2. **Integration smoke test** with a live model (`PYTHONPATH=src python -m pytest -m integration`, or manually drive the app and verify). Prefer a **capable** model here — small local models (e.g. a 4B) are intermittently unreliable at tool-calling, so the tool-backed checks can flake; the suite passes deterministically on a strong model (e.g. Bedrock Claude Sonnet). Point the run at a specific config with `MNEMOAI_CONFIG=/path/to/config.yaml` if needed:
+   - a greeting / simple Q&A returns a non-empty answer;
+   - a tool-backed query runs a tool (e.g. "list files here") and the `[⚙ …]` marker fires;
+   - with routing on, a multi-step task is decomposed (orchestrator) and completes;
+   - **plan mode**: `/plan` on → an edit/bash request is blocked; `/plan` off → it proceeds;
+   - an external MCP tool (from `mcp.json`) is callable.
+3. **Update `CHANGELOG.md`** — move `Unreleased` items under the new version + date.
+4. **Bump `version`** in `pyproject.toml`.
+5. **Build + validate**: `uv build` then `twine check dist/*`.
+6. **Tag** `vX.Y.Z`, push, then `twine upload dist/*` (refreshes the PyPI description).
+
 ### Adding New Tools
 
 1. Create tool file in `server/tools/`:

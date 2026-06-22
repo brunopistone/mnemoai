@@ -331,11 +331,3 @@ PLAYBOOK:
 
 - Strategies: `~/.mnemoai/{profile}/models/{model}/playbook/playbook.json`
 - Metrics: `~/.mnemoai/{profile}/models/{model}/playbook/metrics.json`
-
-### Training Data Collection
-
-#### Supervised Fine-Tuning (SFT)
-
-- Use `/good` to mark high-quality responses
-- Saved conversations include quality markers
-- Extract labeled interactions for training

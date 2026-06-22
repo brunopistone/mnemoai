@@ -199,9 +199,13 @@ python -m pytest -m "not integration"        # explicitly exclude integration
 5. Add vision support in `models/controllers/vision_model_controller.py` if applicable
 6. Document config structure in all `utils/config.yaml*.example` templates
 
+## Stability & Versioning
+
+Semver. The **public contract** (what a major bump protects) is: `config.yaml` keys (model sections, `ENABLE_*`/`REQUIRE_*` toggles, documented sections), the `mcp.json` `mcpServers` schema, the CLI slash-commands + `mnemoai` console command, and the `mnemoai-assistant` dist / `mnemoai` import name. Everything under `client/`/`server/`/`models/`/`utils/` not in that list is internal and may change freely. All changes go in `CHANGELOG.md`; releases follow the checklist in `docs/development.md`. CI (`.github/workflows/tests.yml`) runs the unit tier + import-sort on push/PR; the integration tier is run locally before releases.
+
 ## Known Limitations
 
-- Unit tests cover pure logic only — agent/LLM integration paths still need manual verification
+- Unit tests cover pure logic only — agent/LLM integration paths still need manual verification (run the integration tier + the release checklist before releasing)
 - MCP server is a subprocess — debugging requires attaching to child process or reading logs
 - No Docker/containerization — runs directly on host with system Python/conda/venv
 - No database — all persistence is file-based (JSON, FAISS index files, SQLite chunk cache)

@@ -33,7 +33,6 @@ class ChatInterface:
         """
         self.client = client
 
-        self.interaction_quality = []  # Track quality per interaction
         # Persistent command history for arrow key navigation
         self.command_history = InMemoryHistory()
 
@@ -94,8 +93,7 @@ class ChatInterface:
             ("/save", "Save current conversation"),
             ("/load <path>", "Load a saved conversation"),
         ]),
-        ("Data & exit", [
-            ("/good", "Mark last response as good (training data)"),
+        ("Exit", [
             ("/exit, /quit", "Exit the application"),
         ]),
     ]
@@ -115,7 +113,6 @@ class ChatInterface:
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/save", "Save current conversation"),
         ("/load", "Load a saved conversation (/load <path>)"),
-        ("/good", "Mark last response as good (training data)"),
         ("/exit", "Exit the application"),
         ("/quit", "Exit the application"),
     ]
@@ -161,11 +158,20 @@ class ChatInterface:
     def __welcome_message(self) -> None:
         """Display the launch banner + a framed, grouped command list."""
         C = self._C
-        W = 64  # inner width; matches the wordmark banner width
 
         def vlen(s: str) -> int:
             """Visible length (ANSI escapes don't occupy columns)."""
             return len(self._ANSI_RE.sub("", s))
+
+        # Inner width: at least the wordmark banner width (64), but widen to fit
+        # the longest command row ("  " + padded cmd + "  " + desc) so no row
+        # overflows the box border.
+        cmd_w = max(vlen(c) for _, items in self._COMMAND_GROUPS for c, _ in items)
+        longest_row = max(
+            2 + cmd_w + 2 + vlen(desc)
+            for _, items in self._COMMAND_GROUPS for _, desc in items
+        )
+        W = max(64, longest_row)
 
         def row(content: str = "") -> None:
             """Print one framed row, padding to the visible inner width."""
@@ -186,7 +192,6 @@ class ChatInterface:
         # --- Framed command list ---
         print(top)
 
-        cmd_w = max(vlen(c) for _, items in self._COMMAND_GROUPS for c, _ in items)
         for gi, (heading, items) in enumerate(self._COMMAND_GROUPS):
             if gi:
                 row()  # blank spacer between groups
@@ -484,9 +489,7 @@ class ChatInterface:
 
             if query.lower() == "/save":
                 timestamp = self.client.session_id.split("_", 1)[1]
-                self.client.save_conversation_with_quality(
-                    timestamp, self.interaction_quality
-                )
+                self.client.save_conversation(timestamp)
                 continue
 
             # Reconfigure: rewrite config.yaml via the interactive configurator,
@@ -566,16 +569,6 @@ class ChatInterface:
                     print_error("Failed to load conversation. Check the file path.")
                 continue
 
-            # Training data commands
-            if query.lower() == "/good":
-                interaction_idx = len(self.interaction_quality) - 1
-                if interaction_idx >= 0:
-                    self.interaction_quality[interaction_idx] = "good"
-                    print("✓ Marked as good")
-                else:
-                    print("No interaction to mark")
-                continue
-
             if not query.strip():
                 print("Input cannot be empty. Please try again.")
                 continue
@@ -593,9 +586,6 @@ class ChatInterface:
 
             try:
                 response = self.client.query(query)
-
-                # Track this interaction (unlabeled by default)
-                self.interaction_quality.append("unlabeled")
 
                 # Store CURRENT interaction immediately after response (new mode)
                 if self.client.episodic_memory and use_immediate_storage:

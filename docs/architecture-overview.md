@@ -145,7 +145,6 @@ Each chat session has a unique ID used for:
 
 - RAG document indexing (session-scoped)
 - Chunk caching for file summarization
-- Training data collection (SFT markers)
 
 Session data is stored in `~/.mnemoai/{profile_name}/`:
 

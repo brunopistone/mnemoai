@@ -4,7 +4,6 @@ import ast
 import asyncio
 import json
 import os
-import re
 import shutil
 import sqlite3
 import sys
@@ -865,49 +864,6 @@ class LangGraphClient:
                     if self.tools
                     else []
                 ),
-            }
-
-            with open(filepath, "w") as f:
-                json.dump(conversation_data, f, indent=2, default=str)
-
-            print(f"Conversation saved to {filepath}")
-
-        except Exception as e:
-            logger.error(f"Failed to save conversation: {e}")
-
-    def save_conversation_with_quality(
-        self, timestamp: str = None, quality_markers: list = None
-    ) -> None:
-        """Save conversation with quality markers for training data.
-
-        Args:
-            timestamp: Optional timestamp for filename
-            quality_markers: List of quality labels for each message
-        """
-        if not self.agent:
-            return
-
-        try:
-            save_dir = str(profile_dir() / "conversations")
-            os.makedirs(save_dir, exist_ok=True)
-
-            timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = os.path.join(save_dir, f"conversation_{timestamp}.json")
-
-            strands_messages = convert_langchain_messages_to_strands(
-                self.agent.messages
-            )
-            conversation_data = {
-                "messages": [
-                    {"role": "system", "content": [{"text": self.system_prompt}]}
-                ]
-                + strands_messages,
-                "tools": (
-                    [{"name": t.name, "description": t.description} for t in self.tools]
-                    if self.tools
-                    else []
-                ),
-                "quality_markers": quality_markers or [],
             }
 
             with open(filepath, "w") as f:
