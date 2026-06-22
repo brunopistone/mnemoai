@@ -9,6 +9,15 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-06-22
+
+### Fixed
+
+- Arrow keys and backspace now work while typing answers in the `/config` and
+  `/model` (and first-run) configurator prompts. They previously leaked raw
+  escape sequences (e.g. `^[[D`) into the value because the `input()` prompts
+  had no line editing; importing the stdlib `readline` module enables it.
+
 ## [0.8.4] — 2026-06-22
 
 ### Changed
@@ -205,7 +214,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.4...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.5...HEAD
+[0.8.5]: https://github.com/brunopistone/mnemoai/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/brunopistone/mnemoai/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/brunopistone/mnemoai/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/brunopistone/mnemoai/compare/v0.8.1...v0.8.2
