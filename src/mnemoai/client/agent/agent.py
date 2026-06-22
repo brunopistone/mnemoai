@@ -594,7 +594,7 @@ class LangGraphAgent:
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
         self._start_spinner()
-        response, _ = self._stream_response(messages, config)
+        response, _ = self._stream_response(messages, config, mark_answer=True)
 
         if response is None:
             response = self.model.invoke(messages, config=config)
@@ -650,7 +650,7 @@ class LangGraphAgent:
 
         active_model = self._get_route_model(state)
         response, had_reasoning = self._stream_response(
-            messages, config, model=active_model
+            messages, config, model=active_model, mark_answer=True
         )
 
         if response is None:
@@ -730,6 +730,7 @@ class LangGraphAgent:
                     config,
                     print_reasoning=False,
                     model=active_model,
+                    mark_answer=True,
                 )
             finally:
                 self._restore_reasoning(saved)
@@ -763,6 +764,7 @@ class LangGraphAgent:
         config: dict,
         print_reasoning: bool = True,
         model=None,
+        mark_answer: bool = False,
     ) -> tuple:
         """Stream model response, handling spinner and output.
 
@@ -771,6 +773,10 @@ class LangGraphAgent:
             config: LangChain config dict
             print_reasoning: Whether to print reasoning in gray
             model: Optional model override (defaults to self.model_with_tools)
+            mark_answer: Print a marker before the answer when no reasoning is
+                shown, so it's visually distinct from the user's prompt. Set on
+                user-facing answer turns; left off for worker streams (which
+                already carry a `[Step N/N]` header).
 
         Returns:
             Tuple of (response, had_reasoning)
@@ -779,7 +785,7 @@ class LangGraphAgent:
         attempts = getattr(self, "_empty_response_retries", 0) + 1
         for attempt in range(attempts):
             response, had_reasoning = self._stream_once(
-                active_model, messages, config, print_reasoning
+                active_model, messages, config, print_reasoning, mark_answer
             )
             # Retry only a *completely* empty turn (no content, no reasoning,
             # no tool calls) — a transient endpoint hiccup, not a real answer.
@@ -812,11 +818,13 @@ class LangGraphAgent:
         messages: list,
         config: dict,
         print_reasoning: bool = True,
+        mark_answer: bool = False,
     ) -> tuple:
         """Single streaming attempt (see _stream_response for the retry wrapper)."""
         self._code_formatter = CodeFormatter()
         first_token = True
         had_reasoning = False
+        answer_marker_printed = False
         response = None
 
         try:
@@ -837,9 +845,18 @@ class LangGraphAgent:
 
                 if chunk_content:
                     if had_reasoning:
+                        # Reasoning already printed (gray) above — separate it
+                        # from the answer with a blank line.
                         print("\n\n", end="", flush=True)
                         had_reasoning = False
                         chunk_content = chunk_content.lstrip("\n")
+                    elif mark_answer and not answer_marker_printed:
+                        # No reasoning was shown (non-reasoning model, or
+                        # reasoning hidden). Print a marker so the answer is
+                        # visually distinct from the user's prompt instead of
+                        # butting directly against it.
+                        self._print_answer_marker()
+                    answer_marker_printed = True
                     self._code_formatter.process_chunk(chunk_content)
 
                 response = chunk if response is None else response + chunk
@@ -863,6 +880,17 @@ class LangGraphAgent:
                 logger.error(f"Non-streaming fallback also failed: {e2}")
 
         return response, had_reasoning
+
+    def _print_answer_marker(self) -> None:
+        """Print a subtle marker before a streamed answer.
+
+        When the model exposes no reasoning, the answer would otherwise stream
+        directly under the user's prompt with nothing to separate them. A small
+        dim cyan bullet on its own line makes the assistant's reply visually
+        distinct from the question.
+        """
+        # Cyan ● bullet, then reset; blank line below so the answer starts clean.
+        print("\033[36m●\033[0m\n", flush=True)
 
     def _stop_spinner(self) -> None:
         """Stop the spinner and mark first token received."""

@@ -192,3 +192,43 @@ def test_stream_no_retry_when_first_succeeds():
     resp, _ = a._stream_response(["msg"], {}, model=model)
     assert resp.content == "GOOD"
     assert model.calls == 1
+
+
+def _harness_counting_marker(retries=0):
+    a = _AgentStreamHarness.make(retries=retries)
+    a._marker_calls = 0
+
+    def _mark():
+        a._marker_calls += 1
+
+    a._print_answer_marker = _mark
+    return a
+
+
+def test_answer_marker_printed_when_marking_and_no_reasoning():
+    # No reasoning shown + mark_answer=True -> exactly one marker before answer.
+    a = _harness_counting_marker()
+    model = _SeqModel(["the answer"])
+    a._stream_response(["msg"], {}, model=model, mark_answer=True)
+    assert a._marker_calls == 1
+
+
+def test_answer_marker_not_printed_when_not_marking():
+    # Worker streams (mark_answer=False) must NOT print the marker.
+    a = _harness_counting_marker()
+    model = _SeqModel(["the answer"])
+    a._stream_response(["msg"], {}, model=model, mark_answer=False)
+    assert a._marker_calls == 0
+
+
+def test_answer_marker_printed_once_across_chunks():
+    # A single answer streamed as several chunks gets exactly one marker.
+    a = _harness_counting_marker()
+
+    class _MultiChunk:
+        def stream(self, messages, config=None):
+            for piece in ("Hel", "lo ", "there"):
+                yield _Chunk(content=piece)
+
+    a._stream_response(["msg"], {}, model=_MultiChunk(), mark_answer=True)
+    assert a._marker_calls == 1
