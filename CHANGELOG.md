@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.6] — 2026-06-22
+
+### Fixed
+
+- A runaway repetition loop no longer hangs the UI or burns the whole token
+  budget. Some Bedrock Mantle-served models (observed with `google.gemma-4-31b`)
+  intermittently degenerate into emitting a single reserved token
+  (`<unused6226>`) until `MAX_TOKENS`, flooding the screen. The streaming loop
+  now detects a special token repeated many times at the tail, aborts the
+  stream early, and shows a clear message suggesting a different model or
+  `API_PROTOCOL`. Conservative thresholds avoid tripping on legitimate
+  repetition (lists, code, prose).
+
 ## [0.8.5] — 2026-06-22
 
 ### Fixed
@@ -214,7 +227,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.5...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.6...HEAD
+[0.8.6]: https://github.com/brunopistone/mnemoai/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/brunopistone/mnemoai/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/brunopistone/mnemoai/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/brunopistone/mnemoai/compare/v0.8.2...v0.8.3

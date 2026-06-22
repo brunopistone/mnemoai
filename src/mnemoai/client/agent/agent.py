@@ -826,6 +826,8 @@ class LangGraphAgent:
         had_reasoning = False
         answer_marker_printed = False
         response = None
+        streamed_text = ""  # accumulated visible text, for degeneration check
+        degenerate = False
 
         try:
             for chunk in active_model.stream(messages, config=config):
@@ -860,6 +862,16 @@ class LangGraphAgent:
                         answer_marker_printed = True
                     self._code_formatter.process_chunk(chunk_content)
 
+                    # Abort a runaway repetition loop (e.g. some Mantle-served
+                    # models degenerate into emitting one reserved token —
+                    # `<unused6226>` — until MAX_TOKENS, hanging the UI and
+                    # burning the whole budget). Break the stream early.
+                    streamed_text += chunk_content
+                    if self._is_degenerate_repetition(streamed_text):
+                        degenerate = True
+                        response = chunk if response is None else response + chunk
+                        break
+
                 response = chunk if response is None else response + chunk
         except KeyboardInterrupt:
             raise
@@ -880,7 +892,56 @@ class LangGraphAgent:
             except Exception as e2:
                 logger.error(f"Non-streaming fallback also failed: {e2}")
 
+        if degenerate:
+            logger.warning(
+                "Model produced a degenerate repetition loop (the same token "
+                "over and over) and was cut off. This is a known failure of some "
+                "Bedrock Mantle-served models; try a different model or "
+                "API_PROTOCOL."
+            )
+            self._stop_spinner()
+            msg = (
+                "\n\n[The model fell into a repetition loop and produced no "
+                "usable answer — I stopped it early. This is a known issue with "
+                "some models on this endpoint; try a different model or "
+                "API_PROTOCOL.]"
+            )
+            print(msg, flush=True)
+            response = AIMessage(content=msg.strip())
+
         return response, had_reasoning
+
+    @staticmethod
+    def _is_degenerate_repetition(text: str) -> bool:
+        """Detect a runaway single-token repetition loop in streamed text.
+
+        Some models served via Bedrock Mantle degenerate into emitting one
+        reserved token (e.g. ``<unused6226>``) until they hit ``MAX_TOKENS`` —
+        hanging the UI and burning the whole budget. We watch for a special
+        token repeated many times in a row near the tail of the stream so we
+        can abort early. Conservative thresholds keep legitimate repetition
+        (lists, code, "ha ha ha") from tripping it.
+
+        Args:
+            text: The visible text accumulated so far.
+
+        Returns:
+            True once a clear degenerate loop is detected.
+        """
+        # Only act once enough text has accumulated to be confident.
+        if len(text) < 200:
+            return False
+        # Check only the tail — a degenerate loop repeats at the end, and
+        # bounding the scan keeps this O(1) per chunk on long streams. 20
+        # repeats of a <=40-char token fit comfortably in 1000 chars.
+        tail = text[-1000:]
+        # A reserved/special token like <unused6226>, <pad>, <|endoftext|>,
+        # <0xNN>, etc., repeated back-to-back (optionally whitespace-separated).
+        m = re.search(
+            r"(<[^<>\s]{1,40}>)(?:\s*\1){19,}\s*$",
+            tail,
+        )
+        return m is not None
 
     def _print_answer_marker(self) -> None:
         """Print a subtle marker before a streamed answer.
