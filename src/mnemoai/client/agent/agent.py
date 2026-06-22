@@ -844,19 +844,20 @@ class LangGraphAgent:
                     had_reasoning = True
 
                 if chunk_content:
-                    if had_reasoning:
-                        # Reasoning already printed (gray) above — separate it
-                        # from the answer with a blank line.
-                        print("\n\n", end="", flush=True)
-                        had_reasoning = False
-                        chunk_content = chunk_content.lstrip("\n")
-                    elif mark_answer and not answer_marker_printed:
-                        # No reasoning was shown (non-reasoning model, or
-                        # reasoning hidden). Print a marker so the answer is
-                        # visually distinct from the user's prompt instead of
-                        # butting directly against it.
-                        self._print_answer_marker()
-                    answer_marker_printed = True
+                    if not answer_marker_printed:
+                        if had_reasoning:
+                            # Reasoning already printed (gray) above — separate
+                            # it from the answer with a blank line.
+                            print("\n\n", end="", flush=True)
+                            had_reasoning = False
+                            chunk_content = chunk_content.lstrip("\n")
+                        if mark_answer:
+                            # Marker before the first answer chunk so the reply
+                            # is visually distinct from the prompt (and from the
+                            # gray reasoning). The answer continues on the same
+                            # line, after the marker.
+                            self._print_answer_marker()
+                        answer_marker_printed = True
                     self._code_formatter.process_chunk(chunk_content)
 
                 response = chunk if response is None else response + chunk
@@ -884,13 +885,12 @@ class LangGraphAgent:
     def _print_answer_marker(self) -> None:
         """Print a subtle marker before a streamed answer.
 
-        When the model exposes no reasoning, the answer would otherwise stream
-        directly under the user's prompt with nothing to separate them. A small
-        dim cyan bullet on its own line makes the assistant's reply visually
-        distinct from the question.
+        A small cyan bullet makes the assistant's reply visually distinct from
+        the user's prompt (and from any gray reasoning printed above it). The
+        answer continues on the same line, right after the marker.
         """
-        # Cyan ● bullet, then reset; blank line below so the answer starts clean.
-        print("\033[36m●\033[0m\n", flush=True)
+        # Cyan ● bullet + a trailing space; no newline so the answer follows it.
+        print("\033[36m●\033[0m ", end="", flush=True)
 
     def _stop_spinner(self) -> None:
         """Stop the spinner and mark first token received."""

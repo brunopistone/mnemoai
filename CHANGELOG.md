@@ -9,6 +9,15 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.4] — 2026-06-22
+
+### Changed
+
+- The answer marker (`●`) now precedes the answer on the **same line**
+  (`● answer…`) instead of sitting on its own line above it, and it is also
+  shown when reasoning is visible — printed after the gray reasoning block, on
+  the answer line — so every assistant reply carries the marker.
+
 ## [0.8.3] — 2026-06-22
 
 ### Added
@@ -196,7 +205,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.3...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.4...HEAD
+[0.8.4]: https://github.com/brunopistone/mnemoai/compare/v0.8.3...v0.8.4
 [0.8.3]: https://github.com/brunopistone/mnemoai/compare/v0.8.2...v0.8.3
 [0.8.2]: https://github.com/brunopistone/mnemoai/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/brunopistone/mnemoai/compare/v0.8.0...v0.8.1
