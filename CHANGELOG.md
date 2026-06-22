@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.7] — 2026-06-22
+
+### Removed
+
+- Reverted the streaming repetition-loop guard added in 0.8.6
+  (`_is_degenerate_repetition`). Investigation confirmed the `<unused6226>`
+  degeneration is a **non-deterministic serving-side issue** with
+  `google.gemma-4-31b` on Bedrock Mantle (the identical request produces a clean
+  answer on most calls and a repetition loop on a minority), not a client
+  problem — so it belongs upstream, not as a heuristic in the stream loop. The
+  guard added complexity and a regex scan on every chunk for a vendor bug that
+  is being reported to AWS; removing it keeps the streaming path lean.
+
 ## [0.8.6] — 2026-06-22
 
 ### Fixed
@@ -227,7 +240,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.6...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.7...HEAD
+[0.8.7]: https://github.com/brunopistone/mnemoai/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/brunopistone/mnemoai/compare/v0.8.5...v0.8.6
 [0.8.5]: https://github.com/brunopistone/mnemoai/compare/v0.8.4...v0.8.5
 [0.8.4]: https://github.com/brunopistone/mnemoai/compare/v0.8.3...v0.8.4
