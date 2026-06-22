@@ -15,6 +15,15 @@ import re
 from pathlib import Path
 from typing import Optional
 
+# Importing readline (stdlib) is enough to give the built-in input() proper
+# line-editing: arrow keys, history, and backspace work instead of leaking raw
+# escape sequences (e.g. ^[[D) into the typed value. Guarded because readline
+# is absent on some platforms (e.g. stock Windows).
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
 from mnemoai.utils.console import print_error
 from mnemoai.utils.paths import config_path
 
