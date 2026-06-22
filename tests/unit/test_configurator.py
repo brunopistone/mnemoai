@@ -354,6 +354,45 @@ def test_prune_unknown_provider_is_noop():
     assert _prune_unsupported_params(text, "MODEL_ID", "weird") == text
 
 
+def test_clear_inference_params_drops_tunables_keeps_identity():
+    # /model clears model-specific inference params on a model change (so a
+    # leftover TEMPERATURE isn't carried into a model that rejects it), while
+    # keeping identity/connection and any `keep` set (MAX_TOKENS).
+    from mnemoai.utils.configurator import _clear_inference_params
+
+    text = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: qwen3.5:4b
+          TYPE: ollama
+          HOST: localhost
+          PORT: 11434
+          MAX_TOKENS: 8192
+          TEMPERATURE: 0.6
+          TOP_P: 0.9
+          FREQUENCY_PENALTY: 0.0
+          STOP:
+            - "<|im_end|>"
+        """
+    )
+    out = _clear_inference_params(text, "MODEL_ID", keep={"MAX_TOKENS"})
+    d = yaml.safe_load(out)["MODEL_ID"]
+    # Inference params gone.
+    for k in ("TEMPERATURE", "TOP_P", "FREQUENCY_PENALTY", "STOP"):
+        assert k not in d, f"{k} should be cleared"
+    # Identity / connection / kept key survive.
+    assert d["NAME"] == "qwen3.5:4b" and d["TYPE"] == "ollama"
+    assert d["HOST"] == "localhost" and d["PORT"] == 11434
+    assert d["MAX_TOKENS"] == 8192
+
+
+def test_clear_inference_params_noop_when_none_present():
+    from mnemoai.utils.configurator import _clear_inference_params
+
+    text = "MODEL_ID:\n  NAME: m\n  TYPE: ollama\n  HOST: localhost\n"
+    assert _clear_inference_params(text, "MODEL_ID") == text
+
+
 def test_provider_params_registry_shape():
     # Guard against drift: each section must advertise the provider set the
     # configurator/controllers expect, and supported_keys must report sane sets.
