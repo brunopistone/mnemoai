@@ -9,6 +9,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-06-22
+
 ### Changed
 
 - `/model` now resets a section's inference parameters (temperature, top_p,
@@ -174,7 +176,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/brunopistone/mnemoai/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/brunopistone/mnemoai/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/brunopistone/mnemoai/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/brunopistone/mnemoai/compare/v0.6.0...v0.6.1
