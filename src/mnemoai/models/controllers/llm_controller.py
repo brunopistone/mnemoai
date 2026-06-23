@@ -9,7 +9,7 @@ from langchain_litellm import ChatLiteLLM
 from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
 from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
 from mnemoai.models.controllers.base_model_controller import BaseModelController
-from mnemoai.models.provider_params import build_kwargs
+from mnemoai.models.provider_params import build_kwargs, extra_params
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
@@ -118,6 +118,10 @@ class LangChainLLMController(BaseModelController):
             if self.temperature is not None:
                 kwargs["temperature"] = 1.0
 
+        # Generic passthrough: forward EXTRA_PARAMS verbatim (e.g. extra
+        # additional_model_request_fields the registry doesn't model).
+        kwargs.update(extra_params(self.model_id))
+
         self.model = ChatBedrockConverse(**kwargs)
 
     def _initialize_mantle_model(self, callbacks: list = None) -> None:
@@ -139,6 +143,9 @@ class LangChainLLMController(BaseModelController):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             top_p=self.top_p,
+            reasoning_effort=self.reasoning_effort,
+            thinking_tokens=self.thinking_tokens,
+            extra_params=extra_params(self.model_id),
         )
 
     def _initialize_litellm_model(self, callbacks: list = None) -> None:
@@ -157,6 +164,9 @@ class LangChainLLMController(BaseModelController):
             kwargs["api_base"] = self.model_id["API_BASE"]
         if self.model_id.get("API_KEY"):
             kwargs["api_key"] = self.model_id["API_KEY"]
+
+        # Generic passthrough: merge EXTRA_PARAMS into the request body.
+        model_kwargs.update(extra_params(self.model_id))
 
         self.model = ChatLiteLLM(model_kwargs=model_kwargs, **kwargs)
 
@@ -184,6 +194,9 @@ class LangChainLLMController(BaseModelController):
         if self.verbose_mode:
             kwargs["reasoning"] = True
 
+        # Generic passthrough: forward EXTRA_PARAMS verbatim.
+        kwargs.update(extra_params(self.model_id))
+
         self.model = ChatOllamaWrapper(**kwargs)
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
@@ -199,7 +212,10 @@ class LangChainLLMController(BaseModelController):
             "streaming": self.stream,
             **passthrough,
         }
-        # reasoning_effort (o1/o3 models) goes in model_kwargs.
+        # reasoning_effort (o1/o3 models) goes in model_kwargs. EXTRA_PARAMS is
+        # merged in too — the generic passthrough for any other request-body key
+        # (e.g. reasoning={"effort": …}, verbosity, service_tier).
+        model_kwargs.update(extra_params(self.model_id))
         if model_kwargs:
             kwargs["model_kwargs"] = model_kwargs
 
@@ -256,6 +272,11 @@ class LangChainLLMController(BaseModelController):
             kwargs.pop("top_p", None)
             kwargs.pop("top_k", None)
 
+        # Generic passthrough: forward EXTRA_PARAMS verbatim (e.g. a `thinking`
+        # override, or newer `output_config`/`effort` knobs). Applied last so an
+        # explicit EXTRA_PARAMS wins over the derived defaults above.
+        kwargs.update(extra_params(self.model_id))
+
         self.model = ChatAnthropic(**kwargs)
 
     def _initialize_sagemaker_model(self, callbacks: list = None) -> None:
@@ -274,6 +295,9 @@ class LangChainLLMController(BaseModelController):
             "callbacks": callbacks,
             **passthrough,
         }
+
+        # Generic passthrough: forward EXTRA_PARAMS verbatim.
+        kwargs.update(extra_params(self.model_id))
 
         self.model = ChatSageMaker(**kwargs)
 

@@ -935,7 +935,10 @@ _PARAM_META = {
     "STOP": ("list", "comma-separated stop sequences"),
     "STREAM": ("bool", "stream tokens as they generate"),
     "REASONING": ("bool", "enable extended thinking"),
-    "REASONING_EFFORT": ("enum:minimal,low,medium,high", "reasoning effort"),
+    "REASONING_EFFORT": (
+        "enum:none,minimal,low,medium,high,xhigh,max",
+        "reasoning effort (provider-dependent; e.g. low|medium|high)",
+    ),
     "THINKING_TOKENS": ("int", "budget for thinking tokens"),
 }
 

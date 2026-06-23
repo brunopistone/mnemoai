@@ -90,7 +90,7 @@ Used in both episodic memory and RAG. Pattern: get top-N candidates from vector 
 
 ### Multi-provider LLM abstraction (`models/controllers/llm_controller.py`)
 
-`LangChainLLMController.initialize_model()` dispatches on `MODEL_ID.TYPE` (bedrock/mantle/ollama/openai/anthropic/sagemaker/litellm). Each provider's supported config keys / client-kwarg mapping live in `models/provider_params.py` (consumed via `build_kwargs`). Note: `anthropic` is the direct Anthropic API (`ChatAnthropic`, `ANTHROPIC_API_KEY`), distinct from Mantle's `anthropic` _protocol_ (Claude via Bedrock).
+`LangChainLLMController.initialize_model()` dispatches on `MODEL_ID.TYPE` (bedrock/mantle/ollama/openai/anthropic/sagemaker/litellm). Each provider's supported config keys / client-kwarg mapping live in `models/provider_params.py` (consumed via `build_kwargs`). For anything the registry doesn't model, every section accepts an `EXTRA_PARAMS` dict — a generic passthrough merged verbatim into the model's request body (`provider_params.extra_params`), used e.g. for `reasoning_effort` (OpenAI/Mantle responses) or `thinking` (Anthropic/Mantle anthropic). Note: `anthropic` is the direct Anthropic API (`ChatAnthropic`, `ANTHROPIC_API_KEY`), distinct from Mantle's `anthropic` _protocol_ (Claude via Bedrock).
 
 ### Bedrock Mantle (`models/mantle_factory.py`)
 

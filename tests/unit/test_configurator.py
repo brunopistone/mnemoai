@@ -404,22 +404,26 @@ def test_provider_params_registry_shape():
     assert set(providers("VISION_MODEL_ID")) == {
         "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker", "litellm"
     }
-    # Anthropic (direct Claude API): STOP-capable, with extended-thinking specials.
+    # Anthropic (direct Claude API): STOP-capable, with extended-thinking
+    # specials. EXTRA_PARAMS (the generic passthrough) is supported everywhere.
     assert supported_keys("MODEL_ID", "anthropic") == {
         "TEMPERATURE", "MAX_TOKENS", "TOP_P", "TOP_K", "STOP",
         "API_KEY", "ENDPOINT_URL",
         "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+        "EXTRA_PARAMS",
     }
     assert supported_keys("VISION_MODEL_ID", "litellm") == {
-        "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P"
+        "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P", "EXTRA_PARAMS"
     }
     assert set(providers("EMBED_MODEL_ID")) == {
         "ollama", "bedrock", "openai", "sagemaker", "litellm"
     }
-    # Embeddings take no inference params — only connection keys.
-    assert supported_keys("EMBED_MODEL_ID", "ollama") == {"HOST", "PORT"}
-    assert supported_keys("EMBED_MODEL_ID", "openai") == set()
-    assert supported_keys("EMBED_MODEL_ID", "litellm") == {"API_BASE", "API_KEY"}
+    # Embeddings take no inference params — only connection keys (+ EXTRA_PARAMS).
+    assert supported_keys("EMBED_MODEL_ID", "ollama") == {"HOST", "PORT", "EXTRA_PARAMS"}
+    assert supported_keys("EMBED_MODEL_ID", "openai") == {"EXTRA_PARAMS"}
+    assert supported_keys("EMBED_MODEL_ID", "litellm") == {
+        "API_BASE", "API_KEY", "EXTRA_PARAMS"
+    }
     # Unknown provider -> None (configurator then prunes nothing).
     assert supported_keys("MODEL_ID", "bogus") is None
 
@@ -439,16 +443,28 @@ def test_tunable_params_excludes_connection_keys():
     tb = tunable_params("MODEL_ID", "bedrock")
     assert {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS"} <= tb
     assert "REGION" not in tb
-    # mantle: connection (REGION/API_PROTOCOL) excluded, specials kept.
+    # Capability filtering: /params only offers params a provider supports.
+    # Anthropic has no OpenAI-style penalties — they must NOT be offered/written.
+    ta = tunable_params("MODEL_ID", "anthropic")
+    assert "FREQUENCY_PENALTY" not in ta and "PRESENCE_PENALTY" not in ta
+    assert "REASONING_EFFORT" in ta  # but reasoning effort IS supported
+    # litellm gains a first-class REASONING_EFFORT (LiteLLM translates per backend).
+    assert "REASONING_EFFORT" in tunable_params("MODEL_ID", "litellm")
+    # mantle: connection (REGION/API_PROTOCOL) excluded, specials kept —
+    # including REASONING_EFFORT (translated per protocol by the factory).
     tm = tunable_params("MODEL_ID", "mantle")
     assert "REGION" not in tm and "API_PROTOCOL" not in tm
-    assert {"TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM"} == tm
-    # It's exactly supported minus the connection set.
+    assert {"TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM", "REASONING_EFFORT"} == tm
+    # It's exactly supported minus the connection set and the generic
+    # EXTRA_PARAMS passthrough (which is not a /params-tunable scalar).
     from mnemoai.models.provider_params import _TABLES  # type: ignore
 
     for prov in ("ollama", "bedrock", "openai", "sagemaker", "litellm"):
         conn = _TABLES["MODEL_ID"][prov]["connection"]
-        assert tunable_params("MODEL_ID", prov) == supported_keys("MODEL_ID", prov) - conn
+        expected = supported_keys("MODEL_ID", prov) - conn - {"EXTRA_PARAMS"}
+        assert tunable_params("MODEL_ID", prov) == expected
+    # EXTRA_PARAMS is supported but never tunable via /params.
+    assert "EXTRA_PARAMS" not in tunable_params("MODEL_ID", "openai")
     # Embeddings have nothing to tune.
     assert tunable_params("EMBED_MODEL_ID", "ollama") == set()
     # Unknown provider -> None.

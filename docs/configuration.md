@@ -264,26 +264,75 @@ truth that the controllers build their client kwargs from — so it reflects
 exactly what each provider's init path forwards. (`mantle` reads
 `TEMPERATURE`/`MAX_TOKENS`/`TOP_P` via the Mantle factory.)
 
-| Parameter            | Description                            | Honored by (`MODEL_ID`)                                        |
-| -------------------- | -------------------------------------- | -------------------------------------------------------------- |
-| `MAX_TOKENS`         | Max output tokens to generate          | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
-| `TEMPERATURE`        | Sampling temperature                   | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
-| `TOP_P`              | Top-p (nucleus) sampling               | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
-| `TOP_K`              | Top-k sampling                         | ollama, anthropic, sagemaker                                   |
-| `STOP`               | Stop sequences (YAML list)             | ollama, bedrock, anthropic, sagemaker, litellm                 |
-| `STREAM`             | Stream tokens (default `true`)         | mantle, openai, anthropic, litellm                             |
-| `PRESENCE_PENALTY`   | Presence penalty                       | ollama, openai                                                 |
-| `FREQUENCY_PENALTY`  | Frequency penalty                      | ollama                                                         |
-| `REPETITION_PENALTY` | Repetition penalty                     | ollama, litellm                                                |
-| `REASONING`          | Enable extended thinking (boolean)     | bedrock, anthropic                                             |
-| `THINKING_TOKENS`    | Thinking token budget (default `2048`) | bedrock, anthropic                                             |
-| `REASONING_EFFORT`   | `low`/`medium`/`high`/`max`            | openai, anthropic (also maps to Bedrock thinking budget)       |
+| Parameter            | Description                                                                                 | Honored by (`MODEL_ID`)                                        |
+| -------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `MAX_TOKENS`         | Max output tokens to generate                                                               | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
+| `TEMPERATURE`        | Sampling temperature                                                                        | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
+| `TOP_P`              | Top-p (nucleus) sampling                                                                    | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
+| `TOP_K`              | Top-k sampling                                                                              | ollama, anthropic, sagemaker                                   |
+| `STOP`               | Stop sequences (YAML list)                                                                  | ollama, bedrock, anthropic, sagemaker, litellm                 |
+| `STREAM`             | Stream tokens (default `true`)                                                              | mantle, openai, anthropic, litellm                             |
+| `PRESENCE_PENALTY`   | Presence penalty                                                                            | ollama, openai                                                 |
+| `FREQUENCY_PENALTY`  | Frequency penalty                                                                           | ollama                                                         |
+| `REPETITION_PENALTY` | Repetition penalty                                                                          | ollama, litellm                                                |
+| `REASONING`          | Enable extended thinking (boolean)                                                          | bedrock, anthropic                                             |
+| `THINKING_TOKENS`    | Thinking token budget (default `2048`)                                                      | bedrock, anthropic                                             |
+| `REASONING_EFFORT`   | reasoning effort (provider-dependent: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`) | openai, anthropic, bedrock, mantle, litellm                    |
 
 `VISION_MODEL_ID` supports the same seven providers as `MODEL_ID`. It accepts a
 subset of params: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` across providers, plus
 `TOP_K` on ollama/anthropic/sagemaker and `STOP` on ollama/sagemaker. Connection
 keys follow the provider (host/port, region, Mantle protocol, SageMaker
 `INPUT_FORMAT`, LiteLLM/Anthropic `API_BASE`/`API_KEY`/base URL).
+
+> **`/params` only offers what the provider supports.** The set of tunable
+> params is taken per-provider from the registry, so `/params` never prompts for
+> — and never writes — a key the model ignores (e.g. Anthropic has no
+> `PRESENCE_PENALTY`/`FREQUENCY_PENALTY`; only the params it honors are offered).
+>
+> **`REASONING_EFFORT` is a single, first-class knob translated per provider.**
+> Set one effort value and mnemoai maps it to each provider's mechanism:
+> forwarded as `reasoning_effort` on OpenAI and Mantle's `responses` protocol;
+> mapped to a `thinking` token budget on Anthropic, standard Bedrock, and
+> Mantle's `anthropic` protocol; passed through LiteLLM (which translates it per
+> backend). When thinking is enabled this way, `temperature`/`top_p`/`top_k` are
+> dropped automatically (the providers reject them). For finer control, set the
+> raw provider parameter via `EXTRA_PARAMS` (below), which overrides this.
+
+##### `EXTRA_PARAMS` — generic passthrough for anything else
+
+The table above is the curated set. For provider-specific knobs it doesn't model
+— or new ones that ship after a release — add an `EXTRA_PARAMS` dict to any
+`MODEL_ID` / `VISION_MODEL_ID`. Its contents are forwarded **verbatim** to the
+underlying model's request body, with **no interpretation** by mnemoai, so you
+use the **provider's own parameter names**. This means new parameters need no
+code change. Works for every provider; it's the right place for reasoning
+controls on Mantle, which the curated columns don't cover.
+
+```yaml
+# OpenAI / GPT-5.x (TYPE: openai, or Mantle API_PROTOCOL: responses)
+MODEL_ID:
+  NAME: openai.gpt-5.5
+  TYPE: mantle
+  API_PROTOCOL: responses
+  EXTRA_PARAMS:
+    reasoning_effort: high      # none | low | medium | high | xhigh
+    # verbosity: low
+
+# Anthropic / Claude (TYPE: anthropic, or Mantle API_PROTOCOL: anthropic)
+MODEL_ID:
+  NAME: anthropic.claude-opus-4-8
+  TYPE: mantle
+  API_PROTOCOL: anthropic
+  EXTRA_PARAMS:
+    thinking: { type: enabled, budget_tokens: 10000 }
+```
+
+Notes: `reasoning_effort` is lifted to a first-class argument on OpenAI-family
+clients (so it isn't double-specified); everything else is merged into
+`model_kwargs`. A non-dict `EXTRA_PARAMS` is ignored rather than crashing. It is
+not offered by the `/params` interactive tuner (it's a free-form dict, not a
+scalar) — set it in `config.yaml` directly.
 
 > **Provider-appropriate tuning matters.** Newer Claude and GPT models reject
 > `TEMPERATURE` outright; `STOP`, penalties, and `TOP_K` are largely
