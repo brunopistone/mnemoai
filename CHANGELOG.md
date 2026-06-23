@@ -9,6 +9,37 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.10] — 2026-06-23
+
+### Added
+
+- `REASONING_EFFORT` is now a first-class, `/params`-tunable knob for **every**
+  provider that supports reasoning — `openai`, `anthropic`, `bedrock`, `mantle`,
+  and `litellm` — translated to each provider's mechanism: forwarded as
+  `reasoning_effort` on OpenAI and Mantle's `responses` protocol; mapped to a
+  `thinking` token budget on Anthropic, standard Bedrock, and Mantle's
+  `anthropic` protocol; passed through LiteLLM (which translates per backend).
+  This gives Bedrock Mantle a real reasoning path it previously lacked. When
+  thinking is enabled this way, `temperature`/`top_p`/`top_k` are dropped (the
+  providers reject them).
+- `EXTRA_PARAMS`: a generic per-model passthrough for the long tail. Any
+  `MODEL_ID` / `VISION_MODEL_ID` may include an `EXTRA_PARAMS` dict whose
+  contents are forwarded verbatim to the underlying model's request body (using
+  the provider's own parameter names), so provider-specific knobs the curated
+  registry doesn't model need no code change. Works for every provider (OpenAI,
+  Anthropic, Bedrock, Ollama, SageMaker, LiteLLM, and all three Mantle
+  protocols). `reasoning_effort` is lifted to a first-class arg on OpenAI-family
+  clients; everything else merges into `model_kwargs`. A non-dict value is
+  ignored. It is **config.yaml-only** — supported everywhere (never pruned by
+  `/model`) but not prompted by `/model` or `/params`. `EXTRA_PARAMS` overrides
+  the first-class `REASONING_EFFORT` if both set the same key.
+
+### Changed
+
+- `/params` only offers (and only writes) params the chosen provider actually
+  supports — now covered by a regression test (e.g. Anthropic is never prompted
+  for `PRESENCE_PENALTY`/`FREQUENCY_PENALTY`, but is for `REASONING_EFFORT`).
+
 ## [0.8.9] — 2026-06-23
 
 ### Changed
@@ -259,7 +290,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.9...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.10...HEAD
+[0.8.10]: https://github.com/brunopistone/mnemoai/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/brunopistone/mnemoai/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/brunopistone/mnemoai/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/brunopistone/mnemoai/compare/v0.8.6...v0.8.7

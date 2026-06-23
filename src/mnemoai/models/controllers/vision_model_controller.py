@@ -7,7 +7,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from mnemoai.models.controllers.base_model_controller import BaseModelController
-from mnemoai.models.provider_params import build_kwargs
+from mnemoai.models.provider_params import build_kwargs, extra_params
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
@@ -71,6 +71,7 @@ class VisionModelController(BaseModelController):
         logger.debug("Initializing Bedrock vision model via LangChain...")
 
         _, model_kwargs = build_kwargs("VISION_MODEL_ID", "bedrock", self)
+        model_kwargs.update(extra_params(self.model_id))
 
         region = self.model_id.get("REGION", "us-east-1")
 
@@ -101,6 +102,7 @@ class VisionModelController(BaseModelController):
             "base_url": base_url,
             **passthrough,
         }
+        kwargs.update(extra_params(self.model_id))
 
         self.model = ChatOllama(**kwargs)
 
@@ -115,6 +117,13 @@ class VisionModelController(BaseModelController):
             "model": self.model_name,
             **passthrough,
         }
+        # Generic passthrough into the request body (reasoning_effort is a
+        # first-class arg; the rest go via model_kwargs).
+        extra = extra_params(self.model_id)
+        if "reasoning_effort" in extra:
+            kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
+        if extra:
+            kwargs["model_kwargs"] = extra
 
         self.model = ChatOpenAI(**kwargs)
 
@@ -141,6 +150,8 @@ class VisionModelController(BaseModelController):
             kwargs["api_key"] = self.api_key
         if self.endpoint_url:
             kwargs["base_url"] = self.endpoint_url
+        # Generic passthrough (e.g. thinking={...}).
+        kwargs.update(extra_params(self.model_id))
 
         self.model = ChatAnthropic(**kwargs)
 
@@ -160,6 +171,7 @@ class VisionModelController(BaseModelController):
             temperature=self.temperature,
             max_tokens=self.max_tokens,
             top_p=self.top_p,
+            extra_params=extra_params(self.model_id),
         )
 
     def _initialize_sagemaker_model(self) -> None:

@@ -32,6 +32,11 @@ ParamSpec = namedtuple("ParamSpec", ["config_key", "attr", "kwarg", "dest"])
 # param is included when its value ``is not None``.
 _TRUTHY_KEYS = {"STOP"}
 
+# A generic passthrough every provider accepts: an arbitrary dict merged into
+# the model's request body (model_kwargs). Universally supported so `/model`
+# pruning never strips it on a provider switch. See :func:`extra_params`.
+EXTRA_PARAMS_KEY = "EXTRA_PARAMS"
+
 
 def _p(config_key, attr, kwarg, dest="main"):
     return ParamSpec(config_key, attr, kwarg, dest)
@@ -64,11 +69,13 @@ _LLM = {
         "special": {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS"},
     },
     "mantle": {
-        # Delegates to mantle_factory (temperature/max_tokens/top_p/streaming),
-        # so no passthrough specs here; the factory reads these from the dict.
+        # Delegates to mantle_factory (temperature/max_tokens/top_p/streaming +
+        # reasoning), so no passthrough specs here; the factory reads these from
+        # the dict and translates REASONING_EFFORT per protocol (effort enum on
+        # responses, a thinking budget on anthropic).
         "params": [],
         "connection": {"REGION", "API_PROTOCOL", "ENDPOINT_URL", "API_KEY"},
-        "special": {"TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM"},
+        "special": {"TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM", "REASONING_EFFORT"},
     },
     "openai": {
         "params": [
@@ -113,6 +120,10 @@ _LLM = {
             _p("TOP_P", "top_p", "top_p"),
             _p("STOP", "stop", "stop", "model_kwargs"),
             _p("REPETITION_PENALTY", "repetition_penalty", "repeat_penalty", "model_kwargs"),
+            # LiteLLM's unified reasoning knob; it translates per backend
+            # (effort enum for OpenAI, thinking budget for Anthropic). Passed via
+            # model_kwargs since ChatLiteLLM has no top-level field for it.
+            _p("REASONING_EFFORT", "reasoning_effort", "reasoning_effort", "model_kwargs"),
         ],
         "connection": {"API_BASE", "API_KEY"},
         "special": {"STREAM"},
@@ -221,7 +232,12 @@ def supported_keys(section: str, provider: str) -> Optional[set]:
     entry = _TABLES.get(section, {}).get(provider)
     if entry is None:
         return None
-    return {s.config_key for s in entry["params"]} | entry["connection"] | entry["special"]
+    return (
+        {s.config_key for s in entry["params"]}
+        | entry["connection"]
+        | entry["special"]
+        | {EXTRA_PARAMS_KEY}
+    )
 
 
 def tunable_params(section: str, provider: str) -> Optional[set]:
@@ -237,6 +253,29 @@ def tunable_params(section: str, provider: str) -> Optional[set]:
     if entry is None:
         return None
     return {s.config_key for s in entry["params"]} | entry["special"]
+
+
+def extra_params(model_id: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the raw ``EXTRA_PARAMS`` passthrough dict from a model section.
+
+    ``EXTRA_PARAMS`` is a generic escape hatch: a mapping of arbitrary key/value
+    pairs forwarded verbatim to the underlying model (merged into its
+    ``model_kwargs`` / request body) with **no interpretation** by mnemoai. It
+    lets users set provider-specific knobs the curated registry doesn't model —
+    e.g. ``reasoning_effort`` / ``reasoning`` (OpenAI, Mantle responses),
+    ``thinking`` (Anthropic, Mantle anthropic), ``verbosity``, ``service_tier`` —
+    without a code change. The user supplies the provider's own parameter names.
+
+    Args:
+        model_id: A model section dict (MODEL_ID / VISION_MODEL_ID / EMBED).
+
+    Returns:
+        A shallow copy of the EXTRA_PARAMS dict, or ``{}`` when absent/empty.
+        A non-dict value is ignored (returns ``{}``) so a malformed config
+        degrades gracefully instead of crashing model construction.
+    """
+    raw = (model_id or {}).get("EXTRA_PARAMS")
+    return dict(raw) if isinstance(raw, dict) and raw else {}
 
 
 def build_kwargs(section: str, provider: str, controller: Any) -> Tuple[Dict, Dict]:

@@ -488,3 +488,211 @@ class TestMantleApiKeyAuth:
             {"NAME": "qwen.qwen3-32b", "TYPE": "mantle", "REGION": "us-east-1"}
         )
         assert patch_mantle["api_key"] == "bedrock-api-fake-token"
+
+
+class TestExtraParamsPassthrough:
+    """EXTRA_PARAMS: a generic dict forwarded verbatim to the model.
+
+    Verifies the passthrough reaches the right sink per provider/protocol:
+    - Mantle responses / direct OpenAI: reasoning_effort lifts to a first-class
+      arg; other keys go into model_kwargs.
+    - Mantle anthropic / direct Anthropic: passed as top-level constructor args
+      (e.g. thinking).
+    """
+
+    def test_mantle_responses_reasoning_effort_and_model_kwargs(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.5",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+                "EXTRA_PARAMS": {"reasoning_effort": "high", "verbosity": "low"},
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatOpenAI"
+        # reasoning_effort is a first-class ChatOpenAI arg.
+        assert patch_mantle["reasoning_effort"] == "high"
+        # Remaining keys go into the request body.
+        assert patch_mantle["model_kwargs"] == {"verbosity": "low"}
+
+    def test_mantle_anthropic_thinking_passthrough(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic.claude-opus-4-8",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_PROTOCOL": "anthropic",
+                "MAX_TOKENS": 8192,
+                "EXTRA_PARAMS": {
+                    "thinking": {"type": "enabled", "budget_tokens": 4096}
+                },
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+
+    def test_direct_openai_extra_params(self, patch_mantle, monkeypatch):
+        import langchain_openai
+
+        captured = {}
+
+        def rec(**kwargs):
+            captured.clear()
+            captured.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(langchain_openai, "ChatOpenAI", rec)
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "gpt-5.5",
+                "TYPE": "openai",
+                "EXTRA_PARAMS": {"reasoning_effort": "high", "verbosity": "low"},
+            },
+        )
+        ctrl.initialize_model()
+        assert captured["model_kwargs"]["verbosity"] == "low"
+        # reasoning_effort flows via model_kwargs on the direct OpenAI path
+        # (registry already maps REASONING_EFFORT there), or as a key in
+        # model_kwargs from EXTRA_PARAMS — assert it reached the request body.
+        assert "reasoning_effort" in captured["model_kwargs"]
+
+    def test_direct_anthropic_extra_params(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "claude-opus-4-8",
+                "TYPE": "anthropic",
+                "API_KEY": "k",
+                "MAX_TOKENS": 4096,
+                "EXTRA_PARAMS": {"thinking": {"type": "adaptive"}},
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["thinking"] == {"type": "adaptive"}
+
+    def test_absent_extra_params_is_noop(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.4",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+            },
+        )
+        ctrl.initialize_model()
+        assert "reasoning_effort" not in patch_mantle
+        assert "model_kwargs" not in patch_mantle
+
+    def test_non_dict_extra_params_ignored(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.4",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+                "EXTRA_PARAMS": "not-a-dict",
+            },
+        )
+        ctrl.initialize_model()  # must not raise
+        assert "model_kwargs" not in patch_mantle
+
+
+class TestReasoningEffortFirstClass:
+    """REASONING_EFFORT as a first-class, provider-translated knob.
+
+    - Mantle responses / direct OpenAI: forwarded as `reasoning_effort`.
+    - Mantle anthropic / direct Bedrock / direct Anthropic: mapped to a
+      `thinking` budget (token budget, not an effort enum).
+    - LiteLLM: forwarded via model_kwargs (LiteLLM translates per backend).
+    """
+
+    def test_mantle_responses_reasoning_effort(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.5",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+                "REASONING_EFFORT": "high",
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatOpenAI"
+        assert patch_mantle["reasoning_effort"] == "high"
+
+    def test_mantle_anthropic_reasoning_effort_maps_to_thinking(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic.claude-opus-4-8",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "anthropic",
+                "REASONING_EFFORT": "high",
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["thinking"] == {
+            "type": "enabled",
+            "budget_tokens": 16384,
+        }
+        # max_tokens bumped above the budget; temperature dropped.
+        assert patch_mantle["max_tokens"] > 16384
+        assert "temperature" not in patch_mantle
+
+    def test_extra_params_overrides_reasoning_effort(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.5",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+                "REASONING_EFFORT": "low",
+                "EXTRA_PARAMS": {"reasoning_effort": "xhigh"},
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["reasoning_effort"] == "xhigh"
+
+    def test_litellm_reasoning_effort_in_model_kwargs(self, patch_mantle, monkeypatch):
+        # ChatLiteLLM is imported at module top into the controller's namespace,
+        # so patch the bound name on the controller module (not langchain_litellm).
+        import mnemoai.models.controllers.llm_controller as ctrl_mod
+
+        cap = {}
+
+        def rec(**kwargs):
+            cap.clear()
+            cap.update(kwargs)
+            return MagicMock()
+
+        monkeypatch.setattr(ctrl_mod, "ChatLiteLLM", rec)
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic/claude-3-7-sonnet",
+                "TYPE": "litellm",
+                "REASONING_EFFORT": "medium",
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert cap["model_kwargs"]["reasoning_effort"] == "medium"

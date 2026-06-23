@@ -21,6 +21,13 @@ MODEL_ID:
 #   REGION: us-west-2
 #   API_PROTOCOL: responses
 #   MAX_TOKENS: 128000
+#   # Reasoning is a first-class knob, translated per protocol (here -> the
+#   # OpenAI `reasoning_effort` param). Also tunable via /params.
+#   REASONING_EFFORT: high   # none|minimal|low|medium|high|xhigh|max
+#   # For anything else, EXTRA_PARAMS is forwarded verbatim (provider's own
+#   # parameter names); it overrides REASONING_EFFORT if it sets the same key:
+#   # EXTRA_PARAMS:
+#   #   verbosity: low
 # Anthropic (Claude) model example:
 # MODEL_ID:
 #   NAME: anthropic.claude-opus-4-8
@@ -28,6 +35,12 @@ MODEL_ID:
 #   REGION: us-east-1
 #   API_PROTOCOL: anthropic
 #   MAX_TOKENS: 128000
+#   # On the anthropic protocol REASONING_EFFORT maps to a `thinking` token
+#   # budget automatically (temperature/top_p are dropped when thinking is on):
+#   REASONING_EFFORT: high
+#   # Or set the raw block yourself via EXTRA_PARAMS (overrides the above):
+#   # EXTRA_PARAMS:
+#   #   thinking: { type: enabled, budget_tokens: 10000 }
 # MODEL_ID:
 #   NAME: xai.grok-4.3
 #   TYPE: mantle

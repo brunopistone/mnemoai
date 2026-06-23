@@ -24,6 +24,12 @@ from mnemoai.utils.logger import logger
 
 VALID_PROTOCOLS = ("chat_completions", "responses", "anthropic")
 
+# REASONING_EFFORT -> thinking budget_tokens, used on the anthropic protocol
+# (which takes a token budget, not an effort enum). Mirrors the mapping in
+# llm_controller for direct Bedrock/Anthropic. The responses/chat_completions
+# protocols take the effort string directly.
+_EFFORT_TO_TOKENS = {"low": 1024, "medium": 8192, "high": 16384, "max": 32768}
+
 
 def _mantle_base_url(region: str, protocol: str, override: Optional[str]) -> str:
     """Resolve the Mantle base URL for a protocol (or use an explicit override)."""
@@ -45,6 +51,9 @@ def build_mantle_model(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     top_p: Optional[float] = None,
+    reasoning_effort: Optional[str] = None,
+    thinking_tokens: Optional[int] = None,
+    extra_params: Optional[Dict[str, Any]] = None,
 ) -> BaseChatModel:
     """Build a LangChain chat model for a Bedrock Mantle endpoint.
 
@@ -57,10 +66,23 @@ def build_mantle_model(
             Anthropic path which LangChain streams by default).
         temperature, max_tokens, top_p: Optional inference params; only sent
             when not None.
+        reasoning_effort: First-class ``REASONING_EFFORT`` knob, translated per
+            protocol — sent as ``reasoning_effort`` on responses/chat_completions
+            and as a ``thinking`` budget (mapped via ``_EFFORT_TO_TOKENS``) on
+            anthropic. ``EXTRA_PARAMS`` overrides it if it sets the same key.
+        thinking_tokens: Fallback thinking budget for the anthropic protocol when
+            ``reasoning_effort`` is unset but a budget is wanted (currently only
+            used if explicitly provided).
+        extra_params: Generic ``EXTRA_PARAMS`` passthrough forwarded verbatim.
+            For chat_completions / responses it is merged into ``model_kwargs``
+            (request body) — e.g. ``reasoning_effort``, ``reasoning``,
+            ``verbosity``. For the anthropic protocol it is passed as top-level
+            constructor kwargs — e.g. ``thinking``.
 
     Returns:
         An initialized ChatOpenAI or ChatAnthropic instance.
     """
+    extra = dict(extra_params or {})
     name = model_id["NAME"]
     region = model_id.get("REGION", "us-east-1")
     protocol = model_id.get("API_PROTOCOL", "chat_completions")
@@ -104,6 +126,23 @@ def build_mantle_model(
             kwargs["top_p"] = top_p
         if callbacks is not None:
             kwargs["callbacks"] = callbacks
+        # REASONING_EFFORT -> a thinking budget (the anthropic protocol takes a
+        # token budget, not an effort enum). Ensure the budget fits under
+        # max_tokens. EXTRA_PARAMS may override `thinking` below.
+        if reasoning_effort or thinking_tokens:
+            budget = (
+                _EFFORT_TO_TOKENS.get(reasoning_effort, thinking_tokens or 2048)
+                if reasoning_effort
+                else thinking_tokens
+            )
+            if kwargs["max_tokens"] <= budget:
+                kwargs["max_tokens"] = budget + 1024
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            # Anthropic rejects temperature/top_p/top_k when thinking is on.
+            kwargs.pop("temperature", None)
+            kwargs.pop("top_p", None)
+        # Generic passthrough (e.g. thinking={...}); applied last so it wins.
+        kwargs.update(extra)
         return ChatAnthropic(**kwargs)
 
     # OpenAI-compatible protocols (chat_completions / responses)
@@ -126,4 +165,17 @@ def build_mantle_model(
         kwargs["max_tokens"] = max_tokens
     if top_p is not None:
         kwargs["top_p"] = top_p
+    # REASONING_EFFORT is a first-class ChatOpenAI arg on the OpenAI-compatible
+    # protocols (effort enum forwarded as-is). EXTRA_PARAMS overrides it below.
+    if reasoning_effort:
+        kwargs["reasoning_effort"] = reasoning_effort
+    # Generic passthrough: merge EXTRA_PARAMS into the request body so knobs the
+    # registry doesn't model (reasoning_effort, reasoning={...}, verbosity, …)
+    # reach the API. reasoning_effort is a first-class ChatOpenAI arg, so lift it
+    # out of model_kwargs to avoid a "specified in both" error.
+    if extra:
+        if "reasoning_effort" in extra:
+            kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
+        if extra:
+            kwargs["model_kwargs"] = extra
     return ChatOpenAI(**kwargs)
