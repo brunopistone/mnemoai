@@ -9,6 +9,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.9] — 2026-06-23
+
+### Changed
+
+- The curated `MEMORY.md` now separates entries with a Markdown `---` rule
+  instead of a `§` section sign, so the file renders as clean prose with
+  dividers rather than showing a stray symbol. Existing `§`-delimited files are
+  still read correctly and migrate to `---` automatically on the next memory
+  write.
+
 ## [0.8.8] — 2026-06-22
 
 ### Changed
@@ -249,7 +259,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.8...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.9...HEAD
+[0.8.9]: https://github.com/brunopistone/mnemoai/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/brunopistone/mnemoai/compare/v0.8.7...v0.8.8
 [0.8.7]: https://github.com/brunopistone/mnemoai/compare/v0.8.6...v0.8.7
 [0.8.6]: https://github.com/brunopistone/mnemoai/compare/v0.8.5...v0.8.6

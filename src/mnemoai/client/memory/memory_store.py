@@ -10,16 +10,24 @@ This module is pure file logic — no MCP, no LLM — so it is shared by the
 server-side ``memory`` tool and the client-side ``/memory`` command, and is
 unit-testable on its own.
 
-Entries are separated by a ``§`` delimiter on its own line, which lets a single
-entry span multiple lines while keeping add/replace/remove reliable.
+Entries are separated by a Markdown horizontal rule (``---`` on its own line),
+which renders cleanly in any viewer and lets a single entry span multiple lines
+while keeping add/replace/remove reliable. Legacy files using the old ``§``
+delimiter are still read correctly and migrate to ``---`` on the next write.
 """
 
+import re
 from pathlib import Path
 from typing import List, Optional
 
 from mnemoai.utils.logger import logger
 
-DELIMITER = "\n§\n"
+# Entry separator written to disk: a Markdown thematic break, blank-line padded
+# so it renders as a clean divider rather than a stray symbol.
+DELIMITER = "\n\n---\n\n"
+# Split on a ``---`` rule on its own line OR the legacy ``§`` delimiter, so old
+# MEMORY.md files keep parsing and migrate to ``---`` the next time we write.
+_SPLIT_RE = re.compile(r"\n\s*(?:---+|§)\s*\n")
 DEFAULT_MAX_CHARS = 2200
 
 
@@ -64,11 +72,15 @@ class MemoryStore:
             return ""
 
     def _entries(self) -> List[str]:
-        """Current entries (delimiter-split, blanks dropped)."""
+        """Current entries (delimiter-split, blanks dropped).
+
+        Splits on a ``---`` rule on its own line or the legacy ``§`` delimiter,
+        so both the current and old on-disk formats parse correctly.
+        """
         text = self.read().strip()
         if not text:
             return []
-        return [e.strip() for e in text.split(DELIMITER.strip()) if e.strip()]
+        return [e.strip() for e in _SPLIT_RE.split(text) if e.strip()]
 
     def _write_entries(self, entries: List[str]) -> None:
         """Persist entries joined by the delimiter (creates parent dir)."""
