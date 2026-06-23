@@ -92,6 +92,36 @@ def test_multiline_entry_preserved(store):
     assert store._entries() == ["line1\nline2\nline3"]
 
 
+def test_entries_separated_by_markdown_rule(store):
+    # New format: entries are separated by a `---` thematic break on its own
+    # line, and the file contains no stray `§` symbol.
+    store.add("first fact")
+    store.add("second fact")
+    raw = store.read()
+    assert "\n---\n" in raw
+    assert "§" not in raw
+
+
+def test_reads_legacy_section_sign_file(tmp_path):
+    # Existing MEMORY.md files used a `§` delimiter; they must still parse.
+    p = tmp_path / "MEMORY.md"
+    p.write_text("legacy one.\n§\nlegacy two.\n")
+    s = MemoryStore(path=p, max_chars=10000)
+    assert s._entries() == ["legacy one.", "legacy two."]
+
+
+def test_legacy_file_migrates_to_rule_on_write(tmp_path):
+    # The first write after reading a `§` file rewrites it with `---`.
+    p = tmp_path / "MEMORY.md"
+    p.write_text("legacy one.\n§\nlegacy two.\n")
+    s = MemoryStore(path=p, max_chars=10000)
+    s.add("new three.")
+    raw = p.read_text()
+    assert "§" not in raw
+    assert "\n---\n" in raw
+    assert s._entries() == ["legacy one.", "legacy two.", "new three."]
+
+
 def test_clear_empties_file(store):
     store.add("a")
     store.add("b")
