@@ -9,6 +9,31 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.11] — 2026-06-23
+
+### Fixed
+
+- Compaction no longer corrupts the conversation by splitting a tool
+  call/result pair. Previously the kept-verbatim window could start with an
+  orphaned tool result (its originating assistant tool-call turn summarized
+  away), which the OpenAI Responses API rejects on the very next turn with a
+  deterministic 400 — "No tool call found for function call output with call_id
+  …" — looping until the query fails. The split point is now tool-pair-safe
+  (`_safe_tool_boundary`): it moves earlier as needed so a tool call and its
+  result are always kept (or summarized) together.
+
+### Changed
+
+- Conversation compaction now uses Claude Code's compaction approach: a
+  "summarizing conversations" system framing plus the verbatim structured task
+  prompt (an `<analysis>` pass, then nine fixed sections — Primary Request,
+  Key Technical Concepts, Files and Code Sections, Errors and fixes, Problem
+  Solving, All user messages, Pending Tasks, Current Work, Optional Next Step).
+  `/compact <focus>` is injected under a `## Compact Instructions` header; the
+  `<analysis>` scratchpad is stripped from the result; and the injected summary
+  block carries the verbatim continuation instruction so the model resumes the
+  work seamlessly instead of recapping.
+
 ## [0.8.10] — 2026-06-23
 
 ### Added
@@ -290,7 +315,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.10...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.11...HEAD
+[0.8.11]: https://github.com/brunopistone/mnemoai/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/brunopistone/mnemoai/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/brunopistone/mnemoai/compare/v0.8.8...v0.8.9
 [0.8.8]: https://github.com/brunopistone/mnemoai/compare/v0.8.7...v0.8.8
