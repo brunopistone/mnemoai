@@ -83,7 +83,10 @@ class _FakeAgent:
 
 
 class _FakeSpinner:
-    def start(self):
+    def start(self, label="Thinking"):
+        pass
+
+    def set_label(self, label):
         pass
 
     def stop(self):
@@ -115,6 +118,47 @@ def _llm_config(**overrides):
         return default
 
     return _get
+
+
+class _PhaseRecordingSpinner:
+    """Records the phase labels passed to the spinner during compaction."""
+
+    def __init__(self):
+        self.labels = []
+
+    def start(self, label="Thinking"):
+        self.labels.append(("start", label))
+
+    def set_label(self, label):
+        self.labels.append(("set", label))
+
+    def stop(self):
+        pass
+
+
+class _PhaseClient(_FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.spinner = _PhaseRecordingSpinner()
+
+
+class TestCompactProgressPhases:
+    def test_compaction_sets_phase_labels(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(
+            mod.config, "get", _llm_config(MANUAL_COMPACT_KEEP_RECENT=2)
+        )
+        msgs = [HumanMessage(f"m{i}") for i in range(6)]
+        client = _PhaseClient()
+        mgr = AgentConversationManager(max_tokens=100)
+        _run(mgr.compact(client, _FakeAsyncModel(), _FakeAgent(list(msgs))))
+
+        phases = client.spinner.labels
+        # Phase 1: summarizing N older messages; Phase 2: applying.
+        assert phases[0][0] == "start"
+        assert "Summarizing" in phases[0][1] and "older messages" in phases[0][1]
+        assert ("set", "Applying summary") in phases
 
 
 class TestCompactKeepsRecent:

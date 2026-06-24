@@ -143,6 +143,21 @@ def profile_dir(profile: str = None) -> Path:
     return d
 
 
+def conversations_dir(profile: str = None) -> Path:
+    """Per-profile directory for saved conversations (created).
+
+    ``/save`` writes here and ``/load`` lists from here. Lives under the profile
+    dir as ``conversations/`` (see the app-home layout), keeping saved chats out
+    of the profile root.
+
+    Args:
+        profile: Profile name; resolved from config when omitted.
+    """
+    d = profile_dir(profile) / "conversations"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def memory_file_path(profile: str = None) -> Path:
     """Path to the curated ``MEMORY.md`` (profile-scoped, not auto-created).
 

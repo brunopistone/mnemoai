@@ -9,7 +9,34 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
-## [0.8.12] — 2026-06-24
+## [0.8.13] — 2026-06-24
+
+### Fixed
+
+- `/save` now writes to the profile's `conversations/` directory instead of the
+  profile root (`~/.mnemoai/<profile>/`), where saved chats were cluttering the
+  top level. New `paths.conversations_dir()` helper; existing files in the root
+  are not moved (load them with an explicit `/load <path>`).
+
+### Added
+
+- `/save [path]` accepts an optional destination — a directory (saved there with
+  the default `conversation_<ts>.json` name) or a full file path (`.json` added
+  if missing). With no argument it saves to `conversations/` as before.
+- `/load` with no argument now lists saved conversations (newest first, with
+  relative times) and lets you pick one by number, instead of requiring a typed
+  path. `/load <path>` still loads a specific file directly.
+
+### Changed
+
+- Compaction now shows phased progress on the spinner instead of a static
+  "Generating summary …" line that looked frozen during the (single, long) LLM
+  summary call. The spinner animates through `Summarizing N older messages` →
+  `Applying summary` → the green "Compacted: …" result. (A true % bar isn't
+  possible — one LLM generation has no measurable total — so this surfaces the
+  discrete stages honestly rather than a fake bar.) The `Spinner` gained an
+  optional `start(label=…)` argument and a `set_label()` method; the default
+  label stays "Thinking" for the normal agent loop.
 
 ### Changed
 
@@ -333,7 +360,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.12...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.13...HEAD
+[0.8.13]: https://github.com/brunopistone/mnemoai/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/brunopistone/mnemoai/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/brunopistone/mnemoai/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/brunopistone/mnemoai/compare/v0.8.9...v0.8.10

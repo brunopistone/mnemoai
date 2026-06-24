@@ -72,6 +72,13 @@ class TestSubdirs:
         assert d == tmp_home / "alice"
         assert d.is_dir()
 
+    def test_conversations_dir_under_profile(self, tmp_home):
+        # Regression: /save must write to <profile>/conversations/, not the
+        # profile root.
+        d = paths.conversations_dir("alice")
+        assert d == tmp_home / "alice" / "conversations"
+        assert d.is_dir()
+
     def test_model_dir_nested_and_sanitized(self, tmp_home):
         d = paths.model_dir("brnpistone/Qwen3.5-4B:latest", profile="bob")
         assert d == tmp_home / "bob" / "models" / "brnpistone_Qwen3.5-4B_latest"

@@ -90,8 +90,8 @@ class ChatInterface:
             ("/compact [focus]", "Summarize & shrink context"),
             ("/memory [clear]", "View (or clear) persistent memory"),
             ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
-            ("/save", "Save current conversation"),
-            ("/load <path>", "Load a saved conversation"),
+            ("/save [path]", "Save conversation (optional file/dir path)"),
+            ("/load [path]", "Load a saved conversation (lists saved if no path)"),
         ]),
         ("Exit", [
             ("/exit, /quit", "Exit the application"),
@@ -111,8 +111,8 @@ class ChatInterface:
         ("/compact", "Summarize & shrink context (optional focus)"),
         ("/memory", "View persistent memory (/memory clear to wipe)"),
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
-        ("/save", "Save current conversation"),
-        ("/load", "Load a saved conversation (/load <path>)"),
+        ("/save", "Save conversation (/save [path])"),
+        ("/load", "Load a saved conversation (/load lists saved)"),
         ("/exit", "Exit the application"),
         ("/quit", "Exit the application"),
     ]
@@ -370,6 +370,58 @@ class ChatInterface:
         print(f"\n  Declare more servers in:\n    {mcp_config_path()}")
         print('  Format: {"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}\n')
 
+    def _select_saved_conversation(self):
+        """List saved conversations (newest first) and let the user pick one.
+
+        Returns the chosen file path (str), or None if there are none or the
+        user cancels (blank/0/invalid input). Used by ``/load`` with no argument.
+        """
+        files = self.client.list_saved_conversations()
+        if not files:
+            print(
+                "No saved conversations found. Use /save first, or "
+                "/load <path> to load from a specific file."
+            )
+            return None
+
+        import datetime as _dt
+
+        now = _dt.datetime.now().timestamp()
+
+        def _ago(ts: float) -> str:
+            s = max(0, int(now - ts))
+            if s < 60:
+                return f"{s}s ago"
+            if s < 3600:
+                return f"{s // 60}m ago"
+            if s < 86400:
+                return f"{s // 3600}h ago"
+            return f"{s // 86400}d ago"
+
+        shown = files[:20]  # cap the menu; older ones load via /load <path>
+        print("\nSaved conversations:")
+        for i, p in enumerate(shown, 1):
+            print(f"  {i}) {p.name}  ({_ago(p.stat().st_mtime)})")
+        if len(files) > len(shown):
+            print(f"  … and {len(files) - len(shown)} more (use /load <path>)")
+
+        try:
+            answer = input("  Select [1, or Enter to cancel]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if not answer:
+            return None
+        try:
+            idx = int(answer)
+        except ValueError:
+            print_error("Not a number; cancelled.")
+            return None
+        if not (1 <= idx <= len(shown)):
+            print_error("Out of range; cancelled.")
+            return None
+        return str(shown[idx - 1])
+
     def _handle_memory_command(self, arg: str) -> None:
         """Handle ``/memory`` (view) and ``/memory clear``.
 
@@ -503,9 +555,12 @@ class ChatInterface:
                 print("Context cleared!")
                 continue
 
-            if query.lower() == "/save":
+            # /save [path] — save to conversations/ by default, or to an
+            # optional file/directory path.
+            if query.lower() == "/save" or query.lower().startswith("/save "):
                 timestamp = self.client.session_id.split("_", 1)[1]
-                self.client.save_conversation(timestamp)
+                save_path = query[len("/save"):].strip() or None
+                self.client.save_conversation(timestamp, path=save_path)
                 continue
 
             # Reconfigure: rewrite config.yaml via the interactive configurator,
@@ -573,12 +628,14 @@ class ChatInterface:
                 )
                 continue
 
-            # Handle /load command
-            if query.lower().startswith("/load"):
-                if query.strip() == "/load":
-                    print("Usage: /load <path>")
-                    continue
-                file_path = query[6:].strip()  # Remove "/load " prefix
+            # Handle /load command. With no path, list saved conversations and
+            # let the user pick one; with a path, load it directly.
+            if query.lower() == "/load" or query.lower().startswith("/load "):
+                file_path = query[len("/load"):].strip()
+                if not file_path:
+                    file_path = self._select_saved_conversation()
+                    if not file_path:
+                        continue  # nothing to load, or user cancelled
                 if self.client.load_conversation(file_path):
                     print("Conversation loaded successfully!")
                 else:

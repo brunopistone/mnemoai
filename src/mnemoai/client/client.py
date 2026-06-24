@@ -34,7 +34,12 @@ from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.server.tools import count_tokens
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
-from mnemoai.utils.paths import model_dir, profile_dir, sanitize_model_name
+from mnemoai.utils.paths import (
+    conversations_dir,
+    model_dir,
+    profile_dir,
+    sanitize_model_name,
+)
 
 
 class StreamingCallbackHandler(BaseCallbackHandler):
@@ -834,22 +839,38 @@ class LangGraphClient:
         except Exception as e:
             logger.warning(f"Failed to reset RAG store: {e}")
 
-    def save_conversation(self, timestamp: str = None) -> None:
-        """Save conversation to file.
+    def save_conversation(self, timestamp: str = None, path: str = None) -> None:
+        """Save conversation to a JSON file.
 
         Args:
-            timestamp: Optional timestamp for filename
+            timestamp: Optional timestamp for the default filename.
+            path: Optional destination. If a directory (existing, or ending in a
+                separator), the conversation is saved there with the default
+                ``conversation_<ts>.json`` name. Otherwise it's treated as a full
+                file path (a ``.json`` suffix is added if missing). When omitted,
+                saves to the profile's ``conversations/`` directory.
         """
         if not self.agent:
             logger.error("Agent not initialized")
             return
 
         try:
-            conversations_dir = str(profile_dir())
-            os.makedirs(conversations_dir, exist_ok=True)
-
             timestamp = timestamp or datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = os.path.join(conversations_dir, f"conversation_{timestamp}.json")
+            default_name = f"conversation_{timestamp}.json"
+
+            if path:
+                expanded = os.path.expanduser(path)
+                # Treat as a directory when it exists as one or ends with a sep.
+                if os.path.isdir(expanded) or path.endswith(("/", os.sep)):
+                    os.makedirs(expanded, exist_ok=True)
+                    filepath = os.path.join(expanded, default_name)
+                else:
+                    parent = os.path.dirname(expanded)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    filepath = expanded if expanded.endswith(".json") else expanded + ".json"
+            else:
+                filepath = os.path.join(str(conversations_dir()), default_name)
 
             strands_messages = convert_langchain_messages_to_strands(
                 self.agent.messages
@@ -873,6 +894,23 @@ class LangGraphClient:
 
         except Exception as e:
             logger.error(f"Failed to save conversation: {e}")
+
+    def list_saved_conversations(self) -> list:
+        """List saved conversation files, newest first.
+
+        Returns:
+            A list of ``Path`` objects for ``*.json`` files in the profile's
+            ``conversations/`` directory, sorted most-recently-modified first.
+            Empty if none exist.
+        """
+        try:
+            d = conversations_dir()
+            files = [p for p in d.glob("*.json") if p.is_file()]
+            files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            return files
+        except Exception as e:
+            logger.error(f"Failed to list saved conversations: {e}")
+            return []
 
     def load_conversation(self, file_path: str) -> bool:
         """Load conversation from file.
