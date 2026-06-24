@@ -63,10 +63,18 @@ class StreamingCallbackHandler(BaseCallbackHandler):
     def on_llm_new_token(self, token: str, **kwargs) -> None:
         """Handle new tokens from the LLM.
 
+        Stop the spinner only on a token that carries VISIBLE text. Some models
+        (e.g. Anthropic via Bedrock) stream redacted/secret reasoning tokens
+        with empty text before the answer — stopping on those would leave a dead
+        pause (spinner gone, nothing printed) until the visible answer arrives,
+        so we keep spinning until real text shows up.
+
         Args:
             token: The new token
             **kwargs: Additional arguments
         """
+        if not token or not str(token).strip():
+            return
         if not self.first_token_received and self.spinner:
             with self.spinner_lock:
                 if not self.first_token_received:

@@ -9,7 +9,18 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
-## [0.8.14] — 2026-06-24
+## [0.8.15] — 2026-06-24
+
+### Fixed
+
+- The "Thinking" spinner no longer stops too early on models that stream hidden
+  reasoning. Some providers (e.g. Anthropic via Bedrock) send redacted/secret
+  reasoning chunks before the answer; the spinner used to stop on the first such
+  chunk, leaving a dead pause (spinner gone, nothing printed) until the visible
+  answer arrived. The spinner now stops only when something is actually about to
+  be displayed — visible answer text, or reasoning shown in verbose mode — and
+  keeps spinning through hidden reasoning. The streaming callback likewise
+  ignores empty/whitespace-only tokens.
 
 ### Fixed
 
@@ -397,7 +408,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.14...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.15...HEAD
+[0.8.15]: https://github.com/brunopistone/mnemoai/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/brunopistone/mnemoai/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/brunopistone/mnemoai/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/brunopistone/mnemoai/compare/v0.8.11...v0.8.12
