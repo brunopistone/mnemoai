@@ -256,3 +256,46 @@ def test_answer_marker_printed_after_reasoning():
 
     a._stream_response(["msg"], {}, model=_Model(), mark_answer=True)
     assert a._marker_calls == 1
+
+
+def test_spinner_kept_running_through_hidden_reasoning():
+    # Regression: a model that streams reasoning we DON'T display (redacted, or
+    # non-verbose — e.g. Anthropic via Bedrock) must keep the spinner running
+    # until the visible answer arrives, not stop on the first hidden-reasoning
+    # chunk (which left a dead pause before any text printed).
+    import contextlib
+    import io
+
+    a = _AgentStreamHarness.make(retries=0)
+    a.verbose = False  # reasoning is NOT displayed
+    a.callbacks = ["cb"]  # non-empty so the stop-condition is reachable
+
+    # Record how much visible text had streamed at each _stop_spinner call.
+    streamed = {"text": ""}
+    stops = []
+    a._stop_spinner = lambda: stops.append(streamed["text"])
+    a._extract_content = lambda ch: (
+        getattr(ch, "content", ""), getattr(ch, "reasoning", "")
+    )
+
+    class _RC(_Chunk):
+        def __init__(self, content="", reasoning=""):
+            super().__init__(content=content)
+            self.reasoning = reasoning
+
+    class _Model:
+        def stream(self, messages, config=None):
+            # Two hidden-reasoning chunks, THEN the visible answer.
+            yield _RC(reasoning="secret 1")
+            yield _RC(reasoning="secret 2")
+            yield _RC(content="visible answer")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        a._stream_response(["msg"], {}, model=_Model(), mark_answer=True)
+
+    # Spinner stopped exactly ONCE — and not during the two hidden-reasoning
+    # chunks (it kept spinning until the visible answer arrived).
+    assert len(stops) == 1
+    # The visible answer did get printed.
+    assert "visible answer" in buf.getvalue()

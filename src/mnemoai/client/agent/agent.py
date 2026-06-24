@@ -836,9 +836,17 @@ class LangGraphAgent:
             for chunk in active_model.stream(messages, config=config):
                 chunk_content, reasoning_content = self._extract_content(chunk)
 
+                # Stop the spinner only when something is about to be DISPLAYED:
+                # visible answer text, or reasoning we'll actually print. Some
+                # models reasoning chunks whose text we never show — stopping
+                # on those leaves a dead pause (spinner gone, nothing printed)
+                # until the answer arrives. Keep spinning through hidden reasoning.
+                will_show_reasoning = bool(
+                    reasoning_content and self.verbose and print_reasoning
+                )
                 if (
                     first_token
-                    and (chunk_content or reasoning_content)
+                    and (chunk_content or will_show_reasoning)
                     and self.callbacks
                 ):
                     first_token = False
