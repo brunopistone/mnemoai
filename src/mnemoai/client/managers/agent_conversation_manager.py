@@ -301,8 +301,9 @@ class AgentConversationManager:
         Returns:
             Summary text
         """
-        log_green(f"Generating summary ...")
-
+        # Progress is shown via the spinner's phase label (set by the caller in
+        # _compact); no separate static line here so it doesn't clutter the
+        # spinner line.
         summary_prompt = self._build_summary_prompt(focus_instructions)
 
         try:
@@ -559,11 +560,14 @@ class AgentConversationManager:
             # Everything is within the keep window; nothing to summarize.
             return False
 
-        client.spinner.start()
+        # Phased status on the spinner (no fake % bar — a single LLM summary
+        # call has no measurable total; we surface the discrete stages instead).
+        client.spinner.start(f"Summarizing {len(older)} older messages")
         try:
             summary = await self.generate_summary(
                 messages_to_dict_list(older), model, focus_instructions
             )
+            client.spinner.set_label("Applying summary")
             clean_summary = "".join(c for c in summary if c.isprintable())
 
             new_system_content = self._build_system_with_summary(clean_summary)
@@ -572,6 +576,7 @@ class AgentConversationManager:
             agent.messages = list(recent)
             client.system_prompt = new_system_content
             agent.system_prompt = new_system_content
+            client.spinner.stop()
             log_green(
                 f"Compacted: summarized {len(older)} older messages, "
                 f"kept {len(recent)} recent."
