@@ -9,6 +9,39 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.14] — 2026-06-24
+
+### Fixed
+
+- The interactive configurator (`/config`, `/model`, `/params`, first-run setup)
+  now **re-asks on invalid input** instead of silently proceeding. Previously a
+  bad menu choice kept the current value (or cancelled), and a non-numeric entry
+  for `MAX_TOKENS` / `MAX_CONVERSATION_TOKENS` / the Mantle protocol was accepted
+  or defaulted. Now menu prompts re-ask until a listed option is chosen, numeric
+  prompts re-ask until the value parses as an int/float (`none` still clears
+  optional `MAX_TOKENS`), and the `/model` and `/params` model pickers re-ask
+  within the configured sections rather than cancelling on a wrong number.
+- Streamed output no longer drops code at end-of-stream. The `CodeFormatter`'s
+  `flush()` (now actually called when a stream ends) emits a response that ended
+  inside an unclosed ` ``` ` fence, a held-back trailing backtick, and resets the
+  terminal color after an unbalanced inline backtick — previously those were
+  silently lost or left the prompt stuck in cyan. Bare `except:` clauses in the
+  highlighter were also narrowed to `except Exception`.
+
+### Changed
+
+- Inline code / identifiers in streamed output are now **bold cyan** (matching
+  Claude Code's look and the Rich default) instead of plain cyan, for a crisper
+  distinction from surrounding prose. Fenced code blocks keep Pygments/monokai
+  highlighting.
+
+### Added
+
+- A visible cancel affordance in the configurator: every interactive flow shows
+  "Press Ctrl+C or Ctrl+D at any prompt to cancel — nothing is saved", and
+  EOF/interrupt at any prompt now aborts cleanly (config left untouched) instead
+  of half-applying an entry.
+
 ## [0.8.13] — 2026-06-24
 
 ### Fixed
@@ -38,6 +71,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   optional `start(label=…)` argument and a `set_label()` method; the default
   label stays "Thinking" for the normal agent loop.
 
+## [0.8.12] — 2026-06-24
+
 ### Changed
 
 - The agent loop no longer hard-stops at 50 steps. That cap cut off legitimate
@@ -55,6 +90,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   tracker now records whether stdout is mid-line, and the log handler prepends a
   newline when needed — so logs always start on their own line (no-op on
   piped/non-TTY output).
+
+## [0.8.11] — 2026-06-23
 
 ### Fixed
 
@@ -360,7 +397,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.13...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.14...HEAD
+[0.8.14]: https://github.com/brunopistone/mnemoai/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/brunopistone/mnemoai/compare/v0.8.12...v0.8.13
 [0.8.12]: https://github.com/brunopistone/mnemoai/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/brunopistone/mnemoai/compare/v0.8.10...v0.8.11

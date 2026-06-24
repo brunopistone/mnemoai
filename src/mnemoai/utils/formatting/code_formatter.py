@@ -10,6 +10,12 @@ from mnemoai.utils.formatting.url_formatter import make_urls_clickable
 class CodeFormatter:
     """Handles syntax highlighting for code blocks and inline code during streaming."""
 
+    # Inline code / identifiers: bold cyan, matching Claude Code's look (and the
+    # Rich library default ``bold cyan``). Plain cyan was washed out next to the
+    # surrounding text; the bold weight gives the same crisp distinction.
+    _INLINE_CODE = "\033[1;36m"
+    _RESET = "\033[0m"
+
     def __init__(self) -> None:
         """Initialize code formatter."""
         self._in_code_block = False
@@ -47,13 +53,13 @@ class CodeFormatter:
                     self._code_buffer = ""
                     self._code_lang = ""
                     if self._in_inline_code:
-                        print("\033[0m", end="", flush=True)
+                        print(self._RESET, end="", flush=True)
                         self._in_inline_code = False
                     in_code = False
                 else:
                     # Start of code block
                     if self._in_inline_code:
-                        print("\033[0m", end="", flush=True)
+                        print(self._RESET, end="", flush=True)
                         self._in_inline_code = False
                     self._in_code_block = True
                     # Extract language from the part after ```
@@ -100,10 +106,10 @@ class CodeFormatter:
             if text[i] == "`":
                 # Toggle inline code state
                 if self._in_inline_code:
-                    print("\033[0m", end="", flush=True)
+                    print(self._RESET, end="", flush=True)
                     self._in_inline_code = False
                 else:
-                    print("\033[36m", end="", flush=True)
+                    print(self._INLINE_CODE, end="", flush=True)
                     self._in_inline_code = True
                 i += 1
             else:
@@ -132,13 +138,13 @@ class CodeFormatter:
             if self._code_lang:
                 try:
                     lexer = get_lexer_by_name(self._code_lang, stripall=True)
-                except:
-                    pass
+                except Exception:
+                    lexer = None
 
             if not lexer:
                 try:
                     lexer = guess_lexer(self._code_buffer)
-                except:
+                except Exception:
                     lexer = TextLexer()
 
             # Use Terminal256Formatter for better colors
@@ -146,15 +152,52 @@ class CodeFormatter:
                 self._code_buffer, lexer, Terminal256Formatter(style="monokai")
             )
             print(highlighted, end="", flush=True)
-        except Exception as e:
-            # Fallback: cyan color
+        except Exception:
+            # Fallback: plain cyan, so a highlighter failure still shows the code.
             print(f"\033[36m{self._code_buffer}\033[0m", end="", flush=True)
 
     def flush(self) -> None:
-        """Flush any remaining buffered backticks."""
-        if self._backtick_buffer:
-            self._print_with_inline_code(self._backtick_buffer)
-            self._backtick_buffer = ""
+        """Emit anything still buffered at end-of-stream.
+
+        Must be called once the stream ends. Without it:
+        * a trailing backtick held back for a possible ``\\`\\`\\``` is dropped;
+        * a response that ends INSIDE an unclosed code fence loses its entire
+          code body (it sits unprinted in ``_code_buffer``);
+        * an unbalanced inline backtick leaves the terminal stuck in cyan.
+
+        Handles all three: flush pending backticks as text, highlight/emit any
+        unclosed code block, and reset inline-code color.
+        """
+        # Any backticks we were holding back never became a fence — they're
+        # literal text. Append them to whatever we emit below.
+        pending_backticks = self._backtick_buffer
+        self._backtick_buffer = ""
+
+        if self._in_code_block:
+            # Stream ended mid-code-block (no closing fence). Emit the code we
+            # accumulated so it isn't lost; highlight it with whatever language
+            # we detected (guess_lexer falls back when unknown).
+            if self._code_buffer or pending_backticks:
+                self._code_buffer += pending_backticks
+                self._print_highlighted_code()
+            self._in_code_block = False
+            self._code_buffer = ""
+            self._code_lang = ""
+        elif pending_backticks:
+            # These backticks were held back as a possible ``` fence that never
+            # arrived. They're literal text now — print them verbatim, NOT via
+            # _print_with_inline_code (which would treat ` as a mode toggle and
+            # swallow the character).
+            if self._in_inline_code:
+                print(self._RESET, end="", flush=True)
+                self._in_inline_code = False
+            print(pending_backticks, end="", flush=True)
+            return
+
+        # Never leave the terminal mid-inline-code (stuck cyan).
+        if self._in_inline_code:
+            print(self._RESET, end="", flush=True)
+            self._in_inline_code = False
 
     def process_chunk(self, data: str) -> None:
         """Process a streaming chunk with code highlighting.

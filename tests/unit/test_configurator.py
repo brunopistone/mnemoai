@@ -640,13 +640,100 @@ def test_prompt_provider_type_numbered_menu_returns_canonical_value(monkeypatch)
     assert C._prompt_provider_type("MODEL_ID", "ollama") == "mantle"
 
 
-def test_prompt_provider_type_invalid_keeps_current(monkeypatch):
+def test_prompt_provider_type_invalid_reasks_then_accepts(monkeypatch):
+    # New behavior: an invalid choice RE-ASKS instead of silently keeping the
+    # current value. Feed "99" (invalid) then "2" (bedrock) -> bedrock.
     import builtins
 
     from mnemoai.utils import configurator as C
 
-    monkeypatch.setattr(builtins, "input", lambda prompt="": "99")
-    assert C._prompt_provider_type("MODEL_ID", "bedrock") == "bedrock"
+    answers = iter(["99", "2"])
+    monkeypatch.setattr(builtins, "input", lambda prompt="": next(answers))
+    assert C._prompt_provider_type("MODEL_ID", "ollama") == "bedrock"
+
+
+def test_prompt_provider_type_eof_cancels(monkeypatch):
+    # Ctrl+D / EOF aborts the flow with _Cancelled rather than defaulting.
+    import builtins
+
+    import pytest as _pytest
+
+    from mnemoai.utils import configurator as C
+
+    def _raise_eof(prompt=""):
+        raise EOFError()
+
+    monkeypatch.setattr(builtins, "input", _raise_eof)
+    with _pytest.raises(C._Cancelled):
+        C._prompt_provider_type("MODEL_ID", "ollama")
+
+
+class TestValidatingPrompts:
+    """The re-asking input helpers used across the configurator."""
+
+    def test_ask_choice_reasks_until_valid(self, monkeypatch):
+        import builtins
+
+        from mnemoai.utils import configurator as C
+
+        answers = iter(["x", "9", "2"])
+        monkeypatch.setattr(builtins, "input", lambda *a, **k: next(answers))
+        assert C._ask_choice("Pick", {"1", "2", "3"}, "1") == "2"
+
+    def test_ask_choice_enter_uses_default(self, monkeypatch):
+        import builtins
+
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(builtins, "input", lambda *a, **k: "")
+        assert C._ask_choice("Pick", {"1", "2"}, "2") == "2"
+
+    def test_ask_choice_eof_cancels(self, monkeypatch):
+        import builtins
+
+        import pytest as _pytest
+
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(
+            builtins, "input", lambda *a, **k: (_ for _ in ()).throw(EOFError())
+        )
+        with _pytest.raises(C._Cancelled):
+            C._ask_choice("Pick", {"1"}, "1")
+
+    def test_ask_number_reasks_on_non_numeric(self, monkeypatch):
+        import builtins
+
+        from mnemoai.utils import configurator as C
+
+        answers = iter(["abc", "1.5x", "4096"])
+        monkeypatch.setattr(builtins, "input", lambda *a, **k: next(answers))
+        assert C._ask_number("Tokens", default=None, kind="int") == "4096"
+
+    def test_ask_number_float_accepts_float(self, monkeypatch):
+        import builtins
+
+        from mnemoai.utils import configurator as C
+
+        answers = iter(["nope", "0.7"])
+        monkeypatch.setattr(builtins, "input", lambda *a, **k: next(answers))
+        assert C._ask_number("Temp", default=None, kind="float") == "0.7"
+
+    def test_ask_number_none_returns_none(self, monkeypatch):
+        import builtins
+
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(builtins, "input", lambda *a, **k: "none")
+        assert C._ask_number("Tokens", default="none", allow_none=True) is None
+
+    def test_ask_number_enter_uses_default(self, monkeypatch):
+        import builtins
+
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(builtins, "input", lambda *a, **k: "")
+        assert C._ask_number("Ctx", default="65536", kind="int") == "65536"
 
 
 def test_prompt_provider_type_embeddings_has_no_mantle(monkeypatch):

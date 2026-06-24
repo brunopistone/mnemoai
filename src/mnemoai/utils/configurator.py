@@ -407,6 +407,16 @@ def _get_top_level(text: str, key: str) -> Optional[str]:
     return None
 
 
+# Sentinel raised to abort an interactive flow (Ctrl+C / Ctrl+D / EOF). The
+# caller catches it and leaves the config untouched.
+class _Cancelled(Exception):
+    """User aborted the configurator step (Ctrl+C / Ctrl+D)."""
+
+
+# Shown once at the top of an interactive flow so the user knows how to bail.
+_CANCEL_HINT = "  (Press Ctrl+C or Ctrl+D at any prompt to cancel — nothing is saved.)"
+
+
 def _ask(prompt: str, default: Optional[str] = None) -> Optional[str]:
     """Prompt for a value, returning ``default`` on empty input or EOF."""
     suffix = f" [{default}]" if default else ""
@@ -416,6 +426,70 @@ def _ask(prompt: str, default: Optional[str] = None) -> Optional[str]:
         print()
         return default
     return val or default
+
+
+def _ask_required(prompt: str, default: Optional[str] = None) -> str:
+    """Prompt for a value, cancelling the flow on Ctrl+C / Ctrl+D.
+
+    Unlike :func:`_ask`, EOF aborts (raises ``_Cancelled``) rather than silently
+    returning the default — so an interrupted prompt never half-applies input.
+    Returns the entered value, or ``default`` on empty input.
+    """
+    suffix = f" [{default}]" if default else ""
+    try:
+        val = input(f"  {prompt}{suffix}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        raise _Cancelled()
+    return val or (default or "")
+
+
+def _ask_choice(
+    prompt: str, valid: set, default: Optional[str] = None
+) -> str:
+    """Prompt for one of ``valid`` keys, RE-ASKING on an invalid entry.
+
+    Enter accepts ``default`` (when given). Ctrl+C / Ctrl+D cancels the flow.
+    The previous behavior — accept-then-default/keep on a bad value — is gone:
+    a wrong choice now re-prompts instead of silently proceeding.
+    """
+    while True:
+        answer = _ask_required(prompt, default)
+        if answer in valid:
+            return answer
+        print(f"  '{answer}' is not a valid choice; please pick one of: "
+              f"{', '.join(sorted(valid))}.")
+
+
+def _ask_number(
+    prompt: str,
+    default: Optional[str] = None,
+    kind: str = "int",
+    allow_none: bool = False,
+) -> Optional[str]:
+    """Prompt for an int/float, RE-ASKING until the input parses.
+
+    - Enter -> ``default`` (returned as-is).
+    - "none" (case-insensitive) -> returns ``None`` when ``allow_none``.
+    - A non-numeric entry re-prompts instead of being accepted.
+    Ctrl+C / Ctrl+D cancels the flow (raises ``_Cancelled``).
+    Returns the validated numeric string, the default, or None.
+    """
+    while True:
+        answer = _ask_required(prompt, default)
+        if allow_none and answer.strip().lower() == "none":
+            return None
+        if default is not None and answer == default:
+            return default
+        try:
+            if kind == "float":
+                float(answer)
+            else:
+                int(answer)
+            return answer
+        except ValueError:
+            label = "a number" if kind == "float" else "an integer"
+            print(f"  '{answer}' is not {label}; please try again"
+                  + (" (or 'none')." if allow_none else "."))
 
 
 def _ask_bool(prompt: str, default: bool) -> bool:
@@ -463,10 +537,8 @@ def _prompt_provider_type(section: str, current: str) -> str:
     print(f"\n  Provider type for this model (current: {_PROVIDER_LABELS.get(current, current)})")
     for i, prov in enumerate(options, 1):
         print(f"    {i}) {_PROVIDER_LABELS.get(prov, prov)}")
-    choice = _ask("Provider", default_key) or default_key
-    if not choice.isdigit() or not (1 <= int(choice) <= len(options)):
-        print(f"  '{choice}' is not a valid choice; keeping {_PROVIDER_LABELS.get(current, current)}.")
-        return current
+    valid = {str(i) for i in range(1, len(options) + 1)}
+    choice = _ask_choice("Provider", valid, default_key)
     return options[int(choice) - 1]
 
 
@@ -482,10 +554,7 @@ def _prompt_mantle_protocol(text: str, section: str) -> str:
     print("  Mantle API protocol:")
     for k, (_, desc) in _MANTLE_PROTOCOLS.items():
         print(f"    {k}) {desc}")
-    choice = _ask("Protocol", default_key) or default_key
-    if choice not in _MANTLE_PROTOCOLS:
-        print(f"  '{choice}' is not valid; defaulting to chat_completions.")
-        choice = "1"
+    choice = _ask_choice("Protocol", set(_MANTLE_PROTOCOLS), default_key)
     chosen = _MANTLE_PROTOCOLS[choice][0]
     if chosen != existing and not (existing is None and chosen == "chat_completions"):
         text = _set_field(text, section, "API_PROTOCOL", chosen)
@@ -620,10 +689,12 @@ def _build_config(
     text = _prompt_max_tokens(text, "MODEL_ID")
 
     # Max context window (top-level MAX_CONVERSATION_TOKENS) is mandatory; always
-    # written, defaulting to the template's value (or 65536 if missing).
-    ctx = _ask(
+    # written, defaulting to the template's value (or 65536 if missing). Must be
+    # an integer — re-asks on bad input.
+    ctx = _ask_number(
         "Max context window",
-        _get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
+        default=_get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
+        kind="int",
     )
     text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
@@ -696,13 +767,11 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     before calling this. Returns the written Path, or None if a template was
     missing.
     """
+    print(_CANCEL_HINT)
     print("\n  Choose your LLM provider:")
     for k, (_, _, label, _) in _PROVIDERS.items():
         print(f"    {k}) {label}")
-    choice = _ask("Provider", "1") or "1"
-    if choice not in _PROVIDERS:
-        print(f"  '{choice}' is not a valid choice; defaulting to Ollama.")
-        choice = "1"
+    choice = _ask_choice("Provider", set(_PROVIDERS), "1")
 
     provider, template_file, label, default_model = _PROVIDERS[choice]
     template_path = _templates_dir() / template_file
@@ -754,7 +823,7 @@ def run_first_run_setup() -> Optional[Path]:
             return None
 
         return _run_configurator(dest)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, _Cancelled):
         print("\n  Setup cancelled. No config was written.")
         return None
 
@@ -786,7 +855,7 @@ def run_reconfigure() -> Optional[Path]:
             return None
 
         return _run_configurator(dest)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, _Cancelled):
         print("\n  Reconfigure cancelled. Existing config left untouched.")
         return None
 
@@ -835,11 +904,14 @@ def _prompt_max_tokens(text: str, section: str) -> str:
       * Enter / 'none' -> no MAX_TOKENS (provider default; key removed)
       * a number       -> set it
     """
-    answer = _ask("Max output tokens (number, or 'none' for provider default)", "none")
+    answer = _ask_number(
+        "Max output tokens (number, or 'none' for provider default)",
+        default="none",
+        kind="int",
+        allow_none=True,
+    )
     if answer is None:
-        return text
-    answer = answer.strip().lower()
-    if answer in ("none", ""):
+        # 'none' (or Enter on the 'none' default) -> drop the key.
         return _remove_field(text, section, "MAX_TOKENS")
     return _set_field(text, section, "MAX_TOKENS", answer)
 
@@ -911,7 +983,7 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         # Ollama num_ctx and the compaction budget). It is mandatory and
         # model-specific, so it defaults to 65536 rather than carrying over the
         # previous model's value.
-        ctx = _ask("Max context window", "65536")
+        ctx = _ask_number("Max context window", default="65536", kind="int")
         text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
 
     return text
@@ -1081,19 +1153,14 @@ def run_params_override() -> Optional[Path]:
         if available.get(k):
             print(f"    {k}) {label}")
 
+    print(_CANCEL_HINT)
     try:
-        choice = _ask("Model", "1") or "1"
-        if choice not in _PARAM_SECTIONS:
-            print(f"  '{choice}' is not a valid choice. Cancelled.")
-            return None
-        if not available.get(choice):
-            print(f"  {_PARAM_SECTIONS[choice][1]} is not configured. Cancelled.")
-            return None
-
+        valid = {k for k in _PARAM_SECTIONS if available.get(k)}
+        choice = _ask_choice("Model", valid, "1")
         section, label = _PARAM_SECTIONS[choice]
         print(f"\n  -- {label} parameters --")
         new_text = _prompt_inference_params(text, section)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, _Cancelled):
         print("\n  Cancelled. Config left untouched.")
         return None
 
@@ -1141,20 +1208,15 @@ def run_model_override() -> Optional[Path]:
             continue
         print(f"    {k}) {label}")
 
+    print(_CANCEL_HINT)
     try:
-        choice = _ask("Model", "1") or "1"
-        if choice not in _MODEL_SECTIONS:
-            print(f"  '{choice}' is not a valid choice. Cancelled.")
-            return None
-        if not available.get(choice):
-            section_label = _MODEL_SECTIONS[choice][1]
-            print(f"  {section_label} is not configured. Cancelled.")
-            return None
-
+        # Only the configured sections are selectable; re-ask on a bad choice.
+        valid = {k for k in _MODEL_SECTIONS if available.get(k)}
+        choice = _ask_choice("Model", valid, "1")
         section, label, is_llm = _MODEL_SECTIONS[choice]
         print(f"\n  -- {label} --")
         new_text = _prompt_model_section(text, section, is_llm)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, _Cancelled):
         print("\n  Cancelled. Config left untouched.")
         return None
 
