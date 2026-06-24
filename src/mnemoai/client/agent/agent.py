@@ -866,6 +866,12 @@ class LangGraphAgent:
                     self._code_formatter.process_chunk(chunk_content)
 
                 response = chunk if response is None else response + chunk
+
+            # Stream finished cleanly: flush the formatter so a trailing
+            # backtick or a response that ended inside an unclosed code fence is
+            # still emitted (not silently dropped) and the terminal color reset.
+            if answer_marker_printed:
+                self._code_formatter.flush()
         except KeyboardInterrupt:
             raise
         except Exception as e:

@@ -112,3 +112,42 @@ class TestCodeFormatter:
         captured = capsys.readouterr()
         assert "after the block" in captured.out
         assert "y" in captured.out
+
+    def test_inline_code_is_bold_cyan(self, capsys):
+        # Matches Claude Code's look: inline code / identifiers in bold cyan.
+        cf = CodeFormatter()
+        cf.process_chunk("use `foo.py` now")
+        cf.flush()
+        out = capsys.readouterr().out
+        assert "\033[1;36m" in out  # bold cyan
+        assert "foo.py" in out
+
+    def test_unclosed_code_block_is_flushed(self, capsys):
+        # Regression: a response that ends INSIDE an unclosed ``` fence must
+        # still emit the code, not silently drop it in the buffer.
+        cf = CodeFormatter()
+        cf.process_chunk("here:\n```python\nprint('hi')\n")
+        cf.flush()
+        out = capsys.readouterr().out
+        assert "print" in out and "hi" in out
+        assert cf._in_code_block is False
+
+    def test_dangling_backtick_not_dropped(self, capsys):
+        # A trailing solo backtick (held back as a possible ``` fence) that
+        # never completes must print as a literal backtick, not vanish.
+        cf = CodeFormatter()
+        cf.process_chunk("see ")
+        cf.process_chunk("`")
+        cf.flush()
+        out = capsys.readouterr().out
+        assert "`" in out
+
+    def test_unbalanced_inline_backtick_resets_color(self, capsys):
+        # An unterminated inline backtick must reset the terminal color on flush
+        # so the prompt isn't left stuck in cyan.
+        cf = CodeFormatter()
+        cf.process_chunk("start `unterminated")
+        cf.flush()
+        out = capsys.readouterr().out
+        assert out.rstrip().endswith("\033[0m")
+        assert cf._in_inline_code is False
