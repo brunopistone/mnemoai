@@ -287,8 +287,10 @@ LLM:
   # Defaults to 25% of MAX_CONVERSATION_TOKENS when unset.
   KEEP_RECENT_TOKEN_BUDGET: 16384
   # Max model<->tools steps per query before the agent loop is cut short and a
-  # partial result is returned (LangGraph recursion_limit).
-  RECURSION_LIMIT: 50
+  # partial result is returned (LangGraph recursion_limit). Set high so
+  # legitimate long tasks aren't capped — context compaction is the real
+  # limiter, as in Claude Code; this is just a runaway guard.
+  RECURSION_LIMIT: 200
   # Upper bound (seconds) for a single MCP tool call at the transport layer.
   # Must exceed the longest tool-level timeout (execute_bash allows up to 120s).
   MCP_CALL_TIMEOUT: 300

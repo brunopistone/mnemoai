@@ -9,7 +9,25 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
-## [0.8.11] — 2026-06-23
+## [0.8.12] — 2026-06-24
+
+### Changed
+
+- The agent loop no longer hard-stops at 50 steps. That cap cut off legitimate
+  long tasks mid-work with "Agent hit recursion limit". Following Claude Code's
+  model — where context compaction, not a step count, is the real limiter — the
+  default `LLM.RECURSION_LIMIT` is now **200** (still configurable). It remains a
+  runaway guard (LangGraph requires a finite bound), so hitting it now signals a
+  likely stuck loop and the message says so and points at the config knob.
+
+### Fixed
+
+- Log lines (warnings/errors/info) no longer print inline with streamed answer
+  text. The chat UI streams chunks to stdout without a trailing newline, so a
+  log written to stderr afterwards landed on the same visual line. A cursor
+  tracker now records whether stdout is mid-line, and the log handler prepends a
+  newline when needed — so logs always start on their own line (no-op on
+  piped/non-TTY output).
 
 ### Fixed
 
@@ -315,7 +333,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.11...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.12...HEAD
+[0.8.12]: https://github.com/brunopistone/mnemoai/compare/v0.8.11...v0.8.12
 [0.8.11]: https://github.com/brunopistone/mnemoai/compare/v0.8.10...v0.8.11
 [0.8.10]: https://github.com/brunopistone/mnemoai/compare/v0.8.9...v0.8.10
 [0.8.9]: https://github.com/brunopistone/mnemoai/compare/v0.8.8...v0.8.9

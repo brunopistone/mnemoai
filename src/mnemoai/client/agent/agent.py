@@ -94,7 +94,12 @@ class LangGraphAgent:
         self._code_formatter = CodeFormatter()
         self.router = router
         self.orchestrator_enabled = orchestrator_enabled and router is not None
-        self.recursion_limit = config.get("LLM", {}).get("RECURSION_LIMIT", 50)
+        # Bound on the model<->tool loop. Claude Code has no hard step cap —
+        # context compaction is the real limiter and the loop runs until the
+        # model stops calling tools. LangGraph requires a finite recursion_limit
+        # (its runaway guard), so we set it high enough that legitimate long
+        # tasks never hit it; compaction keeps context in check. Configurable.
+        self.recursion_limit = config.get("LLM", {}).get("RECURSION_LIMIT", 200)
         # Some endpoints (notably Bedrock Mantle reasoning models on the
         # Responses API) intermittently return a completely empty response
         # — no content, no reasoning, no tool calls. A retry reliably recovers
@@ -1330,24 +1335,28 @@ class LangGraphAgent:
                 SystemMessage(content=self.system_prompt)
             ] + list(initial_state["messages"])
 
-        # Bound the model<->tools loop. LangGraph's default recursion_limit is
-        # 25; raise it so legitimate multi-tool tasks complete, but still cap it
-        # so a stuck loop degrades gracefully instead of running forever.
+        # Bound the model<->tools loop. This is a runaway guard, not a normal
+        # stopping point — set high (default 200, configurable) so legitimate
+        # long tasks run to completion, with context compaction as the real
+        # limiter (like Claude Code). Hitting it means a likely stuck loop.
         try:
             result = self.graph.invoke(
                 initial_state, config={"recursion_limit": self.recursion_limit}
             )
         except GraphRecursionError:
             logger.warning(
-                "Agent hit recursion limit (%d steps); returning partial result",
+                "Agent stopped after the safety step limit (%d); the task may be "
+                "looping. Returning the work so far — raise LLM.RECURSION_LIMIT "
+                "if a legitimate task needs more steps.",
                 self.recursion_limit,
             )
             self._stop_spinner()
             partial = self._last_visible_from(self._messages)
             return partial or (
-                "I reached my step limit while working on that and couldn't "
-                "finish. Try narrowing the request or breaking it into smaller "
-                "steps."
+                "I reached my safety step limit while working on that and "
+                "couldn't finish. Try narrowing the request, or raise "
+                "LLM.RECURSION_LIMIT in config if the task legitimately needs "
+                "more steps."
             )
 
         final_messages = result["messages"]
