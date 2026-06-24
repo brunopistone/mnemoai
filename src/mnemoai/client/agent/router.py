@@ -10,12 +10,47 @@ from mnemoai.client.agent.reasoning_utils import disable_reasoning, restore_reas
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
+# --- Deterministic fast-path signals -----------------------------------------
+# Before spending an LLM round-trip on classification, we look for unambiguous
+# signals in the query. A SINGLE clear signal routes deterministically (free,
+# instant, and not subject to classifier misclassification). When TWO OR MORE
+# signals appear — or none — we fall back to "full" / the LLM, because the safe
+# failure mode is OVER-binding tools (harmless) not UNDER-binding (drops
+# capability, which is the bug class we keep hitting).
+
+# Image extensions -> a vision question. describe_image is an always-available
+# meta tool, so any route can use it; we route these to "knowledge" (read-only,
+# document-ish) which keeps the tool set tight while the vision tool is bound.
+_IMAGE_EXT_RE = re.compile(
+    r"\.(png|jpe?g|gif|bmp|webp|tiff?|ico|heic)\b", re.IGNORECASE
+)
+# A URL -> live web content (research).
+_URL_RE = re.compile(r"https?://", re.IGNORECASE)
+# A filesystem-ish path or code file reference -> code route.
+_PATH_RE = re.compile(
+    r"(?:^|\s)(?:~|\.{1,2})?/[\w./\-]+"            # /abs, ./rel, ~/home paths
+    r"|[\w\-./]+\.(?:py|js|ts|tsx|jsx|go|rs|java|c|cpp|h|hpp|rb|php|sh|"
+    r"yaml|yml|toml|json|md|txt|cfg|ini|sql)\b",   # bare code/config filenames
+    re.IGNORECASE,
+)
+# Document formats handled by the knowledge route's readers.
+_DOC_EXT_RE = re.compile(r"\.(pdf|docx?|csv|xlsx?|jsonl?)\b", re.IGNORECASE)
+# Greetings / thanks / trivially short chit-chat -> simple_qa (no tools).
+_GREETING_RE = re.compile(
+    r"^(hi|hello|hey|yo|thanks|thank you|thx|ok(ay)?|cool|great|nice|"
+    r"good (morning|afternoon|evening)|bye|goodbye)\b[\s!.?]*$",
+    re.IGNORECASE,
+)
+
 # Route definitions: maps route names to tool name lists.
 # None means all tools (fallback).
 ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
     "simple_qa": [],
+    # code: everything for local development — filesystem writes/exec, git, and
+    # the COMPLETE task-support suites (todos, plan-mode bookkeeping, background
+    # tasks). fs_read / glob need not be listed: fs_read and describe_image are
+    # always-available meta tools, and glob_search is bound here for code search.
     "code": [
-        "fs_read",
         "fs_write",
         "file_edit",
         "glob_search",
@@ -24,9 +59,11 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
         "git_safe",
         "git_status_safe",
         "git_commit_safe",
-        "describe_image",
+        # Todos (complete suite)
         "todo_write",
         "todo_read",
+        "todo_clear",
+        # Plan-mode bookkeeping (complete suite)
         "enter_plan_mode",
         "add_plan_step",
         "add_plan_file",
@@ -34,24 +71,29 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
         "present_plan",
         "approve_plan",
         "exit_plan_mode",
+        "get_plan_status",
+        # Background tasks (complete suite — start/inspect/list/cancel/clear)
         "start_background_task",
         "get_task_status",
         "get_task_output",
+        "list_background_tasks",
+        "cancel_background_task",
         "wait_for_task",
+        "clear_completed_tasks",
     ],
     "research": [
         "web_search",
         "web_crawler",
     ],
+    # knowledge: querying user-provided documents via the RAG index. Reading a
+    # specific file by path is fs_read (a meta tool, always available) — and
+    # fs_read handles every format through its `mode` (PDF/CSV/JSON/DOCX/Line),
+    # so there are no separate per-format reader tools to bind.
     "knowledge": [
-        "fs_read",
-        "glob_search",
-        "read_csv",
-        "read_json",
-        "read_pdf",
-        "read_docx",
         "list_documents",
         "search_in_documents",
+        "clear_documents",
+        "glob_search",
     ],
     "full": None,
 }
@@ -89,12 +131,59 @@ class QueryRouter:
         self.model = model
         self._valid_routes = set(ROUTE_TOOLS.keys())
 
+    def fast_route(self, query: str) -> Optional[str]:
+        """Route deterministically from unambiguous signals, or None.
+
+        Returns a route only when the query has exactly ONE clear signal (or is
+        a plain greeting). With multiple signals it returns ``full`` (the task
+        spans categories — bind everything); with none it returns None so the
+        caller falls back to the LLM classifier. The bias is deliberate: a lone
+        signal routes for free and reliably, but anything mixed/ambiguous never
+        under-binds tools.
+
+        Args:
+            query: The user's query (the latest message text).
+
+        Returns:
+            A route name, or None to defer to the LLM classifier.
+        """
+        q = (query or "").strip()
+        if not q:
+            return None
+
+        # Plain greeting / thanks / very short chit-chat -> no tools needed.
+        if _GREETING_RE.match(q):
+            return "simple_qa"
+
+        # Collect signals. Each maps to the route whose tools it needs.
+        signals = set()
+        if _IMAGE_EXT_RE.search(q):
+            signals.add("knowledge")  # vision tool is always-available; tight set
+        if _URL_RE.search(q):
+            signals.add("research")
+        if _DOC_EXT_RE.search(q):
+            signals.add("knowledge")
+        if _PATH_RE.search(q):
+            signals.add("code")
+
+        if len(signals) == 1:
+            return next(iter(signals))
+        # 2+ signals -> spans categories, which is exactly what "full" is for
+        # (bind everything; never under-bind). 0 signals -> defer to the LLM.
+        if len(signals) >= 2:
+            return "full"
+        return None
+
     def classify(
         self,
         query: str,
         conversation_context: str = "",
     ) -> str:
         """Classify a query into a route category.
+
+        First tries a deterministic heuristic fast-path (:meth:`fast_route`) to
+        avoid an LLM round-trip on obvious cases; falls back to the LLM
+        classifier only when the heuristics are inconclusive.
 
         Args:
             query: The user's query
@@ -103,6 +192,16 @@ class QueryRouter:
         Returns:
             Route name (one of ROUTE_TOOLS keys)
         """
+        # Deterministic fast-path — free, instant, not subject to classifier
+        # misclassification. Skipped when there's conversation context, so short
+        # follow-ups ("now commit it") still reach the LLM, which uses context
+        # to disambiguate.
+        if not conversation_context:
+            fast = self.fast_route(query)
+            if fast:
+                logger.debug(f"Router fast-path -> {fast}")
+                return fast
+
         messages: List[BaseMessage] = [
             SystemMessage(content=get_classifier_prompt()),
         ]

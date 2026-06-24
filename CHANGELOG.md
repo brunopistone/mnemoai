@@ -9,6 +9,40 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.16] — 2026-06-24
+
+### Fixed
+
+- Image and file questions no longer fail by routing to a tool subset that
+  can't handle them. `describe_image` and `fs_read` are now always-available
+  meta tools (bound on every route, like `memory`), so "what's in this image?"
+  or "what's in config.yaml?" — which classify as `simple_qa`/`knowledge` — can
+  always reach the vision/read tools instead of falling back to reading bytes
+  as text.
+- `fs_read` on a binary/image file now returns a clear message steering the
+  model to `describe_image` (for images) instead of dumping a raw
+  `UnicodeDecodeError` stack trace. Binary files are detected up front
+  (extension + content sniff) and logged calmly.
+- **Route table audit & repair.** The `knowledge` route named four reader tools
+  that don't exist (`read_csv/json/pdf/docx` — `fs_read` handles all formats via
+  its `mode`), and six tools (`list_background_tasks`, `cancel_background_task`,
+  `clear_completed_tasks`, `get_plan_status`, `todo_clear`, `clear_documents`)
+  were reachable only via `full`. Routes are now re-derived from the real tool
+  surface: `code` binds the complete todo/plan/background-task suites; `knowledge`
+  is scoped to the RAG index (`list_documents`/`search_in_documents`/
+  `clear_documents`). A regression test guards against future orphans/stale refs.
+
+### Changed
+
+- The query router gained a deterministic heuristic fast-path: obvious queries
+  (greetings → `simple_qa`, a lone file path → `code`, a URL → `research`, a doc
+  extension → `knowledge`) route instantly with **no LLM classification call**,
+  while multi-signal or ambiguous queries fall back to `full`/the LLM. This cuts
+  a per-query round-trip, sidesteps the empty/blank-route issues on reasoning
+  models, and — by always preferring `full` on mixed signals — never under-binds
+  tools. The `knowledge` category in `ROUTING_PROMPT` is re-scoped to RAG
+  document search (reading a file by path works from any category).
+
 ## [0.8.15] — 2026-06-24
 
 ### Fixed
@@ -408,7 +442,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.15...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.16...HEAD
+[0.8.16]: https://github.com/brunopistone/mnemoai/compare/v0.8.15...v0.8.16
 [0.8.15]: https://github.com/brunopistone/mnemoai/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/brunopistone/mnemoai/compare/v0.8.13...v0.8.14
 [0.8.13]: https://github.com/brunopistone/mnemoai/compare/v0.8.12...v0.8.13

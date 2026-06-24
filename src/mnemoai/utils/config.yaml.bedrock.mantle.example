@@ -208,14 +208,13 @@ ROUTING_PROMPT: |
   </category>
 
   <category name="knowledge">
-  Tasks that involve reading, indexing, or querying user-provided documents
-  such as PDFs, CSVs, DOCX, or JSON files. This includes summarizing a
-  document, searching within previously indexed documents, or extracting
-  specific information from a file that is too long to read at once and
-  needs to be indexed first.
-  Examples: "Summarize this PDF", "Search in my documents for X",
-  "What does the report say about Y?", "Index the CSV and find all rows
-  where status is failed"
+  Tasks that query the RAG document index — searching ACROSS your previously
+  indexed/uploaded documents, or asking what's in the indexed collection.
+  This is for "search my documents" style questions, not for reading one named
+  file (reading a specific file by path — including a PDF/CSV/DOCX — is handled
+  directly and works from any category).
+  Examples: "Search in my documents for X", "What do my indexed docs say
+  about Y?", "Which documents mention the auth flow?", "List my documents"
   </category>
 
   <category name="full">

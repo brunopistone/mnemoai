@@ -76,3 +76,48 @@ class TestClassifyRecovery:
         r = _router(["research"])
         assert r.classify("search the web") == "research"
         assert r.model.calls == 1
+
+
+class TestFastRoute:
+    """Deterministic heuristic fast-path: routes obvious cases with no LLM call."""
+
+    def test_greeting_is_simple_qa(self):
+        r = _router([])
+        assert r.fast_route("hello") == "simple_qa"
+        assert r.fast_route("thanks!") == "simple_qa"
+        assert r.fast_route("good morning") == "simple_qa"
+
+    def test_single_signal_routes(self):
+        r = _router([])
+        assert r.fast_route("Read main.py") == "code"
+        assert r.fast_route("fix src/auth.py please") == "code"
+        assert r.fast_route("summarize report.pdf") == "knowledge"
+        assert r.fast_route("what's in data.csv") == "knowledge"
+        assert r.fast_route("what's in screenshot.png?") == "knowledge"
+        assert r.fast_route("read https://example.com") == "research"
+
+    def test_multiple_signals_go_full_never_underbind(self):
+        r = _router([])
+        # image extension + a path = 2 signals -> full (binds everything,
+        # incl. describe_image). The original bug was UNDER-binding here.
+        assert r.fast_route("/Users/x/a.png what's in it?") == "full"
+        assert r.fast_route("read config.yaml and fetch https://api.x.com") == "full"
+
+    def test_no_signal_defers_to_llm(self):
+        r = _router([])
+        assert r.fast_route("explain recursion to me") is None
+        assert r.fast_route("what is the capital of France") is None
+        assert r.fast_route("") is None
+
+    def test_classify_uses_fast_path_without_llm_call(self):
+        # An obvious query must NOT spend an LLM round-trip.
+        r = _router(["should-not-be-used"])
+        assert r.classify("Read main.py") == "code"
+        assert r.model.calls == 0
+
+    def test_classify_with_context_skips_fast_path(self):
+        # With conversation context (a follow-up), defer to the LLM so it can
+        # disambiguate using that context.
+        r = _router(["code"])
+        assert r.classify("Read main.py", conversation_context="prior turn") == "code"
+        assert r.model.calls == 1
