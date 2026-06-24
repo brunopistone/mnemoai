@@ -127,3 +127,50 @@ class TestGlobSearch:
         result = json.loads(run(glob_search("*.rs", path=str(tmp_path))))
         assert result["success"] is True
         assert result["count"] == 0
+
+
+class TestBinaryFileSteering:
+    """A text reader on a binary/image file must fail fast with a message that
+    steers the model to describe_image — not a raw UnicodeDecodeError.
+    """
+
+    def test_looks_like_binary_detects_image_and_text(self, tmp_path):
+        from mnemoai.server.tools import looks_like_binary
+
+        png = tmp_path / "x.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00stuff")
+        txt = tmp_path / "x.txt"
+        txt.write_text("hello\nworld\n")
+        assert looks_like_binary(str(png)) is True
+        assert looks_like_binary(str(txt)) is False
+
+    def test_binary_file_error_steers_images_to_describe_image(self):
+        from mnemoai.server.tools import binary_file_error
+
+        err = binary_file_error("/tmp/x.png")
+        assert err["error"] is True and err["is_image"] is True
+        assert "describe_image" in err["message"]
+
+    def test_read_lines_on_png_returns_steering_message(self, tmp_path):
+        from mnemoai.server.tools.readers.line_reader import read_lines
+
+        png = tmp_path / "img.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00binary\x00data")
+        out = json.loads(run(read_lines(str(png), 1, 5)))
+        assert out["error"] is True
+        assert "describe_image" in out["message"]
+
+    def test_read_lines_on_text_still_works(self, tmp_path, monkeypatch):
+        import mnemoai.server.tools.readers.line_reader as lr
+        from mnemoai.server.tools.readers.line_reader import read_lines
+
+        # read_lines needs DOC_MAX_TOKENS; provide it (no config.yaml in tests).
+        monkeypatch.setattr(
+            lr.config,
+            "get",
+            lambda key, default=None: 16384 if key == "DOC_MAX_TOKENS" else default,
+        )
+        f = tmp_path / "a.txt"
+        f.write_text("line1\nline2\nline3\n")
+        out = json.loads(run(read_lines(str(f), 1, 2)))
+        assert "content" in out and "line1" in out["content"]

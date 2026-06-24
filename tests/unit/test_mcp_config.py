@@ -229,3 +229,73 @@ def test_memory_meta_tool_reachable_on_every_route():
     assert "memory" in by_route["full"]
     # memory is a meta tool, not external; brave_search still is.
     assert [t.name for t in agent.external_tools] == ["brave_search"]
+
+
+def test_describe_image_reachable_on_every_route():
+    # describe_image is a meta tool: an image can be referenced in any query
+    # ("what's in this image?" classifies as simple_qa/knowledge), so the vision
+    # tool must be bound on every route — otherwise the model falls back to a
+    # text reader on a binary file.
+    from mnemoai.client.agent.agent import LangGraphAgent
+
+    class _StubModel:
+        def bind_tools(self, tools):
+            return self
+
+    tools = [
+        _FakeTool("fs_read"),
+        _FakeTool("describe_image"),
+        _FakeTool("memory"),
+    ]
+    routes = {
+        "simple_qa": [],
+        "knowledge": ["fs_read"],
+        "code": ["fs_read"],
+        "full": None,
+    }
+    agent = LangGraphAgent(
+        model=_StubModel(), tools=tools, router=object(), tool_routes=routes,
+    )
+    by_route = {k: [t.name for t in v] for k, v in agent.tools_by_route.items()}
+    for route in ("simple_qa", "knowledge", "code", "full"):
+        assert "describe_image" in by_route[route], route
+    # It's a meta tool, not an external one.
+    assert "describe_image" not in [t.name for t in agent.external_tools]
+
+
+def test_route_table_has_no_orphans_or_stale_refs():
+    """Every route-named tool must exist, and every real tool must be reachable.
+
+    Guards the route audit: a tool named in a route but not registered (stale),
+    or a registered tool in no route and not a meta tool (orphan, only reachable
+    via 'full'), is a routing bug.
+    """
+    from mnemoai.client.agent.agent import LangGraphAgent
+    from mnemoai.client.agent.router import ROUTE_TOOLS
+
+    # The full registered tool surface (server/tools/*). Kept here as the
+    # source of truth for the audit; update alongside ROUTE_TOOLS when tools
+    # are added/removed.
+    registered = {
+        "add_plan_file", "add_plan_risk", "add_plan_step", "approve_plan",
+        "cancel_background_task", "clear_completed_tasks", "clear_documents",
+        "describe_image", "enter_plan_mode", "execute_bash", "exit_plan_mode",
+        "file_edit", "fs_read", "fs_write", "get_plan_status", "get_task_output",
+        "get_task_status", "git_commit_safe", "git_safe", "git_status_safe",
+        "glob_search", "grep_search", "list_background_tasks", "list_documents",
+        "memory", "present_plan", "search_in_documents", "start_background_task",
+        "todo_clear", "todo_read", "todo_write", "wait_for_task", "web_crawler",
+        "web_search",
+    }
+    meta = LangGraphAgent._ALWAYS_AVAILABLE_TOOLS
+
+    named = set()
+    for tools in ROUTE_TOOLS.values():
+        if tools is not None:
+            named |= set(tools)
+
+    stale = named - registered
+    assert not stale, f"routes name nonexistent tools: {sorted(stale)}"
+
+    orphans = registered - named - meta
+    assert not orphans, f"tools reachable only via 'full': {sorted(orphans)}"

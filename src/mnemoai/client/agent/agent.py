@@ -41,9 +41,16 @@ class LangGraphAgent:
     """LangGraph-based agent with streaming support."""
 
     # Task-agnostic "meta" tools bound on EVERY route (incl. the no-tools
-    # simple_qa route), so e.g. a "remember this" request can always reach the
-    # memory tool regardless of how the query was classified.
-    _ALWAYS_AVAILABLE_TOOLS = {"memory"}
+    # simple_qa route), regardless of how the query was classified:
+    #   - memory: a "remember this" request classifies as simple_qa.
+    #   - describe_image: an image can be referenced in any kind of query
+    #     ("what's in this image?" classifies as simple_qa/knowledge), and the
+    #     vision tool must be reachable there — otherwise the model falls back to
+    #     reading a binary file as text.
+    #   - fs_read: read-only and universal (handles every format via its mode).
+    #     A user can reference a file in ANY query ("what's in config.yaml?"
+    #     classifies as simple_qa/knowledge), so reading must never be gated out.
+    _ALWAYS_AVAILABLE_TOOLS = {"memory", "describe_image", "fs_read"}
 
     # Mutating / shell-executing tools hard-blocked while plan mode is active
     # (Claude-Code-style read-only planning). Read-only tools (fs_read, glob/grep

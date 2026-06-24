@@ -5,7 +5,7 @@ import json
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
-from .. import count_tokens, validate_file_path
+from .. import binary_file_error, count_tokens, looks_like_binary, validate_file_path
 
 
 async def read_lines(path: str, start_line: int, end_line: int) -> str:
@@ -22,6 +22,12 @@ async def read_lines(path: str, start_line: int, end_line: int) -> str:
     is_valid, normalized_path, error_dict = validate_file_path(path)
     if not is_valid:
         return json.dumps(error_dict)
+
+    # Fail fast on binary/image files with a message that steers the model to
+    # the right tool (describe_image for images), instead of choking on the
+    # UTF-8 decode and dumping a stack trace.
+    if looks_like_binary(normalized_path):
+        return json.dumps(binary_file_error(normalized_path))
 
     try:
         with open(normalized_path, "r", encoding="utf-8") as file:
@@ -103,9 +109,8 @@ async def read_lines(path: str, start_line: int, end_line: int) -> str:
             }
         )
 
-    except UnicodeDecodeError as e:
-        logger.error(f"Error during read lines: {str(e)}", exc_info=True)
-
-        return json.dumps(
-            {"error": True, "message": f"Cannot decode file as text: {path}"}
-        )
+    except UnicodeDecodeError:
+        # Expected for a binary/image file the up-front check didn't catch —
+        # not an internal error, so log calmly (debug) and steer the model.
+        logger.debug(f"read_lines: {path} is not valid UTF-8 text; treating as binary")
+        return json.dumps(binary_file_error(normalized_path))
