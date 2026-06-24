@@ -158,6 +158,135 @@ class AgentConversationManager:
 
         return text
 
+    # System framing for the summarization call (mirrors Claude Code: the model
+    # is told its sole job is to summarize, and it returns text only).
+    _SUMMARY_SYSTEM_PROMPT = (
+        "You are a helpful AI assistant tasked with summarizing conversations."
+    )
+
+    # Structured task prompt — the verbatim Claude Code compaction template
+    # (standard variant). An <analysis> pass followed by a fixed 9-section
+    # summary, so the result preserves the detail needed to continue work
+    # without losing context. Kept word-for-word intentionally: this wording is
+    # tuned, and any per-call focus instructions are appended at the bottom
+    # under a "## Compact Instructions" header (see _build_summary_prompt).
+    _SUMMARY_TASK_PROMPT = (
+        "Your task is to create a detailed summary of the conversation so far, "
+        "paying close attention to the user's explicit requests and your "
+        "previous actions.\n"
+        "This summary should be thorough in capturing technical details, code "
+        "patterns, and architectural decisions that would be essential for "
+        "continuing development work without losing context.\n"
+        "Before providing your final summary, wrap your analysis in <analysis> "
+        "tags to organize your thoughts and ensure you've covered all necessary "
+        "points.\n"
+        "In your analysis process:\n"
+        "1. Chronologically analyze each message and section of the "
+        "conversation. For each section thoroughly identify:\n"
+        "   - The user's explicit requests and intents\n"
+        "   - Your approach to addressing the user's requests\n"
+        "   - Key decisions, technical concepts and code patterns\n"
+        "   - Specific details like:\n"
+        "     - full code snippets\n"
+        "     - function signatures\n"
+        "   - Errors that you ran into and how you fixed them\n"
+        "   - Pay special attention to specific user feedback that you "
+        "received, especially if the user told you to do something "
+        "differently.\n"
+        "   - Note any security-relevant instructions or constraints the user "
+        "stated (e.g., sensitive files or data to avoid, operations that must "
+        "not be performed, credential or secret handling rules). These MUST be "
+        "preserved verbatim in the summary so they continue to apply after "
+        "compaction.\n"
+        "2. Double-check for technical accuracy and completeness, addressing "
+        "each required element thoroughly.\n"
+        "Your summary should include the following sections:\n"
+        "1. Primary Request and Intent: Capture all of the user's explicit "
+        "requests and intents in detail\n"
+        "2. Key Technical Concepts: List all important technical concepts, "
+        "technologies, and frameworks discussed.\n"
+        "3. Files and Code Sections: Enumerate specific files and code sections "
+        "examined, modified, or created. Pay special attention to the most "
+        "recent messages and include full code snippets where applicable and "
+        "include a summary of why this file read or edit is important.\n"
+        "4. Errors and fixes: List all errors that you ran into, and how you "
+        "fixed them. Pay special attention to specific user feedback that you "
+        "received, especially if the user told you to do something "
+        "differently.\n"
+        "5. Problem Solving: Document problems solved and any ongoing "
+        "troubleshooting efforts.\n"
+        "6. All user messages: List ALL user messages that are not tool "
+        "results. These are critical for understanding the users' feedback and "
+        "changing intent. Preserve any security-relevant instructions or "
+        "constraints verbatim so they remain in effect after compaction.\n"
+        "7. Pending Tasks: Outline any pending tasks that you have explicitly "
+        "been asked to work on.\n"
+        "8. Current Work: Describe in detail precisely what was being worked on "
+        "immediately before this summary request, paying special attention to "
+        "the most recent messages from both user and assistant. Include file "
+        "names and code snippets where applicable.\n"
+        "9. Optional Next Step: List the next step that you will take that is "
+        "related to the most recent work you were doing. IMPORTANT: ensure that "
+        "this step is DIRECTLY in line with the user's most recent explicit "
+        "requests, and the task you were working on immediately before this "
+        "summary request. If your last task was concluded, then only list next "
+        "steps if they are explicitly in line with the users request. Do not "
+        "start on tangential requests or really old requests that were already "
+        "completed without confirming with the user first.\n"
+        "If there is a next step, include direct quotes from the most recent "
+        "conversation showing exactly what task you were working on and where "
+        "you left off. This should be verbatim to ensure there's no drift in "
+        "task interpretation.\n"
+        "Please provide your summary based on the conversation so far, "
+        "following this structure and ensuring precision and thoroughness in "
+        "your response.\n"
+        "There may be additional summarization instructions provided in the "
+        "included context. If so, remember to follow these instructions when "
+        "creating the above summary. Examples of instructions include:\n"
+        "## Compact Instructions\n"
+        "When summarizing the conversation focus on typescript code changes and "
+        "also remember the mistakes you made and how you fixed them.\n"
+        "# Summary instructions\n"
+        "When you are using compact - please focus on test output and code "
+        "changes. Include file reads verbatim."
+    )
+
+    @staticmethod
+    def _strip_analysis(text: str) -> str:
+        """Remove the model's <analysis>…</analysis> scratchpad from the output.
+
+        The task prompt asks the model to think in <analysis> tags before the
+        structured summary; we keep only the summary. If no tags are present
+        (or only an opening tag), return the text unchanged/after the tag.
+        """
+        import re
+
+        # Drop a complete <analysis>...</analysis> block.
+        cleaned = re.sub(
+            r"<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL | re.IGNORECASE
+        )
+        # If only a closing tag remains (unbalanced), keep what follows it.
+        if "</analysis>" in cleaned.lower():
+            idx = cleaned.lower().rfind("</analysis>")
+            cleaned = cleaned[idx + len("</analysis>"):]
+        return cleaned
+
+    def _build_summary_prompt(self, focus_instructions: str = "") -> str:
+        """Assemble the task prompt, appending any per-call focus instructions.
+
+        The base template tells the model to honor "additional summarization
+        instructions provided in the included context", under a
+        ``## Compact Instructions`` header — exactly how Claude Code injects a
+        ``/compact <focus>`` directive. We append the user's focus there.
+        """
+        prompt = self._SUMMARY_TASK_PROMPT
+        if focus_instructions:
+            prompt += (
+                "\n\n## Compact Instructions\n"
+                f"{focus_instructions.strip()}"
+            )
+        return prompt
+
     async def generate_summary(
         self, messages: List[Dict], model: Any, focus_instructions: str = ""
     ) -> str:
@@ -174,25 +303,7 @@ class AgentConversationManager:
         """
         log_green(f"Generating summary ...")
 
-        summary_prompt = f"""
-        Create a detailed summary of this conversation that preserves important information for future reference. Include:
-
-        1. Specific topics, requests, and questions discussed
-        2. Key facts, data, or findings that were discovered
-        3. Important decisions, solutions, or conclusions reached
-        4. Any specific tools, commands, or technical details mentioned (including which tools were called, their inputs, and their results)
-        5. Files read or modified, and any pending or in-progress work
-        6. Context that would be valuable for continuing this conversation later
-
-        Write in a structured format that maintains the essential details while being concise. Focus on preserving actionable information and specific context rather than just high-level themes.
-        """
-
-        summary_prompt = textwrap.dedent(summary_prompt).strip()
-        if focus_instructions:
-            summary_prompt += (
-                "\n\nThe user asked you to focus the summary on the following — "
-                f"prioritize this:\n{focus_instructions.strip()}"
-            )
+        summary_prompt = self._build_summary_prompt(focus_instructions)
 
         try:
             summary_response = ""
@@ -202,8 +313,10 @@ class AgentConversationManager:
                 # LangChain model - use ainvoke
                 from langchain_core.messages import HumanMessage, SystemMessage
 
-                # Build LangChain messages
-                lc_messages = []
+                # Build LangChain messages. The system role frames the task as
+                # summarization (mirrors Claude Code's compaction call); any
+                # prior summary is carried as additional context.
+                lc_messages = [SystemMessage(content=self._SUMMARY_SYSTEM_PROMPT)]
                 if self.previous_summary:
                     lc_messages.append(SystemMessage(content=self.previous_summary))
 
@@ -232,9 +345,12 @@ class AgentConversationManager:
                 # Strands model - use stream
                 messages.append({"role": "user", "content": [{"text": summary_prompt}]})
                 think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
+                system_prompt = self._SUMMARY_SYSTEM_PROMPT
+                if self.previous_summary:
+                    system_prompt = f"{system_prompt}\n\n{self.previous_summary}"
 
                 async for event in model.stream(
-                    messages, system_prompt=self.previous_summary, think=think_param
+                    messages, system_prompt=system_prompt, think=think_param
                 ):
                     if (
                         "contentBlockDelta" in event
@@ -243,8 +359,9 @@ class AgentConversationManager:
                     ):
                         summary_response += event["contentBlockDelta"]["delta"]["text"]
 
-            # Clean the response
-            clean_summary = summary_response.strip()
+            # Clean the response, dropping the model's <analysis> scratchpad if
+            # present (we keep only the structured summary that follows it).
+            clean_summary = self._strip_analysis(summary_response).strip()
             return clean_summary
 
         except Exception as e:
@@ -252,12 +369,27 @@ class AgentConversationManager:
             return "Previous conversation covered multiple topics and requests."
 
     def _build_system_with_summary(self, clean_summary: str) -> str:
-        """Embed a conversation summary into the configured system prompt."""
+        """Embed a conversation summary into the configured system prompt.
+
+        The block carries a continuation instruction (mirrors Claude Code) so
+        the model resumes the work seamlessly instead of re-acknowledging the
+        summary or recapping.
+        """
+        # Continuation instruction is the verbatim Claude Code text, so the
+        # model resumes seamlessly instead of re-acknowledging the summary.
         summary_block = textwrap.dedent(
             f"""
             <conversation_summary>
-            Previous conversation summary:
+            This summary replaces older messages that were compacted to save
+            context. Treat it as the established history of this session.
+
             {clean_summary}
+
+            Continue the conversation from where it left off without asking the
+            user any further questions. Resume directly — do not acknowledge the
+            summary, do not recap what was happening, do not preface with "I'll
+            continue" or similar. Pick up the last task as if the break never
+            happened.
             </conversation_summary>
             """
         ).strip()
@@ -353,7 +485,50 @@ class AgentConversationManager:
             used += msg_tokens
             kept += 1
 
-        return n - kept
+        split = n - kept
+        return self._safe_tool_boundary(raw_messages, split)
+
+    @staticmethod
+    def _is_tool_message(msg: Any) -> bool:
+        """True if msg is a tool result (LangChain ToolMessage or dict tool role)."""
+        if isinstance(msg, dict):
+            return msg.get("role") == "tool"
+        return getattr(msg, "type", None) == "tool"
+
+    @staticmethod
+    def _has_tool_calls(msg: Any) -> bool:
+        """True if msg is an assistant turn that issued tool calls."""
+        if isinstance(msg, dict):
+            return bool(msg.get("tool_calls"))
+        return bool(getattr(msg, "tool_calls", None))
+
+    def _safe_tool_boundary(self, raw_messages: List[Any], split: int) -> int:
+        """Adjust a split index so it never severs a tool-call/result pair.
+
+        ``messages[:split]`` is summarized; ``messages[split:]`` is kept
+        verbatim. A split is UNSAFE when it lands inside a tool exchange:
+
+        * the kept window starts with a tool result (a ToolMessage whose
+          originating assistant tool-call turn was summarized away), or
+        * the message just before the split is an assistant turn that issued
+          tool calls (its results were kept, so the call is now orphaned).
+
+        Either case makes providers like the OpenAI Responses API reject the
+        request: "No tool call found for function call output with call_id …".
+        We move the split EARLIER (summarize a little more, pulling the whole
+        tool exchange into the kept window) until the boundary is clean.
+
+        Returns the adjusted split (0 = summarize everything, also safe).
+        """
+        n = len(raw_messages)
+        while split > 0:
+            head_is_tool = split < n and self._is_tool_message(raw_messages[split])
+            prev_calls = self._has_tool_calls(raw_messages[split - 1])
+            if head_is_tool or prev_calls:
+                split -= 1
+                continue
+            break
+        return split
 
     async def _compact(
         self,

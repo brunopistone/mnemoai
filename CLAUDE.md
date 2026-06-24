@@ -98,7 +98,7 @@ Used in both episodic memory and RAG. Pattern: get top-N candidates from vector 
 
 ### Conversation compaction (`client/managers/agent_conversation_manager.py`)
 
-Keeps the conversation under `MAX_CONVERSATION_TOKENS` by summarizing older messages into the system prompt while keeping recent turns verbatim. Triggers automatically when over budget, or manually via `/compact`. The kept window is bounded by message count AND a token budget so an oversized recent message (e.g. a pasted document) is summarized, not kept. Tool calls/results are preserved in the summary.
+Keeps the conversation under `MAX_CONVERSATION_TOKENS` by summarizing older messages into the system prompt while keeping recent turns verbatim. Triggers automatically when over budget, or manually via `/compact`. The kept window is bounded by message count AND a token budget so an oversized recent message (e.g. a pasted document) is summarized, not kept. Tool calls/results are preserved in the summary. The summary uses a Claude-Code-style structured prompt (a "summarizing conversations" system framing + a 9-section `<analysis>`-then-summary task template, with `/compact <focus>` injected as compact instructions); the `<analysis>` scratchpad is stripped, and the injected block carries a continuation instruction so the model resumes seamlessly. **The split point is tool-pair-safe** (`_safe_tool_boundary`): it never starts the kept window with an orphaned tool result nor cuts an assistant tool-call turn from its results — which would otherwise make the OpenAI Responses API reject the next turn with "No tool call found for function call output".
 
 ### Query routing (`client/agent/router.py`)
 

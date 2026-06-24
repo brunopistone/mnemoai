@@ -163,6 +163,98 @@ class TestCompactKeepsRecent:
         assert len(agent.messages) == 5
 
 
+class TestToolBoundarySafety:
+    """The kept-verbatim window must never start with an orphaned tool result,
+    nor end the summarized set on a tool-call turn whose results were kept.
+
+    Regression for the OpenAI Responses 400: "No tool call found for function
+    call output with call_id …" after compaction split a tool pair.
+    """
+
+    def _mgr(self):
+        return AgentConversationManager(max_tokens=1000)
+
+    def test_split_not_inside_tool_pair_keeps_call_with_result(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+        mgr = self._mgr()
+        # 0: user, 1: assistant(tool_call), 2: tool result, 3: assistant answer
+        msgs = [
+            HumanMessage("do it"),
+            AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "call_2"}]),
+            ToolMessage(content="ok", tool_call_id="call_2", name="x"),
+            AIMessage("done"),
+        ]
+        # A naive split of 2 would keep [tool result, answer] -> orphaned result.
+        safe = mgr._safe_tool_boundary(msgs, 2)
+        # Must move before the assistant tool-call turn (index 1).
+        assert safe <= 1
+        kept = msgs[safe:]
+        assert not mgr._is_tool_message(kept[0])  # never starts on a tool result
+
+    def test_split_orphaning_tool_result_is_pulled_back(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+        mgr = self._mgr()
+        msgs = [
+            HumanMessage("a"),
+            AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "c1"}]),
+            ToolMessage(content="r", tool_call_id="c1", name="x"),
+        ]
+        # Split of 2 would keep ONLY the tool result (its call summarized away)
+        # -> must move back to 1, keeping the call+result pair together.
+        assert mgr._safe_tool_boundary(msgs, 2) == 1
+        # Split of 1 is already clean (kept window = call + its result).
+        assert mgr._safe_tool_boundary(msgs, 1) == 1
+
+    def test_clean_split_unchanged(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+        mgr = self._mgr()
+        msgs = [HumanMessage("a"), AIMessage("b"), HumanMessage("c"), AIMessage("d")]
+        # No tools involved -> split is already safe.
+        assert mgr._safe_tool_boundary(msgs, 2) == 2
+
+    def test_full_compact_never_orphans_tool_result(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(
+            mod.config, "get", _llm_config(MANUAL_COMPACT_KEEP_RECENT=2)
+        )
+        mgr = self._mgr()
+        msgs = [
+            HumanMessage("q"),
+            AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "c"}]),
+            ToolMessage(content="res", tool_call_id="c", name="x"),
+            AIMessage("final"),
+        ]
+        agent = _FakeAgent(list(msgs))
+        _run(mgr.compact(_FakeClient(), _FakeAsyncModel(), agent))
+        # Whatever was kept, it must not begin with a tool result.
+        if agent.messages:
+            assert getattr(agent.messages[0], "type", None) != "tool"
+
+
+class TestStripAnalysis:
+    def test_strips_analysis_block(self):
+        text = "<analysis>thinking hard</analysis>\n1. Primary: foo"
+        out = AgentConversationManager._strip_analysis(text)
+        assert "thinking hard" not in out
+        assert "Primary: foo" in out
+
+    def test_no_tags_unchanged(self):
+        text = "1. Primary Request: bar"
+        assert AgentConversationManager._strip_analysis(text).strip() == text
+
+    def test_unbalanced_closing_tag_keeps_tail(self):
+        text = "leftover analysis</analysis>\nThe summary."
+        out = AgentConversationManager._strip_analysis(text)
+        assert "The summary." in out and "leftover analysis" not in out
+
+
 class TestTokenAwareRetention:
     def test_oversized_recent_message_is_summarized_not_kept(self, monkeypatch):
         # The LAST message is a huge document. Even though the count window
