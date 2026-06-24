@@ -13,6 +13,65 @@ _LEVEL_COLORS = {
 _RESET = "\033[0m"
 
 
+class _CursorTracker:
+    """Wraps a text stream to remember whether the cursor is mid-line.
+
+    The chat UI streams answer chunks to stdout without a trailing newline, so a
+    log record written to stderr afterwards lands ON THE SAME visual line. By
+    tracking whether the last character written to stdout was a newline, the log
+    handler can prepend one when needed — keeping logs on their own lines.
+    """
+
+    def __init__(self, wrapped) -> None:
+        self._wrapped = wrapped
+        # Start "at line start" so a log before any output doesn't get a blank
+        # line prepended.
+        self.at_line_start = True
+
+    def write(self, s):
+        n = self._wrapped.write(s)
+        if s:
+            self.at_line_start = s.endswith("\n")
+        return n
+
+    def __getattr__(self, name):
+        # Delegate everything else (flush, isatty, fileno, encoding, …).
+        return getattr(self._wrapped, name)
+
+
+# Install the tracker on stdout once, so log handlers can consult it. Only wrap
+# a real stream (skip when stdout is already wrapped or missing).
+if not isinstance(sys.stdout, _CursorTracker) and sys.stdout is not None:
+    sys.stdout = _CursorTracker(sys.stdout)
+
+
+class _NewlineGuardHandler(logging.StreamHandler):
+    """StreamHandler that ensures a log record starts on a fresh line.
+
+    If stdout is mid-line (the chat UI streamed text without a trailing
+    newline), emit a leading newline to stderr first so the log message isn't
+    appended to the user-facing output. No-op when stdout isn't a TTY (piped
+    output stays clean) or when already at line start.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        out = sys.stdout
+        try:
+            mid_line = (
+                isinstance(out, _CursorTracker)
+                and not out.at_line_start
+                and hasattr(self.stream, "isatty")
+                and self.stream.isatty()
+            )
+            if mid_line:
+                self.stream.write("\n")
+                self.stream.flush()
+                out.at_line_start = True
+        except Exception:
+            pass
+        super().emit(record)
+
+
 class _ColorFormatter(logging.Formatter):
     """Formatter that colors the whole record by level when writing to a TTY.
 
@@ -59,9 +118,11 @@ def setup_logger(name: str = "ai_app", level: int = None) -> logging.Logger:
     logger.setLevel(level)
     logger.propagate = False
 
-    # Create console handler and set level
+    # Create console handler and set level. The newline-guard handler ensures a
+    # log line never lands inline with streamed chat output (which has no
+    # trailing newline) — it prepends a newline when stdout is mid-line.
     if not logger.handlers:
-        console_handler = logging.StreamHandler(sys.stderr)
+        console_handler = _NewlineGuardHandler(sys.stderr)
         console_handler.setLevel(level)
 
         # Color the record by level on a TTY (red for errors, yellow for
