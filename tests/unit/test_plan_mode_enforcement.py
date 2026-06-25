@@ -56,7 +56,7 @@ def test_default_provider_is_inactive():
     assert a._is_blocked_by_plan_mode("execute_bash") is False
 
 
-# --- Conditional plan-mode allowances (Claude-Code-style "read-only except…") ---
+# --- Conditional plan-mode allowances ---
 
 READONLY_CMDS = [
     "ls -la",

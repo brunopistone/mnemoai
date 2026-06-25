@@ -9,12 +9,23 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
-## [0.8.18] — 2026-06-25
+## [0.8.19] — 2026-06-25
+
+### Fixed
+
+- **No more "stuck"-looking terminal while a tool runs.** Previously the spinner
+  stopped when a tool was about to execute and only restarted *after* all tools
+  finished, so a slow `tool.invoke()` (executing Python, a long shell command, a
+  web fetch, a large file write) — especially right after the user confirmed it
+  — showed a frozen, blank terminal with no sign of progress. The agent now
+  animates a spinner with a per-tool label (e.g. `Running: python run.py`,
+  `Searching the web`, `Writing /path/to/file`) for the full duration of each
+  tool call, at both execution chokepoints (main loop and orchestrator worker
+  loop). The spinner is always stopped afterward, even if the tool errors.
 
 ### Changed
 
-- **Plan mode is now Claude-Code-style "read-only except…" rather than a blanket
-  block.** While `/plan` is active:
+- **Plan mode is now "read-only except…" rather than a blanket block.** While `/plan` is active:
   - **Read-only shell commands run.** `execute_bash` is allowed when the command
     is read-only (leading program in an allowlist — `ls`, `cat`, `grep`, `rg`,
     `find`, `git status/log/diff/show`, etc. — with no redirection/chaining
@@ -24,8 +35,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
     for a Markdown (`.md`) file under the plans directory (`paths.plans_dir()`),
     so the model can draft its plan incrementally. All other file writes remain
     blocked.
-  - **The per-turn reminder is firmer.** The injected plan-mode notice now uses
-    Claude-Code-style wording ("Plan mode is active… you MUST NOT make any
+  - **The per-turn reminder is firmer.** ("Plan mode is active… you MUST NOT make any
     edits… this supersedes any other instructions"), points the model at the
     single writable plan file, and tells it to ask clarifying questions rather
     than guess.

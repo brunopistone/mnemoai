@@ -56,8 +56,8 @@ class LangGraphAgent:
     _ALWAYS_AVAILABLE_TOOLS = {"memory", "describe_image", "fs_read"}
 
     # Mutating / shell-executing tools hard-blocked while plan mode is active
-    # (Claude-Code-style read-only planning). Read-only tools (fs_read, glob/grep
-    # search, web, document readers) and the `memory` notebook are allowed.
+    # Read-only tools (fs_read, glob/grep search, web, document readers) and
+    # the `memory` notebook are allowed.
     # NOTE: execute_bash, fs_write, and file_edit are blocked CONDITIONALLY (see
     # _is_blocked_by_plan_mode): read-only bash and writes to the plan file are
     # permitted; everything else here is an unconditional block.
@@ -71,8 +71,7 @@ class LangGraphAgent:
     }
 
     # In plan mode, fs_write/file_edit are allowed ONLY for the plan file (a
-    # single writable path under the plans dir, Claude-Code-style). Everything
-    # else writing is blocked.
+    # single writable path under the plans dir. Everything else writing is blocked.
     _PLAN_FILE_SUFFIX = ".md"
 
     # Read-only shell commands permitted in plan mode (the leading program must
@@ -571,7 +570,7 @@ class LangGraphAgent:
                 elif tool:
                     try:
                         logger.debug(f"Worker tool: {tool_name} args: {tool_args}")
-                        result = tool.invoke(tool_args)
+                        result = self._invoke_tool(tool, tool_name, tool_args)
                         worker_messages.append(
                             ToolMessage(
                                 content=str(result),
@@ -967,20 +966,60 @@ class LangGraphAgent:
                 else:
                     cb.spinner.stop()
 
-    def _start_spinner(self) -> None:
-        """Restart the spinner and reset first token flag."""
+    def _start_spinner(self, label: str = "Thinking") -> None:
+        """Restart the spinner and reset first token flag.
+
+        Args:
+            label: Text shown next to the animated glyph (e.g. "Running command"
+                while a tool executes), so a slow tool never looks stuck.
+        """
         for cb in self.callbacks:
             if hasattr(cb, "spinner") and cb.spinner:
                 lock = getattr(cb, "spinner_lock", None)
                 if lock:
                     with lock:
-                        cb.spinner.start()
+                        cb.spinner.start(label)
                         if hasattr(cb, "first_token_received"):
                             cb.first_token_received = False
                 else:
-                    cb.spinner.start()
+                    cb.spinner.start(label)
                     if hasattr(cb, "first_token_received"):
                         cb.first_token_received = False
+
+    def _tool_progress_label(self, tool_name: str, tool_args: dict) -> str:
+        """A short 'still working' label shown while a tool runs.
+
+        Keeps the user informed during a slow ``tool.invoke()`` (e.g. executing
+        Python, a long shell command, a web fetch) so it never looks stuck while
+        it's just waiting for completion.
+        """
+        if tool_name == "execute_bash":
+            cmd = str(tool_args.get("command", "")).strip().replace("\n", " ")
+            if len(cmd) > 50:
+                cmd = cmd[:47] + "…"
+            return f"Running: {cmd}" if cmd else "Running command"
+        if tool_name in ("fs_write", "file_edit"):
+            path = str(tool_args.get("path", "")).strip()
+            return f"Writing {path}" if path else "Writing file"
+        labels = {
+            "web_search": "Searching the web",
+            "web_crawl": "Fetching web page",
+            "describe_image": "Analyzing image",
+            "start_background_task": "Starting background task",
+        }
+        return labels.get(tool_name, f"Running {tool_name}")
+
+    def _invoke_tool(self, tool, tool_name: str, tool_args: dict):
+        """Invoke a tool while showing a progress spinner, then stop it.
+
+        The spinner animates with a per-tool label for the duration of the call
+        so a long-running tool never presents a frozen, blank terminal.
+        """
+        self._start_spinner(self._tool_progress_label(tool_name, tool_args))
+        try:
+            return tool.invoke(tool_args)
+        finally:
+            self._stop_spinner()
 
     def _extract_thinking(self, response) -> Optional[str]:
         """Extract thinking/reasoning content from a response.
@@ -1180,7 +1219,7 @@ class LangGraphAgent:
 
         Enforced client-side at the tool chokepoints (the MCP server can't see
         client state). Read-only tools and the memory notebook always pass.
-        Three tools are CONDITIONAL (Claude-Code-style "read-only except…"):
+        Three tools are CONDITIONAL:
 
         * ``execute_bash`` — allowed if the command is read-only (see
           :meth:`_is_readonly_bash`), else blocked.
@@ -1406,7 +1445,7 @@ class LangGraphAgent:
                     continue
                 try:
                     logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
-                    result = tool.invoke(tool_args)
+                    result = self._invoke_tool(tool, tool_name, tool_args)
                     tool_results.append(
                         ToolMessage(
                             content=str(result), tool_call_id=tool_id, name=tool_name

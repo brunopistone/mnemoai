@@ -407,7 +407,7 @@ class LangGraphClient:
 
             # Plan mode: remind the model every turn that it's read-only (the
             # system prompt is frozen at session start, so inject per-query).
-            # Claude-Code-style firm wording — this supersedes other instructions.
+            # This supersedes other instructions.
             if self.plan_mode_active:
                 prompt = self._plan_mode_reminder() + prompt
 
@@ -626,10 +626,9 @@ class LangGraphClient:
     def _plan_mode_reminder(self) -> str:
         """The read-only plan-mode reminder prepended to every prompt while on.
 
-        Claude-Code-style: a firm, supersedes-everything instruction injected
-        into the user turn each turn (the system prompt is frozen at session
-        start). Tells the model it MUST NOT mutate, that the only writable path
-        is the plan file, and to ask the user instead of guessing.
+        A firm, supersedes-everything instruction injected into the user turn each 
+        turn (the system prompt is frozen at session start). Tells the model it MUST NOT 
+        mutate, that the only writable path is the plan file, and to ask the user instead of guessing.
         """
         try:
             plan_hint = str(plans_dir())
