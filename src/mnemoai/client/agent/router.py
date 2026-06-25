@@ -99,24 +99,17 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
 }
 
 
-# Minimal fallback used when no ROUTING_PROMPT is configured (e.g. a stripped
-# config, or unit tests with no config.yaml). Keeps classify() from building a
-# SystemMessage(content=None), which raises a pydantic ValidationError.
-_DEFAULT_CLASSIFIER_PROMPT = (
-    "You are a query classifier. Read the user's message and reply with EXACTLY "
-    "one of these category names, lowercase, no other text: "
-    + ", ".join(ROUTE_TOOLS.keys())
-    + ". Choose 'full' when unsure or when the task spans multiple categories."
-)
-
-
 def get_classifier_prompt() -> str:
-    """Get the classifier prompt from config, falling back to a default.
+    """Get the routing/classifier prompt from prompts.yaml.
 
     Returns:
-        Classifier prompt string (never None)
+        The ROUTING_PROMPT string.
+
+    Raises:
+        PromptError: if ROUTING_PROMPT is missing — routing is enabled, so its
+        prompt is required (no in-code fallback).
     """
-    return config.get("ROUTING_PROMPT", None) or _DEFAULT_CLASSIFIER_PROMPT
+    return config.require_prompt("ROUTING_PROMPT")
 
 
 class QueryRouter:

@@ -9,21 +9,28 @@ from mnemoai.utils.logger import logger
 
 
 def get_orchestrator_prompt() -> str:
-    """Get the orchestrator prompt from config, falling back to the default.
+    """Get the orchestrator (task-decomposition) prompt from prompts.yaml.
 
     Returns:
-        Orchestrator prompt string
+        The ORCHESTRATOR_PROMPT string.
+
+    Raises:
+        PromptError: if missing — only called when orchestration is enabled, so
+        the prompt is required (no in-code fallback).
     """
-    return config.get("ORCHESTRATOR_PROMPT", None)
+    return config.require_prompt("ORCHESTRATOR_PROMPT")
 
 
 def get_aggregator_prompt() -> str:
-    """Get the aggregator prompt from config, falling back to the default.
+    """Get the aggregator (result-synthesis) prompt from prompts.yaml.
 
     Returns:
-        Aggregator prompt string
+        The AGGREGATOR_PROMPT string.
+
+    Raises:
+        PromptError: if missing (required when orchestration is enabled).
     """
-    return config.get("AGGREGATOR_PROMPT", None)
+    return config.require_prompt("AGGREGATOR_PROMPT")
 
 
 def parse_subtasks(

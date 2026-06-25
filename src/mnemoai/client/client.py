@@ -208,10 +208,11 @@ class LangGraphClient:
         Returns:
             Complete system prompt string
         """
-        system_prompt = config.system_prompt or ""
-        if system_prompt:
-            current_date = date.today().strftime("%Y-%m-%d")
-            system_prompt = system_prompt.format(current_date=current_date)
+        # config.system_prompt reads SYSTEM_PROMPT from prompts.yaml and raises
+        # PromptError if it's missing (no fallback) — a clean fail-fast.
+        system_prompt = config.system_prompt
+        current_date = date.today().strftime("%Y-%m-%d")
+        system_prompt = system_prompt.format(current_date=current_date)
 
         if config.get("PROFILE", {}).get("USE_PROFILING", False):
             profile_summary = self.profile_manager.get_profile_summary()
@@ -319,6 +320,15 @@ class LangGraphClient:
         """
         try:
             self.verbose_mode = verbose
+
+            # Fail fast if prompts.yaml is missing a required prompt. Prompts are
+            # read only from prompts.yaml (no config.yaml, no in-code defaults):
+            # mandatory prompts must exist, and a feature's prompt is required
+            # when that feature is enabled.
+            config.validate_prompts(
+                routing=config.get("ENABLE_ROUTING", False),
+                orchestration=config.get("ENABLE_ORCHESTRATION", False),
+            )
 
             with self.mcp_client:
                 self.tools = self.mcp_client.list_tools_sync()

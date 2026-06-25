@@ -388,7 +388,7 @@ LLM:
 
 ### System Prompt
 
-The system prompt in `config.yaml` defines the assistant's behavior. Customize the `SYSTEM_PROMPT` field to change the assistant's personality, instructions, and tool usage patterns. Key sections in the default prompt:
+The system prompt lives in **`prompts.yaml`** (a sibling of `config.yaml`, in the same `config/` directory — all model-facing prompts live there, separate from configuration). Customize the `SYSTEM_PROMPT` field to change the assistant's personality, instructions, and tool usage patterns. Key sections in the default prompt:
 
 - `<identity>`: Basic identity and core principles
 - `<reasoning_discipline>`: Thinking rules and loop detection

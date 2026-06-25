@@ -6,7 +6,8 @@ find, back up, or relocate:
     ~/.mnemoai/
     ├── config/                             # config.yaml + provider examples
     │   ├── config.yaml                     # user config (installed CLI)
-    │   └── config.yaml*.example            # bundled examples (copied here to read)
+    │   ├── config.yaml*.example            # bundled examples (copied here to read)
+    │   └── prompt.yaml                     # application prompts
     ├── mcp/                                # external MCP servers
     │   ├── mcp.json                        # optional, user-created
     │   └── mcp.json.example                # bundled example (copied here to read)
@@ -69,6 +70,16 @@ def legacy_config_path() -> Path:
     return app_home() / "config.yaml"
 
 
+def prompts_path() -> Path:
+    """Location of the LLM prompts file: ``<app_home>/config/prompts.yaml``.
+
+    All model-facing prompts (system, routing, orchestrator, aggregator, and the
+    compaction summary prompts) live here, separate from ``config.yaml`` which
+    holds only configuration. Seeded from the bundled template on first run.
+    """
+    return config_dir() / "prompts.yaml"
+
+
 def mcp_config_path() -> Path:
     """Location of the external MCP servers config: ``<app_home>/mcp/mcp.json``.
 
@@ -100,6 +111,13 @@ def seed_example_files() -> None:
             dest = config_dir() / example.name
             if not dest.exists():
                 shutil.copyfile(example, dest)
+        # prompts.yaml is the live prompts file (not a *.example): seed the
+        # actual file so the app has prompts out of the box. Never overwrite.
+        prompts_template = pkg_templates / "prompts.yaml"
+        if prompts_template.is_file():
+            dest = prompts_path()
+            if not dest.exists():
+                shutil.copyfile(prompts_template, dest)
         mcp_example = pkg_templates / "mcp.json.example"
         if mcp_example.is_file():
             dest = mcp_dir() / mcp_example.name
