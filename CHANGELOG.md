@@ -9,6 +9,29 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.18] — 2026-06-25
+
+### Changed
+
+- **Plan mode is now Claude-Code-style "read-only except…" rather than a blanket
+  block.** While `/plan` is active:
+  - **Read-only shell commands run.** `execute_bash` is allowed when the command
+    is read-only (leading program in an allowlist — `ls`, `cat`, `grep`, `rg`,
+    `find`, `git status/log/diff/show`, etc. — with no redirection/chaining
+    operators, and `git` limited to read-only subcommands). Mutating commands stay
+    blocked. This lets the agent investigate properly while planning.
+  - **The plan can be written to disk.** `fs_write`/`file_edit` are allowed only
+    for a Markdown (`.md`) file under the plans directory (`paths.plans_dir()`),
+    so the model can draft its plan incrementally. All other file writes remain
+    blocked.
+  - **The per-turn reminder is firmer.** The injected plan-mode notice now uses
+    Claude-Code-style wording ("Plan mode is active… you MUST NOT make any
+    edits… this supersedes any other instructions"), points the model at the
+    single writable plan file, and tells it to ask clarifying questions rather
+    than guess.
+  - Blocked-tool feedback is tailored per tool (read-only-bash hint; plan-file
+    path hint) so the model pivots cleanly instead of just erroring.
+
 ## [0.8.17] — 2026-06-25
 
 ### Changed

@@ -1,8 +1,10 @@
 """LangGraph-based agent implementation."""
 
 import operator
+import os
 import re
 import sys
+from pathlib import Path
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -27,6 +29,7 @@ from mnemoai.client.agent.router import ROUTE_TOOLS
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
+from mnemoai.utils.paths import plans_dir
 
 
 class AgentState(TypedDict):
@@ -55,6 +58,9 @@ class LangGraphAgent:
     # Mutating / shell-executing tools hard-blocked while plan mode is active
     # (Claude-Code-style read-only planning). Read-only tools (fs_read, glob/grep
     # search, web, document readers) and the `memory` notebook are allowed.
+    # NOTE: execute_bash, fs_write, and file_edit are blocked CONDITIONALLY (see
+    # _is_blocked_by_plan_mode): read-only bash and writes to the plan file are
+    # permitted; everything else here is an unconditional block.
     _PLAN_BLOCKED_TOOLS = {
         "execute_bash",
         "fs_write",
@@ -62,6 +68,40 @@ class LangGraphAgent:
         "git_safe",
         "git_commit_safe",
         "start_background_task",
+    }
+
+    # In plan mode, fs_write/file_edit are allowed ONLY for the plan file (a
+    # single writable path under the plans dir, Claude-Code-style). Everything
+    # else writing is blocked.
+    _PLAN_FILE_SUFFIX = ".md"
+
+    # Read-only shell commands permitted in plan mode (the leading program must
+    # be one of these AND the command must contain no shell operator that could
+    # chain a mutation — see _is_readonly_bash). Conservative on purpose: when in
+    # doubt, the command is treated as NOT read-only and blocked.
+    _READONLY_BASH_CMDS = {
+        "ls", "cat", "head", "tail", "less", "more", "pwd", "echo", "find",
+        "grep", "rg", "egrep", "fgrep", "wc", "stat", "file", "tree", "du",
+        "df", "which", "type", "whoami", "hostname", "date", "env", "printenv",
+        "ps", "uname", "id", "diff", "sort", "uniq", "cut", "awk", "sed",
+        "realpath", "readlink", "basename", "dirname", "git",
+    }
+    # Shell operators that could append/redirect a mutation onto a read-only
+    # command. Their presence forces the command to be treated as non-read-only.
+    _BASH_MUTATION_OPS = (">", ">>", "|", ";", "&&", "||", "`", "$(", "&")
+    # git subcommands that are unambiguously read-only (others — commit/push/
+    # checkout/tag/stash/config-set/branch -d… — can mutate, so are blocked).
+    _READONLY_GIT_SUBCMDS = {
+        "status", "log", "diff", "show", "rev-parse", "describe", "blame",
+        "ls-files", "ls-tree", "cat-file", "shortlog",
+    }
+    # Per-program flags that turn an otherwise-read-only allowlisted command into
+    # a mutating one. `-i` is program-specific (sed: in-place edit; but grep/ls
+    # `-i` are read-only), so it's keyed by program rather than global.
+    _BASH_MUTATING_FLAGS = {
+        "sed": ("-i", "--in-place"),  # also matches `-i.bak` (prefix check)
+        "find": ("-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"),
+        "awk": ("-i",),  # gawk -i inplace
     }
 
     def __init__(
@@ -512,14 +552,10 @@ class LangGraphAgent:
                 if not tool:
                     tool = next((t for t in self.tools if t.name == tool_name), None)
 
-                if tool and self._is_blocked_by_plan_mode(tool_name):
+                if tool and self._is_blocked_by_plan_mode(tool_name, tool_args):
                     worker_messages.append(
                         ToolMessage(
-                            content=(
-                                "Blocked: plan mode is active (read-only). Present "
-                                "a plan for the user to review; the user must exit "
-                                "plan mode (/plan) before this tool can run."
-                            ),
+                            content=self._plan_mode_block_message(tool_name),
                             tool_call_id=tool_id,
                             name=tool_name,
                         )
@@ -1139,13 +1175,106 @@ class LangGraphAgent:
             raw = raw[1:-1]
         return {field: raw}
 
-    def _is_blocked_by_plan_mode(self, tool_name: str) -> bool:
-        """True when plan mode is active and this tool mutates/executes.
+    def _is_blocked_by_plan_mode(self, tool_name: str, tool_args: dict = None) -> bool:
+        """True when plan mode is active and this tool/call would mutate.
 
         Enforced client-side at the tool chokepoints (the MCP server can't see
-        client state) — read-only tools and the memory notebook stay allowed.
+        client state). Read-only tools and the memory notebook always pass.
+        Three tools are CONDITIONAL (Claude-Code-style "read-only except…"):
+
+        * ``execute_bash`` — allowed if the command is read-only (see
+          :meth:`_is_readonly_bash`), else blocked.
+        * ``fs_write`` / ``file_edit`` — allowed only when writing the plan file
+          (a single Markdown file under the plans dir), else blocked.
+
+        Everything else in ``_PLAN_BLOCKED_TOOLS`` is unconditionally blocked.
         """
-        return self._plan_mode_provider() and tool_name in self._PLAN_BLOCKED_TOOLS
+        if not self._plan_mode_provider():
+            return False
+        if tool_name not in self._PLAN_BLOCKED_TOOLS:
+            return False
+
+        args = tool_args or {}
+        if tool_name == "execute_bash":
+            return not self._is_readonly_bash(str(args.get("command", "")))
+        if tool_name in ("fs_write", "file_edit"):
+            return not self._is_plan_file(str(args.get("path", "")))
+        return True
+
+    @classmethod
+    def _is_readonly_bash(cls, command: str) -> bool:
+        """Heuristically decide if a shell command is read-only (plan-mode safe).
+
+        Conservative: the leading program must be in the read-only allowlist,
+        the command must contain no operator that could chain/redirect a
+        mutation, and a ``git`` command must use a read-only subcommand. Anything
+        uncertain returns False (so it stays blocked).
+        """
+        cmd = (command or "").strip()
+        if not cmd:
+            return False
+        if any(op in cmd for op in cls._BASH_MUTATION_OPS):
+            return False
+        tokens = cmd.split()
+        prog = tokens[0]
+        if prog not in cls._READONLY_BASH_CMDS:
+            return False
+        # Reject program-specific mutating flags (e.g. `sed -i`, `sed -i.bak`,
+        # `find … -delete`/`-exec`) even though the program is allowlisted.
+        bad_flags = cls._BASH_MUTATING_FLAGS.get(prog, ())
+        for tok in tokens[1:]:
+            if any(tok == f or tok.startswith(f) for f in bad_flags):
+                return False
+        if prog == "git":
+            sub = tokens[1] if len(tokens) > 1 else ""
+            return sub in cls._READONLY_GIT_SUBCMDS
+        return True
+
+    def _is_plan_file(self, path: str) -> bool:
+        """True if ``path`` is the writable plan file (under the plans dir)."""
+        if not path:
+            return False
+        try:
+            target = Path(os.path.expanduser(path)).resolve()
+            base = plans_dir().resolve()
+            return (
+                target.suffix == self._PLAN_FILE_SUFFIX
+                and base in target.parents
+            )
+        except Exception:
+            return False
+
+    def _plan_mode_block_message(self, tool_name: str) -> str:
+        """The ToolMessage returned when a tool is blocked by plan mode.
+
+        Tailored per tool so the model knows the read-only escape hatch (run a
+        read-only shell command, or write the plan file) rather than just
+        erroring out.
+        """
+        if tool_name == "execute_bash":
+            return (
+                "Blocked: plan mode is active (read-only). Only read-only shell "
+                "commands (e.g. ls, cat, grep, git status/log/diff) are allowed "
+                "while planning. Investigate with read-only tools and present a "
+                "plan; the user must exit plan mode (/plan) before mutating "
+                "commands can run."
+            )
+        if tool_name in ("fs_write", "file_edit"):
+            try:
+                plan_hint = str(plans_dir())
+            except Exception:
+                plan_hint = "the plans directory"
+            return (
+                "Blocked: plan mode is active (read-only). You may only write your "
+                f"plan as a Markdown file under {plan_hint}. Editing other files is "
+                "blocked — present a plan for the user to review; the user must "
+                "exit plan mode (/plan) before other changes can be made."
+            )
+        return (
+            "Blocked: plan mode is active (read-only). Present a plan for the user "
+            "to review; the user must exit plan mode (/plan) before this tool can "
+            "run."
+        )
 
     # Tools gated by a hard confirmation prompt, keyed by category.
     _CONFIRM_BASH_TOOLS = {"execute_bash"}
@@ -1256,14 +1385,10 @@ class LangGraphAgent:
 
             if tool:
                 # Plan mode: hard-block mutating/exec tools (read-only planning).
-                if self._is_blocked_by_plan_mode(tool_name):
+                if self._is_blocked_by_plan_mode(tool_name, tool_args):
                     tool_results.append(
                         ToolMessage(
-                            content=(
-                                "Blocked: plan mode is active (read-only). Present "
-                                "a plan for the user to review; the user must exit "
-                                "plan mode (/plan) before this tool can run."
-                            ),
+                            content=self._plan_mode_block_message(tool_name),
                             tool_call_id=tool_id,
                             name=tool_name,
                         )
