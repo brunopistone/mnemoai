@@ -182,9 +182,12 @@ def test_orchestrator_block_lists_tools_and_routes_to_full():
     assert "<external_tools>" in block
 
 
-def test_external_tools_appended_to_nonempty_routes():
+def test_external_tools_appended_to_every_route():
     # The route-building logic appends external tools (those not named in any
-    # route) to every non-empty route, and 'full' (None) still gets everything.
+    # route) to EVERY route — including the no-tools 'simple_qa' route — and
+    # 'full' (None) still gets everything. External tools are user-configured
+    # capabilities, so a short factual question ("what time is it?") that
+    # classifies as simple_qa must still be able to reach an external server.
     from mnemoai.client.agent.agent import LangGraphAgent
 
     class _StubModel:
@@ -201,10 +204,10 @@ def test_external_tools_appended_to_nonempty_routes():
         model=model, tools=tools, router=object(), tool_routes=routes,
     )
     by_route = {k: [t.name for t in v] for k, v in agent.tools_by_route.items()}
-    # External 'brave_search' reaches the 'code' route despite not being listed.
+    # External 'brave_search' reaches every route despite not being listed.
     assert "brave_search" in by_route["code"]
-    assert by_route["simple_qa"] == []          # no tools (no meta tool present)
-    assert "brave_search" in by_route["full"]   # full binds everything
+    assert by_route["simple_qa"] == ["brave_search"]   # external reachable here too
+    assert "brave_search" in by_route["full"]          # full binds everything
     assert agent.external_tools and agent.external_tools[0].name == "brave_search"
 
 
@@ -224,7 +227,10 @@ def test_memory_meta_tool_reachable_on_every_route():
         model=_StubModel(), tools=tools, router=object(), tool_routes=routes,
     )
     by_route = {k: [t.name for t in v] for k, v in agent.tools_by_route.items()}
-    assert by_route["simple_qa"] == ["memory"]   # meta-only on the no-tools route
+    # 'memory' (meta) is bound on the no-tools route; the external 'brave_search'
+    # rides along too, but no built-in non-meta tool does.
+    assert "memory" in by_route["simple_qa"]
+    assert "read_file" not in by_route["simple_qa"]
     assert "memory" in by_route["code"]
     assert "memory" in by_route["full"]
     # memory is a meta tool, not external; brave_search still is.
