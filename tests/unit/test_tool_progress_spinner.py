@@ -92,3 +92,45 @@ class TestInvokeToolSpinner:
             pass
         # The finally clause must still have stopped the spinner.
         assert ("stop", None) in events
+
+
+class _AnswerResponse:
+    """Minimal stand-in for an AIMessage with visible content, no tool calls."""
+
+    def __init__(self, content="done"):
+        self.content = content
+        self.tool_calls = []
+        self.additional_kwargs = {}
+
+
+class TestCallModelStartsSpinner:
+    """The final answer turn must spin while waiting for the model's first token.
+
+    Regression: _call_model used to rely on the preceding tool node leaving the
+    spinner running. Once each tool call stopped its own spinner on completion,
+    the wait between the last tool result and the final answer showed a frozen
+    terminal. _call_model now starts the spinner at entry itself.
+    """
+
+    def test_spinner_started_before_streaming(self):
+        a = _agent()
+        events = []
+        a.system_prompt = None
+        a.callbacks = []
+        a._start_spinner = lambda label="Thinking": events.append("start")
+        a._get_route_model = lambda state: object()
+
+        def _fake_stream(messages, config, model=None, mark_answer=False):
+            # The spinner must already have been started by the time we stream.
+            events.append("stream")
+            return _AnswerResponse(), False
+
+        a._stream_response = _fake_stream
+        a._extract_thinking = lambda r: None
+        a._extract_visible = lambda c: "done"
+
+        a._call_model({"messages": [], "route": None})
+
+        assert events[0] == "start"
+        assert "stream" in events
+        assert events.index("start") < events.index("stream")
