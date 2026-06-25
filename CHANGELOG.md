@@ -9,9 +9,21 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
-## [0.8.20] — 2026-06-25
+## [0.8.21] — 2026-06-25
 
 ### Fixed
+
+- **External MCP tools are now reachable on the `simple_qa` route.** A short
+  factual question ("what time is in Singapore?") classifies as `simple_qa` —
+  the no-tools route, which bound only the built-in meta tools (`memory`,
+  `describe_image`, `fs_read`). External (`mcp.json`) tools were appended only to
+  _non-empty_ routes, so a configured server like `time` was invisible on the
+  very route such questions land in, and the model answered from its own
+  knowledge ("I don't have access to the live clock") instead of calling the
+  tool. External tools are user-configured capabilities, so they're now bound on
+  **every** route, including `simple_qa`. (Built-in tool pruning per route is
+  unchanged — only the handful of explicitly configured external tools ride
+  along everywhere.)
 
 - **Closed the last "stuck"-looking gap: the final answer after the last tool.**
   0.8.19 added a spinner _during_ tool execution, but the model call that turns

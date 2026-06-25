@@ -190,7 +190,13 @@ class LangGraphAgent:
                 if tool_names is None:
                     route_tools = tools  # 'full' already binds everything
                 elif not tool_names:
-                    route_tools = list(always_tools)  # e.g. simple_qa: meta only
+                    # e.g. simple_qa: built-in meta tools only — BUT external
+                    # (mcp.json) tools are user-configured capabilities and must
+                    # stay reachable even here. A short factual question ("what
+                    # time is it in Singapore?") classifies as simple_qa, so
+                    # without this an external server like `time` would be
+                    # invisible on the very route such questions land in.
+                    route_tools = list(always_tools) + external_tools
                 else:
                     matched = [t for t in tools if t.name in tool_names]
                     route_tools = matched + external_tools + always_tools
