@@ -9,6 +9,32 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.17] — 2026-06-25
+
+### Changed
+
+- **Prompts moved out of `config.yaml` into a dedicated `prompts.yaml`.** All
+  model-facing prompts — `SYSTEM_PROMPT`, `ROUTING_PROMPT`, `ORCHESTRATOR_PROMPT`,
+  `AGGREGATOR_PROMPT`, and the compaction prompts (`SUMMARY_SYSTEM_PROMPT`,
+  `SUMMARY_TASK_PROMPT`, previously hardcoded in Python) — now live in a
+  `prompts.yaml` sibling of `config.yaml` (same `config/` dir, same resolution +
+  first-run seeding; `$MNEMOAI_PROMPTS` overrides). `config.yaml` now holds
+  configuration only (~165 lines, down from ~400). Access is via
+  `Config().prompt("KEY")`.
+
+### Breaking
+
+- Prompts are read **only** from `prompts.yaml` — never from `config.yaml`, and
+  there are no in-code prompt fallbacks. Prompt keys left in `config.yaml` are
+  ignored (a one-time migration warning is logged); move customizations to
+  `prompts.yaml`. The app **fails fast at startup** (`PromptError`) if a required
+  prompt is missing: the mandatory prompts (`SYSTEM_PROMPT`,
+  `SUMMARY_SYSTEM_PROMPT`, `SUMMARY_TASK_PROMPT`) are always required, and a
+  feature's prompt is required when that feature is enabled (`ROUTING_PROMPT`
+  with `ENABLE_ROUTING`; `ORCHESTRATOR_PROMPT`/`AGGREGATOR_PROMPT` with
+  `ENABLE_ORCHESTRATION`). A bundled `prompts.yaml` seeds new installs and
+  provides the defaults, so out-of-the-box runs are unaffected.
+
 ## [0.8.16] — 2026-06-24
 
 ### Fixed
@@ -442,7 +468,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.16...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.17...HEAD
+[0.8.17]: https://github.com/brunopistone/mnemoai/compare/v0.8.16...v0.8.17
 [0.8.16]: https://github.com/brunopistone/mnemoai/compare/v0.8.15...v0.8.16
 [0.8.15]: https://github.com/brunopistone/mnemoai/compare/v0.8.14...v0.8.15
 [0.8.14]: https://github.com/brunopistone/mnemoai/compare/v0.8.13...v0.8.14

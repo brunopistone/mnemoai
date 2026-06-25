@@ -21,12 +21,16 @@ When enabled, the assistant classifies each query before processing it and route
 1. A lightweight LLM call classifies the query into one of the categories above
 2. The agent node binds only the tools for that category
 3. If a query spans multiple categories, it routes to `full` (all tools)
-4. The classifier prompt is customizable via `ROUTING_PROMPT` in `config.yaml`
+4. The classifier prompt is customizable via `ROUTING_PROMPT` in `prompts.yaml`
+   (all prompts live there, separate from `config.yaml`)
 
 **Configuration:**
 
 ```yaml
+# config.yaml — toggle
 ENABLE_ROUTING: true
+
+# prompts.yaml — the classifier prompt
 ROUTING_PROMPT: |
   # Custom classifier prompt (optional, has a sensible default)
   ...
@@ -54,10 +58,13 @@ Orchestrator decomposes into:
 **Configuration:**
 
 ```yaml
+# config.yaml — toggles
 ENABLE_ROUTING: true # Required
 ENABLE_ORCHESTRATION: true # Activates orchestrator for 'full' route
-# ORCHESTRATOR_PROMPT: |      # Optional: customize decomposition prompt
-# AGGREGATOR_PROMPT: |        # Optional: customize synthesis prompt
+
+# prompts.yaml — customize the prompts (optional; sensible defaults bundled)
+# ORCHESTRATOR_PROMPT: |      # decomposition prompt
+# AGGREGATOR_PROMPT: |        # synthesis prompt
 ```
 
 **When orchestration is disabled**, `full` routes use all tools in a single agent loop (the previous behavior). No regression.
