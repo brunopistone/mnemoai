@@ -695,6 +695,13 @@ class LangGraphAgent:
 
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
+        # Spin while we wait for the model's first token (it's stopped as soon as
+        # visible text/reasoning streams, or when tools start). Started here —
+        # not left to the predecessor node — so the gap between the last tool
+        # result and the final answer never shows a frozen terminal. Idempotent:
+        # Spinner.start() no-ops if it's already running. Mirrors _aggregate().
+        self._start_spinner()
+
         active_model = self._get_route_model(state)
         response, had_reasoning = self._stream_response(
             messages, config, model=active_model, mark_answer=True

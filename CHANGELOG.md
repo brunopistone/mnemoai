@@ -9,12 +9,26 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.8.20] — 2026-06-25
+
+### Fixed
+
+- **Closed the last "stuck"-looking gap: the final answer after the last tool.**
+  0.8.19 added a spinner _during_ tool execution, but the model call that turns
+  the tool results into the final reply (`_call_model`) relied on the spinner
+  being left running by the preceding tool node — which no longer held once each
+  tool call stopped its own spinner on completion. The result was a blank pause
+  between the last tool and the model's answer. `_call_model` now starts the
+  spinner at entry itself (idempotent; stopped as soon as visible text/reasoning
+  streams or the next tool starts), mirroring `_aggregate`, so the wait for the
+  model's first token always shows progress.
+
 ## [0.8.19] — 2026-06-25
 
 ### Fixed
 
 - **No more "stuck"-looking terminal while a tool runs.** Previously the spinner
-  stopped when a tool was about to execute and only restarted *after* all tools
+  stopped when a tool was about to execute and only restarted _after_ all tools
   finished, so a slow `tool.invoke()` (executing Python, a long shell command, a
   web fetch, a large file write) — especially right after the user confirmed it
   — showed a frozen, blank terminal with no sign of progress. The agent now
