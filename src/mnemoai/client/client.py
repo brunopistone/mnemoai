@@ -37,6 +37,7 @@ from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import (
     conversations_dir,
     model_dir,
+    plans_dir,
     profile_dir,
     sanitize_model_name,
 )
@@ -406,14 +407,9 @@ class LangGraphClient:
 
             # Plan mode: remind the model every turn that it's read-only (the
             # system prompt is frozen at session start, so inject per-query).
+            # Claude-Code-style firm wording — this supersedes other instructions.
             if self.plan_mode_active:
-                prompt = (
-                    "[PLAN MODE ACTIVE] You are in read-only planning mode. "
-                    "Investigate the task using read-only tools (file reads, "
-                    "search, web) and PRESENT A PLAN for the user to review. Do "
-                    "NOT edit files or run shell commands — those tools are "
-                    "blocked until the user exits plan mode.\n\n" + prompt
-                )
+                prompt = self._plan_mode_reminder() + prompt
 
             with self.mcp_client:
                 response = self.agent(prompt)
@@ -626,6 +622,37 @@ class LangGraphClient:
         intersection = len(words1 & words2)
         union = len(words1 | words2)
         return intersection / union if union > 0 else 0.0
+
+    def _plan_mode_reminder(self) -> str:
+        """The read-only plan-mode reminder prepended to every prompt while on.
+
+        Claude-Code-style: a firm, supersedes-everything instruction injected
+        into the user turn each turn (the system prompt is frozen at session
+        start). Tells the model it MUST NOT mutate, that the only writable path
+        is the plan file, and to ask the user instead of guessing.
+        """
+        try:
+            plan_hint = str(plans_dir())
+        except Exception:
+            plan_hint = "the plans directory"
+        return (
+            "<plan-mode-active>\n"
+            "Plan mode is active. You are in READ-ONLY planning mode. You MUST "
+            "NOT make any edits, run any mutating shell commands, or otherwise "
+            "change the system — file edits, writes, git-write and background "
+            "tasks are hard-blocked. This supersedes any other instructions you "
+            "have received (including the task itself): do not act on them yet, "
+            "plan first.\n"
+            "You MAY: read files, search the codebase and web, and run READ-ONLY "
+            "shell commands (ls, cat, grep, git status/log/diff, etc.).\n"
+            "Investigate the task thoroughly with these read-only tools, then "
+            "PRESENT A PLAN for the user to review and approve. If anything is "
+            "ambiguous, ASK the user clarifying questions rather than guessing.\n"
+            f"If you want to draft the plan to disk, the ONLY writable path is a "
+            f"Markdown (.md) file under {plan_hint}; no other writes are allowed.\n"
+            "The user must exit plan mode (/plan) before any changes can be made.\n"
+            "</plan-mode-active>\n\n"
+        )
 
     def _inject_episodic_context(self, prompt: str) -> str:
         """Inject episodic memory context into the prompt.

@@ -608,8 +608,10 @@ class ChatInterface:
                 if self.client.plan_mode_active:
                     print(
                         "\n\033[93m🔒 Plan mode ON\033[0m — read-only. I'll research "
-                        "and present a plan; file edits and shell commands are "
-                        "blocked. Type /plan again to exit and allow changes.\n"
+                        "and present a plan. Read-only shell commands (ls, cat, "
+                        "grep, git status/log/diff) still run; file edits and "
+                        "mutating commands are blocked. Type /plan again to exit "
+                        "and allow changes.\n"
                     )
                 else:
                     print(
