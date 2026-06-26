@@ -53,7 +53,11 @@ class LangGraphAgent:
     #   - fs_read: read-only and universal (handles every format via its mode).
     #     A user can reference a file in ANY query ("what's in config.yaml?"
     #     classifies as simple_qa/knowledge), so reading must never be gated out.
-    _ALWAYS_AVAILABLE_TOOLS = {"memory", "describe_image", "fs_read"}
+    #   - use_skill: loads an authored skill's instructions on demand. A request
+    #     matching a skill can classify as simple_qa (e.g. "write a commit
+    #     message"), so the loader must reach every route or the skill could
+    #     never trigger (same reasoning as external MCP tools, see 0.8.21).
+    _ALWAYS_AVAILABLE_TOOLS = {"memory", "describe_image", "fs_read", "use_skill"}
 
     # Mutating / shell-executing tools hard-blocked while plan mode is active
     # Read-only tools (fs_read, glob/grep search, web, document readers) and

@@ -225,6 +225,12 @@ class LangGraphClient:
         if memory_context:
             system_prompt = f"{system_prompt}\n\n{memory_context}"
 
+        # Tier-1 skill metadata: name+description of each installed skill, so the
+        # model knows what it can load on demand via the use_skill tool.
+        skills_context = self._inject_skills_context()
+        if skills_context:
+            system_prompt = f"{system_prompt}\n\n{skills_context}"
+
         return system_prompt
 
     @staticmethod
@@ -521,6 +527,22 @@ class LangGraphClient:
         if not contents:
             return ""
         return f"[Persistent Memory]\n{contents}"
+
+    def _inject_skills_context(self) -> str:
+        """Get the tier-1 ``<available_skills>`` block for the system prompt.
+
+        Lists each installed skill's name+description (cheap, always-on) so the
+        model can load a full body on demand via the ``use_skill`` tool. Returns
+        "" when skills are disabled or none are installed.
+        """
+        if not config.get("ENABLE_SKILLS", True):
+            return ""
+        from mnemoai.client.memory.skill_store import (
+            SkillStore,
+            format_available_skills,
+        )
+
+        return format_available_skills(SkillStore().list_metadata())
 
     def _get_playbook_context(self) -> str:
         """Get formatted playbook context for system prompt.

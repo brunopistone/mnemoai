@@ -84,6 +84,7 @@ class ChatInterface:
             ("/model", "Override one model (LLM/vision/embeddings)"),
             ("/params", "Tune model inference params (temp, top_p, …)"),
             ("/mcp", "List configured MCP servers & tools"),
+            ("/skills [name]", "List installed skills (or preview one)"),
         ]),
         ("Conversation", [
             ("/clear", "Clear conversation context"),
@@ -107,6 +108,7 @@ class ChatInterface:
         ("/model", "Override one model (LLM/vision/embeddings)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/mcp", "List configured MCP servers & their tools"),
+        ("/skills", "List installed skills (/skills <name> to preview)"),
         ("/clear", "Clear conversation context"),
         ("/compact", "Summarize & shrink context (optional focus)"),
         ("/memory", "View persistent memory (/memory clear to wipe)"),
@@ -463,6 +465,45 @@ class ChatInterface:
             print("  (empty — the agent saves facts here as you work)")
         print()
 
+    def _handle_skills_command(self, arg: str) -> None:
+        """Handle ``/skills`` (list) and ``/skills <name>`` (preview a body).
+
+        Skills are authored ``SKILL.md`` instruction packs the model loads on
+        demand via the ``use_skill`` tool; this command lets the user see what's
+        installed and preview one. Reuses ``SkillStore``.
+        """
+        from mnemoai.client.memory.skill_store import SkillStore
+        from mnemoai.utils.paths import skills_dir
+
+        store = SkillStore()
+        name = arg.strip()
+
+        if name:
+            skill = store.load_body(name)
+            if skill is None:
+                available = ", ".join(n for n, _ in store.list_metadata()) or "(none)"
+                print(f"\nNo skill named '{name}'. Installed: {available}.\n")
+                return
+            print(f"\nSkill '{skill.name}' ({skill.path}):\n")
+            print(skill.body)
+            print()
+            return
+
+        skills, issues = store._scan()
+        print(f"\nInstalled skills ({skills_dir()}):")
+        if skills:
+            for s in skills:
+                print(f"  • {s.name} — {s.description}")
+            print("\n  Preview one with /skills <name>.")
+        else:
+            print("  (none — add one as <name>/SKILL.md here)")
+        # Surface rejected skills so a malformed one isn't silently invisible.
+        if issues:
+            print("\n  Skipped (fix and they'll load):")
+            for issue in issues:
+                print(f"  ✗ {issue.name} — {issue.reason}")
+        print()
+
     def _restart_in_place(self) -> None:
         """Restart the current process so reloaded config takes full effect.
 
@@ -595,6 +636,11 @@ class ChatInterface:
             # List configured MCP servers (built-in + external from mcp.json).
             if query.lower() == "/mcp":
                 self._print_mcp_status()
+                continue
+
+            # List installed skills, or preview one: /skills [name].
+            if query.lower() == "/skills" or query.lower().startswith("/skills "):
+                self._handle_skills_command(query[len("/skills"):].strip())
                 continue
 
             # View or clear the curated persistent memory (MEMORY.md).

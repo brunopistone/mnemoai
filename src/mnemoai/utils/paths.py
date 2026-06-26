@@ -12,6 +12,7 @@ find, back up, or relocate:
     │   ├── mcp.json                        # optional, user-created
     │   └── mcp.json.example                # bundled example (copied here to read)
     ├── plans/current_plan.json             # plan-mode state
+    ├── skills                              # skills folder
     ├── tasks/                              # background-task output
     └── {profile}/                          # per-user-profile data
         ├── conversations/  todos/  rag_*  chunk_cache_*  profile JSON
@@ -123,6 +124,18 @@ def seed_example_files() -> None:
             dest = mcp_dir() / mcp_example.name
             if not dest.exists():
                 shutil.copyfile(mcp_example, dest)
+        # Seed the bundled example skill(s) into the skills dir so the feature is
+        # discoverable out of the box. Only when the dir is empty (never clobber a
+        # user's skills); each skill is a directory copied whole.
+        skills_template_root = pkg_templates / "skills_example"
+        if skills_template_root.is_dir():
+            dest_root = skills_dir()
+            if not any(dest_root.iterdir()):
+                for skill_dir in skills_template_root.iterdir():
+                    if skill_dir.is_dir():
+                        dest = dest_root / skill_dir.name
+                        if not dest.exists():
+                            shutil.copytree(skill_dir, dest)
     except OSError:
         # Seeding examples is a convenience; never let it block startup.
         pass
@@ -131,6 +144,16 @@ def seed_example_files() -> None:
 def plans_dir() -> Path:
     """Directory for plan-mode state (created)."""
     d = app_home() / "plans"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def skills_dir() -> Path:
+    """Directory holding agent skills, one ``<name>/SKILL.md`` per skill (created).
+
+    Seeded with a bundled example on first run by :func:`seed_example_files`.
+    """
+    d = app_home() / "skills"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
