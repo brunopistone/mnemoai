@@ -41,6 +41,31 @@ _GREETING_RE = re.compile(
     r"good (morning|afternoon|evening)|bye|goodbye)\b[\s!.?]*$",
     re.IGNORECASE,
 )
+# Any of the deterministic content signals above (path, url, doc, image). A
+# query carrying one of these is doing real work, not trivial chit-chat.
+_SIGNAL_RES = (_IMAGE_EXT_RE, _URL_RE, _PATH_RE, _DOC_EXT_RE)
+
+
+def is_trivial_query(query: str) -> bool:
+    """True for a short, signal-free query that isn't worth orchestrating.
+
+    The orchestrator (decompose → workers → aggregate) only earns its overhead
+    on genuinely complex, multi-step tasks. A brief conversational prompt with no
+    file/URL/doc signal ("can you do it?", "please do it", "what do you think?")
+    should go straight to the normal call_model path — which binds the same tools
+    and has the empty-turn safety net — instead of being decomposed into a single
+    trivial subtask (which previously could surface a blank answer). Conservative:
+    only very short, signal-free queries qualify; anything substantial or carrying
+    a content signal is left to normal routing.
+    """
+    q = (query or "").strip()
+    if not q:
+        return True
+    if any(rx.search(q) for rx in _SIGNAL_RES):
+        return False
+    # Word-count gate: short prompts are chit-chat / clarifications. Real
+    # decomposable tasks are longer and more specific.
+    return len(q.split()) <= 6
 
 # Route definitions: maps route names to tool name lists.
 # None means all tools (fallback).

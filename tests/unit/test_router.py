@@ -8,7 +8,34 @@ silently (no scary WARNING every turn).
 
 from langchain_core.messages import AIMessage
 
-from mnemoai.client.agent.router import QueryRouter
+from mnemoai.client.agent.router import QueryRouter, is_trivial_query
+
+
+class TestIsTrivialQuery:
+    """Trivial, signal-free queries should bypass the orchestrator.
+
+    Regression: short conversational prompts ("can you do it?", "please do it")
+    classified as 'full' were decomposed into a single subtask in the worker
+    loop, which could surface a blank answer.
+    """
+
+    def test_short_chit_chat_is_trivial(self):
+        for q in ["Can you do it?", "Please do it", "what do you think?", "go ahead"]:
+            assert is_trivial_query(q) is True, q
+
+    def test_empty_is_trivial(self):
+        assert is_trivial_query("") is True
+        assert is_trivial_query("   ") is True
+
+    def test_substantial_query_not_trivial(self):
+        q = "Refactor the auth module to use JWT and update all the tests accordingly"
+        assert is_trivial_query(q) is False
+
+    def test_content_signal_overrides_shortness(self):
+        # A short query is NOT trivial if it carries a real content signal.
+        assert is_trivial_query("read config.yaml") is False
+        assert is_trivial_query("open https://x.com") is False
+        assert is_trivial_query("./run.py") is False
 
 
 class _StubModel:

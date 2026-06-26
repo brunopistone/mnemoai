@@ -299,3 +299,46 @@ def test_spinner_kept_running_through_hidden_reasoning():
     assert len(stops) == 1
     # The visible answer did get printed.
     assert "visible answer" in buf.getvalue()
+
+
+# --- Worker-loop (orchestrator) empty-turn salvage ---------------------------
+# Regression: a worker finishing with no tool calls and no visible content
+# (reasoning-only / empty turn) returned "" with nothing streamed to screen, so
+# the orchestrator surfaced a blank answer. _salvage_empty_worker_turn must
+# recover a visible reply, mirroring _call_model's guarantee.
+
+
+def _salvage_agent():
+    a = _agent()
+    a._start_spinner = lambda label="Thinking": None
+    a._stop_spinner = lambda: None
+    a._disable_reasoning = lambda: {}
+    a._restore_reasoning = lambda saved: None
+    return a
+
+
+def test_worker_salvage_retries_and_recovers_visible_answer():
+    a = _salvage_agent()
+    # The retry stream yields a real answer.
+    a._stream_response = lambda *args, **kw: (AIMessage(content="RECOVERED"), False)
+    msgs = [HumanMessage(content="please do it")]
+    out = a._salvage_empty_worker_turn(msgs, {}, object())
+    assert out == "RECOVERED"
+    # The recovered message is appended for saving.
+    assert any(getattr(m, "content", "") == "RECOVERED" for m in msgs)
+
+
+def test_worker_salvage_falls_back_when_retry_still_empty():
+    import contextlib
+    import io
+
+    a = _salvage_agent()
+    a._stream_response = lambda *args, **kw: (AIMessage(content=""), False)
+    msgs = [HumanMessage(content="please do it")]
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        out = a._salvage_empty_worker_turn(msgs, {}, object())
+    # Never empty — a visible fallback is returned AND printed.
+    assert out
+    assert "wasn't able to produce" in out
+    assert "wasn't able to produce" in buf.getvalue()

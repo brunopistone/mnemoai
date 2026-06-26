@@ -25,7 +25,7 @@ from mnemoai.client.agent.orchestrator import (
     parse_subtasks,
 )
 from mnemoai.client.agent.reasoning_utils import disable_reasoning, restore_reasoning
-from mnemoai.client.agent.router import ROUTE_TOOLS
+from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
@@ -267,6 +267,13 @@ class LangGraphAgent:
     def _route_after_classify(self, state: AgentState) -> str:
         """Route to orchestrator for 'full' tasks, agent otherwise.
 
+        A 'full' classification still goes to the normal call_model ``agent``
+        path when the query is trivial (short, signal-free chit-chat or a
+        clarification): orchestrating it into a single subtask adds overhead and
+        previously could surface a blank answer, while ``agent`` binds the same
+        tools and has the empty-turn safety net. Only substantive 'full' tasks
+        are actually decomposed.
+
         Args:
             state: Current agent state
 
@@ -274,7 +281,13 @@ class LangGraphAgent:
             "orchestrator" or "agent"
         """
         if state.get("route") == "full":
-            return "orchestrator"
+            query = ""
+            for msg in reversed(state.get("messages", [])):
+                if isinstance(msg, HumanMessage):
+                    query = str(msg.content)
+                    break
+            if not is_trivial_query(query):
+                return "orchestrator"
         return "agent"
 
     def _classify(self, state: AgentState) -> Dict[str, Any]:
@@ -535,8 +548,15 @@ class LangGraphAgent:
 
             # If no tool calls, worker is done
             if not isinstance(response, AIMessage) or not response.tool_calls:
-                self._stop_spinner()
                 visible = self._extract_visible(response.content)
+                # Reasoning-only / empty turn: nothing was streamed to the
+                # screen, so the orchestrator would surface a blank answer.
+                # Salvage a visible reply (same guarantee as _call_model).
+                if not visible:
+                    visible = self._salvage_empty_worker_turn(
+                        worker_messages, config, worker_model
+                    )
+                self._stop_spinner()
                 # Return non-system messages for conversation saving
                 saveable = [
                     m for m in worker_messages if not isinstance(m, SystemMessage)
@@ -617,6 +637,59 @@ class LangGraphAgent:
         )
         result = f"{partial}\n\n{truncated_note}" if partial else truncated_note
         return result, saveable
+
+    def _salvage_empty_worker_turn(
+        self, worker_messages: List[BaseMessage], config: dict, worker_model
+    ) -> str:
+        """Recover a visible answer when a worker turn produced none.
+
+        A worker can finish with no tool calls and no visible text — typically a
+        reasoning model that streamed only hidden thinking on a trivial prompt.
+        Nothing was streamed to the screen, so the orchestrator would otherwise
+        surface a blank answer. Mirror :meth:`_call_model`'s guarantee: retry
+        once with reasoning disabled (streamed, so the answer prints), and if
+        that still yields nothing, print and return a visible fallback. The
+        recovered message is appended to ``worker_messages`` so it's saved.
+
+        Returns the visible answer text (never empty).
+        """
+        logger.debug("Worker produced no visible content; salvaging.")
+        retry_messages = list(worker_messages) + [
+            HumanMessage(
+                content=(
+                    "You provided reasoning but no visible response. "
+                    "Please provide your answer."
+                )
+            )
+        ]
+        self._start_spinner()
+        saved = self._disable_reasoning()
+        try:
+            retry_response, _ = self._stream_response(
+                retry_messages,
+                config,
+                print_reasoning=False,
+                model=worker_model,
+                mark_answer=True,
+            )
+        finally:
+            self._restore_reasoning(saved)
+
+        if retry_response is not None:
+            visible = self._extract_visible(retry_response.content)
+            if visible:
+                worker_messages.append(retry_response)
+                return visible
+
+        # Still nothing usable: surface a fallback so the turn is never silent.
+        fallback = (
+            "I wasn't able to produce a response for that. "
+            "Could you rephrase or give me a bit more detail?"
+        )
+        self._stop_spinner()
+        print(f"\n{fallback}", flush=True)
+        worker_messages.append(AIMessage(content=fallback))
+        return fallback
 
     def _aggregate_results(
         self,
