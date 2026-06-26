@@ -269,6 +269,30 @@ def test_describe_image_reachable_on_every_route():
     assert "describe_image" not in [t.name for t in agent.external_tools]
 
 
+def test_use_skill_reachable_on_every_route():
+    # use_skill loads a skill on demand; a skill-matching request can classify as
+    # simple_qa (e.g. "write a commit message"), so the loader must be bound on
+    # EVERY route — else the skill could never trigger.
+    from mnemoai.client.agent.agent import LangGraphAgent
+
+    assert "use_skill" in LangGraphAgent._ALWAYS_AVAILABLE_TOOLS
+
+    class _StubModel:
+        def bind_tools(self, tools):
+            return self
+
+    tools = [_FakeTool("fs_read"), _FakeTool("use_skill")]
+    routes = {"simple_qa": [], "code": ["fs_read"], "full": None}
+    agent = LangGraphAgent(
+        model=_StubModel(), tools=tools, router=object(), tool_routes=routes,
+    )
+    by_route = {k: [t.name for t in v] for k, v in agent.tools_by_route.items()}
+    for route in ("simple_qa", "code", "full"):
+        assert "use_skill" in by_route[route], route
+    # It's a meta tool, not an external one.
+    assert "use_skill" not in [t.name for t in agent.external_tools]
+
+
 def test_route_table_has_no_orphans_or_stale_refs():
     """Every route-named tool must exist, and every real tool must be reachable.
 
@@ -290,8 +314,8 @@ def test_route_table_has_no_orphans_or_stale_refs():
         "get_task_status", "git_commit_safe", "git_safe", "git_status_safe",
         "glob_search", "grep_search", "list_background_tasks", "list_documents",
         "memory", "present_plan", "search_in_documents", "start_background_task",
-        "todo_clear", "todo_read", "todo_write", "wait_for_task", "web_crawler",
-        "web_search",
+        "todo_clear", "todo_read", "todo_write", "use_skill", "wait_for_task",
+        "web_crawler", "web_search",
     }
     meta = LangGraphAgent._ALWAYS_AVAILABLE_TOOLS
 

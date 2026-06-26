@@ -9,6 +9,42 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-06-26
+
+### Added
+
+- **Agent Skills** — authored, on-demand instruction packs (a faithful port of
+  Claude Code's Skills). A skill is a directory `~/.mnemoai/skills/<name>/SKILL.md`
+  with YAML frontmatter (`name` + `description`) and a markdown body, optionally
+  bundling `reference.md` / `scripts/`. Skills fill the gap between always-on
+  context (system prompt, `MEMORY.md`) and learned tactics (the ACE playbook):
+  *authored procedures the model follows when a task matches*.
+  - **Three-tier progressive disclosure:** (1) only each skill's name+description
+    is injected into the system prompt at session start (cheap, always-on — the
+    `<available_skills>` block); (2) the full body is loaded into context **only
+    when the model calls the new `use_skill` tool** (its return value becomes the
+    body); (3) bundled `reference.md`/`scripts/` are read/run on demand via the
+    existing `fs_read`/`execute_bash` tools. Installing many skills stays cheap.
+  - `use_skill` is bound on **every** route (it's in `_ALWAYS_AVAILABLE_TOOLS`),
+    so a skill-matching request that classifies as `simple_qa` (e.g. "write a
+    commit message") can still trigger it.
+  - The metadata block is **re-injected after conversation compaction** (which
+    rebuilds the system prompt fresh), so skills don't vanish mid-session.
+  - **`/skills`** lists installed skills; a malformed skill is shown under
+    *Skipped* with the reason (missing `description`, bad YAML, over-long
+    description) instead of being silently ignored — the authoring-feedback loop.
+    `/skills <name>` previews a skill's full body.
+  - Two skills are **seeded on first run**: a `commit-message` example, and a
+    **`skill-creator`** meta-skill — ask the assistant to "create a skill for X"
+    and it loads that guidance and authors a well-formed `SKILL.md` for you.
+  - Claude-Code frontmatter extras (`license`, `allowed-tools`, `metadata`,
+    `compatibility`) are tolerated so CC-authored skills parse; only
+    `name`+`description` are required.
+  - New module `client/memory/skill_store.py` (`SkillStore`, shared by the
+    server tool and the client like `MemoryStore`), `server/tools/skill_tool.py`,
+    `utils/paths.py:skills_dir()` + seeding. Gated by `ENABLE_SKILLS` (default
+    true). See the Skills section in `docs/usage.md`.
+
 ## [0.8.21] — 2026-06-25
 
 ### Fixed

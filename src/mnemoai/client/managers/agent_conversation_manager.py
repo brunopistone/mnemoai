@@ -315,13 +315,37 @@ class AgentConversationManager:
         self.previous_summary = summary_block
 
         original_system_prompt = config.system_prompt
-        if original_system_prompt:
-            current_date = date.today().strftime("%Y-%m-%d")
-            original_system_prompt = original_system_prompt.format(
-                current_date=current_date
-            )
-            return f"{original_system_prompt}\n\n{summary_block}"
-        return summary_block
+        if not original_system_prompt:
+            return summary_block
+
+        current_date = date.today().strftime("%Y-%m-%d")
+        original_system_prompt = original_system_prompt.format(
+            current_date=current_date
+        )
+        # Re-inject the tier-1 skills block: this rebuild re-fetches the base
+        # prompt fresh, dropping all session-start injections, so without this
+        # the <available_skills> block would silently vanish after compaction
+        # and the model would forget which skills it can load.
+        parts = [original_system_prompt]
+        skills_block = self._skills_block()
+        if skills_block:
+            parts.append(skills_block)
+        parts.append(summary_block)
+        return "\n\n".join(parts)
+
+    def _skills_block(self) -> str:
+        """Build the tier-1 ``<available_skills>`` block (or "" when disabled/empty).
+
+        Mirrors the client's session-start injection so skills survive compaction.
+        """
+        if not config.get("ENABLE_SKILLS", True):
+            return ""
+        from mnemoai.client.memory.skill_store import (
+            SkillStore,
+            format_available_skills,
+        )
+
+        return format_available_skills(SkillStore().list_metadata())
 
     async def manage_messages(self, client: Any, model: Any, agent: Any) -> None:
         """Auto-compact: summarize if the conversation exceeds the token limit.

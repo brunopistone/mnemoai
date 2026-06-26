@@ -107,6 +107,11 @@ EPISODIC_MEMORY:
 ENABLE_MEMORY: true
 MEMORY:
   MAX_CHARS: 2200   # hard cap; agent must consolidate when full
+# Agent Skills: authored SKILL.md instruction packs under ~/.mnemoai/skills/
+# (one <name>/SKILL.md per skill). Only each skill's name+description is injected
+# into the system prompt; the model loads a full skill body on demand via the
+# use_skill tool. A bundled example skill is seeded on first run.
+ENABLE_SKILLS: true
 # ACE Playbook Configuration (Agentic Context Engineering)
 ENABLE_PLAYBOOK: true
 PLAYBOOK:

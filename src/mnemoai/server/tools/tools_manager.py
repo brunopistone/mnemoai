@@ -98,6 +98,7 @@ class ToolManager:
         from .memory_tool import register_memory_tools
         from .plan_mode import register_plan_mode_tools
         from .rag import register_rag_tools
+        from .skill_tool import register_skill_tools
         from .todo_manager import register_todo_tools
         from .web_crawler import register_web_crawler_tools
         from .web_search import register_web_search_tools
@@ -118,6 +119,9 @@ class ToolManager:
 
         if config.get("ENABLE_MEMORY", True):
             register_memory_tools(mcp)
+
+        if config.get("ENABLE_SKILLS", True):
+            register_skill_tools(mcp)
 
         if config.get("ENABLE_RAG", False):
             register_rag_tools(mcp)
