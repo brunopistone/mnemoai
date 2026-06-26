@@ -9,6 +9,27 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.9.1] — 2026-06-26
+
+### Fixed
+
+- **Trivial queries no longer produce a blank answer.** A short conversational
+  prompt ("can you do it?", "please do it") could be classified as `full` and
+  sent through the orchestrator, which decomposed it into a single subtask run by
+  the worker loop. That loop — unlike the normal `call_model` path — had **no
+  empty-turn salvage**, so when a reasoning model streamed only hidden thinking
+  (no visible text), nothing was printed and the turn ended silently after the
+  `[Step 1/1]` / `[Context: …]` lines. Two fixes:
+  - **Worker-loop salvage:** `_run_worker_loop` now mirrors `_call_model`'s
+    guarantee — when a worker finishes with no visible content, it retries once
+    with reasoning disabled (streamed, so the answer prints) and falls back to a
+    visible message if still empty. The orchestrator path can no longer surface a
+    blank answer.
+  - **Smarter orchestrator gating:** a trivial, signal-free query classified as
+    `full` now goes to the normal `call_model` path (which binds the same tools
+    and already has the empty-turn safety net) instead of being decomposed. Only
+    substantive tasks are orchestrated (`router.is_trivial_query`).
+
 ## [0.9.0] — 2026-06-26
 
 ### Added
@@ -571,7 +592,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/brunopistone/mnemoai/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/brunopistone/mnemoai/compare/v0.8.21...v0.9.0
 [0.8.21]: https://github.com/brunopistone/mnemoai/compare/v0.8.20...v0.8.21
 [0.8.20]: https://github.com/brunopistone/mnemoai/compare/v0.8.19...v0.8.20
