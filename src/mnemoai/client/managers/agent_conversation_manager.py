@@ -515,7 +515,14 @@ class AgentConversationManager:
             new_system_content = self._build_system_with_summary(clean_summary)
 
             # Keep recent turns verbatim; drop only the summarized older ones.
-            agent.messages = list(recent)
+            # Sanitize the kept window so a tool call/result pair severed by the
+            # split (or an orphan inherited from earlier history) can't break the
+            # next turn with "No tool output found for function call …".
+            kept = list(recent)
+            sanitize = getattr(agent, "_sanitize_tool_pairs", None)
+            if callable(sanitize):
+                kept = sanitize(kept)
+            agent.messages = kept
             client.system_prompt = new_system_content
             agent.system_prompt = new_system_content
             client.spinner.stop()
