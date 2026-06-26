@@ -61,6 +61,10 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   unchanged — only the handful of explicitly configured external tools ride
   along everywhere.)
 
+## [0.8.20] — 2026-06-25
+
+### Fixed
+
 - **Closed the last "stuck"-looking gap: the final answer after the last tool.**
   0.8.19 added a spinner _during_ tool execution, but the model call that turns
   the tool results into the final reply (`_call_model`) relied on the spinner
@@ -84,6 +88,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   `Searching the web`, `Writing /path/to/file`) for the full duration of each
   tool call, at both execution chokepoints (main loop and orchestrator worker
   loop). The spinner is always stopped afterward, even if the tool errors.
+
+## [0.8.18] — 2026-06-25
 
 ### Changed
 
@@ -176,6 +182,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   be displayed — visible answer text, or reasoning shown in verbose mode — and
   keeps spinning through hidden reasoning. The streaming callback likewise
   ignores empty/whitespace-only tokens.
+
+## [0.8.14] — 2026-06-24
 
 ### Fixed
 
@@ -563,7 +571,12 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.8.17...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/brunopistone/mnemoai/compare/v0.8.21...v0.9.0
+[0.8.21]: https://github.com/brunopistone/mnemoai/compare/v0.8.20...v0.8.21
+[0.8.20]: https://github.com/brunopistone/mnemoai/compare/v0.8.19...v0.8.20
+[0.8.19]: https://github.com/brunopistone/mnemoai/compare/v0.8.18...v0.8.19
+[0.8.18]: https://github.com/brunopistone/mnemoai/compare/v0.8.17...v0.8.18
 [0.8.17]: https://github.com/brunopistone/mnemoai/compare/v0.8.16...v0.8.17
 [0.8.16]: https://github.com/brunopistone/mnemoai/compare/v0.8.15...v0.8.16
 [0.8.15]: https://github.com/brunopistone/mnemoai/compare/v0.8.14...v0.8.15
