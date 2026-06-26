@@ -9,6 +9,24 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-26
+
+### Fixed
+
+- **Orphaned tool call/result pairs no longer wedge the conversation.** A turn
+  cut short (recursion limit, stream error, interrupt) or a history slice could
+  leave an assistant `tool_call` with no matching tool result (or vice-versa)
+  persisted in the conversation. Strict providers — the OpenAI/Mantle Responses
+  API — then rejected **every** subsequent turn with "No tool output found for
+  function call …" (or the mirror, "No tool call found for function call
+  output …"), with retries and the non-streaming fallback all re-sending the
+  same broken history and failing identically. Added `_sanitize_tool_pairs`: an
+  id-based repair that drops orphaned tool calls (keeping any visible text on
+  that turn) and orphaned tool results before each model call, and on the kept
+  window during compaction so the persisted history is repaired too. Extends the
+  existing `_safe_tool_boundary` guard (which only covered the orphaned-*result*
+  case at the compaction split) to both orphan directions, anywhere in history.
+
 ## [0.9.1] — 2026-06-26
 
 ### Fixed
@@ -592,7 +610,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/brunopistone/mnemoai/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/brunopistone/mnemoai/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/brunopistone/mnemoai/compare/v0.8.21...v0.9.0
 [0.8.21]: https://github.com/brunopistone/mnemoai/compare/v0.8.20...v0.8.21

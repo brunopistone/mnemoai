@@ -281,6 +281,30 @@ class TestToolBoundarySafety:
         if agent.messages:
             assert getattr(agent.messages[0], "type", None) != "tool"
 
+    def test_compact_sanitizes_orphaned_call_in_kept_window(self, monkeypatch):
+        # An orphaned assistant tool-call (no matching result) inherited in the
+        # kept window must be repaired so the next turn doesn't 400 with
+        # "No tool output found for function call …".
+        import mnemoai.client.managers.agent_conversation_manager as mod
+        from mnemoai.client.agent.agent import LangGraphAgent
+
+        monkeypatch.setattr(
+            mod.config, "get", _llm_config(MANUAL_COMPACT_KEEP_RECENT=2)
+        )
+        mgr = self._mgr()
+        orphan = AIMessage(content="", tool_calls=[{"name": "x", "args": {}, "id": "z"}])
+        msgs = [HumanMessage("q1"), AIMessage("a1"), orphan, HumanMessage("q2")]
+
+        # A fake agent that exposes the real sanitizer (as the live agent does).
+        agent = _FakeAgent(list(msgs))
+        agent._sanitize_tool_pairs = staticmethod(LangGraphAgent._sanitize_tool_pairs)
+        _run(mgr.compact(_FakeClient(), _FakeAsyncModel(), agent))
+
+        # No surviving assistant message may carry an unmatched tool call.
+        for m in agent.messages:
+            for c in getattr(m, "tool_calls", []) or []:
+                assert c["id"] != "z", "orphaned tool call survived compaction"
+
 
 class TestStripAnalysis:
     def test_strips_analysis_block(self):
