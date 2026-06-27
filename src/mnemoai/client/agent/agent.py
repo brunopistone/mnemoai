@@ -1165,18 +1165,29 @@ class LangGraphAgent:
             return f"Writing {path}" if path else "Writing file"
         labels = {
             "web_search": "Searching the web",
-            "web_crawl": "Fetching web page",
             "describe_image": "Analyzing image",
             "start_background_task": "Starting background task",
         }
         return labels.get(tool_name, f"Running {tool_name}")
 
-    def _invoke_tool(self, tool, tool_name: str, tool_args: dict):
-        """Invoke a tool while showing a progress spinner, then stop it.
+    # Tools that print their OWN live progress to the terminal (e.g. crawl4ai's
+    # [INIT]/[FETCH]/[SCRAPE] lines, emitted on stderr by the web_crawler
+    # subprocess). Animating our spinner over them collides on the same lines —
+    # so for these we keep the spinner stopped and let the tool's output show.
+    _SELF_REPORTING_TOOLS = {"web_crawler"}
 
-        The spinner animates with a per-tool label for the duration of the call
-        so a long-running tool never presents a frozen, blank terminal.
+    def _invoke_tool(self, tool, tool_name: str, tool_args: dict):
+        """Invoke a tool, showing a progress spinner unless the tool reports itself.
+
+        Most tools give no feedback while running, so a per-tool spinner keeps a
+        slow call from looking frozen. Tools in ``_SELF_REPORTING_TOOLS`` emit
+        their own live progress; we leave the spinner stopped for those so the
+        two don't overwrite each other on the terminal.
         """
+        if tool_name in self._SELF_REPORTING_TOOLS:
+            self._stop_spinner()
+            return tool.invoke(tool_args)
+
         self._start_spinner(self._tool_progress_label(tool_name, tool_args))
         try:
             return tool.invoke(tool_args)

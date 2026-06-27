@@ -9,6 +9,21 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-06-27
+
+### Fixed
+
+- **Web-crawler progress no longer collides with the loading spinner.** The
+  per-tool progress spinner added in 0.8.19 animated (carriage-return redraws)
+  _during_ a `web_crawler` call, while crawl4ai writes its own live
+  `[INIT]/[FETCH]/[SCRAPE]/[COMPLETE]` progress to the terminal — the two
+  overwrote each other on the same lines (e.g. `⠏ Running web_crawler…[FETCH]…`).
+  Tools that report their own progress are now listed in
+  `_SELF_REPORTING_TOOLS`, and `_invoke_tool` keeps the spinner **stopped** for
+  them so their output shows cleanly (as it did before 0.8.19), while every other
+  tool still gets the progress spinner. Also fixed a stale progress-label key
+  (`web_crawl` → the real tool name is `web_crawler`).
+
 ## [0.9.2] — 2026-06-26
 
 ### Fixed
@@ -24,7 +39,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   id-based repair that drops orphaned tool calls (keeping any visible text on
   that turn) and orphaned tool results before each model call, and on the kept
   window during compaction so the persisted history is repaired too. Extends the
-  existing `_safe_tool_boundary` guard (which only covered the orphaned-*result*
+  existing `_safe_tool_boundary` guard (which only covered the orphaned-_result_
   case at the compaction split) to both orphan directions, anywhere in history.
 
 ## [0.9.1] — 2026-06-26
@@ -57,7 +72,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   with YAML frontmatter (`name` + `description`) and a markdown body, optionally
   bundling `reference.md` / `scripts/`. Skills fill the gap between always-on
   context (system prompt, `MEMORY.md`) and learned tactics (the ACE playbook):
-  *authored procedures the model follows when a task matches*.
+  _authored procedures the model follows when a task matches_.
   - **Three-tier progressive disclosure:** (1) only each skill's name+description
     is injected into the system prompt at session start (cheap, always-on — the
     `<available_skills>` block); (2) the full body is loaded into context **only
@@ -70,7 +85,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   - The metadata block is **re-injected after conversation compaction** (which
     rebuilds the system prompt fresh), so skills don't vanish mid-session.
   - **`/skills`** lists installed skills; a malformed skill is shown under
-    *Skipped* with the reason (missing `description`, bad YAML, over-long
+    _Skipped_ with the reason (missing `description`, bad YAML, over-long
     description) instead of being silently ignored — the authoring-feedback loop.
     `/skills <name>` previews a skill's full body.
   - Two skills are **seeded on first run**: a `commit-message` example, and a
@@ -610,7 +625,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/brunopistone/mnemoai/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/brunopistone/mnemoai/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/brunopistone/mnemoai/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/brunopistone/mnemoai/compare/v0.8.21...v0.9.0

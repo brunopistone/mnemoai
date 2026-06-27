@@ -93,6 +93,18 @@ class TestInvokeToolSpinner:
         # The finally clause must still have stopped the spinner.
         assert ("stop", None) in events
 
+    def test_self_reporting_tool_does_not_animate_spinner(self):
+        # web_crawler prints its own live progress; the spinner must stay
+        # stopped (not start) so the two don't collide on the terminal.
+        a, events = self._spy_agent()
+        out = a._invoke_tool(_FakeTool(result="page"), "web_crawler", {"url": "http://x"})
+        assert out == "page"
+        assert ("stop", None) in events
+        assert not any(e[0] == "start" for e in events)
+
+    def test_web_crawler_is_self_reporting(self):
+        assert "web_crawler" in LangGraphAgent._SELF_REPORTING_TOOLS
+
 
 class _AnswerResponse:
     """Minimal stand-in for an AIMessage with visible content, no tool calls."""
