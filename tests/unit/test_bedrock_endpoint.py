@@ -184,6 +184,61 @@ class TestMantleModelType:
         )
         assert patch_mantle["use_responses_api"] is True
 
+    def test_responses_effort_requests_reasoning_summary(
+        self, patch_mantle, monkeypatch
+    ):
+        # On the responses protocol, REASONING_EFFORT must become a `reasoning`
+        # object that also asks for a summary — effort alone yields hidden
+        # reasoning the user can't see.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.5",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+                "REASONING_EFFORT": "high",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle.get("reasoning") == {"effort": "high", "summary": "auto"}
+        # The bare effort enum must NOT also be set (would double-specify).
+        assert "reasoning_effort" not in patch_mantle
+
+    def test_chat_completions_effort_stays_plain_enum(self, patch_mantle, monkeypatch):
+        # Chat Completions takes the plain reasoning_effort enum, no summary obj.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "qwen.qwen3-32b",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_PROTOCOL": "chat_completions",
+                "REASONING_EFFORT": "high",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle.get("reasoning_effort") == "high"
+        assert "reasoning" not in patch_mantle
+
+    def test_extra_params_reasoning_overrides_summary_default(
+        self, patch_mantle, monkeypatch
+    ):
+        # An explicit EXTRA_PARAMS.reasoning wins over the auto summary default.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "openai.gpt-5.5",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "responses",
+                "REASONING_EFFORT": "high",
+                "EXTRA_PARAMS": {"reasoning": {"effort": "low", "summary": "detailed"}},
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle.get("reasoning") == {"effort": "low", "summary": "detailed"}
+
     def test_anthropic_protocol_uses_chatanthropic(self, patch_mantle, monkeypatch):
         ctrl = _make_llm_controller(
             monkeypatch,
@@ -611,7 +666,9 @@ class TestExtraParamsPassthrough:
 class TestReasoningEffortFirstClass:
     """REASONING_EFFORT as a first-class, provider-translated knob.
 
-    - Mantle responses / direct OpenAI: forwarded as `reasoning_effort`.
+    - Mantle responses: becomes a `reasoning` object that also requests a
+      summary (`{"effort": …, "summary": "auto"}`) so the reasoning is visible.
+    - Mantle chat_completions / direct OpenAI: forwarded as `reasoning_effort`.
     - Mantle anthropic / direct Bedrock / direct Anthropic: mapped to a
       `thinking` budget (token budget, not an effort enum).
     - LiteLLM: forwarded via model_kwargs (LiteLLM translates per backend).
@@ -631,7 +688,8 @@ class TestReasoningEffortFirstClass:
         )
         ctrl.initialize_model()
         assert patch_mantle["_class"] == "ChatOpenAI"
-        assert patch_mantle["reasoning_effort"] == "high"
+        # responses protocol: effort + auto summary so reasoning is visible.
+        assert patch_mantle["reasoning"] == {"effort": "high", "summary": "auto"}
 
     def test_mantle_anthropic_reasoning_effort_maps_to_thinking(
         self, patch_mantle, monkeypatch
@@ -656,6 +714,37 @@ class TestReasoningEffortFirstClass:
         # max_tokens bumped above the budget; temperature dropped.
         assert patch_mantle["max_tokens"] > 16384
         assert "temperature" not in patch_mantle
+
+    def test_direct_anthropic_effort_alone_enables_thinking(
+        self, patch_mantle, monkeypatch
+    ):
+        # Direct TYPE: anthropic — REASONING_EFFORT alone (no REASONING: true)
+        # enables extended thinking, matching the OpenAI responses behavior.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "claude-opus-4-8",
+                "TYPE": "anthropic",
+                "REASONING_EFFORT": "high",
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert patch_mantle["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+        assert patch_mantle["max_tokens"] > 16384
+        assert "temperature" not in patch_mantle
+
+    def test_direct_anthropic_no_reasoning_no_thinking(
+        self, patch_mantle, monkeypatch
+    ):
+        # Neither REASONING nor REASONING_EFFORT -> thinking stays off.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {"NAME": "claude-opus-4-8", "TYPE": "anthropic", "MAX_TOKENS": 4096},
+        )
+        ctrl.initialize_model()
+        assert "thinking" not in patch_mantle
 
     def test_extra_params_overrides_reasoning_effort(self, patch_mantle, monkeypatch):
         ctrl = _make_llm_controller(
@@ -696,3 +785,42 @@ class TestReasoningEffortFirstClass:
         )
         ctrl.initialize_model()
         assert cap["model_kwargs"]["reasoning_effort"] == "medium"
+
+    def test_direct_openai_responses_requests_summary(
+        self, patch_mantle, monkeypatch
+    ):
+        # Direct TYPE: openai on the responses protocol must use the Responses
+        # API and request a reasoning summary, mirroring Mantle responses.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "gpt-5.5",
+                "TYPE": "openai",
+                "API_PROTOCOL": "responses",
+                "REASONING_EFFORT": "high",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatOpenAI"
+        assert patch_mantle["use_responses_api"] is True
+        assert patch_mantle["reasoning"] == {"effort": "high", "summary": "auto"}
+        # No bare reasoning_effort left in model_kwargs (would double-specify).
+        assert "reasoning_effort" not in (patch_mantle.get("model_kwargs") or {})
+
+    def test_direct_openai_chat_completions_stays_plain(
+        self, patch_mantle, monkeypatch
+    ):
+        # Default (chat_completions): plain reasoning_effort enum, no Responses
+        # API, no reasoning summary object.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "o3",
+                "TYPE": "openai",
+                "REASONING_EFFORT": "high",
+            },
+        )
+        ctrl.initialize_model()
+        assert "use_responses_api" not in patch_mantle
+        assert "reasoning" not in patch_mantle
+        assert patch_mantle["model_kwargs"]["reasoning_effort"] == "high"

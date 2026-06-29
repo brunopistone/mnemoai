@@ -85,7 +85,10 @@ _LLM = {
             _p("PRESENCE_PENALTY", "presence_penalty", "presence_penalty"),
             _p("REASONING_EFFORT", "reasoning_effort", "reasoning_effort", "model_kwargs"),
         ],
-        "connection": set(),
+        # API_PROTOCOL selects chat_completions (default) vs the Responses API;
+        # on `responses`, REASONING_EFFORT is sent as reasoning={effort, summary}
+        # so the reasoning summary is returned and shown (handled inline).
+        "connection": {"API_PROTOCOL"},
         "special": {"STREAM"},
     },
     "anthropic": {

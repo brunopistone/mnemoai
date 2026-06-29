@@ -165,15 +165,32 @@ def build_mantle_model(
         kwargs["max_tokens"] = max_tokens
     if top_p is not None:
         kwargs["top_p"] = top_p
-    # REASONING_EFFORT is a first-class ChatOpenAI arg on the OpenAI-compatible
-    # protocols (effort enum forwarded as-is). EXTRA_PARAMS overrides it below.
-    if reasoning_effort:
-        kwargs["reasoning_effort"] = reasoning_effort
+    # Reasoning. The two OpenAI-compatible protocols differ in how reasoning is
+    # exposed, so they're handled differently:
+    #
+    #   responses  -> the Responses API can return a *summary* of the model's
+    #     reasoning, but ONLY if asked (reasoning={"summary": "auto"}); effort
+    #     alone produces hidden reasoning you can't see. So when an effort is set
+    #     we request both, as a `reasoning` object (a first-class ChatOpenAI
+    #     field), and the agent's extractor surfaces the streamed summary.
+    #   chat_completions -> the Chat Completions API takes the plain
+    #     `reasoning_effort` enum and exposes no readable summary.
+    #
+    # EXTRA_PARAMS wins over both (so a user can set their own `reasoning`/
+    # `reasoning_effort`/`summary` and we don't clobber it).
+    extra_sets_reasoning = "reasoning" in extra or "reasoning_effort" in extra
+    if reasoning_effort and not extra_sets_reasoning:
+        if protocol == "responses":
+            kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
+        else:
+            kwargs["reasoning_effort"] = reasoning_effort
     # Generic passthrough: merge EXTRA_PARAMS into the request body so knobs the
     # registry doesn't model (reasoning_effort, reasoning={...}, verbosity, …)
-    # reach the API. reasoning_effort is a first-class ChatOpenAI arg, so lift it
-    # out of model_kwargs to avoid a "specified in both" error.
+    # reach the API. `reasoning` and `reasoning_effort` are first-class ChatOpenAI
+    # args, so lift them out of model_kwargs to avoid a "specified in both" error.
     if extra:
+        if "reasoning" in extra:
+            kwargs["reasoning"] = extra.pop("reasoning")
         if "reasoning_effort" in extra:
             kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
         if extra:

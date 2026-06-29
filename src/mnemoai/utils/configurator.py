@@ -595,7 +595,11 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
             _get_field(text, section, "INPUT_FORMAT") or "openai_chat",
         ) or "openai_chat"
         text = _set_field(text, section, "INPUT_FORMAT", fmt)
-    if "API_PROTOCOL" in allowed:
+    if "API_PROTOCOL" in allowed and provider == "mantle":
+        # Mantle's protocol is a required, 3-way choice the configurator walks
+        # through. For direct OpenAI, API_PROTOCOL is an optional advanced
+        # opt-in (chat_completions default vs responses) the user sets by hand,
+        # so the configurator doesn't prompt for it.
         text = _prompt_mantle_protocol(text, section)
     if provider == "litellm":
         if "API_BASE" in allowed:
