@@ -142,6 +142,10 @@ class LangGraphAgent:
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
         self._code_formatter = CodeFormatter()
+        # Confirmation categories the user chose to trust for this session
+        # (via the "a = allow" option at a Proceed? prompt). Skips re-prompting
+        # for that whole category until the process restarts.
+        self._trusted_confirm_categories: set = set()
         self.router = router
         self.orchestrator_enabled = orchestrator_enabled and router is not None
         # Bound on the model<->tool loop. Claude Code has no hard step cap —
@@ -1338,20 +1342,35 @@ class LangGraphAgent:
         return chunk_content, reasoning_content
 
     @staticmethod
-    def _format_tool_call(tool_call: dict) -> str:
+    def _elide_middle(text: str, limit: int = 72) -> str:
+        """Shorten ``text`` to ``limit`` chars keeping BOTH ends.
+
+        A long value (e.g. a shell command or a path) is most informative at its
+        head AND tail — the program/path at the front and the meaningful
+        subcommand/flags at the end. Middle elision (``head…tail``) preserves
+        both, unlike a plain head cut that hides the tail.
+        """
+        if len(text) <= limit:
+            return text
+        keep = limit - 1  # room for the ellipsis
+        head = (keep + 1) // 2
+        tail = keep // 2
+        return f"{text[:head]}…{text[-tail:]}"
+
+    @classmethod
+    def _format_tool_call(cls, tool_call: dict) -> str:
         """Compact one-line ``name(arg=value, …)`` rendering of a tool call.
 
-        Argument values are stringified and truncated so a large payload (e.g.
-        file content for a write) doesn't flood the marker line.
+        Argument values are stringified and middle-elided so a large payload
+        (e.g. file content for a write, or a long command) doesn't flood the
+        marker line while keeping both informative ends visible.
         """
         name = tool_call.get("name", "tool")
         args = tool_call.get("args") or {}
         parts = []
         for key, value in args.items():
             text = str(value).replace("\n", " ")
-            if len(text) > 60:
-                text = text[:57] + "..."
-            parts.append(f"{key}={text}")
+            parts.append(f"{key}={cls._elide_middle(text)}")
         return f"{name}({', '.join(parts)})"
 
     # Matches a key that is really a ``field="value"`` (or field='value', or
@@ -1507,7 +1526,8 @@ class LangGraphAgent:
         don't hang.
         """
         if tool_name in self._CONFIRM_BASH_TOOLS:
-            toggle, toggle_default, header, detail = (
+            category, toggle, toggle_default, header, detail = (
+                "bash",
                 "REQUIRE_BASH_CONFIRMATION",
                 True,
                 "▶ Run shell command?",
@@ -1520,7 +1540,8 @@ class LangGraphAgent:
                 return True
             path = tool_args.get("path", "")
             op = tool_args.get("command", "edit")  # fs_write: create/str_replace/…
-            toggle, toggle_default, header, detail = (
+            category, toggle, toggle_default, header, detail = (
+                "write",
                 "REQUIRE_WRITE_CONFIRMATION",
                 True,
                 "▶ Write to file?",
@@ -1532,7 +1553,8 @@ class LangGraphAgent:
             if action not in ("add", "replace", "remove"):
                 return True
             text = tool_args.get("text") or tool_args.get("old_text") or ""
-            toggle, toggle_default, header, detail = (
+            category, toggle, toggle_default, header, detail = (
+                "memory",
                 "REQUIRE_MEMORY_CONFIRMATION",
                 False,
                 "▶ Update memory?",
@@ -1543,17 +1565,27 @@ class LangGraphAgent:
 
         if not config.get(toggle, toggle_default):
             return True
+        # Already trusted for this session (user answered "a" earlier).
+        trusted = getattr(self, "_trusted_confirm_categories", None)
+        if trusted is not None and category in trusted:
+            return True
         if not sys.stdin.isatty():
             return True  # non-interactive: can't prompt, don't block
 
         self._stop_spinner()
-        # Yellow header + the action detail, then a strict y/N prompt.
+        # Yellow header + the action detail, then a strict y/N/a prompt.
+        # "a" = allow this whole category for the rest of the session.
         print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
         try:
-            answer = input("  Proceed? (y/N): ").strip().lower()
+            answer = input("  Proceed? (y/N/a=allow all this session): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             answer = ""
+        if answer in ("a", "all", "always"):
+            if not hasattr(self, "_trusted_confirm_categories"):
+                self._trusted_confirm_categories = set()
+            self._trusted_confirm_categories.add(category)
+            return True
         return answer in ("y", "yes")
 
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:

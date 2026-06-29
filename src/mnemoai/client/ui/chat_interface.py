@@ -62,9 +62,29 @@ class ChatInterface:
         )
 
         try:
-            return session.prompt(HTML("<ansiblue>></ansiblue> "))
+            return session.prompt(HTML(self._prompt_html()))
         except KeyboardInterrupt:
             raise
+
+    def _prompt_html(self) -> str:
+        """Build the input-prompt line, with status indicators.
+
+        Shows a 🔒 plan tag while plan mode is active and a dim model name, so
+        the user always knows which model is answering and whether mutations are
+        currently blocked. Kept compact so it doesn't crowd the input line.
+        """
+        from html import escape
+
+        from mnemoai.utils.config import config
+
+        parts = []
+        if getattr(self.client, "plan_mode_active", False):
+            parts.append("<ansiyellow>🔒 plan</ansiyellow>")
+        model_name = str(config.get("MODEL_ID", {}).get("NAME", "")).strip()
+        if model_name:
+            parts.append(f"<ansibrightblack>{escape(model_name)}</ansibrightblack>")
+        status = (" ".join(parts) + " ") if parts else ""
+        return f"{status}<ansiblue>></ansiblue> "
 
     # ASCII wordmark shown on launch (ANSI "Shadow" style). Rendered in the
     # brand indigo. Kept as data so the banner is easy to restyle/replace.
