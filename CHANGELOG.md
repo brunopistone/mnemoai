@@ -9,6 +9,23 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.10.4] — 2026-06-29
+
+### Fixed
+
+- **Regression from 0.10.3: every query failed on the Responses protocol with
+  "Responses.create() got an unexpected keyword argument 'reasoning_effort'".**
+  0.10.3 builds responses-protocol models with a `reasoning` OBJECT
+  (`{"effort": …, "summary": "auto"}`), but `disable_reasoning` (used for the
+  auxiliary classify/decompose calls) still set the scalar `model.reasoning_effort
+= "none"`. The model then carried BOTH, and the Responses API rejects them
+  together. `disable_reasoning`/`restore_reasoning` now operate on the
+  `reasoning` object when present (setting its effort to `"none"` in place,
+  preserving the summary), and only fall back to the scalar `reasoning_effort`
+  for the legacy shape. Also fixed the Ollama-branch guard so a `reasoning`
+  _dict_ is no longer mistaken for the Ollama boolean toggle. Verified at the
+  request-payload level (no `reasoning_effort` reaches the Responses API).
+
 ## [0.10.3] — 2026-06-29
 
 ### Fixed
@@ -16,7 +33,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 - **Reasoning is now visible for OpenAI-style reasoning models, not just
   Anthropic.** Two halves were missing:
   - **Request side:** the OpenAI Responses API only returns a reasoning
-    *summary* if you ask for it (`reasoning={"effort": …, "summary": "auto"}`);
+    _summary_ if you ask for it (`reasoning={"effort": …, "summary": "auto"}`);
     effort alone reasons invisibly. mnemoai sent only the bare effort, so
     Mantle GPT-5/Grok (and direct OpenAI) produced no visible reasoning. Now,
     on the `responses` protocol, `REASONING_EFFORT` is sent as a `reasoning`
@@ -720,7 +737,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.3...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.4...HEAD
+[0.10.4]: https://github.com/brunopistone/mnemoai/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/brunopistone/mnemoai/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/brunopistone/mnemoai/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/brunopistone/mnemoai/compare/v0.10.0...v0.10.1

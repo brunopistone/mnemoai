@@ -40,6 +40,24 @@ class FakeResponsesModel:
         self.reasoning_effort = reasoning_effort
 
 
+class FakeResponsesSummaryModel:
+    """ChatOpenAI on the Responses API built with a `reasoning` OBJECT.
+
+    This is the 0.10.3 shape: reasoning={"effort": …, "summary": "auto"} to get
+    a visible summary. ChatOpenAI ALSO exposes a `reasoning_effort` field
+    (defaulting None). disable_reasoning must set the object's effort to "none"
+    and must NOT populate reasoning_effort (the Responses API rejects both).
+    """
+
+    def __init__(self, reasoning=None):
+        self.use_responses_api = True
+        self.reasoning = reasoning if reasoning is not None else {
+            "effort": "high",
+            "summary": "auto",
+        }
+        self.reasoning_effort = None
+
+
 class FakeChatCompletionsModel:
     """ChatOpenAI on the classic chat_completions API (not a reasoning model).
 
@@ -131,6 +149,38 @@ class TestDisableRestoreResponsesModel:
         assert model.reasoning_effort is None
         restore_reasoning(model, saved)
         assert model.reasoning_effort is None
+
+
+class TestDisableRestoreResponsesSummaryModel:
+    """The 0.10.3 `reasoning` OBJECT shape (with a summary request).
+
+    Regression for the live "Responses.create() got an unexpected keyword
+    argument 'reasoning_effort'" crash: when the model carries a `reasoning`
+    dict, disable_reasoning must set THAT object's effort to "none" and must NOT
+    set the scalar reasoning_effort (which would then be sent alongside the
+    object and rejected by the Responses API).
+    """
+
+    def test_sets_object_effort_none_not_scalar(self):
+        model = FakeResponsesSummaryModel()
+        saved = disable_reasoning(model)
+        assert model.reasoning == {"effort": "none", "summary": "auto"}
+        # The scalar must stay unset, or the API rejects both together.
+        assert model.reasoning_effort is None
+        assert "reasoning_effort" not in saved
+
+    def test_restores_original_object(self):
+        model = FakeResponsesSummaryModel()
+        saved = disable_reasoning(model)
+        restore_reasoning(model, saved)
+        assert model.reasoning == {"effort": "high", "summary": "auto"}
+
+    def test_preserves_extra_keys_in_object(self):
+        model = FakeResponsesSummaryModel(
+            reasoning={"effort": "max", "summary": "detailed"}
+        )
+        disable_reasoning(model)
+        assert model.reasoning == {"effort": "none", "summary": "detailed"}
 
 
 class TestDisableRestorePlainModel:

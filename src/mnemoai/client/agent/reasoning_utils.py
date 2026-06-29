@@ -22,9 +22,12 @@ def disable_reasoning(model) -> Dict[str, Any]:
     """
     saved: Dict[str, Any] = {}
 
-    # Ollama wrapper / LiteLLM
+    # Ollama wrapper / LiteLLM: a boolean `reasoning` toggle. Guard on bool so
+    # this doesn't swallow ChatOpenAI's `reasoning` DICT (handled below as the
+    # Responses-API object) — setting that to False would drop the summary
+    # request and leave a stale flag.
     reasoning = getattr(model, "reasoning", None)
-    if reasoning is not None:
+    if isinstance(reasoning, bool):
         saved["reasoning"] = reasoning
         model.reasoning = False
 
@@ -51,19 +54,32 @@ def disable_reasoning(model) -> Dict[str, Any]:
     # ChatOpenAI on the Responses API (e.g. Mantle GPT-5 / Grok). These are
     # reasoning models: with reasoning on, a short auxiliary call (classify /
     # decompose) spends its whole token budget reasoning and returns empty
-    # `content`. `reasoning_effort="none"` makes the model answer directly.
-    # We only force it when the model exposes the knob AND speaks the Responses
-    # API, leaving non-reasoning chat_completions models untouched.
-    if getattr(model, "use_responses_api", False) and hasattr(
-        model, "reasoning_effort"
-    ):
-        saved["reasoning_effort"] = getattr(model, "reasoning_effort", None)
-        try:
-            model.reasoning_effort = "none"
-        except Exception:
-            # Some providers reject "none"; leave reasoning as-is rather than
-            # crash the auxiliary call.
-            saved.pop("reasoning_effort", None)
+    # `content`. Setting effort to "none" makes the model answer directly.
+    #
+    # Two shapes exist depending on how the model was built:
+    #   * reasoning={"effort": …, "summary": …}  — a `reasoning` OBJECT (current
+    #     build; requests a visible summary). Set its effort to "none" in place.
+    #   * reasoning_effort="…"                    — a scalar enum (legacy / direct
+    #     OpenAI chat). Set it to "none".
+    # We must NOT set `reasoning_effort` when a `reasoning` object is present:
+    # the Responses API rejects both together ("unexpected keyword argument
+    # 'reasoning_effort'").
+    if getattr(model, "use_responses_api", False):
+        reasoning_obj = getattr(model, "reasoning", None)
+        if isinstance(reasoning_obj, dict):
+            saved["reasoning"] = dict(reasoning_obj)
+            try:
+                model.reasoning = {**reasoning_obj, "effort": "none"}
+            except Exception:
+                saved.pop("reasoning", None)
+        elif hasattr(model, "reasoning_effort"):
+            saved["reasoning_effort"] = getattr(model, "reasoning_effort", None)
+            try:
+                model.reasoning_effort = "none"
+            except Exception:
+                # Some providers reject "none"; leave reasoning as-is rather
+                # than crash the auxiliary call.
+                saved.pop("reasoning_effort", None)
 
     return saved
 
