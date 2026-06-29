@@ -16,7 +16,8 @@ provider behaves identically for text and image inputs.
 """
 
 import os
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
@@ -24,11 +25,54 @@ from mnemoai.utils.logger import logger
 
 VALID_PROTOCOLS = ("chat_completions", "responses", "anthropic")
 
-# REASONING_EFFORT -> thinking budget_tokens, used on the anthropic protocol
-# (which takes a token budget, not an effort enum). Mirrors the mapping in
-# llm_controller for direct Bedrock/Anthropic. The responses/chat_completions
-# protocols take the effort string directly.
+# REASONING_EFFORT -> thinking budget_tokens, used on OLDER Claude models on the
+# anthropic protocol (which take a token budget, not an effort enum). Newer
+# models (Opus 4.6+) use the `adaptive` form with `output_config.effort` — see
+# _anthropic_thinking_kwargs. The responses/chat_completions protocols take the
+# effort string directly.
 _EFFORT_TO_TOKENS = {"low": 1024, "medium": 8192, "high": 16384, "max": 32768}
+
+
+def _claude_version(name: str) -> Optional[Tuple[int, int]]:
+    """Best-effort (major, minor) parsed from a Claude model id, or None.
+
+    Matches e.g. ``claude-opus-4-8`` / ``anthropic.claude-opus-4-8`` -> (4, 8),
+    ``claude-3-7-sonnet`` -> (3, 7). Returns None when no version is present.
+    """
+    m = re.search(r"(\d+)[.\-](\d+)", name or "")
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def _anthropic_thinking_kwargs(name: str, effort: Optional[str], budget: int) -> dict:
+    """Pick the thinking request form Claude's API expects for this model.
+
+    The Anthropic Messages API changed how extended thinking is requested:
+
+    * **Opus 4.7+**: ``thinking={"type":"adaptive","display":"summarized"}`` plus
+      ``output_config={"effort": …}``. The old ``enabled``+``budget_tokens`` form
+      is **rejected** ("thinking.type.enabled is not supported for this model").
+    * **Opus 4.6**: ``thinking={"type":"adaptive"}`` + ``output_config.effort``
+      (``display`` not yet available).
+    * **Older (≤4.5, 3.x)**: ``thinking={"type":"enabled","budget_tokens": …}``;
+      these reject ``adaptive``.
+
+    An unknown/unparseable version assumes the current (adaptive) API; set your
+    own ``thinking`` via ``EXTRA_PARAMS`` if a specific model needs otherwise.
+    Returns a dict of constructor kwargs to merge (``thinking`` and possibly
+    ``output_config``).
+    """
+    version = _claude_version(name)
+    use_adaptive = version is None or version >= (4, 6)
+    if not use_adaptive:
+        return {"thinking": {"type": "enabled", "budget_tokens": budget}}
+
+    thinking: Dict[str, Any] = {"type": "adaptive"}
+    if version is None or version >= (4, 7):
+        thinking["display"] = "summarized"  # surfaces a reasoning summary
+    out: Dict[str, Any] = {"thinking": thinking}
+    if effort:
+        out["output_config"] = {"effort": effort}
+    return out
 
 
 def _mantle_base_url(region: str, protocol: str, override: Optional[str]) -> str:
@@ -53,6 +97,7 @@ def build_mantle_model(
     top_p: Optional[float] = None,
     reasoning_effort: Optional[str] = None,
     thinking_tokens: Optional[int] = None,
+    reasoning_model: bool = False,
     extra_params: Optional[Dict[str, Any]] = None,
 ) -> BaseChatModel:
     """Build a LangChain chat model for a Bedrock Mantle endpoint.
@@ -70,9 +115,13 @@ def build_mantle_model(
             protocol — sent as ``reasoning_effort`` on responses/chat_completions
             and as a ``thinking`` budget (mapped via ``_EFFORT_TO_TOKENS``) on
             anthropic. ``EXTRA_PARAMS`` overrides it if it sets the same key.
-        thinking_tokens: Fallback thinking budget for the anthropic protocol when
-            ``reasoning_effort`` is unset but a budget is wanted (currently only
-            used if explicitly provided).
+        thinking_tokens: Thinking budget (token count) used for OLDER Claude
+            models on the anthropic protocol; the value only, NOT a trigger.
+        reasoning_model: Opt-in flag for the anthropic protocol (the config
+            ``REASONING: true``). Thinking is enabled only when this is set OR
+            ``reasoning_effort`` is set — so a non-reasoning Claude isn't sent a
+            ``thinking`` block it would reject. (chat_completions / responses are
+            unaffected — they gate on ``reasoning_effort``.)
         extra_params: Generic ``EXTRA_PARAMS`` passthrough forwarded verbatim.
             For chat_completions / responses it is merged into ``model_kwargs``
             (request body) — e.g. ``reasoning_effort``, ``reasoning``,
@@ -126,22 +175,26 @@ def build_mantle_model(
             kwargs["top_p"] = top_p
         if callbacks is not None:
             kwargs["callbacks"] = callbacks
-        # REASONING_EFFORT -> a thinking budget (the anthropic protocol takes a
-        # token budget, not an effort enum). Ensure the budget fits under
-        # max_tokens. EXTRA_PARAMS may override `thinking` below.
-        if reasoning_effort or thinking_tokens:
+        # Enable extended thinking only when the user OPTED IN (REASONING_EFFORT
+        # or REASONING: true) — not by default — so a Claude model that doesn't
+        # support thinking isn't sent a `thinking` block it would reject. The
+        # request FORM depends on the model version (newer Claude rejects the old
+        # enabled+budget form), so _anthropic_thinking_kwargs picks the shape.
+        if reasoning_effort or reasoning_model:
             budget = (
                 _EFFORT_TO_TOKENS.get(reasoning_effort, thinking_tokens or 2048)
                 if reasoning_effort
-                else thinking_tokens
+                else (thinking_tokens or 2048)
             )
             if kwargs["max_tokens"] <= budget:
                 kwargs["max_tokens"] = budget + 1024
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            kwargs.update(_anthropic_thinking_kwargs(name, reasoning_effort, budget))
             # Anthropic rejects temperature/top_p/top_k when thinking is on.
             kwargs.pop("temperature", None)
             kwargs.pop("top_p", None)
-        # Generic passthrough (e.g. thinking={...}); applied last so it wins.
+        # Generic passthrough (e.g. thinking={...}, output_config={...}); applied
+        # last so an explicit EXTRA_PARAMS override wins (e.g. to force a
+        # specific form on a model whose version we mis-detect).
         kwargs.update(extra)
         return ChatAnthropic(**kwargs)
 

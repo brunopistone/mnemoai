@@ -9,6 +9,34 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.10.5] — 2026-06-29
+
+### Fixed
+
+- **Newer Claude models (Opus 4.7+) no longer 400 on the Anthropic protocol with
+  "thinking.type.enabled is not supported for this model".** The factory and the
+  direct-Anthropic controller always sent the legacy
+  `thinking={"type":"enabled","budget_tokens":…}` form, which Opus 4.7+ rejects —
+  they require `thinking={"type":"adaptive","display":"summarized"}` plus
+  `output_config={"effort":…}`. The thinking request form is now chosen by model
+  version (parsed from the id): **4.7+** → adaptive + summarized display,
+  **4.6** → adaptive (no display), **≤4.5 / 3.x** → enabled + budget (these
+  reject adaptive). An unknown version assumes the current adaptive API;
+  `EXTRA_PARAMS` (e.g. your own `thinking`/`output_config`) overrides if version
+  detection is wrong. Verified live against a Mantle Opus 4.8 endpoint — both
+  the no-crash path and a returned `thinking` summary block. Applies to both the
+  Mantle `anthropic` protocol and direct `TYPE: anthropic`.
+- **Thinking on the Mantle `anthropic` protocol is now opt-in**, matching direct
+  `TYPE: anthropic`. It was always-requested (a default `thinking_tokens` made
+  the gate always true), so a Claude model that doesn't support extended
+  thinking would 400 on every call with no way to disable it. Thinking is now
+  enabled only when `REASONING_EFFORT` or `REASONING: true` is set; a
+  non-reasoning Claude on Mantle works again. (Note: the OpenAI Responses
+  reasoning *summary* is requested correctly on Mantle GPT-5, but the Mantle
+  gateway returns an empty summary — the reasoning happens and is billed, the
+  text just isn't forwarded; direct `TYPE: openai` on the responses protocol
+  does return it. This is upstream, not a client issue.)
+
 ## [0.10.4] — 2026-06-29
 
 ### Fixed
@@ -737,7 +765,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.4...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.5...HEAD
+[0.10.5]: https://github.com/brunopistone/mnemoai/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/brunopistone/mnemoai/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/brunopistone/mnemoai/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/brunopistone/mnemoai/compare/v0.10.1...v0.10.2
