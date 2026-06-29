@@ -9,6 +9,35 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-06-29
+
+### Added
+
+- **Lightweight Markdown rendering in streamed answers.** The model's Markdown is
+  now rendered in the terminal instead of printed as literal syntax: headers
+  (`##`) show as bold without the hashes, `-`/`*` bullets become `•`, numbered
+  lists are kept, and `**bold**`/`*italic*` are styled. Inline `code` (bold cyan)
+  and fenced code blocks (Pygments syntax highlighting) are unchanged, and
+  clickable URLs still work. Implemented in `CodeFormatter` with a line-buffered
+  pass — **no new dependency** (no `rich`). Emphasis is conservative: a spaced
+  expression like `a * b * c` (e.g. `cost = instance_count * price_per_hour`) is
+  never mis-italicized, and `**x**` inside backticks stays literal.
+- **"Allow for this session" at confirmation prompts.** The destructive-tool gate
+  now offers `Proceed? (y/N/a)` — answering `a` trusts that whole category
+  (shell / file-write / memory) for the rest of the session, so a multi-step task
+  no longer re-prompts for every command. Default-deny is unchanged; trust is
+  per-category and resets on restart.
+- **Status indicators on the input prompt.** The prompt line now shows a
+  `🔒 plan` tag while plan mode is active and a dim chat-model name, so it's
+  always clear which model is answering and whether mutations are blocked.
+
+### Changed
+
+- **Tool-call markers keep both ends of long values.** `[⚙ execute_bash(command=…)]`
+  now middle-elides (`head…tail`) instead of cutting the tail, so a command's
+  meaningful end (subcommand, flags) and trailing args (e.g. `timeout=30`) stay
+  visible.
+
 ## [0.9.3] — 2026-06-27
 
 ### Fixed
@@ -625,7 +654,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/brunopistone/mnemoai/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/brunopistone/mnemoai/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/brunopistone/mnemoai/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/brunopistone/mnemoai/compare/v0.9.0...v0.9.1

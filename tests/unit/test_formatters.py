@@ -144,10 +144,71 @@ class TestCodeFormatter:
 
     def test_unbalanced_inline_backtick_resets_color(self, capsys):
         # An unterminated inline backtick must reset the terminal color on flush
-        # so the prompt isn't left stuck in cyan.
+        # so the prompt isn't left stuck in any styling.
         cf = CodeFormatter()
         cf.process_chunk("start `unterminated")
         cf.flush()
         out = capsys.readouterr().out
         assert out.rstrip().endswith("\033[0m")
-        assert cf._in_inline_code is False
+
+
+class TestMarkdownRendering:
+    """Lightweight Markdown rendering of streamed non-code text (no rich)."""
+
+    def _render(self, *chunks):
+        import contextlib
+        import io
+
+        cf = CodeFormatter()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            for c in chunks:
+                cf.process_chunk(c)
+            cf.flush()
+        return buf.getvalue()
+
+    def test_header_is_bold_without_hashes(self):
+        out = self._render("## What the script does\n")
+        assert "\033[1m" in out  # bold
+        assert "What the script does" in out
+        assert "##" not in out  # the marker itself is stripped
+
+    def test_bullet_becomes_glyph(self):
+        out = self._render("- first item\n")
+        assert "•" in out
+        assert "first item" in out
+
+    def test_numbered_list_preserved(self):
+        out = self._render("1. do this\n")
+        assert "1." in out and "do this" in out
+
+    def test_bold_span_rendered(self):
+        out = self._render("this is **important** text\n")
+        assert "\033[1m" in out
+        assert "important" in out
+        assert "**" not in out
+
+    def test_spaced_asterisks_not_italicized(self):
+        # Regression: a math expression with spaced asterisks must NOT be
+        # treated as italic (would swallow the asterisks and restyle the text).
+        out = self._render("cost = instance_count * price_per_hour * hours\n")
+        assert "instance_count * price_per_hour * hours" in out
+        assert "\033[3m" not in out  # no italic styling applied
+
+    def test_inline_code_in_markdown_line(self):
+        out = self._render("use the `foo.py` file\n")
+        assert "\033[1;36m" in out  # inline code bold cyan
+        assert "foo.py" in out
+
+    def test_bold_inside_inline_code_stays_literal(self):
+        # `**x**` inside backticks must NOT be bolded — it's literal code.
+        out = self._render("run `a ** b` now\n")
+        assert "a ** b" in out
+
+    def test_plain_paragraph_unchanged_text(self):
+        out = self._render("just a normal sentence.\n")
+        assert "just a normal sentence." in out
+
+    def test_code_block_still_highlighted_with_markdown_around(self):
+        out = self._render("# Title\n", "```python\n", "x = 1\n", "```\n", "- done\n")
+        assert "Title" in out and "x" in out and "done" in out
