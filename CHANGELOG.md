@@ -9,6 +9,36 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.10.3] — 2026-06-29
+
+### Fixed
+
+- **Reasoning is now visible for OpenAI-style reasoning models, not just
+  Anthropic.** Two halves were missing:
+  - **Request side:** the OpenAI Responses API only returns a reasoning
+    *summary* if you ask for it (`reasoning={"effort": …, "summary": "auto"}`);
+    effort alone reasons invisibly. mnemoai sent only the bare effort, so
+    Mantle GPT-5/Grok (and direct OpenAI) produced no visible reasoning. Now,
+    on the `responses` protocol, `REASONING_EFFORT` is sent as a `reasoning`
+    object that requests the summary. Direct `TYPE: openai` gains an
+    `API_PROTOCOL` key (`chat_completions` default | `responses`) to opt into
+    the Responses API and get the same treatment.
+  - **Extraction side:** the agent's reasoning extractor now recognizes the
+    OpenAI Responses summary block shape
+    (`{"type":"reasoning","summary":[{"type":"summary_text","text":…}]}`)
+    alongside the existing Bedrock `thinking` blocks, `reasoning_content`, and
+    `<think>` tags. The summary streams as gray reasoning and never leaks into
+    the visible answer.
+- **Anthropic thinking enables on `REASONING_EFFORT` alone.** Direct
+  `TYPE: anthropic` previously needed `REASONING: true` to turn on extended
+  thinking; `REASONING_EFFORT` alone now enables it too (matching the OpenAI
+  behavior). Anthropic thinking was already extracted/displayed once enabled —
+  this just removes the extra flag.
+- `EXTRA_PARAMS` still wins everywhere: set your own `reasoning`/
+  `reasoning_effort` (OpenAI/responses) or `thinking` (Anthropic) to override
+  the derived defaults — e.g. `reasoning: {effort: high, summary: detailed}` or
+  `summary: none`.
+
 ## [0.10.2] — 2026-06-29
 
 ### Fixed
@@ -690,7 +720,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.3...HEAD
+[0.10.3]: https://github.com/brunopistone/mnemoai/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/brunopistone/mnemoai/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/brunopistone/mnemoai/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/brunopistone/mnemoai/compare/v0.9.3...v0.10.0

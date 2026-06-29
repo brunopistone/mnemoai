@@ -21,12 +21,15 @@ MODEL_ID:
 #   REGION: us-west-2
 #   API_PROTOCOL: responses
 #   MAX_TOKENS: 128000
-#   # Reasoning is a first-class knob, translated per protocol (here -> the
-#   # OpenAI `reasoning_effort` param). Also tunable via /params.
+#   # Reasoning is a first-class knob, translated per protocol. On the responses
+#   # protocol it becomes reasoning={"effort": <effort>, "summary": "auto"} so
+#   # the model's reasoning SUMMARY streams back and is shown (in verbose mode);
+#   # effort alone would reason invisibly. Also tunable via /params.
 #   REASONING_EFFORT: high   # none|minimal|low|medium|high|xhigh|max
-#   # For anything else, EXTRA_PARAMS is forwarded verbatim (provider's own
-#   # parameter names); it overrides REASONING_EFFORT if it sets the same key:
+#   # EXTRA_PARAMS is forwarded verbatim and overrides the above — e.g. to set a
+#   # different summary level, or disable the summary, pass your own `reasoning`:
 #   # EXTRA_PARAMS:
+#   #   reasoning: { effort: high, summary: detailed }   # or summary: none
 #   #   verbosity: low
 # Anthropic (Claude) model example:
 # MODEL_ID:

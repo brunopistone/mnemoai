@@ -200,11 +200,21 @@ class LangChainLLMController(BaseModelController):
         self.model = ChatOllamaWrapper(**kwargs)
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
-        """Initialize OpenAI model using LangChain."""
+        """Initialize OpenAI model using LangChain.
+
+        ``API_PROTOCOL`` selects the API: ``chat_completions`` (default) or
+        ``responses``. On the Responses API, a reasoning model can return a
+        *summary* of its reasoning, but only if asked — so when
+        ``REASONING_EFFORT`` is set we send ``reasoning={"effort": …,
+        "summary": "auto"}`` (a first-class ChatOpenAI field) and the agent's
+        extractor surfaces the streamed summary. On Chat Completions there is no
+        readable reasoning, so ``REASONING_EFFORT`` stays the plain enum.
+        """
         from langchain_openai import ChatOpenAI
 
         logger.info("Initializing OpenAI model...")
 
+        protocol = self.model_id.get("API_PROTOCOL", "chat_completions")
         passthrough, model_kwargs = build_kwargs("MODEL_ID", "openai", self)
         kwargs = {
             "model": self.model_name,
@@ -212,10 +222,35 @@ class LangChainLLMController(BaseModelController):
             "streaming": self.stream,
             **passthrough,
         }
-        # reasoning_effort (o1/o3 models) goes in model_kwargs. EXTRA_PARAMS is
-        # merged in too — the generic passthrough for any other request-body key
-        # (e.g. reasoning={"effort": …}, verbosity, service_tier).
-        model_kwargs.update(extra_params(self.model_id))
+
+        extra = extra_params(self.model_id)
+        if protocol == "responses":
+            kwargs["use_responses_api"] = True
+            # On the Responses API, REASONING_EFFORT -> a `reasoning` object that
+            # also requests a summary (so it's visible). build_kwargs put the
+            # bare enum in model_kwargs; lift it out and upgrade it, unless the
+            # user already set their own `reasoning`/`reasoning_effort`.
+            model_kwargs.pop("reasoning_effort", None)
+            if (
+                self.reasoning_effort
+                and "reasoning" not in extra
+                and "reasoning_effort" not in extra
+            ):
+                kwargs["reasoning"] = {
+                    "effort": self.reasoning_effort,
+                    "summary": "auto",
+                }
+            # `reasoning`/`reasoning_effort` are first-class args; lift any from
+            # EXTRA_PARAMS so they don't collide in model_kwargs.
+            if "reasoning" in extra:
+                kwargs["reasoning"] = extra.pop("reasoning")
+            if "reasoning_effort" in extra:
+                kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
+
+        # reasoning_effort (chat_completions: o1/o3) stays in model_kwargs.
+        # EXTRA_PARAMS is merged in too — the generic passthrough for any other
+        # request-body key (verbosity, service_tier, …).
+        model_kwargs.update(extra)
         if model_kwargs:
             kwargs["model_kwargs"] = model_kwargs
 
@@ -252,8 +287,10 @@ class LangChainLLMController(BaseModelController):
 
         # Extended thinking for Claude models. Anthropic requires the thinking
         # budget to be < max_tokens, so bump max_tokens if needed, and (per the
-        # API) temperature must be unset/1 when thinking is enabled.
-        if self.reasoning_model:
+        # API) temperature must be unset/1 when thinking is enabled. Enabled by
+        # EITHER REASONING: true OR REASONING_EFFORT (effort alone is enough, to
+        # match the OpenAI responses behavior).
+        if self.reasoning_model or self.reasoning_effort:
             effort_to_tokens = {
                 "low": 1024,
                 "medium": 8192,

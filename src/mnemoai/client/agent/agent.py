@@ -1198,11 +1198,29 @@ class LangGraphAgent:
         finally:
             self._stop_spinner()
 
+    @staticmethod
+    def _reasoning_summary_text(block: dict) -> str:
+        """Pull the text out of an OpenAI Responses ``reasoning`` summary block.
+
+        Shape (from langchain_openai's Responses streaming):
+        ``{"type":"reasoning","summary":[{"type":"summary_text","text":…}, …]}``.
+        Returns the concatenated summary text (empty if none).
+        """
+        summary = block.get("summary")
+        if not isinstance(summary, list):
+            return ""
+        return "".join(
+            part.get("text", "")
+            for part in summary
+            if isinstance(part, dict) and part.get("type") == "summary_text"
+        )
+
     def _extract_thinking(self, response) -> Optional[str]:
         """Extract thinking/reasoning content from a response.
 
         Checks all possible sources: additional_kwargs, Bedrock content blocks,
-        and <think>/<thinking> tags in string content.
+        OpenAI Responses reasoning-summary blocks, and <think>/<thinking> tags in
+        string content.
 
         Args:
             response: AIMessage response
@@ -1216,13 +1234,18 @@ class LangGraphAgent:
             if thinking:
                 return thinking
 
-        # 2. Check Bedrock-style content blocks
+        # 2. Check content blocks: Bedrock-style {"type":"thinking"} and the
+        #    OpenAI Responses {"type":"reasoning","summary":[…]} summary shape.
         if isinstance(response.content, list):
-            parts = [
-                block.get("thinking", "")
-                for block in response.content
-                if isinstance(block, dict) and block.get("type") == "thinking"
-            ]
+            parts = []
+            for block in response.content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "thinking":
+                    parts.append(block.get("thinking", ""))
+                elif block.get("type") == "reasoning":
+                    parts.append(self._reasoning_summary_text(block))
+            parts = [p for p in parts if p]
             if parts:
                 return "".join(parts)
 
@@ -1322,6 +1345,11 @@ class LangGraphAgent:
                     block_type = block.get("type", "")
                     if block_type == "thinking":
                         reasoning_content += block.get("thinking", "")
+                    elif block_type == "reasoning":
+                        # OpenAI Responses API (e.g. Mantle GPT-5) streams a
+                        # reasoning SUMMARY as {"type":"reasoning","summary":[
+                        # {"type":"summary_text","text":…}]}.
+                        reasoning_content += self._reasoning_summary_text(block)
                     elif block_type == "text":
                         chunk_content += block.get("text", "")
                     elif "text" in block:
