@@ -9,6 +9,26 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-06-29
+
+### Fixed
+
+- **`/save` now writes back to the open conversation file.** After `/load`-ing a
+  conversation (or saving one earlier in the session), a bare `/save` overwrites
+  that same file instead of creating a new `conversation_<timestamp>.json`. The
+  open file is tracked in `current_conversation_path`, set on load and on first
+  save; `/clear` resets it (a fresh conversation saves to a new file), and
+  `/save <path>` still targets an explicit file/dir (and becomes the new open
+  file).
+
+### Changed
+
+- **Removed the model name from the input prompt.** The status indicator added
+  in 0.10.0 crowded the prompt line with long model names (e.g.
+  `brnpistone/Qwen3.5-4B-AgentCoder-q6-k:latest`). The prompt is back to a clean
+  `>`, keeping only the compact `🔒 plan` tag while plan mode is active. Use
+  `/model` to see or change the current model.
+
 ## [0.10.0] — 2026-06-29
 
 ### Added
@@ -654,7 +674,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/brunopistone/mnemoai/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/brunopistone/mnemoai/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/brunopistone/mnemoai/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/brunopistone/mnemoai/compare/v0.9.1...v0.9.2

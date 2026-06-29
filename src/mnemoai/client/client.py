@@ -203,6 +203,13 @@ class LangGraphClient:
         self.previous_response = None
         self.previous_messages = None
 
+        # The conversation file currently "open" — set when a conversation is
+        # loaded or first saved, so a later bare /save overwrites the same file
+        # (the loaded session) instead of creating a new timestamped one. Reset
+        # by /clear (a fresh conversation). A /save with an explicit path updates
+        # it to that path.
+        self.current_conversation_path = None
+
     def _build_system_prompt(self) -> str:
         """Build the system prompt with profile information.
 
@@ -798,6 +805,10 @@ class LangGraphClient:
         if self.agent:
             self.agent.system_prompt = self.system_prompt
 
+        # A cleared context is a fresh conversation — the next /save should make
+        # a new file, not overwrite the previously loaded/saved one.
+        self.current_conversation_path = None
+
         # Flush RAG database when clearing context
         if config.get("ENABLE_RAG", False):
             self._flush_rag_store()
@@ -935,6 +946,11 @@ class LangGraphClient:
                     if parent:
                         os.makedirs(parent, exist_ok=True)
                     filepath = expanded if expanded.endswith(".json") else expanded + ".json"
+            elif self.current_conversation_path:
+                # A conversation is "open" (loaded, or saved earlier this session):
+                # overwrite it so /save updates the same file the user is working
+                # in, rather than spawning a new timestamped copy.
+                filepath = self.current_conversation_path
             else:
                 filepath = os.path.join(str(conversations_dir()), default_name)
 
@@ -955,6 +971,9 @@ class LangGraphClient:
 
             with open(filepath, "w") as f:
                 json.dump(conversation_data, f, indent=2, default=str)
+
+            # Remember the file so subsequent bare /save calls update it in place.
+            self.current_conversation_path = filepath
 
             print(f"Conversation saved to {filepath}")
 
@@ -1009,6 +1028,9 @@ class LangGraphClient:
             if self.agent:
                 self.agent.messages.clear()
                 self.agent.messages.extend(langchain_messages)
+                # Mark this as the open conversation so a later bare /save writes
+                # back to the same file instead of creating a new one.
+                self.current_conversation_path = normalized_path
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"
                 )
