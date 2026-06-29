@@ -1,11 +1,11 @@
 """File system reading tool with multiple modes."""
 
 import json
-import os
 
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
+from mnemoai.utils.path_utils import normalize_path
 
 from ..error_handler import tool_error_handler
 from .readers import (
@@ -87,8 +87,9 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
         logger.debug(f"fs_read called with path: {path}")
 
         try:
-            # Normalize path
-            normalized_path = os.path.expanduser(path.strip())
+            # Normalize path, tolerating shell escaping/quoting (a path the user
+            # copied from a terminal as `/Users/me/My\ File.txt` or quoted).
+            normalized_path = normalize_path(path)
 
             if mode == "Directory":
                 return await read_directory(normalized_path, depth)

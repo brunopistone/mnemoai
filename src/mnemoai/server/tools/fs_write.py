@@ -7,6 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+from mnemoai.utils.path_utils import clean_path_syntax
 
 from ..error_handler import tool_error_handler
 
@@ -20,6 +21,11 @@ def _resolve_path(path: str) -> str:
     Returns:
         Resolved absolute path
     """
+    # Strip any shell quoting/escaping the user copied in (e.g. a path dragged
+    # from a terminal as `/Users/me/My\ File.txt`) before resolving. The target
+    # may not exist yet, so this is syntactic only (no filesystem probe).
+    path = clean_path_syntax(path)
+
     # Get paths from config
     default_output = os.path.expanduser("~")
 

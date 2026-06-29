@@ -9,6 +9,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
+from mnemoai.utils.path_utils import normalize_path
 
 
 def register_search_tools(mcp: FastMCP) -> None:
@@ -51,8 +52,8 @@ def register_search_tools(mcp: FastMCP) -> None:
         if path is None:
             path = os.getcwd()
 
-        # Expand user home directory
-        path = os.path.expanduser(path)
+        # Expand ~ and tolerate shell escaping/quoting in the path.
+        path = normalize_path(path)
 
         if not os.path.exists(path):
             return json.dumps(
@@ -135,8 +136,8 @@ def register_search_tools(mcp: FastMCP) -> None:
         if path is None:
             path = os.getcwd()
 
-        # Expand user home directory
-        path = os.path.expanduser(path)
+        # Expand ~ and tolerate shell escaping/quoting in the path.
+        path = normalize_path(path)
 
         if not os.path.exists(path):
             return json.dumps(
