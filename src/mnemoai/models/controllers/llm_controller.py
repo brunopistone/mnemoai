@@ -145,6 +145,7 @@ class LangChainLLMController(BaseModelController):
             top_p=self.top_p,
             reasoning_effort=self.reasoning_effort,
             thinking_tokens=self.thinking_tokens,
+            reasoning_model=self.reasoning_model,
             extra_params=extra_params(self.model_id),
         )
 
@@ -289,8 +290,13 @@ class LangChainLLMController(BaseModelController):
         # budget to be < max_tokens, so bump max_tokens if needed, and (per the
         # API) temperature must be unset/1 when thinking is enabled. Enabled by
         # EITHER REASONING: true OR REASONING_EFFORT (effort alone is enough, to
-        # match the OpenAI responses behavior).
+        # match the OpenAI responses behavior). The request FORM depends on the
+        # model version — newer Claude (Opus 4.7+) rejects the old
+        # enabled+budget form and needs adaptive + output_config.effort — so the
+        # shared helper picks the right shape.
         if self.reasoning_model or self.reasoning_effort:
+            from mnemoai.models.mantle_factory import _anthropic_thinking_kwargs
+
             effort_to_tokens = {
                 "low": 1024,
                 "medium": 8192,
@@ -304,7 +310,11 @@ class LangChainLLMController(BaseModelController):
             )
             if kwargs["max_tokens"] <= budget:
                 kwargs["max_tokens"] = budget + 1024
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            kwargs.update(
+                _anthropic_thinking_kwargs(
+                    self.model_name, self.reasoning_effort, budget
+                )
+            )
             kwargs.pop("temperature", None)
             kwargs.pop("top_p", None)
             kwargs.pop("top_k", None)

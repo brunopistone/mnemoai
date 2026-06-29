@@ -332,11 +332,14 @@ class TestAnthropicModelType:
             },
         )
         ctrl.initialize_model()
+        # claude-opus-4-8 is a 4.7+ model -> adaptive form with effort, NOT the
+        # old enabled+budget (which 4.7+ rejects).
         assert patch_mantle["thinking"] == {
-            "type": "enabled",
-            "budget_tokens": 16384,
+            "type": "adaptive",
+            "display": "summarized",
         }
-        # max_tokens bumped above the thinking budget; sampling params dropped.
+        assert patch_mantle["output_config"] == {"effort": "high"}
+        # max_tokens still bumped above the derived budget; sampling dropped.
         assert patch_mantle["max_tokens"] == 16384 + 1024
         assert "temperature" not in patch_mantle
         assert "top_p" not in patch_mantle
@@ -691,9 +694,30 @@ class TestReasoningEffortFirstClass:
         # responses protocol: effort + auto summary so reasoning is visible.
         assert patch_mantle["reasoning"] == {"effort": "high", "summary": "auto"}
 
-    def test_mantle_anthropic_reasoning_effort_maps_to_thinking(
+    def test_anthropic_thinking_form_by_version(self):
+        # The helper picks the request form by model version.
+        from mnemoai.models.mantle_factory import _anthropic_thinking_kwargs
+
+        # 4.7+ -> adaptive + summarized display + effort
+        out = _anthropic_thinking_kwargs("claude-opus-4-8", "high", 16384)
+        assert out["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert out["output_config"] == {"effort": "high"}
+        # 4.6 -> adaptive but no display key
+        out = _anthropic_thinking_kwargs("claude-opus-4-6", "high", 16384)
+        assert out["thinking"] == {"type": "adaptive"}
+        # older -> enabled + budget, no output_config
+        out = _anthropic_thinking_kwargs("claude-3-7-sonnet", "high", 16384)
+        assert out["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+        assert "output_config" not in out
+        # unknown/unparseable -> assume current (adaptive + summarized)
+        out = _anthropic_thinking_kwargs("mystery-model", "high", 16384)
+        assert out["thinking"]["type"] == "adaptive"
+
+    def test_mantle_anthropic_newer_model_uses_adaptive(
         self, patch_mantle, monkeypatch
     ):
+        # Opus 4.7+ on Mantle: the old enabled+budget form is rejected by the
+        # API; we must send adaptive + output_config.effort.
         ctrl = _make_llm_controller(
             monkeypatch,
             {
@@ -707,19 +731,75 @@ class TestReasoningEffortFirstClass:
         )
         ctrl.initialize_model()
         assert patch_mantle["_class"] == "ChatAnthropic"
-        assert patch_mantle["thinking"] == {
-            "type": "enabled",
-            "budget_tokens": 16384,
-        }
-        # max_tokens bumped above the budget; temperature dropped.
+        assert patch_mantle["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert patch_mantle["output_config"] == {"effort": "high"}
         assert patch_mantle["max_tokens"] > 16384
         assert "temperature" not in patch_mantle
+
+    def test_mantle_anthropic_older_model_uses_enabled_budget(
+        self, patch_mantle, monkeypatch
+    ):
+        # Older Claude (<=4.5, 3.x) reject `adaptive` and need enabled+budget.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic.claude-3-7-sonnet",
+                "TYPE": "mantle",
+                "REGION": "us-west-2",
+                "API_PROTOCOL": "anthropic",
+                "REASONING_EFFORT": "high",
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+        assert "output_config" not in patch_mantle
+
+    def test_mantle_anthropic_no_optin_requests_no_thinking(
+        self, patch_mantle, monkeypatch
+    ):
+        # A Claude model on Mantle WITHOUT any reasoning opt-in must NOT be sent
+        # a thinking block — a non-reasoning model would reject it (400). Thinking
+        # is opt-in (REASONING_EFFORT or REASONING: true), like direct anthropic.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic.claude-3-5-sonnet",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_PROTOCOL": "anthropic",
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert "thinking" not in patch_mantle
+        assert "output_config" not in patch_mantle
+
+    def test_mantle_anthropic_reasoning_flag_enables_thinking(
+        self, patch_mantle, monkeypatch
+    ):
+        # REASONING: true (no effort) also opts in on Mantle anthropic.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "anthropic.claude-3-5-sonnet",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_PROTOCOL": "anthropic",
+                "REASONING": True,
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert "thinking" in patch_mantle
 
     def test_direct_anthropic_effort_alone_enables_thinking(
         self, patch_mantle, monkeypatch
     ):
         # Direct TYPE: anthropic — REASONING_EFFORT alone (no REASONING: true)
         # enables extended thinking, matching the OpenAI responses behavior.
+        # claude-opus-4-8 is 4.7+ -> adaptive form.
         ctrl = _make_llm_controller(
             monkeypatch,
             {
@@ -731,8 +811,8 @@ class TestReasoningEffortFirstClass:
         )
         ctrl.initialize_model()
         assert patch_mantle["_class"] == "ChatAnthropic"
-        assert patch_mantle["thinking"] == {"type": "enabled", "budget_tokens": 16384}
-        assert patch_mantle["max_tokens"] > 16384
+        assert patch_mantle["thinking"] == {"type": "adaptive", "display": "summarized"}
+        assert patch_mantle["output_config"] == {"effort": "high"}
         assert "temperature" not in patch_mantle
 
     def test_direct_anthropic_no_reasoning_no_thinking(
