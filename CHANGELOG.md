@@ -9,6 +9,22 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.10.2] — 2026-06-29
+
+### Fixed
+
+- **Shell-escaped / quoted file paths now resolve in tools.** A path the user
+  copied from a terminal — `/Users/me/Screenshot\ 2026.png` (backslash-escaped
+  spaces) or `"…/My File.png"` (quoted) — was passed verbatim to tools like
+  `describe_image`, `fs_read`, `file_edit`, `glob_search`/`grep_search`, which
+  aren't shells, so the literal backslashes/quotes made the file "not found"
+  (often sending a smaller model into a retry/guess spiral). New
+  `utils/path_utils.normalize_path` resolves these without breaking legitimate
+  paths: it prefers the path exactly as given and only falls back to a
+  de-escaped/de-quoted variant when the literal one doesn't exist on disk. Write
+  targets (which may not exist yet) use `clean_path_syntax`, a syntactic-only
+  cleanup. Applied across the file/image/search tools.
+
 ## [0.10.1] — 2026-06-29
 
 ### Fixed
@@ -674,7 +690,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/brunopistone/mnemoai/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/brunopistone/mnemoai/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/brunopistone/mnemoai/compare/v0.9.3...v0.10.0
 [0.9.3]: https://github.com/brunopistone/mnemoai/compare/v0.9.2...v0.9.3

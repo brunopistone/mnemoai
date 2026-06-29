@@ -7,6 +7,7 @@ import tiktoken
 
 from mnemoai.models.controllers.vision_model_controller import VisionModelController
 from mnemoai.utils.config import config
+from mnemoai.utils.path_utils import normalize_path
 
 # Load configuration from centralized config
 BRAVE_API_KEY = config.get("BRAVE_API_KEY", None)
@@ -141,8 +142,9 @@ class ToolManager:
         Returns:
             tuple: (is_valid, normalized_path, error_dict_or_empty)
         """
-        # Handle escape characters and normalize path
-        normalized_path = os.path.expanduser(file_path.strip())
+        # Normalize the path, tolerating shell escaping/quoting (e.g. a path the
+        # user copied from a terminal as `/Users/me/My\ File.png` or quoted).
+        normalized_path = normalize_path(file_path)
 
         # Check if path exists
         if not os.path.exists(normalized_path):

@@ -6,6 +6,7 @@ import os
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
+from mnemoai.utils.path_utils import normalize_path
 
 
 def register_edit_tools(mcp: FastMCP) -> None:
@@ -67,8 +68,8 @@ def register_edit_tools(mcp: FastMCP) -> None:
                 new_string="MAX_TOKENS: 8192\\n  TEMPERATURE: 0.3"
             )
         """
-        # Expand user home directory
-        file_path = os.path.expanduser(file_path)
+        # Expand ~ and tolerate shell escaping/quoting in the path.
+        file_path = normalize_path(file_path)
 
         # Validate file exists
         if not os.path.exists(file_path):
