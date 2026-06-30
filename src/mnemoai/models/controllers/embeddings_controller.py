@@ -196,8 +196,21 @@ class EmbeddingsController:
         Returns:
             NumPy array of embeddings
         """
+        # Honor the configured HOST/PORT (matching the LLM and vision controllers'
+        # _initialize_ollama_model) instead of letting the bare ollama.embed()
+        # silently fall back to $OLLAMA_HOST — otherwise an OLLAMA_HOST pointing
+        # at a different server (e.g. a llama-swap port from a local-engine
+        # experiment) hijacks the embed call and it fails, degrading silently to
+        # fallback vectors. Resolved here (only the Ollama path needs it) rather
+        # than in __init__, which runs for every provider.
+        host = "http://{}:{}".format(
+            self.embed_model_config.get("HOST", "localhost"),
+            self.embed_model_config.get("PORT", 11434),
+        )
         try:
-            resp = ollama.embed(model=self.embed_model_name, input=texts)
+            resp = ollama.Client(host=host).embed(
+                model=self.embed_model_name, input=texts
+            )
             emb = self._extract_embeddings_from_response(resp)
             return np.array(emb, dtype=np.float32)
         except Exception:

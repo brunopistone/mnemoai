@@ -9,6 +9,25 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.11.3] — 2026-06-30
+
+### Fixed
+
+- **Ollama embeddings now honor the configured `HOST`/`PORT`** instead of
+  silently following `$OLLAMA_HOST`. `_embed_ollama` called the bare
+  `ollama.embed()`, whose host comes from the `OLLAMA_HOST` env var (or the lib
+  default) — so a stray `OLLAMA_HOST` pointing at another server (e.g. a
+  `llama-swap` port left over from a local-engine experiment) hijacked the embed
+  request, which 400'd and degraded *silently* to the sha256 fallback vectors
+  ("semantic search will be DEGRADED"). It now builds an explicit
+  `ollama.Client(host=…)` from `RAG.EMBED_MODEL_ID.HOST`/`PORT` (default
+  `localhost:11434`), matching how the LLM and vision controllers resolve their
+  Ollama base URL. The host is resolved inside the Ollama path only, so a
+  non-Ollama embeddings provider (Bedrock/OpenAI/SageMaker/LiteLLM) is
+  unaffected. Episodic-memory and RAG retrieval are unchanged in shape — they
+  just stop falling back to degraded embeddings when an unrelated `OLLAMA_HOST`
+  is set.
+
 ## [0.11.2] — 2026-06-30
 
 ### Fixed
