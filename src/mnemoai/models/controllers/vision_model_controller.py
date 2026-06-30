@@ -117,6 +117,16 @@ class VisionModelController(BaseModelController):
             "model": self.model_name,
             **passthrough,
         }
+        # Point at an OpenAI-compatible server (local llama-server / LM Studio /
+        # vLLM with a vision model, etc.) when configured. API_BASE is canonical;
+        # ENDPOINT_URL is an accepted alias.
+        base_url = self.model_id.get("API_BASE") or self.endpoint_url
+        if base_url:
+            kwargs["base_url"] = base_url
+        if self.model_id.get("API_KEY"):
+            kwargs["api_key"] = self.model_id["API_KEY"]
+        elif base_url:
+            kwargs["api_key"] = "sk-local"
         # Generic passthrough into the request body (reasoning_effort is a
         # first-class arg; the rest go via model_kwargs).
         extra = extra_params(self.model_id)

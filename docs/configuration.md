@@ -119,6 +119,60 @@ MODEL_ID:
 # Requires OPENAI_API_KEY environment variable
 ```
 
+#### Local OpenAI-compatible servers (llama.cpp / LM Studio / vLLM)
+
+`TYPE: openai` can point at **any OpenAI-compatible endpoint** via `API_BASE`
+(alias `ENDPOINT_URL`) — so a local [`llama-server`](https://github.com/ggml-org/llama.cpp)
+(llama.cpp), [LM Studio](https://lmstudio.ai), [vLLM](https://docs.vllm.ai), or
+`llama-swap` works as a drop-in alternative to Ollama, no extra provider needed.
+Local servers usually ignore auth, so `API_KEY` is optional (a placeholder is
+sent when a custom `API_BASE` is set and no key is given).
+
+**llama.cpp (`llama-server`)** — `brew install llama.cpp`, then
+`llama-server -hf bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M --port 8080 --ctx-size 8192`
+(pulls the GGUF straight from Hugging Face; OpenAI API at `:8080/v1`):
+
+```yaml
+MODEL_ID:
+  NAME: qwen2.5-7b-instruct # the model name your server reports
+  TYPE: openai
+  API_BASE: http://localhost:8080/v1
+  STREAM: true
+# No API key needed for a local server.
+```
+
+**LM Studio** — start its local server (Developer tab), default port `1234`:
+
+```yaml
+MODEL_ID:
+  NAME: your-loaded-model
+  TYPE: openai
+  API_BASE: http://localhost:1234/v1
+```
+
+The same `API_BASE`/`API_KEY` keys work for `VISION_MODEL_ID` when the local
+server hosts a vision-capable model, and for `RAG.EMBED_MODEL_ID` to serve
+embeddings from the local server (`TYPE: openai` + `API_BASE`). For a
+multi-model setup like Ollama's (one endpoint, hot-swap by name), put
+[`llama-swap`](https://github.com/mostlygeek/llama-swap) in front of several
+`llama-server` instances and point every section's `API_BASE` at it.
+
+```yaml
+RAG:
+  EMBED_MODEL_ID:
+    NAME: qwen3-embedding # name your server reports
+    TYPE: openai
+    API_BASE: http://localhost:8080/v1
+    DIMENSION:
+      1024 # optional: match your embedder's real
+      # size so the SHA256 fallback (used only
+      # when the server is unreachable) stays
+      # dimension-consistent with the index
+```
+
+(Ollama remains fully supported via `TYPE: ollama`; this is an alternative, not
+a replacement.)
+
 #### Anthropic (Claude API)
 
 The direct Anthropic API (`api.anthropic.com`) via `langchain-anthropic`. This is **distinct from the Bedrock Mantle `anthropic` protocol** (which reaches Claude through Bedrock) — `TYPE: anthropic` talks to Anthropic directly. `STOP` maps to Anthropic's `stop_sequences`, and extended thinking is enabled with `REASONING` (+ optional `REASONING_EFFORT` / `THINKING_TOKENS`).

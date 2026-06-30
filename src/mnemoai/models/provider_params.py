@@ -88,7 +88,9 @@ _LLM = {
         # API_PROTOCOL selects chat_completions (default) vs the Responses API;
         # on `responses`, REASONING_EFFORT is sent as reasoning={effort, summary}
         # so the reasoning summary is returned and shown (handled inline).
-        "connection": {"API_PROTOCOL"},
+        # API_BASE/ENDPOINT_URL + API_KEY point at an OpenAI-compatible server
+        # (local llama-server / LM Studio / vLLM, …) instead of the OpenAI API.
+        "connection": {"API_PROTOCOL", "API_BASE", "ENDPOINT_URL", "API_KEY"},
         "special": {"STREAM"},
     },
     "anthropic": {
@@ -162,7 +164,9 @@ _VISION = {
             _p("MAX_TOKENS", "max_tokens", "max_tokens"),
             _p("TOP_P", "top_p", "top_p"),
         ],
-        "connection": set(),
+        # API_BASE/ENDPOINT_URL + API_KEY point a vision model at an
+        # OpenAI-compatible server (local llama-server / LM Studio / vLLM).
+        "connection": {"API_BASE", "ENDPOINT_URL", "API_KEY"},
         "special": set(),
     },
     "anthropic": {
@@ -206,12 +210,26 @@ _VISION = {
 # --- RAG.EMBED_MODEL_ID: mirrors embeddings_controller -----------------------
 # Embeddings use no inference params — only connection/identity. The Ollama
 # embed path uses the default host, so only REGION matters for bedrock/sagemaker.
+# DIMENSION: optional override of the embedding vector size (used for the
+# fallback/empty-result shape; real embeddings pass through natively). It's the
+# one embeddings knob that's both recognized by `supported_keys` (so /model
+# keeps it) AND tunable (so /params can edit it) — hence it lives in `special`.
 _EMBED = {
-    "ollama": {"params": [], "connection": {"HOST", "PORT"}, "special": set()},
-    "bedrock": {"params": [], "connection": {"REGION"}, "special": set()},
-    "openai": {"params": [], "connection": set(), "special": set()},
-    "sagemaker": {"params": [], "connection": {"REGION"}, "special": set()},
-    "litellm": {"params": [], "connection": {"API_BASE", "API_KEY"}, "special": set()},
+    "ollama": {"params": [], "connection": {"HOST", "PORT"}, "special": {"DIMENSION"}},
+    "bedrock": {"params": [], "connection": {"REGION"}, "special": {"DIMENSION"}},
+    # API_BASE/ENDPOINT_URL + API_KEY point embeddings at an OpenAI-compatible
+    # server (local llama-server / LM Studio / vLLM).
+    "openai": {
+        "params": [],
+        "connection": {"API_BASE", "ENDPOINT_URL", "API_KEY"},
+        "special": {"DIMENSION"},
+    },
+    "sagemaker": {"params": [], "connection": {"REGION"}, "special": {"DIMENSION"}},
+    "litellm": {
+        "params": [],
+        "connection": {"API_BASE", "API_KEY"},
+        "special": {"DIMENSION"},
+    },
 }
 
 _TABLES = {

@@ -619,6 +619,32 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
             v = _ask("Anthropic base URL (optional, blank for api.anthropic.com)", _get_field(text, section, "ENDPOINT_URL") or "")
             if v:
                 text = _set_field(text, section, "ENDPOINT_URL", v)
+    if provider == "openai" and "API_BASE" in allowed:
+        # Point at an OpenAI-compatible server (local llama-server / LM Studio /
+        # vLLM) instead of the OpenAI API. Blank keeps the default (api.openai.com).
+        v = _ask(
+            "OpenAI-compatible base URL (optional, blank for the OpenAI API)",
+            _get_field(text, section, "API_BASE") or "",
+        )
+        if v:
+            text = _set_field(text, section, "API_BASE", v)
+        if "API_KEY" in allowed:
+            v = _ask(
+                "API key (optional; blank uses OPENAI_API_KEY, local servers need none)",
+                _get_field(text, section, "API_KEY") or "",
+            )
+            if v:
+                text = _set_field(text, section, "API_KEY", v)
+
+    # Embeddings: optional vector-size override (used for the SHA256 fallback;
+    # real embeddings pass through at the provider's native size).
+    if section == "EMBED_MODEL_ID":
+        v = _ask(
+            "Embedding dimension (optional; blank = auto-detect)",
+            _get_field(text, section, "DIMENSION") or "",
+        )
+        if v:
+            text = _set_field(text, section, "DIMENSION", v)
 
     # Credential notes (env-based auth the configurator can't set for the user).
     if provider == "bedrock":
@@ -1016,6 +1042,7 @@ _PARAM_META = {
         "reasoning effort (provider-dependent; e.g. low|medium|high)",
     ),
     "THINKING_TOKENS": ("int", "budget for thinking tokens"),
+    "DIMENSION": ("int", "embedding vector size (match your embedder; for the fallback)"),
 }
 
 # Order params are prompted in (registry membership decides which appear).
@@ -1023,13 +1050,16 @@ _PARAM_ORDER = [
     "TEMPERATURE", "TOP_P", "TOP_K", "MAX_TOKENS",
     "PRESENCE_PENALTY", "FREQUENCY_PENALTY", "REPETITION_PENALTY",
     "STOP", "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+    "DIMENSION",
 ]
 
-# /params can tune the chat and vision models (embeddings take no inference
-# params). key -> (config section, label).
+# /params can tune the chat, vision, and embeddings models. The embeddings model
+# exposes only DIMENSION; chat/vision expose the generation knobs. key ->
+# (config section, label).
 _PARAM_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)"),
     "2": ("VISION_MODEL_ID", "Vision model"),
+    "3": ("EMBED_MODEL_ID", "Embeddings model"),
 }
 
 
@@ -1143,6 +1173,7 @@ def run_params_override() -> Optional[Path]:
     available = {
         "1": _get_field(text, "MODEL_ID", "NAME") is not None,
         "2": _get_field(text, "VISION_MODEL_ID", "NAME") is not None,
+        "3": _get_field(text, "EMBED_MODEL_ID", "NAME") is not None,
     }
 
     print()
