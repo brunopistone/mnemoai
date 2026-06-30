@@ -123,8 +123,9 @@ class AgentConversationManager:
             )
             return int(len(text) / multiplier)
         else:
-            # Use tiktoken for OpenAI/Bedrock/SageMaker
-            return len(self.encoder.encode(text))
+            # Use tiktoken for OpenAI/Bedrock/SageMaker. disallowed_special=()
+            # so special-token text (e.g. "<|endoftext|>") is counted, not raised.
+            return len(self.encoder.encode(text, disallowed_special=()))
 
     @staticmethod
     def _message_text_for_summary(msg: Dict) -> str:

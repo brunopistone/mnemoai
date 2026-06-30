@@ -75,8 +75,9 @@ class EpisodicMemoryManager:
             )
             return int(len(text) / multiplier)
         else:
-            # Use tiktoken for OpenAI/Bedrock/SageMaker
-            return len(self.encoder.encode(text))
+            # Use tiktoken for OpenAI/Bedrock/SageMaker. disallowed_special=()
+            # so special-token text (e.g. "<|endoftext|>") is counted, not raised.
+            return len(self.encoder.encode(text, disallowed_special=()))
 
     def _truncate_to_tokens(self, text: str, max_tokens: int) -> str:
         """Truncate text to fit within token limit.
@@ -88,7 +89,7 @@ class EpisodicMemoryManager:
         Returns:
             Truncated text
         """
-        tokens = self.encoder.encode(text)
+        tokens = self.encoder.encode(text, disallowed_special=())
         if len(tokens) <= max_tokens:
             return text
 
