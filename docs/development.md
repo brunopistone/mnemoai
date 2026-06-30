@@ -46,7 +46,7 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 The test suite uses `pytest` and is split into two tiers under `tests/`:
 
 - **`tests/unit/`** — fast, deterministic tests for pure logic (BM25, reasoning helpers, response parsing, subtask parsing, the tool error handler, git-safety command classification, file editing/search, bash timeout handling, and episodic-memory heuristics). No LLM, Ollama, or network required, so they run in seconds and don't need a `config.yaml`.
-- **`tests/integration/`** — end-to-end tests that drive the real agent against a live Ollama server and the MCP subprocess (routing, tool calls, bash timeout, no silent empty turns). Marked with `@pytest.mark.integration` and **auto-skipped** unless a runtime `utils/config.yaml` exists and the configured Ollama host is reachable.
+- **`tests/integration/`** — end-to-end tests that drive the real agent against a live Ollama server and the MCP subprocess (routing, tool calls, bash timeout, no silent empty turns). Marked with `@pytest.mark.integration` and **auto-skipped** unless a resolvable runtime config exists (for example `MNEMOAI_CONFIG=/path/to/config.yaml`, `~/.mnemoai/config/config.yaml`, or the checkout fallback `src/mnemoai/utils/config.yaml`) and the configured Ollama host is reachable.
 
 ```bash
 # Install test dependencies
@@ -58,8 +58,8 @@ python -m pytest
 # Unit tier only (fast — good for CI and pre-commit)
 python -m pytest tests/unit
 
-# Integration tier only (requires Ollama running + a real config.yaml)
-python -m pytest -m integration
+# Integration tier only (requires Ollama running + a resolvable config.yaml)
+MNEMOAI_CONFIG=/path/to/config.yaml python -m pytest -m integration
 
 # Run a single file
 python -m pytest tests/unit/test_bm25.py
@@ -162,7 +162,7 @@ VISION_MODEL_ID:
 ```yaml
 RAG:
   EMBED_MODEL_ID:
-    NAME: mxbai-embed-large
+    NAME: qwen3-embedding:0.6b
     TYPE: ollama
 ```
 
@@ -254,7 +254,7 @@ See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for 
 
 - Ensure `ENABLE_RAG: true` (or `ENABLE_EPISODIC_MEMORY: true`) in config
 - Verify embedding model is configured and available (`RAG.EMBED_MODEL_ID` in config)
-- For Ollama embeddings: ensure the embedding model is pulled (`ollama pull mxbai-embed-large`)
+- For Ollama embeddings: ensure the embedding model is pulled, for example `ollama pull qwen3-embedding:0.6b`
 - Check logs for "fallback embeddings" warnings — this means the real model is unreachable
 - Verify documents are being indexed with `list_documents()`
 
@@ -275,7 +275,8 @@ Logs are output to stderr with configurable level:
 
 ```bash
 LOG_LEVEL=DEBUG mnemoai  # Detailed logs
-LOG_LEVEL=INFO mnemoai   # Normal logs (default)
+LOG_LEVEL=INFO mnemoai   # Informational logs
+mnemoai                  # Default: WARNING-level diagnostics only
 ```
 
 ## 📄 License

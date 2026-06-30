@@ -2,117 +2,77 @@
 
 <p align="center"><img src="assets/mnemoai-logo.png" width="120"></p>
 
-A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
+A local agentic AI assistant for developers and power users. Mnemo AI runs in your terminal, connects to tools through MCP (Model Context Protocol), can read and edit files, use shell/git safely, search documents with RAG, and remember useful context across sessions.
+
+It supports local and hosted model providers: **Ollama**, **Amazon Bedrock**, **Bedrock Mantle**, **OpenAI**, **Anthropic**, **Amazon SageMaker AI**, and **LiteLLM**.
 
 ![Demo](https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/assistant-demo.gif)
 
-## ✨ Key Features
+## Quick start
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, OpenAI, Anthropic (Claude), Amazon SageMaker AI, LiteLLM (100+ providers)
-- **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
-- **📚 RAG (Retrieval-Augmented Generation)**: Automatic document indexing and semantic search (_if enabled_)
-- **💬 Advanced Chat Interface**: Multiline input, command system, conversation save/load
-- **🧠 User Profile Learning**: Automatic learning from interactions for personalized responses
-- **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
-- **📖 ACE Playbook**: Learns strategies from successes AND failures via Agentic Context Engineering
-- **🔍 Web Search**: Integrated Brave Search API (_if available_)
-- **🌐 Web Crawler**: Extract and index content from web pages
-- **🖼️ Vision Support**: Image analysis with vision models (_if available_)
-- **📁 File Operations**: Read/write/edit with support for text, CSV, JSON, PDF, DOCX
-- **✏️ Precise File Editing**: Safe string replacement with validation and uniqueness checking
-- **🔎 Fast Search Tools**: Glob pattern matching and ripgrep content search (10-100x faster)
-- **📋 Todo Tracking**: Multi-step task management with real-time progress updates
-- **⚡ Bash Execution**: Direct shell command execution with intelligent error handling
-- **🛡️ Git Safety**: Protection against dangerous git operations with smart warnings
-- **📝 Plan Mode**: Implementation planning workflow for complex tasks
-- **🔄 Background Tasks**: Run long operations in parallel without blocking
-
-## 📖 Project Structure
-
-```yaml
-mnemoai/                      # repo root
-├── pyproject.toml                          # Packaging + `mnemoai` CLI entry point
-├── requirements.txt                        # Dependencies
-├── README.md                               # This file
-├── pytest.ini                              # Pytest configuration
-├── requirements-dev.txt                    # Dev/test dependencies
-│
-├── src/mnemoai/              # The single package (src layout)
-│   ├── __init__.py
-│   ├── __main__.py                         # `python -m mnemoai`
-│   ├── main.py                             # Entry point (cli())
-│   │
-│   ├── client/                             # Client layer
-│   │   ├── client.py                       # LangGraphClient facade (lifecycle, MCP, query)
-│   │   ├── mcp_tool_wrapper.py             # MCP→LangChain adapter + MultiMCPClient (built-in + external servers)
-│   │   ├── mcp_config.py                   # Loads external MCP servers from mcp.json
-│   │   ├── agent/                          # Agent loop
-│   │   │   ├── agent.py                    # LangGraph StateGraph agent with streaming
-│   │   │   ├── router.py                   # Query classifier and routing
-│   │   │   ├── orchestrator.py             # Task decomposition and worker orchestration
-│   │   │   └── reasoning_utils.py          # Reasoning/thinking helpers for aux LLM calls
-│   │   ├── ui/                             # User interface
-│   │   │   ├── chat_interface.py           # Chat loop
-│   │   │   └── spinner.py                  # Loading animations
-│   │   ├── managers/                       # Business logic
-│   │   │   ├── agent_conversation_manager.py  # Conversation state and token tracking
-│   │   │   └── user_profile_manager.py     # User profiling and learning
-│   │   └── memory/                         # Memory systems
-│   │       ├── episodic_memory.py          # Episodic memory manager
-│   │       ├── memory_store.py             # Curated persistent memory (MEMORY.md) store
-│   │       ├── reflector.py                # ACE Reflector - extracts strategies
-│   │       ├── playbook_store.py           # ACE Playbook - stores learned strategies
-│   │       ├── faiss_store.py              # FAISS episodic store
-│   │       └── chroma_store.py             # ChromaDB episodic store
-│   │
-│   ├── server/                             # MCP server layer
-│   │   ├── server.py                       # FastMCP server (run as a subprocess)
-│   │   ├── error_handler.py                # @tool_error_handler decorator (shared)
-│   │   └── tools/                          # Tool implementations
-│   │       ├── tools_manager.py            # Tool registration
-│   │       ├── fs_read.py / fs_write.py / file_edit.py / file_search.py
-│   │       ├── execute_bash.py / git_safety.py / todo_manager.py / plan_mode.py
-│   │       ├── background_tasks.py / web_crawler.py / web_search.py
-│   │       ├── describe_image.py / rag_tool.py / memory_tool.py
-│   │       ├── rag/                        # RAG system (session, vector_store_controller, stores)
-│   │       └── readers/                    # File readers (csv/json/pdf/docx/line/dir/search + chunking)
-│   │
-│   ├── models/                             # Model layer
-│   │   ├── provider_params.py              # Single source of truth: per-provider config keys
-│   │   ├── mantle_factory.py               # Bedrock Mantle model factory (multi-protocol)
-│   │   ├── controllers/                    # Provider-dispatching controllers
-│   │   │   ├── base_model_controller.py    # Minimal shared base
-│   │   │   ├── llm_controller.py           # LLM initialization
-│   │   │   ├── vision_model_controller.py  # Vision model initialization
-│   │   │   └── embeddings_controller.py    # Embeddings initialization
-│   │   └── chat_models/                    # Concrete LangChain ChatModel subclasses
-│   │       ├── chat_ollama_wrapper.py      # Ollama model with penalty support
-│   │       └── sagemaker_chat.py           # SageMaker ChatModel for LangChain
-│   │
-│   └── utils/                              # Utilities
-│       ├── config.py                       # Config loader
-│       ├── configurator.py                 # First-run setup + /config & /model flows
-│       ├── paths.py                        # Central path helper (~/.mnemoai)
-│       ├── logger.py                       # Logging utilities
-│       ├── bm25.py                         # Lightweight BM25 (hybrid search)
-│       ├── config.yaml.example             # Config templates (also .bedrock / .bedrock.mantle)
-│       ├── mcp.json.example                # External MCP servers template
-│       └── formatting/                     # Text formatting (code/url/response)
-│
-├── tests/                                  # Test suite (pytest)
-│   ├── conftest.py                         # Puts src/ on sys.path
-│   ├── unit/                               # Fast, deterministic, no deps
-│   └── integration/                        # Live agent + Ollama + MCP
-│
-├── docs/                                   # ARCHITECTURE.md (detailed file map)
-└── bash/                                   # Helper scripts
-    ├── system-command-app/                 # `mnemoai` wrapper script
-    ├── ollama-freeup-vram/                 # VRAM management
-    └── ollama-env-mac/                     # Ollama config
+```bash
+uv tool install mnemoai-assistant     # or: pip install mnemoai-assistant
+mnemoai
 ```
 
-## Next steps
+On first run, Mnemo AI launches an interactive setup wizard and writes your user config to:
 
-- [Getting Started](getting-started.md) — install and configure the assistant
-- [Usage](usage.md) — commands, feature toggles, and day-to-day use
-- [Configuration](configuration.md) — full configuration reference
+```text
+~/.mnemoai/config/config.yaml
+```
+
+You only need Python 3.11+ and access to at least one model provider. For the easiest local setup, install [Ollama](https://ollama.ai) and pull a chat model before running Mnemo AI.
+
+## What Mnemo AI can do
+
+- **Use multiple LLM providers** — local Ollama or hosted providers such as Bedrock, OpenAI, Anthropic, SageMaker AI, and LiteLLM.
+- **Work with your files** — read, search, write, and precisely edit text, code, CSV, JSON, PDF, and DOCX files.
+- **Use developer tools safely** — shell execution, git safety checks, todo tracking, plan mode, and background tasks.
+- **Search and ingest knowledge** — RAG over documents, web crawling, and optional Brave web search.
+- **Learn over time** — persistent memory, user profiling, episodic memory, ACE playbook strategies, and authored agent skills.
+- **Handle multimodal tasks** — optional vision model support for image analysis.
+
+## Choose your path
+
+| Goal                                                                         | Start here                                |
+| ---------------------------------------------------------------------------- | ----------------------------------------- |
+| Install and use Mnemo AI from scratch                                        | [Getting Started](getting-started.md)     |
+| Learn the chat commands and feature toggles                                  | [Usage](usage.md)                         |
+| Configure providers, models, prompts, RAG, and memory                        | [Configuration](configuration.md)         |
+| Add external MCP servers, RAG, memory, web tools, and skills                 | [Advanced Features](advanced-features.md) |
+| Understand file editing, search, git safety, plan mode, and background tasks | [Productivity Tools](productivity.md)     |
+| Contribute or run tests                                                      | [Development](development.md)             |
+| Understand the internal design                                               | [Architecture](architecture-overview.md)  |
+| Browse the detailed per-file map                                             | [Architecture Reference](ARCHITECTURE.md) |
+
+## Typical workflow
+
+1. Install Mnemo AI.
+2. Run `mnemoai` and complete the first-run wizard.
+3. Ask a simple question or request a file operation, for example:
+
+   ```text
+   What files are in this directory?
+   ```
+
+4. Enable optional features as needed:
+   - RAG/document search needs an embedding model.
+   - Web search needs a Brave Search API key.
+   - Vision needs a vision-capable model.
+   - External MCP tools are configured in `~/.mnemoai/mcp/mcp.json`.
+
+## Where configuration lives
+
+For normal installs, edit:
+
+```text
+~/.mnemoai/config/config.yaml
+```
+
+You can override this with:
+
+```bash
+MNEMOAI_CONFIG=/path/to/config.yaml mnemoai
+```
+
+The first run also seeds readable examples under `~/.mnemoai/config/` and `~/.mnemoai/mcp/`.

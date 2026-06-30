@@ -552,7 +552,7 @@ For Ollama:
 ```yaml
 RAG:
   EMBED_MODEL_ID:
-    NAME: mxbai-embed-large
+    NAME: qwen3-embedding:0.6b
     TYPE: ollama
     HOST: localhost
     PORT: 11434

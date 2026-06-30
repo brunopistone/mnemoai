@@ -22,7 +22,7 @@ Full documentation is available at **https://brunopistone.github.io/mnemoai/**
 - [Configuration](https://brunopistone.github.io/mnemoai/configuration/)
 - [Advanced Features](https://brunopistone.github.io/mnemoai/advanced-features/)
 - [Productivity Tools](https://brunopistone.github.io/mnemoai/productivity/)
-- [Architecture](https://brunopistone.github.io/mnemoai/architecture/)
+- [Architecture](https://brunopistone.github.io/mnemoai/architecture-overview/)
 - [Development](https://brunopistone.github.io/mnemoai/development/)
 
 ## 🚀 Quick Start
