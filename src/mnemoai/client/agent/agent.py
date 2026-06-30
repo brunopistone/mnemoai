@@ -616,7 +616,7 @@ class LangGraphAgent:
                         logger.error(f"Worker tool error: {e}")
                         worker_messages.append(
                             ToolMessage(
-                                content=f"Error: {e}",
+                                content=self._tool_error_message(tool_name, e),
                                 tool_call_id=tool_id,
                                 name=tool_name,
                             )
@@ -1535,6 +1535,34 @@ class LangGraphAgent:
             "run."
         )
 
+    # Matches pydantic's "Field required" line, capturing the missing field name
+    # (the line above the "Field required" message is the field path).
+    _MISSING_FIELD_RE = re.compile(
+        r"^\s*(\w[\w.]*)\s*\n\s*Field required", re.MULTILINE
+    )
+
+    @classmethod
+    def _tool_error_message(cls, tool_name: str, exc: Exception) -> str:
+        """Turn a tool exception into model-facing guidance.
+
+        A pydantic arg-validation failure (raised when the model calls a tool
+        with a required argument missing — e.g. ``file_edit`` without
+        ``new_string``) is otherwise reported as opaque pydantic text the model
+        tends to retry verbatim. Translate the common "Field required" case into
+        a plain instruction so the model corrects the CALL rather than looping.
+        """
+        text = str(exc)
+        missing = cls._MISSING_FIELD_RE.findall(text)
+        if missing:
+            fields = ", ".join(sorted(set(missing)))
+            return (
+                f"Error: the call to `{tool_name}` is missing required "
+                f"argument(s): {fields}. Provide every required argument and try "
+                f"again — do not omit them. (For file_edit, `new_string` is "
+                f"required; pass \"\" to delete text.)"
+            )
+        return f"Error: {text}"
+
     # Tools gated by a hard confirmation prompt, keyed by category.
     _CONFIRM_BASH_TOOLS = {"execute_bash"}
     _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
@@ -1688,7 +1716,9 @@ class LangGraphAgent:
                     logger.error(f"Tool execution error: {e}")
                     tool_results.append(
                         ToolMessage(
-                            content=f"Error: {e}", tool_call_id=tool_id, name=tool_name
+                            content=self._tool_error_message(tool_name, e),
+                            tool_call_id=tool_id,
+                            name=tool_name,
                         )
                     )
             else:
@@ -1730,6 +1760,21 @@ class LangGraphAgent:
         """
         return self.invoke(prompt)
 
+    # Ephemeral, per-turn reminder blocks the client prepends to a prompt (e.g.
+    # the plan-mode banner). They're true only for the turn they're sent on, so
+    # they go to the model THIS turn but must NOT be persisted in history — a
+    # saved/reloaded conversation that kept a "plan mode is active" banner makes
+    # the model believe it's still in plan mode. Matched and stripped before the
+    # prompt is stored.
+    _EPHEMERAL_BLOCK_RE = re.compile(
+        r"<plan-mode-active>.*?</plan-mode-active>\s*", re.DOTALL
+    )
+
+    @classmethod
+    def _strip_ephemeral(cls, text: str) -> str:
+        """Remove ephemeral per-turn reminder blocks from a prompt for storage."""
+        return cls._EPHEMERAL_BLOCK_RE.sub("", text)
+
     def invoke(self, prompt: str) -> str:
         """Invoke the agent with a prompt.
 
@@ -1739,11 +1784,17 @@ class LangGraphAgent:
         Returns:
             Agent response as string
         """
-        user_message = HumanMessage(content=prompt)
-        self._messages.append(user_message)
+        # The model sees the full prompt (incl. any ephemeral plan-mode banner)
+        # for THIS turn, but only the clean prompt is persisted — so a saved
+        # conversation never carries a stale "plan mode is active" instruction.
+        stored_prompt = self._strip_ephemeral(prompt)
+        self._messages.append(HumanMessage(content=stored_prompt))
 
+        # Build the turn the model actually runs on: clean history + the full
+        # current prompt (clean stored turn swapped for the reminder-bearing one).
+        model_messages = self._messages[:-1] + [HumanMessage(content=prompt)]
         initial_state: AgentState = {
-            "messages": self._messages.copy(),
+            "messages": model_messages,
             "thinking": None,
             "route": None,
         }
@@ -1780,10 +1831,16 @@ class LangGraphAgent:
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
 
+        # Collect only the NEW assistant/tool messages produced this turn. Skip
+        # SystemMessage, the already-stored history, and any HumanMessage — the
+        # user turn was stored above as the CLEAN prompt, so we must not re-add
+        # the reminder-bearing HumanMessage the model actually ran on (which is
+        # a distinct object and would otherwise look "new").
         new_messages = [
             m
             for m in final_messages
-            if not isinstance(m, SystemMessage) and m not in self._messages
+            if not isinstance(m, (SystemMessage, HumanMessage))
+            and m not in self._messages
         ]
         self._messages.extend(new_messages)
 

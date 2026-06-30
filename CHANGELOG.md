@@ -9,6 +9,28 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.11.2] — 2026-06-30
+
+### Fixed
+
+- **Plan mode no longer "sticks" to a saved-then-reloaded conversation.** When
+  plan mode is active, the client prepends an ephemeral `<plan-mode-active>`
+  reminder to the turn's prompt. That banner was being baked into the stored
+  `HumanMessage`, so saving the conversation and reloading it (with `/plan` since
+  toggled off) re-fed the banner to the model, which then behaved as if still in
+  plan mode. The banner is now stripped before the turn is stored (the model
+  still receives it that turn, so enforcement is unchanged) and stripped again
+  from any banner-bearing messages on load, so reloaded chats start clean.
+- **Clearer tool arg-validation errors.** When the model called a tool with a
+  required argument missing (notably `file_edit` without `new_string`, which a
+  capable model still did ~80× in one session while trying to DELETE text), the
+  raw pydantic "Field required" text was handed back and retried verbatim in a
+  loop. Such failures are now translated into plain guidance naming the missing
+  argument(s) (e.g. *"the call to `file_edit` is missing required argument(s):
+  new_string … pass \"\" to delete text"*), and `file_edit`'s description now
+  states all three args are required and documents `new_string=""` for deletion
+  (with an example), steering wholesale rewrites toward `fs_write`.
+
 ## [0.11.1] — 2026-06-30
 
 ### Fixed

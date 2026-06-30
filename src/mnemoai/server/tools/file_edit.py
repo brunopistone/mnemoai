@@ -22,14 +22,21 @@ def register_edit_tools(mcp: FastMCP) -> None:
     ) -> str:
         """Perform exact string replacement in a file.
 
-        PREFER THIS TOOL over fs_write for modifying existing files. Reserve
-        fs_write for creating new files or wholesale rewrites; use file_edit for
-        any targeted change to a file that already exists.
+        ALL THREE of file_path, old_string, AND new_string are REQUIRED on every
+        call. To DELETE text, pass new_string="" (an empty string) — do NOT omit
+        new_string; a call without it is rejected. To REPLACE text, set
+        new_string to the new content.
+
+        PREFER THIS TOOL over fs_write for targeted changes to an existing file.
+        For a WHOLESALE REWRITE (replacing most/all of a file, or many scattered
+        sections at once), use fs_write with the full new content instead — one
+        fs_write is far more reliable than dozens of file_edit calls.
 
         WORKFLOW:
         1. Read the file first with fs_read
         2. Copy the exact text to replace, including whitespace and indentation
-        3. Call file_edit(file_path, old_string, new_string)
+        3. Call file_edit(file_path=..., old_string=..., new_string=...) — always
+           include new_string (use "" to delete)
         4. If you get a "not unique" error, include more surrounding context in
            old_string until it matches exactly one location (or set replace_all=True)
 
@@ -38,6 +45,7 @@ def register_edit_tools(mcp: FastMCP) -> None:
         2. The old_string must match EXACTLY as it appears in the file
         3. Include proper indentation (spaces/tabs) in old_string and new_string
         4. If the file uses tabs, use tabs. If spaces, use spaces.
+        5. new_string is mandatory — pass "" to delete, never omit it
 
         This tool provides safer editing than fs_write because:
         - It validates that old_string exists before modifying
@@ -45,9 +53,9 @@ def register_edit_tools(mcp: FastMCP) -> None:
         - It provides clear error messages with guidance
 
         Args:
-            file_path: Absolute path to the file to edit
-            old_string: Exact text to replace (must exist and be unique unless replace_all=True)
-            new_string: Replacement text (can be same length, longer, or shorter)
+            file_path: Absolute path to the file to edit (required)
+            old_string: Exact text to replace (required; must exist and be unique unless replace_all=True)
+            new_string: Replacement text (REQUIRED; pass "" to delete old_string)
             replace_all: If True, replace ALL occurrences. If False (default), old_string must be unique.
 
         Returns:
@@ -66,6 +74,13 @@ def register_edit_tools(mcp: FastMCP) -> None:
                 file_path="/path/to/config.yaml",
                 old_string="MAX_TOKENS: 32768\\n  TEMPERATURE: 0.3",
                 new_string="MAX_TOKENS: 8192\\n  TEMPERATURE: 0.3"
+            )
+
+            # DELETE a block: new_string is "" (still required, never omitted)
+            file_edit(
+                file_path="/path/to/file.md",
+                old_string="## Old Section\\nremove me\\n",
+                new_string=""
             )
         """
         # Expand ~ and tolerate shell escaping/quoting in the path.

@@ -62,6 +62,7 @@ Orchestrator decomposes into:
 ENABLE_ROUTING: true # Required
 ENABLE_ORCHESTRATION: true # Activates orchestrator for 'full' route
 
+
 # prompts.yaml — customize the prompts (optional; sensible defaults bundled)
 # ORCHESTRATOR_PROMPT: |      # decomposition prompt
 # AGGREGATOR_PROMPT: |        # synthesis prompt
@@ -268,7 +269,7 @@ EPISODIC_MEMORY:
   STORE_TYPE: chromadb # or faiss
 RAG:
   EMBED_MODEL_ID: # Required for both stores
-    NAME: mxbai-embed-large
+    NAME: qwen3-embedding:0.6b
     TYPE: ollama
 ```
 
