@@ -90,3 +90,60 @@ class TestEmbeddingDimension:
         c.cache_enabled = False
         out = c._embed_fallback(["hello"])
         assert out.shape == (1, 512)
+
+
+class TestOllamaHost:
+    """The Ollama embed path must honor the configured HOST/PORT (like the LLM
+    and vision controllers) instead of the bare ollama.embed() which silently
+    reads $OLLAMA_HOST — a wrong OLLAMA_HOST (e.g. a llama-swap port left over
+    from a local-engine experiment) otherwise hijacks the embed and it fails.
+    The host is resolved inside _embed_ollama (not __init__), so a non-Ollama
+    controller never builds an Ollama URL it doesn't use."""
+
+    @staticmethod
+    def _patch_client(monkeypatch, captured):
+        class _FakeOllamaClient:
+            def __init__(self, host=None):
+                captured["host"] = host
+
+            def embed(self, model, input):
+                return {"embeddings": [[0.1, 0.2, 0.3]] * len(input)}
+
+        monkeypatch.setattr(ec.ollama, "Client", _FakeOllamaClient)
+
+    def test_configured_host_port_used(self, monkeypatch):
+        captured = {}
+        self._patch_client(monkeypatch, captured)
+        c = EmbeddingsController(
+            {"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "HOST": "myhost", "PORT": 9999}
+        )
+        c.cache_enabled = False
+        c._embed_ollama(["hello"])
+        assert captured["host"] == "http://myhost:9999"
+
+    def test_default_host_port(self, monkeypatch):
+        captured = {}
+        self._patch_client(monkeypatch, captured)
+        c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama"})
+        c.cache_enabled = False
+        c._embed_ollama(["hello"])
+        assert captured["host"] == "http://localhost:11434"
+
+    def test_configured_host_wins_over_env(self, monkeypatch):
+        captured = {}
+        self._patch_client(monkeypatch, captured)
+        # Even with OLLAMA_HOST pointing elsewhere, the configured host wins.
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:56231")
+        c = EmbeddingsController(
+            {"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "HOST": "localhost", "PORT": 11434}
+        )
+        c.cache_enabled = False
+        out = c._embed_ollama(["hello"])
+        assert captured["host"] == "http://localhost:11434"
+        assert out.shape == (1, 3)
+
+    def test_non_ollama_controller_has_no_ollama_host_attr(self):
+        # Resolving the host inside _embed_ollama means a SageMaker/Bedrock/
+        # OpenAI controller never grows an Ollama-specific attribute.
+        c = EmbeddingsController({"NAME": "my-endpoint", "TYPE": "sagemaker"})
+        assert not hasattr(c, "ollama_host")
