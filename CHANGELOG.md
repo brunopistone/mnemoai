@@ -9,6 +9,20 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.11.1] — 2026-06-30
+
+### Fixed
+
+- **`fs_read` (and RAG/memory/compaction token counting) no longer crash on
+  files containing special-token text** like `<|endoftext|>`. tiktoken's
+  `encode()` raises on such text by default; the token-counting helpers now pass
+  `disallowed_special=()` so the text is COUNTED as ordinary content (these are
+  length estimates, not encodings sent to the model). Fixed across all four call
+  sites: `ToolManager.count_tokens` (fs_read's size check), the RAG chunking
+  helper, `EpisodicMemoryManager`, and `AgentConversationManager`. Reading a file
+  that mentions `<|endoftext|>` (e.g. a config `STOP` list or a prompts file) now
+  works instead of erroring with "disallowed special token".
+
 ## [0.11.0] — 2026-06-30
 
 ### Added
@@ -795,7 +809,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/brunopistone/mnemoai/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/brunopistone/mnemoai/compare/v0.10.5...v0.11.0
 [0.10.5]: https://github.com/brunopistone/mnemoai/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/brunopistone/mnemoai/compare/v0.10.3...v0.10.4

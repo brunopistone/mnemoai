@@ -124,8 +124,11 @@ def __count_tokens(text: str) -> int:
     """
     try:
         encoding = tiktoken.get_encoding(MODEL_ID)
-        return len(encoding.encode(text))
-    except:
+        # disallowed_special=() so text that literally contains a special token
+        # (e.g. "<|endoftext|>" in a source file being chunked) is counted as
+        # ordinary text rather than raising.
+        return len(encoding.encode(text, disallowed_special=()))
+    except Exception:
         return len(text) // 4  # Rough estimate
 
 

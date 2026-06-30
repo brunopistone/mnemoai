@@ -79,8 +79,11 @@ class ToolManager:
             )
             return int(len(text) / multiplier)
         else:
-            # Use tiktoken for OpenAI/Bedrock/SageMaker
-            return len(self.encoder.encode(text))
+            # Use tiktoken for OpenAI/Bedrock/SageMaker. disallowed_special=()
+            # so any special-token text in the input (e.g. a file that literally
+            # contains "<|endoftext|>") is COUNTED as ordinary text rather than
+            # raising — this is a length estimate, not encoding for the model.
+            return len(self.encoder.encode(text, disallowed_special=()))
 
     def register_tools(self, mcp: Any) -> None:
         """Register all tools with the MCP server.
