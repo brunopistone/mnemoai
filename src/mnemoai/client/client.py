@@ -1025,6 +1025,14 @@ class LangGraphClient:
                 conversation_messages
             )
 
+            # Repair conversations saved before the ephemeral plan-mode banner was
+            # kept out of history: strip any stored <plan-mode-active> block so a
+            # reloaded chat doesn't make the model believe it's still in plan mode.
+            for m in langchain_messages:
+                content = getattr(m, "content", None)
+                if isinstance(content, str) and "<plan-mode-active>" in content:
+                    m.content = LangGraphAgent._strip_ephemeral(content)
+
             if self.agent:
                 self.agent.messages.clear()
                 self.agent.messages.extend(langchain_messages)
