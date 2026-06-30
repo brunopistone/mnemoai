@@ -201,7 +201,14 @@ class LangChainLLMController(BaseModelController):
         self.model = ChatOllamaWrapper(**kwargs)
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
-        """Initialize OpenAI model using LangChain.
+        """Initialize an OpenAI-compatible model using LangChain.
+
+        Talks to the OpenAI API by default, but ``API_BASE`` (alias
+        ``ENDPOINT_URL``) points it at ANY OpenAI-compatible server — e.g. a
+        local ``llama-server`` (llama.cpp), LM Studio, vLLM, or llama-swap —
+        making those first-class local back ends without a separate provider.
+        Local servers usually need no real key, so ``API_KEY`` defaults to a
+        placeholder when a custom base URL is set.
 
         ``API_PROTOCOL`` selects the API: ``chat_completions`` (default) or
         ``responses``. On the Responses API, a reasoning model can return a
@@ -223,6 +230,21 @@ class LangChainLLMController(BaseModelController):
             "streaming": self.stream,
             **passthrough,
         }
+
+        # Point at an OpenAI-compatible server (local llama-server / LM Studio /
+        # vLLM, etc.) when configured. API_BASE is the canonical key; ENDPOINT_URL
+        # is accepted as an alias for symmetry with the other providers.
+        base_url = self.model_id.get("API_BASE") or self.endpoint_url
+        if base_url:
+            kwargs["base_url"] = base_url
+            logger.info(f"Using OpenAI-compatible endpoint: {base_url}")
+        # A local server typically ignores auth; provide a placeholder key so the
+        # client constructs without a real OPENAI_API_KEY. An explicit API_KEY
+        # (or the env var, used when none is set here) still wins.
+        if self.model_id.get("API_KEY"):
+            kwargs["api_key"] = self.model_id["API_KEY"]
+        elif base_url:
+            kwargs["api_key"] = "sk-local"
 
         extra = extra_params(self.model_id)
         if protocol == "responses":

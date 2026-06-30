@@ -26,17 +26,33 @@ class EmbeddingsController:
         self.embed_model_type = self.embed_model_config.get("TYPE", "ollama")
         self.embed_model_name = self.embed_model_config.get("NAME", "mxbai-embed-large")
         self.region = self.embed_model_config.get("REGION", "us-east-1")
-        # LiteLLM connection (optional): OpenAI-compatible base URL + key.
-        self.api_base = self.embed_model_config.get("API_BASE")
+        # OpenAI-compatible connection (optional): base URL + key. Used by both
+        # the litellm and openai embedding paths so a LOCAL server
+        # (llama-server / LM Studio / vLLM, e.g. behind llama-swap) can serve
+        # embeddings. API_BASE is canonical; ENDPOINT_URL is an accepted alias.
+        self.api_base = self.embed_model_config.get(
+            "API_BASE"
+        ) or self.embed_model_config.get("ENDPOINT_URL")
         self.api_key = self.embed_model_config.get("API_KEY")
 
-        # Set expected dimension based on model
+        # Expected embedding dimension. Used ONLY for the SHA256/zeros fallback
+        # vectors and the empty-result shape — real embeddings pass through at
+        # the provider's native size untouched. An explicit ``DIMENSION`` config
+        # key wins (set it to your embedder's real dim so the fallback matches
+        # and the vector store stays consistent if the provider ever flaps);
+        # otherwise fall back to a known-model lookup, then 1024.
         model_dims = {
             "mxbai-embed-large": 1024,
             "nomic-embed-text": 768,
             "all-minilm": 384,
+            "qwen3-embedding": 1024,
+            "qwen3-embedding:0.6b": 1024,
         }
-        self.dim = model_dims.get(self.embed_model_name, 1024)  # Default to 1024
+        configured_dim = self.embed_model_config.get("DIMENSION")
+        if configured_dim is not None:
+            self.dim = int(configured_dim)
+        else:
+            self.dim = model_dims.get(self.embed_model_name, 1024)
 
         # Initialize embedding cache for performance
         embeddings_config = config.get("RAG", {}).get("EMBEDDINGS", {})
@@ -218,7 +234,12 @@ class EmbeddingsController:
             return self._embed_fallback(texts)
 
     def _embed_openai(self, texts: List[str]) -> np.ndarray:
-        """Embed using OpenAI.
+        """Embed using OpenAI or any OpenAI-compatible server.
+
+        Honors ``API_BASE`` (alias ``ENDPOINT_URL``) + ``API_KEY`` so a local
+        server — ``llama-server`` / LM Studio / vLLM, e.g. behind ``llama-swap``
+        — can provide embeddings, matching the chat controller. Falls back to
+        the OpenAI API (``OPENAI_API_KEY``) when no base URL is set.
 
         Args:
             texts: List of text strings to embed
@@ -227,7 +248,16 @@ class EmbeddingsController:
             NumPy array of embeddings
         """
         try:
-            client = OpenAI()
+            client_kwargs = {}
+            if self.api_base:
+                client_kwargs["base_url"] = self.api_base
+            if self.api_key:
+                client_kwargs["api_key"] = self.api_key
+            elif self.api_base:
+                # Local servers ignore auth; a placeholder lets the client build
+                # without a real OPENAI_API_KEY.
+                client_kwargs["api_key"] = "sk-local"
+            client = OpenAI(**client_kwargs)
             response = client.embeddings.create(
                 model=self.embed_model_name, input=texts
             )

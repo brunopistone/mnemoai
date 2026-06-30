@@ -418,11 +418,17 @@ def test_provider_params_registry_shape():
     assert set(providers("EMBED_MODEL_ID")) == {
         "ollama", "bedrock", "openai", "sagemaker", "litellm"
     }
-    # Embeddings take no inference params — only connection keys (+ EXTRA_PARAMS).
-    assert supported_keys("EMBED_MODEL_ID", "ollama") == {"HOST", "PORT", "EXTRA_PARAMS"}
-    assert supported_keys("EMBED_MODEL_ID", "openai") == {"EXTRA_PARAMS"}
+    # Embeddings take no inference params — only connection keys, the optional
+    # DIMENSION override, and EXTRA_PARAMS.
+    assert supported_keys("EMBED_MODEL_ID", "ollama") == {
+        "HOST", "PORT", "DIMENSION", "EXTRA_PARAMS"
+    }
+    # openai embeddings can target a local OpenAI-compatible server.
+    assert supported_keys("EMBED_MODEL_ID", "openai") == {
+        "API_BASE", "ENDPOINT_URL", "API_KEY", "DIMENSION", "EXTRA_PARAMS"
+    }
     assert supported_keys("EMBED_MODEL_ID", "litellm") == {
-        "API_BASE", "API_KEY", "EXTRA_PARAMS"
+        "API_BASE", "API_KEY", "DIMENSION", "EXTRA_PARAMS"
     }
     # Unknown provider -> None (configurator then prunes nothing).
     assert supported_keys("MODEL_ID", "bogus") is None
@@ -465,8 +471,12 @@ def test_tunable_params_excludes_connection_keys():
         assert tunable_params("MODEL_ID", prov) == expected
     # EXTRA_PARAMS is supported but never tunable via /params.
     assert "EXTRA_PARAMS" not in tunable_params("MODEL_ID", "openai")
-    # Embeddings have nothing to tune.
-    assert tunable_params("EMBED_MODEL_ID", "ollama") == set()
+    # Embeddings expose only DIMENSION as a tunable (the vector-size override);
+    # connection keys (HOST/PORT/REGION/API_BASE/…) are still excluded.
+    assert tunable_params("EMBED_MODEL_ID", "ollama") == {"DIMENSION"}
+    assert tunable_params("EMBED_MODEL_ID", "openai") == {"DIMENSION"}
+    assert "HOST" not in tunable_params("EMBED_MODEL_ID", "ollama")
+    assert "API_BASE" not in tunable_params("EMBED_MODEL_ID", "openai")
     # Unknown provider -> None.
     assert tunable_params("MODEL_ID", "bogus") is None
 
@@ -770,8 +780,10 @@ def _run_build(provider, default_model, answers):
 def test_config_openai_transforms_base_template():
     d = _run_build(
         "openai", "gpt-5-mini",
-        ["gpt-5-mini", "none", "65536", "y", "gpt-5-mini", "none", "alice", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+        # chat name, [blank base URL, blank key], MAX_TOKENS none, context,
+        # vision? y, vision name, vision MAX_TOKENS none, profile, then toggles.
+        ["gpt-5-mini", "", "", "none", "65536", "y", "gpt-5-mini", "none",
+         "alice", "", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "openai" and m["NAME"] == "gpt-5-mini"
@@ -867,28 +879,43 @@ def test_prompt_provider_connection_litellm_asks_base_and_key(monkeypatch):
     assert d["MODEL_ID"]["API_KEY"] == "sk-abc"
 
 
-def test_prompt_provider_connection_openai_asks_nothing(monkeypatch):
-    # OpenAI is env-based (OPENAI_API_KEY); no connection keys to prompt.
+def test_prompt_provider_connection_openai_optional_base_url(monkeypatch):
+    # OpenAI prompts for an OPTIONAL base URL + key (to target a local
+    # OpenAI-compatible server); blank answers leave the config untouched
+    # (defaults to the OpenAI API via OPENAI_API_KEY).
     from mnemoai.utils import configurator as C
 
-    def _no_input(*a, **k):
-        raise AssertionError("OpenAI should not prompt for connection keys")
-
-    monkeypatch.setattr("builtins.input", _no_input)
+    answers = iter(["", ""])  # blank base URL, blank key
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "MODEL_ID:\n  NAME: gpt-5-mini\n  TYPE: openai\n"
     out, conn = C._prompt_provider_connection(text, "MODEL_ID", "openai")
     assert conn == {}
-    assert "HOST" not in yaml.safe_load(out)["MODEL_ID"]
+    d = yaml.safe_load(out)["MODEL_ID"]
+    assert "HOST" not in d
+    assert "API_BASE" not in d and "API_KEY" not in d  # blank -> not written
+
+
+def test_prompt_provider_connection_openai_sets_base_url(monkeypatch):
+    # A non-blank base URL points OpenAI at a local server.
+    from mnemoai.utils import configurator as C
+
+    answers = iter(["http://localhost:8080/v1", ""])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    text = "MODEL_ID:\n  NAME: qwen\n  TYPE: openai\n"
+    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "openai")
+    assert yaml.safe_load(out)["MODEL_ID"]["API_BASE"] == "http://localhost:8080/v1"
 
 
 def test_prompt_provider_connection_embeddings_skips_input_format(monkeypatch):
     # INPUT_FORMAT is a SageMaker *chat* key; embeddings sagemaker only needs REGION.
     from mnemoai.utils import configurator as C
 
-    answers = iter(["us-west-2"])
+    # REGION, then the optional embeddings DIMENSION prompt (left blank).
+    answers = iter(["us-west-2", ""])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "RAG:\n  EMBED_MODEL_ID:\n    NAME: e\n    TYPE: sagemaker\n"
     out, _ = C._prompt_provider_connection(text, "EMBED_MODEL_ID", "sagemaker")
     d = yaml.safe_load(out)
     assert d["RAG"]["EMBED_MODEL_ID"]["REGION"] == "us-west-2"
     assert "INPUT_FORMAT" not in d["RAG"]["EMBED_MODEL_ID"]
+    assert "DIMENSION" not in d["RAG"]["EMBED_MODEL_ID"]  # blank -> not written

@@ -904,3 +904,55 @@ class TestReasoningEffortFirstClass:
         assert "use_responses_api" not in patch_mantle
         assert "reasoning" not in patch_mantle
         assert patch_mantle["model_kwargs"]["reasoning_effort"] == "high"
+
+
+class TestOpenAICompatibleLocalEndpoint:
+    """TYPE: openai pointed at a local OpenAI-compatible server.
+
+    Lets a local llama-server (llama.cpp) / LM Studio / vLLM stand in for the
+    OpenAI API without a separate provider — the article's recommended Ollama
+    alternatives all expose this API.
+    """
+
+    def test_api_base_sets_base_url_and_placeholder_key(
+        self, patch_mantle, monkeypatch
+    ):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "qwen2.5-7b-instruct",
+                "TYPE": "openai",
+                "API_BASE": "http://localhost:8080/v1",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatOpenAI"
+        assert patch_mantle["base_url"] == "http://localhost:8080/v1"
+        # Local servers ignore auth; a placeholder key lets the client build
+        # without a real OPENAI_API_KEY.
+        assert patch_mantle["api_key"] == "sk-local"
+
+    def test_endpoint_url_alias_and_explicit_key(self, patch_mantle, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "local-model",
+                "TYPE": "openai",
+                "ENDPOINT_URL": "http://localhost:1234/v1",
+                "API_KEY": "lm-studio",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["base_url"] == "http://localhost:1234/v1"
+        assert patch_mantle["api_key"] == "lm-studio"
+
+    def test_plain_openai_unchanged(self, patch_mantle, monkeypatch):
+        # No API_BASE/ENDPOINT_URL -> no base_url, no placeholder key (uses the
+        # OPENAI_API_KEY env var as before).
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {"NAME": "gpt-5.5", "TYPE": "openai"},
+        )
+        ctrl.initialize_model()
+        assert "base_url" not in patch_mantle
+        assert "api_key" not in patch_mantle

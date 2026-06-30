@@ -9,6 +9,36 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-06-30
+
+### Added
+
+- **`TYPE: openai` can point at any OpenAI-compatible server** via `API_BASE`
+  (alias `ENDPOINT_URL`) + optional `API_KEY` — making a local
+  [`llama-server`](https://github.com/ggml-org/llama.cpp) (llama.cpp), LM Studio,
+  vLLM, or `llama-swap` a drop-in alternative to Ollama with no extra provider.
+  Local servers usually ignore auth, so a placeholder key is sent automatically
+  when `API_BASE` is set and no `API_KEY` is given. Applies to **all three model
+  roles** — `MODEL_ID` (chat), `VISION_MODEL_ID`, and `RAG.EMBED_MODEL_ID`
+  (embeddings) — so a single local endpoint (e.g. `llama-swap` hot-swapping
+  several `llama-server` instances) can serve everything. The openai embeddings
+  path previously **ignored** `API_BASE`/`API_KEY` (always hit api.openai.com);
+  it now honors them, matching the chat/vision controllers. Ollama
+  (`TYPE: ollama`) remains fully supported — this is an alternative, not a
+  replacement. See the new "Local OpenAI-compatible servers" recipe in
+  `docs/configuration.md`.
+- **Configurable embedding dimension** via `RAG.EMBED_MODEL_ID.DIMENSION`. The
+  vector size was hardcoded (name lookup → 1024 default); it's used for the
+  SHA256/zeros fallback and empty-result shape (real embeddings pass through at
+  the provider's native size). Set it to your embedder's real dimension so the
+  fallback stays index-consistent if the provider ever flaps. Settable via
+  **`/params`** (the embeddings model is now a `/params` target) and **`/model`**
+  (an "Embedding dimension" prompt), or by hand.
+- **`/model` and `/params` now expose the local-server keys.** `/model`'s openai
+  connection flow prompts for an optional OpenAI-compatible base URL + key (chat,
+  vision, embeddings), and the embeddings flow prompts for `DIMENSION` — so the
+  whole local-engine switch is UI-driven, no hand-editing required.
+
 ## [0.10.5] — 2026-06-29
 
 ### Fixed
@@ -32,7 +62,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   thinking would 400 on every call with no way to disable it. Thinking is now
   enabled only when `REASONING_EFFORT` or `REASONING: true` is set; a
   non-reasoning Claude on Mantle works again. (Note: the OpenAI Responses
-  reasoning *summary* is requested correctly on Mantle GPT-5, but the Mantle
+  reasoning _summary_ is requested correctly on Mantle GPT-5, but the Mantle
   gateway returns an empty summary — the reasoning happens and is billed, the
   text just isn't forwarded; direct `TYPE: openai` on the responses protocol
   does return it. This is upstream, not a client issue.)
@@ -765,7 +795,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.10.5...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/brunopistone/mnemoai/compare/v0.10.5...v0.11.0
 [0.10.5]: https://github.com/brunopistone/mnemoai/compare/v0.10.4...v0.10.5
 [0.10.4]: https://github.com/brunopistone/mnemoai/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/brunopistone/mnemoai/compare/v0.10.2...v0.10.3
