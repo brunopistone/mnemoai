@@ -157,6 +157,26 @@ Only an explicit `y`/`yes` proceeds; anything else (including Enter) declines, a
 - Toggles: `REQUIRE_BASH_CONFIRMATION` and `REQUIRE_WRITE_CONFIRMATION` (both default `true`). Set either to `false` for trusted/automation setups.
 - Non-interactive runs (no TTY — tests, pipes, CI) auto-proceed so they don't hang.
 
+### 🧱 Server-Side Safety Floor
+
+The confirmation prompt above is a **convenience layer** you can turn off. Below it sits a **hard floor** that is always on and lives inside the MCP server itself — so it holds even when confirmations are disabled, in non-interactive runs, or if the server is driven by another client. It blocks only **catastrophic, irreversible** actions; ordinary work is never affected.
+
+| Layer                        | What it does                                             | Can be disabled?          |
+| ---------------------------- | -------------------------------------------------------- | ------------------------- |
+| Client confirmation prompt   | Asks `Proceed? (y/N/a)` before each shell/file/memory op | Yes (`REQUIRE_*` toggles) |
+| **Server-side safety floor** | Refuses system-destroying commands and system-dir writes | **No** (always enforced)  |
+
+**Shell commands** (`execute_bash`, `start_background_task`) are refused when they would:
+
+- recursively force-delete a root or home target — `rm -rf /`, `rm -rf ~`, `rm -rf /*`
+- create a filesystem or overwrite a raw device — `mkfs…`, `dd of=/dev/…`, `shred`/`wipefs` on a device
+- change the machine power state — `shutdown`, `reboot`, `halt`, `poweroff`, `init 0/6`
+- fork-bomb the machine — `:(){ :|:& };:`
+
+**File writes** (`fs_write`, `file_edit`) are refused when the target is inside a critical system directory — `/`, `/etc`, `/bin`, `/usr`, `/boot`, `/dev`, `/System`, `/Library`, … (`..` and `~` are resolved first). Your home, project trees, temp directories, and the app home stay fully writable.
+
+This floor is intentionally **narrow**: scoped, everyday-destructive commands like `rm -rf build/` or `git reset --hard` are _not_ blocked here — they remain gated by the confirmation prompt. The goal is to make irreversible system damage impossible, not to second-guess normal edits.
+
 ### 🛡️ Git Safety
 
 Safe git operations with protection against common mistakes:

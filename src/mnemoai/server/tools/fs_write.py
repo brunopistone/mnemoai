@@ -10,6 +10,7 @@ from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import clean_path_syntax
 
 from ..error_handler import tool_error_handler
+from .safety import classify_write_path
 
 
 def _resolve_path(path: str) -> str:
@@ -161,6 +162,21 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
         try:
             # Resolve path using intelligent logic
             resolved_path = _resolve_path(path)
+
+            # Server-side hard floor: never write into a critical system
+            # directory, regardless of dry_run/confirmed. Enforced here (not just
+            # in the docstring) because the MCP server can be driven directly.
+            path_verdict = classify_write_path(resolved_path)
+            if path_verdict.blocked:
+                logger.warning("fs_write blocked path: %s", resolved_path)
+                return json.dumps(
+                    {
+                        "error": True,
+                        "blocked": True,
+                        "message": path_verdict.reason,
+                        "path": resolved_path,
+                    }
+                )
 
             # CRITICAL: Block execution without user confirmation
             if not dry_run and not confirmed:

@@ -8,6 +8,7 @@ import tiktoken
 from mnemoai.models.controllers.vision_model_controller import VisionModelController
 from mnemoai.utils.config import config
 from mnemoai.utils.path_utils import normalize_path
+from mnemoai.utils.tokenization import count_tokens
 
 # Load configuration from centralized config
 BRAVE_API_KEY = config.get("BRAVE_API_KEY", None)
@@ -59,8 +60,9 @@ class ToolManager:
     def count_tokens(self, text: str) -> int:
         """Count tokens with model-specific approximation.
 
-        For Ollama models, uses character-based approximation.
-        For OpenAI/Bedrock models, uses tiktoken encoder.
+        Delegates to :func:`mnemoai.utils.tokenization.count_tokens` — the single
+        shared implementation used by both the client and the server — so the
+        two layers can't drift apart.
 
         Args:
             text: Text to count tokens for
@@ -68,22 +70,7 @@ class ToolManager:
         Returns:
             Estimated token count
         """
-        model_type = config.get("MODEL_ID", {}).get("TYPE", "ollama")
-
-        if model_type == "ollama":
-            # Ollama approximation: ~1.3 chars per token (configurable)
-            multiplier = (
-                config.get("LLM", {})
-                .get("TOKEN_COUNTING", {})
-                .get("OLLAMA_APPROXIMATION", 1.3)
-            )
-            return int(len(text) / multiplier)
-        else:
-            # Use tiktoken for OpenAI/Bedrock/SageMaker. disallowed_special=()
-            # so any special-token text in the input (e.g. a file that literally
-            # contains "<|endoftext|>") is COUNTED as ordinary text rather than
-            # raising — this is a length estimate, not encoding for the model.
-            return len(self.encoder.encode(text, disallowed_special=()))
+        return count_tokens(text)
 
     def register_tools(self, mcp: Any) -> None:
         """Register all tools with the MCP server.
