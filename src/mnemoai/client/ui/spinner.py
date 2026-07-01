@@ -36,6 +36,7 @@ class Spinner:
         self.spinning = False
         if self.thread:
             self.thread.join()
+            self.thread = None
         # Clear the entire line
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()

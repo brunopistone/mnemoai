@@ -46,22 +46,22 @@ Paths below are relative to `src/mnemoai/` (e.g. `client/` is
 also runnable as `python -m mnemoai`. `tests/`, `docs/`, `bash/`
 stay at the repo root.
 
-| Directory               | Role                                                                       |
-| ----------------------- | -------------------------------------------------------------------------- |
-| `client/`               | LangGraphClient facade, MCP bridge                                         |
-| `client/agent/`         | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils  |
-| `client/memory/`        | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                  |
-| `client/managers/`      | Conversation token management, user profile learning                       |
-| `client/ui/`            | prompt_toolkit chat loop, spinner                                          |
-| `server/`               | FastMCP server entry point (run as a subprocess)                           |
-| `server/tools/`         | Tool implementations (bash, file ops, git, web, RAG, vision, planning)     |
-| `server/tools/rag/`     | Session-scoped vector store, hybrid search engine                          |
-| `server/tools/readers/` | File format readers (PDF, DOCX, CSV, JSON, directory, line, search)        |
-| `models/`               | `provider_params` registry + `mantle_factory`                              |
-| `models/controllers/`   | Provider-dispatching LLM/vision/embeddings controllers                     |
-| `models/chat_models/`   | Concrete LangChain ChatModel subclasses (ChatOllamaWrapper, ChatSageMaker) |
-| `utils/`                | Config singleton, configurator, paths, logger, BM25, text formatting       |
-| `bash/` (repo root)     | Shell scripts (system command wrapper, Ollama VRAM management)             |
+| Directory               | Role                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------ |
+| `client/`               | LangGraphClient facade, MCP bridge                                                   |
+| `client/agent/`         | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils            |
+| `client/memory/`        | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                            |
+| `client/managers/`      | Conversation token management, user profile learning                                 |
+| `client/ui/`            | Chat REPL (`chat_interface`), prompt_toolkit input reader + dialogs (`tui`), spinner |
+| `server/`               | FastMCP server entry point (run as a subprocess)                                     |
+| `server/tools/`         | Tool implementations (bash, file ops, git, web, RAG, vision, planning)               |
+| `server/tools/rag/`     | Session-scoped vector store, hybrid search engine                                    |
+| `server/tools/readers/` | File format readers (PDF, DOCX, CSV, JSON, directory, line, search)                  |
+| `models/`               | `provider_params` registry + `mantle_factory`                                        |
+| `models/controllers/`   | Provider-dispatching LLM/vision/embeddings controllers                               |
+| `models/chat_models/`   | Concrete LangChain ChatModel subclasses (ChatOllamaWrapper, ChatSageMaker)           |
+| `utils/`                | Config singleton, configurator, paths, logger, BM25, text formatting                 |
+| `bash/` (repo root)     | Shell scripts (system command wrapper, Ollama VRAM management)                       |
 
 ## Detailed File Map
 
@@ -123,6 +123,10 @@ A small, bounded, profile-scoped (shared across models) `~/.mnemoai/{profile}/ME
 ### Agent Skills (`client/memory/skill_store.py`, `server/tools/skill_tool.py`)
 
 Authored, on-demand instruction packs (Claude-Code-style), one per directory: `~/.mnemoai/skills/{name}/SKILL.md` (YAML frontmatter with `name`+`description`, then a markdown body; may bundle `reference.md`/`scripts/`). **Three-tier progressive disclosure:** (1) only each skill's name+description is injected into the system prompt at session start — the `<available_skills>` block, cheap and always-on; (2) the full body is loaded into context **only when the model calls the `use_skill` tool** (its return value _is_ the body, landing as a `ToolMessage`); (3) bundled resources are read/run on demand via `fs_read`/`execute_bash`. The **directory name is the canonical id** (`use_skill(name)`); frontmatter `name` is display only. `SkillStore` is pure file logic (tolerant scan — bad/incomplete skill skipped, never fatal — mirroring `load_external_servers`), shared by the server `use_skill` tool and the client's tier-1 injection (`client._inject_skills_context`) + `/skills` command — the same shared-store pattern as `MemoryStore`. `use_skill` is in `_ALWAYS_AVAILABLE_TOOLS` so a skill-matching query that classifies as `simple_qa` (e.g. "write a commit message") can still trigger it. **Compaction caveat:** `_build_system_with_summary` re-fetches the base prompt fresh (dropping all session-start injections), so it re-injects the `<available_skills>` block via `format_available_skills` (a loaded body lives in the conversation as a tool result and is summarized like any other). Gated by `ENABLE_SKILLS` (default true); a bundled example (`utils/skills_example/`) is seeded on first run. Distinct from MEMORY.md (always-on facts), the playbook (learned tactics), and prompts.yaml (always-on framing): skills are _authored, on-demand procedures_. `/skills` lists them; `/skills <name>` previews a body. Distinct from the advisory `server/tools/plan_mode.py` and the curated memory tool.
+
+### Terminal UI (`client/ui/chat_interface.py`, `client/ui/tui.py`)
+
+The chat REPL is **app-per-prompt**: prompt*toolkit runs **only while reading a line** (the `PromptReader` in `tui.py` — rich prompt, `SlashCommandCompleter`, history, `Ctrl+J` newline, plan-mode tag, and a `Ctrl+O` toggle panel). The instant the user submits, the prompt app EXITS and the query streams to the terminal with ordinary `print()` — so line-wrapping, the cyan `●` answer marker, markdown/CodeFormatter, and the `\r` stdout spinner all render exactly as before the TUI existed, and **native terminal scrollback + copy/paste are preserved**. This is a deliberate choice over a persistent full-screen app: keeping prompt_toolkit live \_during* streaming breaks terminal auto-wrap and mangles partial-line token output (that path was tried and reverted). It matches Claude Code's **default** (inline) mode; the one gap vs. CC is that the input box isn't pinned during generation — see the deferred "Option 1" note (kept outside the repo). **`Ctrl+O`** toggles an ephemeral `bottom_toolbar` panel showing the last turn's tool calls with full, un-elided args (the `[⚙ …]` marker line elides to 72 chars via `_format_tool_call`/`_elide_middle`; the panel shows them in full). The agent records each turn's raw tool calls in `agent.last_turn_tool_calls` (reset per `invoke()`, appended at both marker sites — main loop + orchestrator worker — regardless of `verbose`). The terminal's `Ctrl+O` = `VDISCARD` control char is disabled for the session (`_ctrl_o_freed`, guarded/Unix-only) so pressing it mid-stream doesn't freeze output. **Dialogs** (`tui.select_from_list` for `/load`; `configurator`'s `_dialog_input`/`_dialog_radio`/`_dialog_yesno` for `/config`,`/model`,`/params`): full-screen prompt_toolkit dialogs with **Enter=confirm the highlighted item, Esc=cancel** (Esc raises `_Cancelled` → the flow aborts, nothing written), stock (readable) styling. Text fields prefill the current value (cursor at end) when editing; a `suggestion` (empty box + hint) is used when proposing a value (e.g. a fresh model name); `required` fields refuse to advance while empty. **Everything degrades to plain `input()` when not a TTY** (`_is_tty()` / `sys.stdin.isatty()`), so pipes / CI / the unit suite never block on a modal — this is a non-interactive fallback, not a second UX.
 
 ## Configuration
 

@@ -919,3 +919,51 @@ def test_prompt_provider_connection_embeddings_skips_input_format(monkeypatch):
     assert d["RAG"]["EMBED_MODEL_ID"]["REGION"] == "us-west-2"
     assert "INPUT_FORMAT" not in d["RAG"]["EMBED_MODEL_ID"]
     assert "DIMENSION" not in d["RAG"]["EMBED_MODEL_ID"]  # blank -> not written
+
+
+def test_prompt_one_param_keeps_current_on_empty(monkeypatch):
+    # A set param, Enter (empty) -> unchanged.
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    text = "MODEL_ID:\n  TYPE: openai\n  TEMPERATURE: 0.7\n"
+    out = C._prompt_one_param(text, "MODEL_ID", "TEMPERATURE", "float", "temp")
+    assert C._get_field(out, "MODEL_ID", "TEMPERATURE") == "0.7"
+
+
+def test_prompt_one_param_default_stays_absent(monkeypatch):
+    # Provider-default param (absent), Enter -> still not written.
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    text = "MODEL_ID:\n  TYPE: openai\n"
+    out = C._prompt_one_param(text, "MODEL_ID", "TEMPERATURE", "float", "temp")
+    assert C._get_field(out, "MODEL_ID", "TEMPERATURE") is None
+
+
+def test_prompt_one_param_sets_from_default(monkeypatch):
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "0.3")
+    text = "MODEL_ID:\n  TYPE: openai\n"
+    out = C._prompt_one_param(text, "MODEL_ID", "TEMPERATURE", "float", "temp")
+    assert C._get_field(out, "MODEL_ID", "TEMPERATURE") == "0.3"
+
+
+def test_prompt_one_param_none_clears(monkeypatch):
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "none")
+    text = "MODEL_ID:\n  TYPE: openai\n  TEMPERATURE: 0.7\n"
+    out = C._prompt_one_param(text, "MODEL_ID", "TEMPERATURE", "float", "temp")
+    assert C._get_field(out, "MODEL_ID", "TEMPERATURE") is None
+
+
+def test_prompt_one_param_reasks_on_invalid(monkeypatch):
+    from mnemoai.utils import configurator as C
+
+    answers = iter(["abc", "0.9"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    text = "MODEL_ID:\n  TYPE: openai\n"
+    out = C._prompt_one_param(text, "MODEL_ID", "TEMPERATURE", "float", "temp")
+    assert C._get_field(out, "MODEL_ID", "TEMPERATURE") == "0.9"

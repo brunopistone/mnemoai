@@ -57,6 +57,9 @@ Assistant: [Uses fs_read tool and displays content]
 - `Ctrl+J`: Insert new line in input
 - `Enter`: Submit message
 - `Ctrl+C`: Interrupt operation (press twice to exit)
+- `Ctrl+O`: At the prompt, toggle a panel showing the last turn's tool calls with their full arguments (press again to hide)
+
+In dialogs (the `/load` picker and the `/config`, `/model`, `/params` prompts): arrow keys move, `Enter` confirms, `Esc` cancels.
 
 ### Verbose Mode
 
