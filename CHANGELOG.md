@@ -9,6 +9,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-07-01
+
 ### Fixed
 
 - **`/model` and `/params` now show the "Current setup" overview inside the
