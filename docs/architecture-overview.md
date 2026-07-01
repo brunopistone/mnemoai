@@ -58,11 +58,17 @@ The client manages the conversation flow and user interaction.
 - **`reasoning_utils.py`**: Shared reasoning/thinking helpers
   - Temporarily disables reasoning for auxiliary LLM calls (routing, task decomposition) so output lands in the response content
   - Extracts visible text from `<think>` tags and Bedrock thinking blocks
+- **Pure agent collaborators** (stateless logic extracted from `agent.py`; `LangGraphAgent` delegates to them):
+  - `message_codec.py`: Strands ↔ LangChain message conversion
+  - `message_sanitizer.py`: repairs orphaned tool-call/result pairs so strict providers don't reject the request
+  - `plan_policy.py`: plan-mode block decision + read-only-bash heuristic + data tables
+  - `tool_formatting.py`: tool-call marker rendering, `Ctrl+O` capture, arg normalization, tool-error translation
 - **`mcp_tool_wrapper.py`**: MCP to LangChain adapter
   - Wraps MCP tools as LangChain BaseTool
   - Handles async/sync conversion
 - **`ui/`**: User interface components
   - `chat_interface.py`: Interactive chat loop with command handling
+  - `tui.py`: prompt_toolkit input reader (slash completion, history, `Ctrl+O` tool-call panel) + dialogs; app-per-prompt, degrades to `input()` off-TTY
   - `spinner.py`: Loading animations
 - **`managers/`**: Business logic
   - `agent_conversation_manager.py`: Conversation state and token tracking
