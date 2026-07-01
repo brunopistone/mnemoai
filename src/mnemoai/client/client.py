@@ -16,8 +16,8 @@ import numpy as np
 from langchain_core.callbacks import BaseCallbackHandler
 from mcp import StdioServerParameters
 
-from mnemoai.client.agent.agent import (
-    LangGraphAgent,
+from mnemoai.client.agent.agent import LangGraphAgent
+from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
     convert_strands_messages_to_langchain,
 )

@@ -49,7 +49,7 @@ stay at the repo root.
 | Directory               | Role                                                                                 |
 | ----------------------- | ------------------------------------------------------------------------------------ |
 | `client/`               | LangGraphClient facade, MCP bridge                                                   |
-| `client/agent/`         | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils            |
+| `client/agent/`         | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils, and pure collaborators (message_codec, plan_policy, tool_formatting) |
 | `client/memory/`        | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                            |
 | `client/managers/`      | Conversation token management, user profile learning                                 |
 | `client/ui/`            | Chat REPL (`chat_interface`), prompt_toolkit input reader + dialogs (`tui`), spinner |
@@ -112,6 +112,10 @@ Keeps the conversation under `MAX_CONVERSATION_TOKENS` by summarizing older mess
 ### Orchestrator-workers (`client/agent/orchestrator.py`, `client/agent/agent.py`)
 
 For "full" complexity tasks: decompose → parse subtasks (JSON) → run worker loop per subtask with category-specific tools → aggregate results.
+
+### Agent pure collaborators (`client/agent/{message_codec,plan_policy,tool_formatting}.py`)
+
+`LangGraphAgent` is the coordinator; its **stateless** logic lives in sibling modules so the class stays focused on the graph/loop. `message_codec` = Strands↔LangChain message conversion; `plan_policy` = the plan-mode block decision + read-only-bash heuristic + data tables (`PLAN_BLOCKED_TOOLS`, `READONLY_BASH_CMDS`, …); `tool_formatting` = the `[⚙ …]` marker rendering (`format_tool_call`/`elide_middle`), `record_turn_tool_calls` (ctrl+o capture), `normalize_tool_args`, and `tool_error_message`. The agent keeps thin `_is_blocked_by_plan_mode`/`_is_readonly_bash`/`_format_tool_call`/… methods that **delegate** into these, preserving the historical class surface the unit tests build against (`LangGraphAgent.__new__(...)` + `LangGraphAgent._…`). When adding pure tool/plan/message logic, put it in the collaborator and delegate — don't grow `agent.py`.
 
 ### ACE Playbook learning (`client/memory/reflector.py`, `client/memory/playbook_store.py`)
 

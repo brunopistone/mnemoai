@@ -9,6 +9,21 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+### Internal
+
+- **`agent.py` decomposition (pure helpers).** Extracted the stateless logic out of
+  `client/agent/agent.py` (2120 → ~1750 lines) into three focused, independently
+  testable modules, with `LangGraphAgent` keeping thin delegating methods so its
+  public surface is unchanged:
+  - `client/agent/message_codec.py` — Strands↔LangChain message conversion.
+  - `client/agent/plan_policy.py` — plan-mode block decision, read-only-bash
+    heuristic, and the associated data tables.
+  - `client/agent/tool_formatting.py` — tool-call marker rendering, ctrl+o capture,
+    arg-normalization, and tool-error translation.
+  No behavior change; all existing unit tests pass unchanged. The heavier
+  streaming / tool-execution / orchestration paths intentionally stay in `agent.py`
+  until they have unit coverage.
+
 ## [0.13.0] — 2026-07-01
 
 ### Added
