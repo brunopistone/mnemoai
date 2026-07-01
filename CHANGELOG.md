@@ -9,6 +9,37 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-07-01
+
+### Added
+
+- **Richer terminal UI (prompt_toolkit).** The input prompt is now a
+  prompt_toolkit reader with slash-command completion, history, a plan-mode tag,
+  and **`Ctrl+O`** — a toggle panel that shows the last turn's tool calls with
+  their **full, un-elided arguments** (the inline `[⚙ …]` marker still elides
+  long commands/paths to keep the stream readable; `Ctrl+O` reveals them in
+  full). The panel is ephemeral (press again to hide) and leaves nothing in
+  scrollback. The design is **app-per-prompt**: prompt_toolkit runs only while
+  reading a line, and the answer then streams with ordinary `print()` — so
+  markdown, the `●` marker, line-wrapping, native scrollback, and copy/paste all
+  work exactly as before. Non-TTY runs (pipes / CI) transparently fall back to
+  plain `input()`.
+- **Dialog-driven configuration.** `/load` now offers an arrow-key picker of
+  saved conversations, and `/config`, `/model`, `/params` present their prompts
+  as full-screen dialogs (text, yes/no, and single-choice lists). Consistent
+  keys throughout: **Enter confirms, Esc cancels** (cancelling aborts the flow
+  with nothing written). Text fields prefill the current value when you're
+  editing an existing setting; a fresh model name is offered as a *suggestion*
+  (empty field) rather than a prefilled default; **mandatory fields won't advance
+  while empty**. Everything degrades to the previous `input()` prompts when not a
+  TTY.
+
+### Changed
+
+- **`DOC_MAX_TOKENS` is now derived as 25% of `MAX_CONVERSATION_TOKENS`**
+  automatically in `/config`, `/model`, and `/params`, so the document read cap
+  scales with the context window instead of being tuned by hand.
+
 ## [0.11.3] — 2026-06-30
 
 ### Fixed

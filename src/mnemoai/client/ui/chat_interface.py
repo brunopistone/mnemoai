@@ -1,25 +1,36 @@
 """Chat interface handling for the application."""
 
-import asyncio
+import contextlib
+import datetime as _dt
 import os
 import re
 import sys
 import time
-from typing import Any, Iterable
+from typing import Any
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
-from prompt_toolkit.key_binding import KeyBindings
 
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
     is_task_successful,
 )
+from mnemoai.client.memory.memory_store import MemoryStore
+from mnemoai.client.memory.skill_store import SkillStore
+from mnemoai.client.ui.tui import PromptReader, confirm_inline, select_from_list
 from mnemoai.utils.config import config
+from mnemoai.utils.configurator import (
+    run_model_override,
+    run_params_override,
+    run_reconfigure,
+)
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger
+from mnemoai.utils.paths import (
+    mcp_config_path,
+    memory_file_path,
+    skills_dir,
+)
 
 
 class ChatInterface:
@@ -35,36 +46,6 @@ class ChatInterface:
 
         # Persistent command history for arrow key navigation
         self.command_history = InMemoryHistory()
-
-    def get_multiline_input(self) -> str:
-        """Get input with Ctrl+J for new lines, Enter to submit.
-
-        Returns:
-            User input string
-        """
-        bindings = KeyBindings()
-
-        @bindings.add("c-j")
-        def _(event: Any) -> None:
-            """Handle Ctrl+J to insert newline.
-
-            Args:
-                event: Key binding event
-            """
-            event.app.current_buffer.insert_text("\n")
-
-        session = PromptSession(
-            history=self.command_history,
-            key_bindings=bindings,
-            multiline=False,
-            completer=self._SlashCommandCompleter(self._COMMANDS),
-            complete_while_typing=True,
-        )
-
-        try:
-            return session.prompt(HTML(self._prompt_html()))
-        except KeyboardInterrupt:
-            raise
 
     def _prompt_html(self) -> str:
         """Build the input-prompt line.
@@ -141,31 +122,8 @@ class ChatInterface:
         "reset": "\033[0m",
     }
 
-    class _SlashCommandCompleter(Completer):
-        """Suggest slash commands, but only when the line starts with '/'.
-
-        Keeps autocomplete out of the way of normal chat: a message that
-        doesn't begin with '/' yields no completions. Matches the typed prefix
-        against the command list and shows each command's description as meta.
-        """
-
-        def __init__(self, commands):
-            self._commands = commands
-
-        def get_completions(self, document, complete_event) -> Iterable[Completion]:
-            text = document.text_before_cursor
-            # Only complete a single leading token that starts with '/'
-            # (don't fire mid-sentence or after a space).
-            if not text.startswith("/") or " " in text:
-                return
-            for cmd, desc in self._commands:
-                if cmd.startswith(text):
-                    yield Completion(
-                        cmd,
-                        start_position=-len(text),  # replace the typed prefix
-                        display=cmd,
-                        display_meta=desc,
-                    )
+    # Slash-command autocompletion lives in mnemoai.client.ui.tui
+    # (SlashCommandCompleter), shared by the inline TUI input field.
 
     _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -240,7 +198,7 @@ class ChatInterface:
             and self.client.previous_response
             and self.client.previous_messages
         ):
-            logger.debug(f"Evaluating previous interaction for episodic storage")
+            logger.debug("Evaluating previous interaction for episodic storage")
             logger.debug(f"Previous query: {self.client.previous_query[:100]}...")
             logger.debug(f"Current query: {query[:100]}...")
 
@@ -361,8 +319,6 @@ class ChatInterface:
         more servers. External tools may appear namespaced as ``server__tool``
         when their name collides with a built-in one.
         """
-        from mnemoai.utils.paths import mcp_config_path
-
         members = getattr(self.client.mcp_client, "_members", [])
         tools = self.client.tools or []
         print("\nMCP servers:")
@@ -388,7 +344,9 @@ class ChatInterface:
         """List saved conversations (newest first) and let the user pick one.
 
         Returns the chosen file path (str), or None if there are none or the
-        user cancels (blank/0/invalid input). Used by ``/load`` with no argument.
+        user cancels. Used by ``/load`` with no argument. On a TTY this is a
+        centered radiolist (arrow-key selection); non-TTY falls back to a
+        numbered ``input()`` prompt — both via :func:`tui.select_from_list`.
         """
         files = self.client.list_saved_conversations()
         if not files:
@@ -397,8 +355,6 @@ class ChatInterface:
                 "/load <path> to load from a specific file."
             )
             return None
-
-        import datetime as _dt
 
         now = _dt.datetime.now().timestamp()
 
@@ -413,28 +369,13 @@ class ChatInterface:
             return f"{s // 86400}d ago"
 
         shown = files[:20]  # cap the menu; older ones load via /load <path>
-        print("\nSaved conversations:")
-        for i, p in enumerate(shown, 1):
-            print(f"  {i}) {p.name}  ({_ago(p.stat().st_mtime)})")
+        options = [
+            (str(p), f"{p.name}  ({_ago(p.stat().st_mtime)})") for p in shown
+        ]
+        title = "Load conversation"
         if len(files) > len(shown):
-            print(f"  … and {len(files) - len(shown)} more (use /load <path>)")
-
-        try:
-            answer = input("  Select [1, or Enter to cancel]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return None
-        if not answer:
-            return None
-        try:
-            idx = int(answer)
-        except ValueError:
-            print_error("Not a number; cancelled.")
-            return None
-        if not (1 <= idx <= len(shown)):
-            print_error("Out of range; cancelled.")
-            return None
-        return str(shown[idx - 1])
+            title += f"  (showing {len(shown)} of {len(files)}; /load <path> for older)"
+        return select_from_list(title, options)
 
     def _handle_memory_command(self, arg: str) -> None:
         """Handle ``/memory`` (view) and ``/memory clear``.
@@ -442,9 +383,6 @@ class ChatInterface:
         The agent normally curates MEMORY.md itself via the memory tool; this
         command lets the user inspect it, or wipe it. Reuses ``MemoryStore``.
         """
-        from mnemoai.client.memory.memory_store import MemoryStore
-        from mnemoai.utils.paths import memory_file_path
-
         store = MemoryStore()
         sub = arg.strip().lower()
 
@@ -452,12 +390,7 @@ class ChatInterface:
             if not store.read().strip():
                 print("Memory is already empty.")
                 return
-            try:
-                answer = input("  Clear ALL persistent memory? (y/N): ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                answer = ""
-            if answer in ("y", "yes"):
+            if confirm_inline("Clear ALL persistent memory?"):
                 store.clear()
                 print("Persistent memory cleared.")
             else:
@@ -484,9 +417,6 @@ class ChatInterface:
         demand via the ``use_skill`` tool; this command lets the user see what's
         installed and preview one. Reuses ``SkillStore``.
         """
-        from mnemoai.client.memory.skill_store import SkillStore
-        from mnemoai.utils.paths import skills_dir
-
         store = SkillStore()
         name = arg.strip()
 
@@ -542,198 +472,261 @@ class ChatInterface:
         # Re-exec with the original interpreter + argv (preserves --no-verbose).
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
+    # Sentinel returned by _dispatch to signal the loop should exit.
+    _EXIT = object()
+
     def run_chat_loop(self) -> None:
         """Run the main chat loop.
 
-        Returns:
-            None
+        A TTY session reads input via :class:`~mnemoai.client.ui.tui.PromptReader`
+        (prompt_toolkit runs only while reading a line — rich prompt, completion,
+        history, ctrl+o); a non-TTY session (pipes / CI / tests) uses a plain
+        ``input()``. Either way the submitted line goes through :meth:`_dispatch`,
+        and the query then streams to the terminal with ordinary ``print()`` — so
+        wrapping, the ``●`` answer marker, markdown, and the spinner all render as
+        before.
         """
         self.__welcome_message()
 
+        is_tty = (
+            hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
+            and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+        )
+        reader = self._build_prompt_reader() if is_tty else None
+
+        # Free up Ctrl+O as an app key: by default the terminal binds Ctrl+O to
+        # VDISCARD ("flush pending output"), so pressing it *while a reply is
+        # streaming* would freeze output and echo "^O". Disabling it for the
+        # session lets our ctrl+o panel toggle own the key everywhere. Restored
+        # on exit. No-op when not a TTY / termios unavailable.
+        with self._ctrl_o_freed(is_tty):
+            self._chat_loop(reader)
+
+    def _chat_loop(self, reader) -> None:
+        """The read → dispatch REPL, shared by the TTY and non-TTY paths."""
         interrupt_count = 0
         last_interrupt_time = 0
 
         while True:
             try:
-                query = self.get_multiline_input()
+                if reader is not None:
+                    query = reader.read()
+                else:
+                    query = input("> ")
                 interrupt_count = 0
             except (KeyboardInterrupt, EOFError):
                 current_time = time.time()
-
                 if current_time - last_interrupt_time > 2:
                     interrupt_count = 0
-
                 interrupt_count += 1
                 last_interrupt_time = current_time
-
                 if interrupt_count == 1:
-                    print("\n> ")
                     print(
-                        "\033[97m(To exit the CLI, press Ctrl+C or Ctrl+D again or type \033[92m/quit\033[97m)"
+                        "\n\033[97m(To exit, press Ctrl+C or Ctrl+D again or type "
+                        "\033[92m/quit\033[97m)\033[0m"
                     )
-                    try:
-                        loop = asyncio.get_event_loop()
-                        pending = asyncio.all_tasks(loop)
-                        for task in pending:
-                            task.cancel()
-                    except:
-                        pass
                     continue
-                else:
-                    print("\nExiting...")
-                    try:
-                        self.client.clear_context()
-                    except KeyboardInterrupt:
-                        pass  # User interrupted cleanup, just exit
-                    break
-
-            # Handle special commands
-            if query.lower() in ["/exit", "/quit"]:
+                print("\nExiting...")
                 try:
-                    self.client.clear_context()  # This will flush RAG
+                    self.client.clear_context()
                 except KeyboardInterrupt:
-                    pass  # User interrupted cleanup, just exit
+                    pass
                 break
 
-            if query.lower() == "/clear":
-                self.client.clear_context()
-                if config.get("ENABLE_RAG", False):
-                    self.client._initialize_rag_session()
-                self.client._initialize_chunk_cache()
-                # Wipe the screen + scrollback and re-show the welcome banner so
-                # /clear is a true fresh start, not "Context cleared!" appended
-                # below the old conversation.
-                self.__clear_screen()
-                self.__welcome_message()
-                print("Context cleared!")
-                continue
+            if self._dispatch(query) is self._EXIT:
+                try:
+                    self.client.clear_context()
+                except KeyboardInterrupt:
+                    pass
+                break
 
-            # /save [path] — save to conversations/ by default, or to an
-            # optional file/directory path.
-            if query.lower() == "/save" or query.lower().startswith("/save "):
-                timestamp = self.client.session_id.split("_", 1)[1]
-                save_path = query[len("/save"):].strip() or None
-                self.client.save_conversation(timestamp, path=save_path)
-                continue
+    @contextlib.contextmanager
+    def _ctrl_o_freed(self, is_tty: bool):
+        """Disable the terminal's Ctrl+O (VDISCARD) for the session, restoring after.
 
-            # Reconfigure: rewrite config.yaml via the interactive configurator,
-            # then restart the process in place so every setting (including MCP
-            # tool toggles, which are decided at subprocess boot) takes effect.
-            if query.lower() == "/config":
-                from mnemoai.utils.configurator import run_reconfigure
+        VDISCARD toggles "discard terminal output" — pressing Ctrl+O mid-stream
+        would otherwise freeze the streamed reply and echo ``^O``. We set it to
+        the POSIX "disabled" value so Ctrl+O is a plain byte our app can bind.
+        Best-effort and fully guarded: any platform/termios issue → no-op.
+        """
+        if not is_tty:
+            yield
+            return
+        try:
+            import termios
 
-                if run_reconfigure() is not None:
-                    self._restart_in_place()
-                continue
-
-            # Override just one model section (LLM / vision / embeddings),
-            # leaving the rest of config.yaml untouched, then restart in place.
-            if query.lower() == "/model":
-                from mnemoai.utils.configurator import run_model_override
-
-                if run_model_override() is not None:
-                    self._restart_in_place()
-                continue
-
-            # Tune a model's inference parameters (temperature, top_p, penalties,
-            # reasoning, stop, stream, …) in place, then restart so the new
-            # generation settings take effect.
-            if query.lower() == "/params":
-                from mnemoai.utils.configurator import run_params_override
-
-                if run_params_override() is not None:
-                    self._restart_in_place()
-                continue
-
-            # List configured MCP servers (built-in + external from mcp.json).
-            if query.lower() == "/mcp":
-                self._print_mcp_status()
-                continue
-
-            # List installed skills, or preview one: /skills [name].
-            if query.lower() == "/skills" or query.lower().startswith("/skills "):
-                self._handle_skills_command(query[len("/skills"):].strip())
-                continue
-
-            # View or clear the curated persistent memory (MEMORY.md).
-            if query.lower() == "/memory" or query.lower().startswith("/memory "):
-                self._handle_memory_command(query[len("/memory"):].strip())
-                continue
-
-            # Toggle enforced, read-only plan mode (mutating/exec tools blocked).
-            if query.lower() == "/plan":
-                self.client.plan_mode_active = not self.client.plan_mode_active
-                if self.client.plan_mode_active:
-                    print(
-                        "\n\033[93m🔒 Plan mode ON\033[0m — read-only. I'll research "
-                        "and present a plan. Read-only shell commands (ls, cat, "
-                        "grep, git status/log/diff) still run; file edits and "
-                        "mutating commands are blocked. Type /plan again to exit "
-                        "and allow changes.\n"
-                    )
-                else:
-                    print(
-                        "\n\033[92m🔓 Plan mode OFF\033[0m — changes allowed again.\n"
-                    )
-                continue
-
-            # Manually compact the conversation: /compact [focus instructions]
-            if query.lower() == "/compact" or query.lower().startswith("/compact "):
-                focus = query[len("/compact"):].strip()
-                did = self.client.compact_conversation(focus)
-                print(
-                    "Conversation compacted."
-                    if did
-                    else "Nothing to compact yet."
-                )
-                continue
-
-            # Handle /load command. With no path, list saved conversations and
-            # let the user pick one; with a path, load it directly.
-            if query.lower() == "/load" or query.lower().startswith("/load "):
-                file_path = query[len("/load"):].strip()
-                if not file_path:
-                    file_path = self._select_saved_conversation()
-                    if not file_path:
-                        continue  # nothing to load, or user cancelled
-                if self.client.load_conversation(file_path):
-                    print("Conversation loaded successfully!")
-                else:
-                    print_error("Failed to load conversation. Check the file path.")
-                continue
-
-            if not query.strip():
-                print("Input cannot be empty. Please try again.")
-                continue
-
-            # Store previous interaction if using delayed mode (legacy)
-            use_immediate_storage = config.get("EPISODIC_MEMORY", {}).get(
-                "IMMEDIATE_STORAGE", True
-            )
-
-            if self.client.episodic_memory and not use_immediate_storage:
-                # Legacy mode: store previous interaction before current query
-                self.__store_episode_in_episodic_memory(query)
-            elif not self.client.episodic_memory:
-                logger.debug("Episodic memory is disabled")
-
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            new = termios.tcgetattr(fd)
+            # cc is index 6; _POSIX_VDISABLE marks a control char as disabled.
+            new[6][termios.VDISCARD] = getattr(termios, "_POSIX_VDISABLE", b"\xff")
+            termios.tcsetattr(fd, termios.TCSANOW, new)
+        except Exception:
+            yield
+            return
+        try:
+            yield
+        finally:
             try:
-                response = self.client.query(query)
+                termios.tcsetattr(fd, termios.TCSANOW, saved)
+            except Exception:
+                pass
 
-                # Store CURRENT interaction immediately after response (new mode)
-                if self.client.episodic_memory and use_immediate_storage:
-                    self.__store_current_episode_immediately(query, response)
+    def _build_prompt_reader(self):
+        """Construct the prompt_toolkit input reader for the TTY path."""
+        return PromptReader(
+            prompt_text=lambda: HTML(self._prompt_html()),
+            commands=self._COMMANDS,
+            history=self.command_history,
+            tool_calls_provider=lambda: getattr(
+                self.client.agent, "last_turn_tool_calls", []
+            ),
+        )
 
-                # ACE Reflection: learn from this interaction
-                if self.client.reflector:
-                    self.client.reflect_and_learn(query)
+    def _dispatch(self, query: str):
+        """Handle one submitted line: slash command or query.
 
-                if response != "Operation was cancelled.":
-                    print("\n")
-            except KeyboardInterrupt:
-                continue
-            except Exception as e:
-                # Full traceback to the logger (stderr, LOG_LEVEL=DEBUG to see);
-                # the user gets a concise red line with the actual cause.
-                logger.error(f"Error processing query: {str(e)}", exc_info=True)
-                print_error(f"Error: {e}")
+        Returns :data:`_EXIT` to request loop termination, else ``None``.
+        Shared by the TUI and plain loops.
+        """
+        # Handle special commands
+        if query.lower() in ["/exit", "/quit"]:
+            return self._EXIT
+
+        if query.lower() == "/clear":
+            self.client.clear_context()
+            if config.get("ENABLE_RAG", False):
+                self.client._initialize_rag_session()
+            self.client._initialize_chunk_cache()
+            # Wipe the screen + scrollback and re-show the welcome banner so
+            # /clear is a true fresh start, not "Context cleared!" appended
+            # below the old conversation.
+            self.__clear_screen()
+            self.__welcome_message()
+            print("Context cleared!")
+            return None
+
+        # /save [path] — save to conversations/ by default, or to an
+        # optional file/directory path.
+        if query.lower() == "/save" or query.lower().startswith("/save "):
+            timestamp = self.client.session_id.split("_", 1)[1]
+            save_path = query[len("/save"):].strip() or None
+            self.client.save_conversation(timestamp, path=save_path)
+            return None
+
+        # Reconfigure: rewrite config.yaml via the interactive configurator,
+        # then restart the process in place so every setting (including MCP
+        # tool toggles, which are decided at subprocess boot) takes effect.
+        if query.lower() == "/config":
+            if run_reconfigure() is not None:
+                self._restart_in_place()
+            return None
+
+        # Override just one model section (LLM / vision / embeddings),
+        # leaving the rest of config.yaml untouched, then restart in place.
+        if query.lower() == "/model":
+            if run_model_override() is not None:
+                self._restart_in_place()
+            return None
+
+        # Tune a model's inference parameters (temperature, top_p, penalties,
+        # reasoning, stop, stream, …) in place, then restart so the new
+        # generation settings take effect.
+        if query.lower() == "/params":
+            if run_params_override() is not None:
+                self._restart_in_place()
+            return None
+
+        # List configured MCP servers (built-in + external from mcp.json).
+        if query.lower() == "/mcp":
+            self._print_mcp_status()
+            return None
+
+        # List installed skills, or preview one: /skills [name].
+        if query.lower() == "/skills" or query.lower().startswith("/skills "):
+            self._handle_skills_command(query[len("/skills"):].strip())
+            return None
+
+        # View or clear the curated persistent memory (MEMORY.md).
+        if query.lower() == "/memory" or query.lower().startswith("/memory "):
+            self._handle_memory_command(query[len("/memory"):].strip())
+            return None
+
+        # Toggle enforced, read-only plan mode (mutating/exec tools blocked).
+        if query.lower() == "/plan":
+            self.client.plan_mode_active = not self.client.plan_mode_active
+            if self.client.plan_mode_active:
+                print(
+                    "\n\033[93m🔒 Plan mode ON\033[0m — read-only. I'll research "
+                    "and present a plan. Read-only shell commands (ls, cat, "
+                    "grep, git status/log/diff) still run; file edits and "
+                    "mutating commands are blocked. Type /plan again to exit "
+                    "and allow changes.\n"
+                )
+            else:
+                print(
+                    "\n\033[92m🔓 Plan mode OFF\033[0m — changes allowed again.\n"
+                )
+            return None
+
+        # Manually compact the conversation: /compact [focus instructions]
+        if query.lower() == "/compact" or query.lower().startswith("/compact "):
+            focus = query[len("/compact"):].strip()
+            did = self.client.compact_conversation(focus)
+            print(
+                "Conversation compacted."
+                if did
+                else "Nothing to compact yet."
+            )
+            return None
+
+        # Handle /load command. With no path, list saved conversations and
+        # let the user pick one; with a path, load it directly.
+        if query.lower() == "/load" or query.lower().startswith("/load "):
+            file_path = query[len("/load"):].strip()
+            if not file_path:
+                file_path = self._select_saved_conversation()
+                if not file_path:
+                    return None  # nothing to load, or user cancelled
+            if self.client.load_conversation(file_path):
+                print("Conversation loaded successfully!")
+            else:
+                print_error("Failed to load conversation. Check the file path.")
+            return None
+
+        if not query.strip():
+            print("Input cannot be empty. Please try again.")
+            return None
+
+        # Store previous interaction if using delayed mode (legacy)
+        use_immediate_storage = config.get("EPISODIC_MEMORY", {}).get(
+            "IMMEDIATE_STORAGE", True
+        )
+
+        if self.client.episodic_memory and not use_immediate_storage:
+            # Legacy mode: store previous interaction before current query
+            self.__store_episode_in_episodic_memory(query)
+        elif not self.client.episodic_memory:
+            logger.debug("Episodic memory is disabled")
+
+        try:
+            response = self.client.query(query)
+
+            # Store CURRENT interaction immediately after response (new mode)
+            if self.client.episodic_memory and use_immediate_storage:
+                self.__store_current_episode_immediately(query, response)
+
+            # ACE Reflection: learn from this interaction
+            if self.client.reflector:
+                self.client.reflect_and_learn(query)
+
+            if response != "Operation was cancelled.":
+                print("\n")
+        except KeyboardInterrupt:
+            return None
+        except Exception as e:
+            # Full traceback to the logger (stderr, LOG_LEVEL=DEBUG to see);
+            # the user gets a concise red line with the actual cause.
+            logger.error(f"Error processing query: {str(e)}", exc_info=True)
+            print_error(f"Error: {e}")
+        return None

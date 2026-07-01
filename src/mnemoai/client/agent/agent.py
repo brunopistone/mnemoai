@@ -146,6 +146,10 @@ class LangGraphAgent:
         # (via the "a = allow" option at a Proceed? prompt). Skips re-prompting
         # for that whole category until the process restarts.
         self._trusted_confirm_categories: set = set()
+        # Tool calls made during the CURRENT turn, captured raw (un-elided) for
+        # the ctrl+o "expand last turn" view. Reset at the start of each invoke()
+        # and appended at the tool-marker sites (main loop + orchestrator worker).
+        self.last_turn_tool_calls: list = []
         self.router = router
         self.orchestrator_enabled = orchestrator_enabled and router is not None
         # Bound on the model<->tool loop. Claude Code has no hard step cap —
@@ -569,6 +573,10 @@ class LangGraphAgent:
 
             # Execute tools
             self._stop_spinner()
+            # Capture raw tool calls for ctrl+o (independent of verbose).
+            self.last_turn_tool_calls.extend(
+                self.record_turn_tool_calls(response.tool_calls)
+            )
             if self.verbose:
                 for tc in response.tool_calls:
                     print(
@@ -1401,6 +1409,24 @@ class LangGraphAgent:
             parts.append(f"{key}={cls._elide_middle(text)}")
         return f"{name}({', '.join(parts)})"
 
+    @staticmethod
+    def record_turn_tool_calls(tool_calls) -> list:
+        """Capture tool calls for the ctrl+o "expand last turn" view.
+
+        Returns ``[{"name", "args"}]`` with the **raw, un-elided** args (unlike
+        the marker line, which middle-elides for compactness). The result is
+        stashed so the input reader can reprint the full call the user only saw
+        truncated. Tolerant of odd shapes — a non-dict entry is skipped.
+        """
+        out = []
+        for tc in tool_calls or []:
+            if not isinstance(tc, dict):
+                continue
+            out.append(
+                {"name": tc.get("name", "tool"), "args": tc.get("args") or {}}
+            )
+        return out
+
     # Matches a key that is really a ``field="value"`` (or field='value', or
     # bare field=value) expression — a common small-model malformation where
     # the model emits Python-call syntax as a single JSON arg key.
@@ -1662,6 +1688,13 @@ class LangGraphAgent:
 
         route_tools = self._get_route_tools(state)
 
+        # Capture raw tool calls for ctrl+o (independent of verbose, so the
+        # expansion works even in --no-verbose). Accumulates across the turn's
+        # steps; the marker only shows an elided line.
+        self.last_turn_tool_calls.extend(
+            self.record_turn_tool_calls(last_message.tool_calls)
+        )
+
         # Print a visible tool-invocation marker so reasoning before a tool call
         # is separated from reasoning after it (otherwise the two run together).
         # Mirrors the gray "[Step …]" markers the orchestrator prints.
@@ -1784,6 +1817,9 @@ class LangGraphAgent:
         Returns:
             Agent response as string
         """
+        # Fresh capture for this turn (ctrl+o shows the MOST RECENT turn's calls).
+        self.last_turn_tool_calls = []
+
         # The model sees the full prompt (incl. any ephemeral plan-mode banner)
         # for THIS turn, but only the clean prompt is persisted — so a saved
         # conversation never carries a stale "plan mode is active" instruction.

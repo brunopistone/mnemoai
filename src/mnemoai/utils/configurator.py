@@ -12,8 +12,25 @@ Entry points:
 
 import getpass
 import re
+import sys
 from pathlib import Path
 from typing import Optional
+
+from prompt_toolkit.application import Application
+from prompt_toolkit.application.current import get_app
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.containers import HSplit
+from prompt_toolkit.widgets import Button, Dialog, Label, RadioList, TextArea
+
+from mnemoai.models.provider_params import (
+    providers,
+    supported_keys,
+    tunable_params,
+)
+from mnemoai.utils.config import Config
+from mnemoai.utils.console import print_error
+from mnemoai.utils.paths import config_path
 
 # Importing readline (stdlib) is enough to give the built-in input() proper
 # line-editing: arrow keys, history, and backspace work instead of leaking raw
@@ -23,9 +40,6 @@ try:
     import readline  # noqa: F401
 except ImportError:
     pass
-
-from mnemoai.utils.console import print_error
-from mnemoai.utils.paths import config_path
 
 # Provider key -> (template filename, human label, default chat model)
 _PROVIDERS = {
@@ -81,8 +95,6 @@ def config_exists() -> bool:
     Delegates to the same resolution the app uses ($MNEMOAI_CONFIG
     -> <app_home>/config.yaml -> repo fallback), so any of those existing counts.
     """
-    from mnemoai.utils.config import Config
-
     return Config._resolve_config_path() is not None
 
 
@@ -290,8 +302,6 @@ def _prune_unsupported_params(text: str, section: str, provider: str) -> str:
     over from a previous provider — connection, auth, and inference alike.
     ``NAME``/``TYPE`` are always kept; an unknown provider prunes nothing.
     """
-    from mnemoai.models.provider_params import supported_keys
-
     allowed = supported_keys(section, provider)
     if allowed is None:
         return text  # unknown provider/section — don't touch anything
@@ -314,8 +324,6 @@ def _clear_inference_params(text: str, section: str, keep: set = None) -> str:
     separately). Uses the union of every provider's tunable set so a leftover
     from a different provider is cleared too.
     """
-    from mnemoai.models.provider_params import providers, tunable_params
-
     keep = keep or set()
     inference: set = set()
     for prov in providers(section):
@@ -381,6 +389,25 @@ def _set_top_level_or_add(text: str, key: str, value: str) -> str:
     return f"{text}{sep}{key}: {value}\n"
 
 
+def _sync_doc_max_tokens(text: str) -> str:
+    """Keep ``DOC_MAX_TOKENS`` at 25% of ``MAX_CONVERSATION_TOKENS``.
+
+    The document read cap should scale with the context window rather than be
+    tuned by hand, so every configurator flow (/config, /model, /params) derives
+    it here from the current ``MAX_CONVERSATION_TOKENS``. No-ops if the context
+    window is missing or unparseable, leaving any existing value untouched.
+    """
+    raw = _get_top_level(text, "MAX_CONVERSATION_TOKENS")
+    if raw is None:
+        return text
+    try:
+        ctx = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return text
+    doc = max(1, ctx // 4)  # 25% of the context window
+    return _set_top_level_or_add(text, "DOC_MAX_TOKENS", str(doc))
+
+
 def _get_in_section(text: str, section: str, key: str) -> Optional[str]:
     """Read the value of the first indented ``key`` inside top-level ``section``.
 
@@ -417,41 +444,313 @@ class _Cancelled(Exception):
 _CANCEL_HINT = "  (Press Ctrl+C or Ctrl+D at any prompt to cancel — nothing is saved.)"
 
 
-def _ask(prompt: str, default: Optional[str] = None) -> Optional[str]:
-    """Prompt for a value, returning ``default`` on empty input or EOF."""
-    suffix = f" [{default}]" if default else ""
-    try:
-        val = input(f"  {prompt}{suffix}: ").strip()
-    except EOFError:
-        print()
-        return default
-    return val or default
+def _is_tty() -> bool:
+    """True on an interactive terminal (prompt_toolkit dialogs can render).
+
+    When False (pipes / CI / tests) the ``_ask_*`` helpers keep their plain
+    ``input()`` behavior so scripted / non-terminal use never blocks on a modal.
+    """
+    return (
+        hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
+        and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+    )
+
+
+# Sentinel returned by the custom dialogs when the user cancels (Esc / Cancel),
+# distinct from a legitimately-empty text entry.
+_DIALOG_CANCEL = object()
+
+
+def _dialog_input(
+    title: str,
+    default: Optional[str] = None,
+    suggestion: Optional[str] = None,
+    required: bool = False,
+):
+    """Centered text-input dialog; returns the text, or ``_DIALOG_CANCEL``.
+
+    Two ways to seed the field:
+      * ``default`` — PREFILLED into the box (cursor at END, so typing appends
+        and you can edit in place). Use when there's a real current value to keep.
+      * ``suggestion`` — shown only as a hint line; the box stays EMPTY. Use when
+        you want to propose a value without forcing the user to clear it (e.g. a
+        model name). On an empty Enter the suggestion is returned as a fallback.
+
+    When ``required`` and the resolved value is empty, **the dialog refuses to
+    confirm** — it shows an error and keeps the field open (Esc still cancels).
+
+    **Enter** confirms from anywhere, **Esc** cancels (no Tab-to-button dance, no
+    "Enter on Cancel = OK" footgun). Stock (readable) styling.
+    """
+    field = TextArea(
+        text=default or "",
+        multiline=False,
+        wrap_lines=False,
+    )
+    # Put the cursor at the end so a prefilled default is editable / appendable.
+    field.buffer.cursor_position = len(field.text)
+
+    base_hint = "Enter to confirm · Esc to cancel"
+    if suggestion:
+        base_hint = f"Suggestion: {suggestion}  ·  " + base_hint
+    hint_label = Label(text=base_hint)
+
+    def _resolve() -> str:
+        # Empty box + a suggestion → take the suggestion as a fallback, UNLESS
+        # the field is required (then the suggestion is display-only and the
+        # user must type a real value — an empty confirm is blocked below).
+        text = field.text
+        if not text.strip() and suggestion and not required:
+            return suggestion
+        return text
+
+    def _ok() -> None:
+        value = _resolve()
+        if required and not value.strip():
+            # Refuse to advance on an empty mandatory field; nudge and stay open.
+            hint_label.text = "This field is required — please enter a value."
+            return
+        get_app().exit(result=value)
+
+    def _cancel() -> None:
+        get_app().exit(result=_DIALOG_CANCEL)
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit([hint_label, field], padding=1),
+        buttons=[
+            Button(text="OK", handler=_ok),
+            Button(text="Cancel", handler=_cancel),
+        ],
+        with_background=True,
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    def _(event) -> None:
+        _ok()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:
+        _cancel()
+
+    app = Application(
+        layout=Layout(dialog),
+        key_bindings=kb,
+        mouse_support=False,
+        full_screen=True,
+    )
+    return app.run()
+
+
+def _dialog_radio(title: str, options: list, default=None):
+    """Centered single-choice list; returns the chosen value or ``_DIALOG_CANCEL``.
+
+    ``options`` is ``[(value, label), …]``. **↑/↓** move the highlight, **Enter**
+    confirms the highlighted item immediately (no Tab-to-button), **Esc**
+    cancels. The Enter binding is attached to the RadioList itself so it isn't
+    swallowed by the widget's own handler.
+    """
+
+    radio = RadioList(values=options, default=default)
+
+    def _ok() -> None:
+        get_app().exit(result=radio.current_value)
+
+    def _cancel() -> None:
+        get_app().exit(result=_DIALOG_CANCEL)
+
+    # Enter confirms the *highlighted* row. RadioList binds Enter internally to
+    # "select current", so we override it on the control's own key bindings to
+    # both select and accept — otherwise a global Enter binding is shadowed.
+    radio.control.key_bindings.add("enter")(lambda event: _ok())
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit(
+            [Label(text="↑/↓ to move · Enter to confirm · Esc to cancel"), radio],
+            padding=1,
+        ),
+        buttons=[
+            Button(text="OK", handler=_ok),
+            Button(text="Cancel", handler=_cancel),
+        ],
+        with_background=True,
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:
+        _cancel()
+
+    app = Application(
+        layout=Layout(dialog),
+        key_bindings=kb,
+        mouse_support=False,
+        full_screen=True,
+    )
+    return app.run()
+
+
+def _dialog_yesno(title: str, default: bool):
+    """Centered yes/no dialog. Returns True/False, or ``_DIALOG_CANCEL`` on Esc.
+
+    **Y/N** keys or ←/→ + **Enter** choose; **Esc** cancels the whole flow
+    (distinct from "No"), consistent with the other dialogs.
+    """
+    def _yes() -> None:
+        get_app().exit(result=True)
+
+    def _no() -> None:
+        get_app().exit(result=False)
+
+    def _cancel() -> None:
+        get_app().exit(result=_DIALOG_CANCEL)
+
+    yes_btn = Button(text="Yes", handler=_yes)
+    no_btn = Button(text="No", handler=_no)
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit(
+            [Label(text="Y/N or ←/→ + Enter · Esc to cancel")],
+            padding=1,
+        ),
+        buttons=[yes_btn, no_btn],
+        with_background=True,
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("y")
+    @kb.add("Y")
+    def _(event) -> None:
+        _yes()
+
+    @kb.add("n")
+    @kb.add("N")
+    def _(event) -> None:
+        _no()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:
+        _cancel()
+
+    app = Application(
+        layout=Layout(dialog),
+        key_bindings=kb,
+        mouse_support=False,
+        full_screen=True,
+    )
+    # Focus the default button so Tab/←/→ + Enter still works intuitively.
+    app.layout.focus(yes_btn if default else no_btn)
+    result = app.run()
+    if result is _DIALOG_CANCEL:
+        return _DIALOG_CANCEL
+    return bool(result)
+
+
+def _ask(
+    prompt: str,
+    default: Optional[str] = None,
+    suggestion: Optional[str] = None,
+    required: bool = False,
+) -> Optional[str]:
+    """Prompt for a value, returning ``default`` on empty input, EOF, or cancel.
+
+    ``suggestion`` proposes a value WITHOUT prefilling the field (the box stays
+    empty; an empty Enter falls back to the suggestion). Use it instead of
+    ``default`` when you don't want to force the user to clear a prefilled value
+    — e.g. a model name.
+
+    ``required`` makes an empty value unacceptable: the flow won't advance until
+    a non-empty value is entered (the suggestion becomes display-only — it is NOT
+    used as an auto-fallback for a required field). On a TTY this is a centered
+    dialog; else plain ``input()`` that re-asks on empty.
+
+    Cancelling (Esc on a dialog, Ctrl+C / Ctrl+D otherwise) aborts the whole
+    flow via ``_Cancelled`` — consistent with every other prompt — so nothing is
+    half-applied.
+    """
+    if _is_tty():
+        val = _dialog_input(prompt, default, suggestion=suggestion, required=required)
+        if val is _DIALOG_CANCEL:
+            raise _Cancelled()
+        val = val.strip()
+        return val or default or (None if required else suggestion)
+
+    # Non-TTY: show the suggestion in the bracket hint, but keep no prefill.
+    hint = default or suggestion
+    suffix = f" [{hint}]" if hint else ""
+    while True:
+        try:
+            val = input(f"  {prompt}{suffix}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise _Cancelled()
+        resolved = val or default or (None if required else suggestion)
+        if required and not (resolved and str(resolved).strip()):
+            print("  This field is required — please enter a value.")
+            continue
+        return resolved
 
 
 def _ask_required(prompt: str, default: Optional[str] = None) -> str:
-    """Prompt for a value, cancelling the flow on Ctrl+C / Ctrl+D.
+    """Prompt for a value; cancelling (Esc / Ctrl+C / Ctrl+D) aborts the flow.
 
-    Unlike :func:`_ask`, EOF aborts (raises ``_Cancelled``) rather than silently
-    returning the default — so an interrupted prompt never half-applies input.
-    Returns the entered value, or ``default`` on empty input.
+    Unlike :func:`_ask`, cancelling aborts (raises ``_Cancelled``) rather than
+    silently returning the default. Empty input keeps ``default`` when one is
+    given; with NO default, an empty value is rejected and re-asked (the value is
+    mandatory). On a TTY this is a centered dialog; otherwise plain ``input()``.
     """
+    if _is_tty():
+        # required=True only when there's no default to fall back on.
+        val = _dialog_input(prompt, default, required=default is None)
+        if val is _DIALOG_CANCEL:
+            raise _Cancelled()
+        return val.strip() or (default or "")
+
     suffix = f" [{default}]" if default else ""
-    try:
-        val = input(f"  {prompt}{suffix}: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        raise _Cancelled()
-    return val or (default or "")
+    while True:
+        try:
+            val = input(f"  {prompt}{suffix}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raise _Cancelled()
+        resolved = val or (default or "")
+        if not resolved and default is None:
+            print("  This field is required — please enter a value.")
+            continue
+        return resolved
 
 
 def _ask_choice(
-    prompt: str, valid: set, default: Optional[str] = None
+    prompt: str,
+    valid: set,
+    default: Optional[str] = None,
+    labels: Optional[dict] = None,
 ) -> str:
     """Prompt for one of ``valid`` keys, RE-ASKING on an invalid entry.
 
-    Enter accepts ``default`` (when given). Ctrl+C / Ctrl+D cancels the flow.
-    The previous behavior — accept-then-default/keep on a bad value — is gone:
-    a wrong choice now re-prompts instead of silently proceeding.
+    On a TTY, when ``labels`` (``{key: human_label}``) is given, this is a
+    centered single-choice dialog (↑/↓ + Enter). **Esc** cancels the whole flow
+    (raises ``_Cancelled``), consistent with the other prompts. Otherwise it
+    falls back to the plain ``input()`` re-ask loop: Enter accepts ``default``;
+    Ctrl+C / Ctrl+D cancels; a wrong value re-prompts.
     """
+    if _is_tty() and labels:
+        # Preserve the natural key order (dict insertion order of `labels`).
+        options = [(k, labels.get(k, k)) for k in labels if k in valid]
+        chosen = _dialog_radio(
+            prompt, options, default=default if default in valid else None
+        )
+        if chosen is _DIALOG_CANCEL:
+            raise _Cancelled()
+        return chosen
+
     while True:
         answer = _ask_required(prompt, default)
         if answer in valid:
@@ -468,10 +767,11 @@ def _ask_number(
 ) -> Optional[str]:
     """Prompt for an int/float, RE-ASKING until the input parses.
 
-    - Enter -> ``default`` (returned as-is).
+    - Enter / accept-with-default -> ``default`` (returned as-is).
     - "none" (case-insensitive) -> returns ``None`` when ``allow_none``.
     - A non-numeric entry re-prompts instead of being accepted.
-    Ctrl+C / Ctrl+D cancels the flow (raises ``_Cancelled``).
+    Esc / Ctrl+C / Ctrl+D cancels the flow (raises ``_Cancelled``).
+    On a TTY each attempt is an ``input_dialog``; otherwise plain ``input()``.
     Returns the validated numeric string, the default, or None.
     """
     while True:
@@ -488,18 +788,36 @@ def _ask_number(
             return answer
         except ValueError:
             label = "a number" if kind == "float" else "an integer"
-            print(f"  '{answer}' is not {label}; please try again"
-                  + (" (or 'none')." if allow_none else "."))
+            # In dialog mode there's no scrollback line to read, so surface the
+            # validation error in the next dialog's title.
+            msg = f"'{answer}' is not {label}" + (
+                " (or 'none')" if allow_none else ""
+            )
+            if _is_tty():
+                prompt = f"{prompt.split(' — ')[0]} — {msg}"
+            else:
+                print(f"  {msg}; please try again.")
 
 
 def _ask_bool(prompt: str, default: bool) -> bool:
-    """Prompt for a yes/no answer, defaulting to ``default`` on empty input/EOF."""
+    """Prompt for a yes/no answer, defaulting to ``default`` on empty input.
+
+    On a TTY this is a centered yes/no dialog (Y/N or ←/→ + Enter); **Esc**
+    cancels the whole flow (raises ``_Cancelled``), consistent with the other
+    prompts. Otherwise it keeps the plain ``input()`` prompt (Ctrl+C / Ctrl+D
+    cancels).
+    """
+    if _is_tty():
+        result = _dialog_yesno(prompt, default)
+        if result is _DIALOG_CANCEL:
+            raise _Cancelled()
+        return result
+
     hint = "Y/n" if default else "y/N"
     try:
         val = input(f"  {prompt} ({hint}): ").strip().lower()
-    except EOFError:
-        print()
-        return default
+    except (EOFError, KeyboardInterrupt):
+        raise _Cancelled()
     if not val:
         return default
     return val.startswith("y")
@@ -526,19 +844,27 @@ def _prompt_provider_type(section: str, current: str) -> str:
     (``bedrock-mantle`` for ``mantle``). The current type is the default; an
     invalid choice keeps it. Returns the canonical config value (e.g. ``mantle``).
     """
-    from mnemoai.models.provider_params import providers
-
     options = list(providers(section))
     if current not in options:
         # Unknown/legacy current value — still offer it so it can be kept.
         options = [current] + options
     default_key = str(options.index(current) + 1)
 
-    print(f"\n  Provider type for this model (current: {_PROVIDER_LABELS.get(current, current)})")
-    for i, prov in enumerate(options, 1):
-        print(f"    {i}) {_PROVIDER_LABELS.get(prov, prov)}")
-    valid = {str(i) for i in range(1, len(options) + 1)}
-    choice = _ask_choice("Provider", valid, default_key)
+    labels = {
+        str(i): _PROVIDER_LABELS.get(prov, prov)
+        for i, prov in enumerate(options, 1)
+    }
+    valid = set(labels)
+    if not _is_tty():
+        print(f"\n  Provider type for this model (current: {_PROVIDER_LABELS.get(current, current)})")
+        for k, lbl in labels.items():
+            print(f"    {k}) {lbl}")
+    choice = _ask_choice(
+        f"Provider type (current: {_PROVIDER_LABELS.get(current, current)})",
+        valid,
+        default_key,
+        labels=labels,
+    )
     return options[int(choice) - 1]
 
 
@@ -551,10 +877,14 @@ def _prompt_mantle_protocol(text: str, section: str) -> str:
     existing = _get_field(text, section, "API_PROTOCOL")
     current = existing or "chat_completions"
     default_key = next((k for k, (v, _) in _MANTLE_PROTOCOLS.items() if v == current), "1")
-    print("  Mantle API protocol:")
-    for k, (_, desc) in _MANTLE_PROTOCOLS.items():
-        print(f"    {k}) {desc}")
-    choice = _ask_choice("Protocol", set(_MANTLE_PROTOCOLS), default_key)
+    labels = {k: desc for k, (_, desc) in _MANTLE_PROTOCOLS.items()}
+    if not _is_tty():
+        print("  Mantle API protocol:")
+        for k, lbl in labels.items():
+            print(f"    {k}) {lbl}")
+    choice = _ask_choice(
+        "Mantle API protocol", set(_MANTLE_PROTOCOLS), default_key, labels=labels
+    )
     chosen = _MANTLE_PROTOCOLS[choice][0]
     if chosen != existing and not (existing is None and chosen == "chat_completions"):
         text = _set_field(text, section, "API_PROTOCOL", chosen)
@@ -572,8 +902,6 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
     Returns ``(text, conn)`` where ``conn`` holds the mirrorable connection
     values (HOST/PORT/REGION) the vision section can reuse.
     """
-    from mnemoai.models.provider_params import supported_keys
-
     allowed = supported_keys(section, provider) or set()
     conn = {}
 
@@ -706,7 +1034,10 @@ def _build_config(
 
     # --- Chat model ---
     print("\n  -- Chat model --")
-    model = _ask("Chat model name", default_model)
+    # `default_model` is an EXAMPLE for the provider, not a current value — offer
+    # it as a suggestion so the field stays empty and the user just types theirs.
+    # The model name is mandatory: an empty value can't advance the setup.
+    model = _ask("Chat model name", suggestion=default_model, required=True)
     if model:
         text = _set_in_section(text, "MODEL_ID", "NAME", model)
 
@@ -727,6 +1058,8 @@ def _build_config(
         kind="int",
     )
     text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
+    # Keep the document read cap at 25% of the context window.
+    text = _sync_doc_max_tokens(text)
 
     # --- Vision model (optional) ---
     print("\n  -- Vision model (image description) --")
@@ -798,10 +1131,15 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     missing.
     """
     print(_CANCEL_HINT)
-    print("\n  Choose your LLM provider:")
-    for k, (_, _, label, _) in _PROVIDERS.items():
-        print(f"    {k}) {label}")
-    choice = _ask_choice("Provider", set(_PROVIDERS), "1")
+    provider_labels = {k: label for k, (_, _, label, _) in _PROVIDERS.items()}
+    # Non-TTY fallback still prints the menu; the dialog shows labels itself.
+    if not _is_tty():
+        print("\n  Choose your LLM provider:")
+        for k, lbl in provider_labels.items():
+            print(f"    {k}) {lbl}")
+    choice = _ask_choice(
+        "Choose your LLM provider", set(_PROVIDERS), "1", labels=provider_labels
+    )
 
     provider, template_file, label, default_model = _PROVIDERS[choice]
     template_path = _templates_dir() / template_file
@@ -1015,6 +1353,8 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         # previous model's value.
         ctx = _ask_number("Max context window", default="65536", kind="int")
         text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
+        # Keep the document read cap at 25% of the context window.
+        text = _sync_doc_max_tokens(text)
 
     return text
 
@@ -1104,26 +1444,44 @@ def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
 def _prompt_one_param(text: str, section: str, key: str, kind: str, hint: str) -> str:
     """Prompt for a single inference param and patch ``text`` accordingly.
 
-    Convention:
-      * Enter        -> keep the current value (no change)
-      * 'none'       -> clear it (remove the key; provider default applies)
-      * a valid value-> set it (re-asks on invalid input)
+    The field is PREFILLED with the current value (empty when the param is at
+    its provider default, i.e. absent from the config) — consistent with the
+    /model text fields. Convention:
+      * Enter (value unchanged / left empty) -> keep as-is. An empty box that
+        stays empty means "provider default": the key is NOT written.
+      * ``none`` -> clear it (remove the key; provider default applies).
+      * a valid value -> set it (re-asks on invalid input).
+      * Esc -> cancel the whole flow.
     """
     current = _get_field(text, section, key)
-    cur_disp = current if current is not None else "provider default"
+    base_hint = hint
     if kind.startswith("enum:"):
-        hint = f"{hint} ({kind.split(':', 1)[1].replace(',', ' | ')})"
+        base_hint = f"{hint} ({kind.split(':', 1)[1].replace(',', ' | ')})"
     elif kind == "bool":
-        hint = f"{hint} (true/false)"
+        base_hint = f"{hint} (true/false)"
+
+    prompt_hint = base_hint
     while True:
-        answer = _ask(f"{key} [{hint}] (current: {cur_disp}; 'none' to clear)", "")
-        if answer is None or answer.strip() == "":
-            return text  # keep current
-        if answer.strip().lower() == "none":
+        # Prefill the current value; empty box == provider default (unset).
+        answer = _ask(f"{key} [{prompt_hint}] ('none' to clear)", default=current)
+        # No current + left empty -> keep the provider default (write nothing).
+        if answer is None:
+            return text
+        answer = answer.strip()
+        # Unchanged (equals current, or empty when there was no current) -> keep.
+        if answer == "" or answer == (current or ""):
+            return text
+        if answer.lower() == "none":
             return _remove_field(text, section, key)
         value = _validate_param(key, kind, answer)
         if value is None:
-            print(f"    '{answer}' is not a valid {kind.split(':', 1)[0]} value; try again.")
+            # Surface the error in the next prompt (a full-screen dialog hides
+            # any print() behind it); the non-TTY path still shows it inline.
+            err = f"'{answer}' is not a valid {kind.split(':', 1)[0]} value"
+            if _is_tty():
+                prompt_hint = f"{base_hint} — {err}, try again"
+            else:
+                print(f"    {err}; try again.")
             continue
         return _set_field(text, section, key, value)
 
@@ -1136,8 +1494,6 @@ def _prompt_inference_params(text: str, section: str) -> str:
     consumes are offered. MAX_CONVERSATION_TOKENS (context window) and the
     connection/auth keys are out of scope here — those live in /model.
     """
-    from mnemoai.models.provider_params import tunable_params
-
     provider = (_get_field(text, section, "TYPE") or "ollama").lower()
     tunable = tunable_params(section, provider)
     if not tunable:
@@ -1181,23 +1537,32 @@ def run_params_override() -> Optional[Path]:
     print("  Tune inference parameters")
     print("=" * 64)
     _print_current_setup(text)
-    print("\n  Which model's parameters do you want to tune? Only inference")
-    print("  params are changed; provider, name, and connection stay as-is")
-    print("  (use /model for those).\n")
-    for k, (_, label) in _PARAM_SECTIONS.items():
-        if available.get(k):
-            print(f"    {k}) {label}")
+    labels = {
+        k: label for k, (_, label) in _PARAM_SECTIONS.items() if available.get(k)
+    }
+    if not _is_tty():
+        print("\n  Which model's parameters do you want to tune? Only inference")
+        print("  params are changed; provider, name, and connection stay as-is")
+        print("  (use /model for those).\n")
+        for k, lbl in labels.items():
+            print(f"    {k}) {lbl}")
 
     print(_CANCEL_HINT)
     try:
-        valid = {k for k in _PARAM_SECTIONS if available.get(k)}
-        choice = _ask_choice("Model", valid, "1")
+        valid = set(labels)
+        choice = _ask_choice(
+            "Which model's parameters to tune?", valid, "1", labels=labels
+        )
         section, label = _PARAM_SECTIONS[choice]
         print(f"\n  -- {label} parameters --")
         new_text = _prompt_inference_params(text, section)
     except (KeyboardInterrupt, _Cancelled):
         print("\n  Cancelled. Config left untouched.")
         return None
+
+    # Keep the document read cap at 25% of the context window (corrects a
+    # hand-edited value even when no inference param changed).
+    new_text = _sync_doc_max_tokens(new_text)
 
     if new_text == text:
         print("  No changes made.")
@@ -1236,18 +1601,22 @@ def run_model_override() -> Optional[Path]:
     print("  Override a model")
     print("=" * 64)
     _print_current_setup(text)
-    print("\n  Which model do you want to change? Only that section is edited;")
-    print("  everything else in your config is left as-is.\n")
-    for k, (_, label, _) in _MODEL_SECTIONS.items():
-        if not available.get(k):
-            continue
-        print(f"    {k}) {label}")
+    labels = {
+        k: label for k, (_, label, _) in _MODEL_SECTIONS.items() if available.get(k)
+    }
+    if not _is_tty():
+        print("\n  Which model do you want to change? Only that section is edited;")
+        print("  everything else in your config is left as-is.\n")
+        for k, lbl in labels.items():
+            print(f"    {k}) {lbl}")
 
     print(_CANCEL_HINT)
     try:
         # Only the configured sections are selectable; re-ask on a bad choice.
-        valid = {k for k in _MODEL_SECTIONS if available.get(k)}
-        choice = _ask_choice("Model", valid, "1")
+        valid = set(labels)
+        choice = _ask_choice(
+            "Which model to change?", valid, "1", labels=labels
+        )
         section, label, is_llm = _MODEL_SECTIONS[choice]
         print(f"\n  -- {label} --")
         new_text = _prompt_model_section(text, section, is_llm)
