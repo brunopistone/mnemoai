@@ -9,6 +9,50 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-07-01
+
+### Added
+
+- **Server-side safety policies (`server/tools/safety/`).** The catastrophic-command
+  and system-path limits the tool docstrings advertise are now *enforced inside the
+  MCP server*, not only by the client's confirmation gate — so they hold even if the
+  server is driven directly.
+  - `bash_policy.classify_shell_command` blocks a small, curated set of
+    irreversible, system-destroying commands: recursive force-deletes of a
+    root/home target (`rm -rf /`, `rm -rf ~`, `rm -rf /*`), filesystem creation
+    (`mkfs*`), raw-device overwrite (`dd of=/dev/…`, `shred`/`wipefs` on a device),
+    power-state changes (`shutdown`/`reboot`/`halt`/`poweroff`, `init 0/6`), and the
+    classic fork bomb. Enforced in **`execute_bash`** and **`start_background_task`**
+    (one shared policy). Ordinary scoped mutations (`rm -rf build/`,
+    `git reset --hard`) are intentionally **not** blocked here — they remain gated
+    by the client confirmation prompt.
+  - `path_policy.classify_write_path` blocks writes into critical system
+    directories (`/`, `/etc`, `/bin`, `/usr`, `/boot`, `/dev`, `/System`,
+    `/Library`, …; `..` escapes are normalized first). Enforced in **`fs_write`**
+    and **`file_edit`**. Home, project, temp (incl. the macOS `/private/var/folders`
+    temp dir), and app paths remain writable.
+  - Both are pure, config-independent functions with direct unit tests
+    (`tests/unit/test_safety_policies.py`).
+
+### Changed
+
+- **Token counting lives in `utils/tokenization.py`.** `count_tokens` moved to a
+  neutral module that both the client and the server import, removing the
+  `client.py → server.tools` import that crossed the MCP layer boundary.
+  `ToolManager.count_tokens` now delegates to it (single implementation). The
+  encoder is created lazily, so importing the module has no side effects.
+
+### Fixed
+
+- **Duplicate RAG/chunk-cache flush** in `LangGraphClient.clear_context()` — the
+  flush block was executed twice; removed the redundant copy.
+
+### Internal
+
+- `requirements.txt`: collapsed the redundant `mcp` / `mcp[cli]` pins into a single
+  `mcp[cli]>=1.26.0`, and dropped `uv` from runtime deps (it's an install/dev tool,
+  not imported at runtime).
+
 ## [0.12.0] — 2026-07-01
 
 ### Added

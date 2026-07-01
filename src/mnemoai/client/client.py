@@ -31,7 +31,6 @@ from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector
 from mnemoai.client.ui.spinner import Spinner
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
-from mnemoai.server.tools import count_tokens
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import (
@@ -41,6 +40,7 @@ from mnemoai.utils.paths import (
     profile_dir,
     sanitize_model_name,
 )
+from mnemoai.utils.tokenization import count_tokens
 
 
 class StreamingCallbackHandler(BaseCallbackHandler):
@@ -810,12 +810,6 @@ class LangGraphClient:
         self.current_conversation_path = None
 
         # Flush RAG database when clearing context
-        if config.get("ENABLE_RAG", False):
-            self._flush_rag_store()
-
-        self._flush_chunk_cache_store()
-
-        # Flush RAG database if enabled
         if config.get("ENABLE_RAG", False):
             self._flush_rag_store()
 

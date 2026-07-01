@@ -8,6 +8,8 @@ from mcp.server.fastmcp import FastMCP
 from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import normalize_path
 
+from .safety import classify_write_path
+
 
 def register_edit_tools(mcp: FastMCP) -> None:
     """Register file editing tools.
@@ -85,6 +87,16 @@ def register_edit_tools(mcp: FastMCP) -> None:
         """
         # Expand ~ and tolerate shell escaping/quoting in the path.
         file_path = normalize_path(file_path)
+
+        # Server-side hard floor: never edit a file inside a critical system
+        # directory. Enforced here because the MCP server can be driven directly,
+        # not only through the client's confirmation gate.
+        path_verdict = classify_write_path(file_path)
+        if path_verdict.blocked:
+            logger.warning("file_edit blocked path: %s", file_path)
+            return json.dumps(
+                {"error": True, "blocked": True, "message": path_verdict.reason}
+            )
 
         # Validate file exists
         if not os.path.exists(file_path):
