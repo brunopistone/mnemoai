@@ -9,6 +9,23 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.13.1] — 2026-07-01
+
+### Fixed
+
+- **`/model` and `/params` now show the "Current setup" overview inside the
+  selection dialog.** The chat/vision/embeddings summary was printed to
+  scrollback and then hidden by the full-screen model-picker dialog, so it was
+  invisible exactly when you needed it. It's now rendered in the dialog body
+  above the choices (and still printed to scrollback for non-TTY runs).
+- **Spinner no longer looks frozen while the model streams a large tool-call
+  argument.** A tool call (e.g. `fs_write` with a big document as `file_text`)
+  streams its arguments as many content-less chunks; after reasoning had already
+  stopped the "Thinking" spinner, that long silent stretch presented a frozen
+  terminal. The stream loop now re-raises a "Preparing tool call" spinner while
+  tool-call-argument chunks are flowing (stopped as soon as the tool marker
+  prints), so a large write never looks stuck.
+
 ## [0.13.0] — 2026-07-01
 
 ### Added
