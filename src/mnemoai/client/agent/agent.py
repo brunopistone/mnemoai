@@ -945,6 +945,7 @@ class LangGraphAgent:
         first_token = True
         had_reasoning = False
         answer_marker_printed = False
+        building_tool_args = False
         response = None
 
         try:
@@ -971,7 +972,27 @@ class LangGraphAgent:
                     print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
                     had_reasoning = True
 
+                # A tool call streams its arguments as many chunks that carry NO
+                # visible content — for a large arg (e.g. fs_write's file_text of
+                # a big document) this is a long, silent stretch. If the spinner
+                # was already stopped (by reasoning above) it would look frozen,
+                # so re-raise a "Preparing …" spinner and keep it up until the
+                # tool marker prints. Guarded on self.callbacks (same as the stop).
+                if (
+                    not chunk_content
+                    and self.callbacks
+                    and getattr(chunk, "tool_call_chunks", None)
+                    and not building_tool_args
+                ):
+                    building_tool_args = True
+                    self._start_spinner("Preparing tool call")
+
                 if chunk_content:
+                    # Real answer text arrived after tool-arg chunks (rare, but a
+                    # model can interleave) — drop the preparing spinner first.
+                    if building_tool_args:
+                        building_tool_args = False
+                        self._stop_spinner()
                     if not answer_marker_printed:
                         if had_reasoning:
                             # Reasoning already printed (gray) above — separate

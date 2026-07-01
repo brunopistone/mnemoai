@@ -146,3 +146,81 @@ class TestCallModelStartsSpinner:
         assert events[0] == "start"
         assert "stream" in events
         assert events.index("start") < events.index("stream")
+
+
+class _Chunk:
+    """Minimal streaming-chunk stand-in for _stream_once.
+
+    ``content`` is a plain string (Ollama-style). ``tool_call_chunks`` mimics
+    langchain's streamed tool-call argument fragments. Chunks add together (the
+    accumulation `response = response + chunk` in _stream_once), so `__add__`
+    just returns the right-hand chunk — enough for these tests.
+    """
+
+    def __init__(self, content="", tool_call_chunks=None):
+        self.content = content
+        self.tool_call_chunks = tool_call_chunks or []
+        self.additional_kwargs = {}
+
+    def __add__(self, other):
+        return other
+
+
+class _StubModel:
+    def __init__(self, chunks):
+        self._chunks = chunks
+
+    def stream(self, messages, config=None):
+        yield from self._chunks
+
+
+class TestToolArgStreamingSpinner:
+    """A tool call streams its args as content-less chunks; for a large arg
+    (fs_write's file_text of a big document) that is a long silent stretch.
+    After reasoning stopped the spinner, _stream_once must re-raise a
+    "Preparing tool call" spinner so the terminal never looks frozen.
+    """
+
+    def _agent_recording(self, chunks):
+        a = _agent()
+        a.verbose = True
+        a.callbacks = [object()]  # non-empty so the spinner logic engages
+        a._code_formatter = None  # not touched (no visible content in these tests)
+        events = []
+        a._start_spinner = lambda label="Thinking": events.append(("start", label))
+        a._stop_spinner = lambda: events.append(("stop", None))
+        a._print_answer_marker = lambda: None
+        return a, events
+
+    def test_spinner_restarts_while_building_tool_args(self):
+        # reasoning chunk (stops spinner) → several content-less tool-arg chunks.
+        # Reasoning chunk: Ollama-style reasoning arrives via additional_kwargs.
+        r = _Chunk(content="")
+        r.additional_kwargs = {"reasoning_content": "thinking..."}
+        arg1 = _Chunk(content="", tool_call_chunks=[{"args": '{"file_text": "'}])
+        arg2 = _Chunk(content="", tool_call_chunks=[{"args": "big doc..."}])
+        a, events = self._agent_recording([r, arg1, arg2])
+
+        a._stream_once(_StubModel([r, arg1, arg2]), [], {}, print_reasoning=True)
+
+        # The spinner must have been (re)started with the preparing label after
+        # reasoning stopped it — exactly once, not per-chunk.
+        starts = [e for e in events if e[0] == "start"]
+        assert ("start", "Preparing tool call") in starts
+        assert sum(1 for e in starts if e[1] == "Preparing tool call") == 1
+
+    def test_no_preparing_spinner_without_tool_calls(self):
+        # A plain reasoning-then-answer stream must NOT trigger the preparing
+        # spinner (no tool_call_chunks anywhere).
+        r = _Chunk(content="")
+        r.additional_kwargs = {"reasoning_content": "thinking..."}
+        ans = _Chunk(content="hello")
+        a, events = self._agent_recording([r, ans])
+        # process_chunk is called on visible content; stub the formatter.
+        a._code_formatter = type("F", (), {"process_chunk": lambda self, c: None,
+                                            "flush": lambda self: None})()
+
+        a._stream_once(_StubModel([r, ans]), [], {}, print_reasoning=True,
+                       mark_answer=True)
+
+        assert not any(e[1] == "Preparing tool call" for e in events if e[0] == "start")
