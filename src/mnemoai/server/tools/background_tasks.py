@@ -20,6 +20,8 @@ from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.paths import tasks_dir
 
+from .safety import classify_shell_command
+
 # Store for background tasks
 _background_tasks: Dict[str, dict] = {}
 _task_lock = threading.Lock()
@@ -120,6 +122,21 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
             start_background_task(command="pip install -r requirements.txt")
             start_background_task(command="cargo build --release", description="Building release")
         """
+        # Same catastrophic-command floor as execute_bash — a backgrounded shell
+        # is still a shell, so it shares the one policy (rm -rf /, mkfs, dd to a
+        # device, shutdown, fork bomb, …).
+        verdict = classify_shell_command(command)
+        if verdict.blocked:
+            return json.dumps(
+                {
+                    "error": True,
+                    "blocked": True,
+                    "message": verdict.reason,
+                    "command": command,
+                },
+                indent=2,
+            )
+
         ensure_task_dir()
 
         task_id = str(uuid.uuid4())[:8]

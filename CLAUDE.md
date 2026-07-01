@@ -49,7 +49,7 @@ stay at the repo root.
 | Directory               | Role                                                                                 |
 | ----------------------- | ------------------------------------------------------------------------------------ |
 | `client/`               | LangGraphClient facade, MCP bridge                                                   |
-| `client/agent/`         | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils            |
+| `client/agent/`         | Agent loop: StateGraph agent, query router, orchestrator, reasoning utils, and pure collaborators (message_codec, message_sanitizer, plan_policy, tool_formatting) |
 | `client/memory/`        | Episodic memory (ChromaDB/FAISS), ACE Playbook, Reflector                            |
 | `client/managers/`      | Conversation token management, user profile learning                                 |
 | `client/ui/`            | Chat REPL (`chat_interface`), prompt_toolkit input reader + dialogs (`tui`), spinner |
@@ -57,6 +57,7 @@ stay at the repo root.
 | `server/tools/`         | Tool implementations (bash, file ops, git, web, RAG, vision, planning)               |
 | `server/tools/rag/`     | Session-scoped vector store, hybrid search engine                                    |
 | `server/tools/readers/` | File format readers (PDF, DOCX, CSV, JSON, directory, line, search)                  |
+| `server/tools/safety/`  | Server-side catastrophic-command + write-path policies (shared by shell/file tools)  |
 | `models/`               | `provider_params` registry + `mantle_factory`                                        |
 | `models/controllers/`   | Provider-dispatching LLM/vision/embeddings controllers                               |
 | `models/chat_models/`   | Concrete LangChain ChatModel subclasses (ChatOllamaWrapper, ChatSageMaker)           |
@@ -79,6 +80,10 @@ All configuration flows through `Config()` which loads `utils/config.yaml` (giti
 ### MCP tool registration (`server/tools/tools_manager.py`)
 
 `ToolManager.register_tools(mcp)` conditionally registers tool groups based on config toggles. Each tool file defines functions decorated with `@mcp.tool()`.
+
+### Server-side safety policies (`server/tools/safety/`)
+
+Two pure classifiers enforce, **inside the MCP server**, the hard limits the tool docstrings advertise — a floor that holds even if the server subprocess is driven directly (not via the client's `_confirm_tool` gate). Deliberately narrow: they block only **catastrophic, irreversible** actions, NOT ordinary scoped mutations (those stay gated by the client confirmation + plan mode). `bash_policy.classify_shell_command(cmd) -> BashPolicyResult` blocks root/home recursive force-deletes (`rm -rf /|~|/*`), `mkfs*`, raw-device `dd`/`shred`/`wipefs`, power-state changes (`shutdown`/`reboot`/`halt`/`poweroff`, `init 0/6`), and the fork bomb — enforced at the top of `execute_bash` **and** `start_background_task` (one shared policy, so shell safety isn't duplicated). `path_policy.classify_write_path(path) -> PathPolicyResult` normalizes `..`/`~` then blocks writes into system dirs (`/`, `/etc`, `/bin`, `/usr`, `/boot`, `/dev`, `/System`, `/Library`, …; NOT the macOS `/private/var/folders` temp dir) — enforced in `fs_write` and `file_edit`. Both are config-independent and unit-tested (`tests/unit/test_safety_policies.py`). This is the server-side complement to the client-side `_confirm_tool` gate and plan mode.
 
 ### External MCP servers (`client/mcp_config.py`, `MultiMCPClient`)
 
@@ -107,6 +112,10 @@ Keeps the conversation under `MAX_CONVERSATION_TOKENS` by summarizing older mess
 ### Orchestrator-workers (`client/agent/orchestrator.py`, `client/agent/agent.py`)
 
 For "full" complexity tasks: decompose → parse subtasks (JSON) → run worker loop per subtask with category-specific tools → aggregate results.
+
+### Agent pure collaborators (`client/agent/{message_codec,message_sanitizer,plan_policy,tool_formatting}.py`)
+
+`LangGraphAgent` is the coordinator; its **stateless** logic lives in sibling modules so the class stays focused on the graph/loop. `message_codec` = Strands↔LangChain message conversion; `message_sanitizer` = orphaned tool-pair repair (`sanitize_tool_pairs`); `plan_policy` = the plan-mode block decision + read-only-bash heuristic + data tables (`PLAN_BLOCKED_TOOLS`, `READONLY_BASH_CMDS`, …); `tool_formatting` = the `[⚙ …]` marker rendering (`format_tool_call`/`elide_middle`), `record_turn_tool_calls` (ctrl+o capture), `normalize_tool_args`, and `tool_error_message`. The agent keeps thin `_sanitize_tool_pairs`/`_is_blocked_by_plan_mode`/`_is_readonly_bash`/`_format_tool_call`/… methods that **delegate** into these, preserving the historical class surface the unit tests build against (`LangGraphAgent.__new__(...)` + `LangGraphAgent._…`) and the `getattr(agent, "_sanitize_tool_pairs", …)` call in `AgentConversationManager`. When adding pure tool/plan/message logic, put it in the collaborator and delegate — don't grow `agent.py`.
 
 ### ACE Playbook learning (`client/memory/reflector.py`, `client/memory/playbook_store.py`)
 
@@ -171,7 +180,7 @@ The chat REPL is **app-per-prompt**: prompt*toolkit runs **only while reading a 
 
 - **Tests** — pytest unit suite in `tests/` covers pure-logic modules (no LLM/Ollama needed). Run with `python -m pytest`. See the Testing section below
 - **Error handling in tools** — `@tool_error_handler` decorator (`server/error_handler.py`) for standardized responses
-- **Action confirmation** — destructive tools (`execute_bash`; `fs_write`/`file_edit`; `memory` writes) are hard-gated by `LangGraphAgent._confirm_tool()` in BOTH `_execute_tools` and `_run_worker_loop`, before `tool.invoke()`. It must live client-side: the MCP server is a piped subprocess and can't prompt the terminal. Toggles `REQUIRE_BASH_CONFIRMATION` / `REQUIRE_WRITE_CONFIRMATION` (default true), `REQUIRE_MEMORY_CONFIRMATION` (default false); non-TTY auto-proceeds; `fs_write` dry-run previews aren't gated. The prompt is `Proceed? (y/N/a)` — `a` trusts that whole category (`bash`/`write`/`memory`, tracked in `_trusted_confirm_categories`) for the rest of the session so a multi-step task doesn't re-prompt; default-deny otherwise
+- **Action confirmation** — destructive tools (`execute_bash`; `fs_write`/`file_edit`; `memory` writes) are hard-gated by `LangGraphAgent._confirm_tool()` in BOTH `_execute_tools` and `_run_worker_loop`, before `tool.invoke()`. It must live client-side: the MCP server is a piped subprocess and can't prompt the terminal. Toggles `REQUIRE_BASH_CONFIRMATION` / `REQUIRE_WRITE_CONFIRMATION` (default true), `REQUIRE_MEMORY_CONFIRMATION` (default false); non-TTY auto-proceeds; `fs_write` dry-run previews aren't gated. The prompt is `Proceed? (y/N/a)` — `a` trusts that whole category (`bash`/`write`/`memory`, tracked in `_trusted_confirm_categories`) for the rest of the session so a multi-step task doesn't re-prompt; default-deny otherwise. **This client gate is a confirmation layer, not the last line of defense**: a separate server-side floor (`server/tools/safety/`, above) hard-blocks catastrophic commands and system-path writes regardless of confirmation, since the MCP server can be driven directly
 - **Plan mode (enforced, user-toggled)** — the `/plan` command flips `client.plan_mode_active`; the agent reads it via a `plan_mode_provider` callback and `_is_blocked_by_plan_mode(tool_name, tool_args)` HARD-BLOCKS the mutating/exec tools (`_PLAN_BLOCKED_TOOLS` = execute*bash, fs_write, file_edit, git_safe, git_commit_safe, start_background_task) at both chokepoints, above `_confirm_tool` (so a blocked tool never even prompts). Three of those are **conditionally** allowed: `execute_bash` runs when the command is read-only (`_is_readonly_bash` — leading program in `_READONLY_BASH_CMDS`, no mutation operators in `_BASH_MUTATION_OPS`, git limited to `_READONLY_GIT_SUBCMDS`), and `fs_write`/`file_edit` are allowed only when writing the plan file (a `.md` under `paths.plans_dir()`, via `_is_plan_file`). Read-only tools + the `memory` notebook always pass. `client.query()` prepends a firm read-only reminder each turn (`_plan_mode_reminder` — "supersedes any other instructions", points the model at the writable plan file and to ask clarifying questions). This is the \_enforced* counterpart to the advisory `server/tools/plan_mode.py` bookkeeping tools, which are unchanged
 - **Async/sync bridge** — MCP client uses a background thread with `asyncio.new_event_loop()` in `client/mcp_tool_wrapper.py`; sync callers use `run_coroutine_threadsafe`
 - **Imports** — absolute (`from mnemoai.…`), at module top level, grouped stdlib → third-party → first-party and **alphabetized within each group** (enforced by `ruff check --select I .` — the CI import-sort gate). Do **not** add lazy/function-local imports unless genuinely necessary to break a real circular import; prove it first by importing the module at top level (`python -c "import mnemoai.client.agent.agent"`) — if it resolves, keep the import at the top. When adding a symbol from a module already imported (e.g. `mnemoai.utils.paths`), extend that existing top-level import group rather than re-importing inside a function

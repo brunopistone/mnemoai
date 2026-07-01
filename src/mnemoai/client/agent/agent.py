@@ -1,10 +1,8 @@
 """LangGraph-based agent implementation."""
 
 import operator
-import os
 import re
 import sys
-from pathlib import Path
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -19,6 +17,7 @@ from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
+from mnemoai.client.agent import message_sanitizer, plan_policy, tool_formatting
 from mnemoai.client.agent.orchestrator import (
     get_aggregator_prompt,
     get_orchestrator_prompt,
@@ -29,7 +28,6 @@ from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
-from mnemoai.utils.paths import plans_dir
 
 
 class AgentState(TypedDict):
@@ -59,53 +57,15 @@ class LangGraphAgent:
     #     never trigger (same reasoning as external MCP tools, see 0.8.21).
     _ALWAYS_AVAILABLE_TOOLS = {"memory", "describe_image", "fs_read", "use_skill"}
 
-    # Mutating / shell-executing tools hard-blocked while plan mode is active
-    # Read-only tools (fs_read, glob/grep search, web, document readers) and
-    # the `memory` notebook are allowed.
-    # NOTE: execute_bash, fs_write, and file_edit are blocked CONDITIONALLY (see
-    # _is_blocked_by_plan_mode): read-only bash and writes to the plan file are
-    # permitted; everything else here is an unconditional block.
-    _PLAN_BLOCKED_TOOLS = {
-        "execute_bash",
-        "fs_write",
-        "file_edit",
-        "git_safe",
-        "git_commit_safe",
-        "start_background_task",
-    }
-
-    # In plan mode, fs_write/file_edit are allowed ONLY for the plan file (a
-    # single writable path under the plans dir. Everything else writing is blocked.
-    _PLAN_FILE_SUFFIX = ".md"
-
-    # Read-only shell commands permitted in plan mode (the leading program must
-    # be one of these AND the command must contain no shell operator that could
-    # chain a mutation — see _is_readonly_bash). Conservative on purpose: when in
-    # doubt, the command is treated as NOT read-only and blocked.
-    _READONLY_BASH_CMDS = {
-        "ls", "cat", "head", "tail", "less", "more", "pwd", "echo", "find",
-        "grep", "rg", "egrep", "fgrep", "wc", "stat", "file", "tree", "du",
-        "df", "which", "type", "whoami", "hostname", "date", "env", "printenv",
-        "ps", "uname", "id", "diff", "sort", "uniq", "cut", "awk", "sed",
-        "realpath", "readlink", "basename", "dirname", "git",
-    }
-    # Shell operators that could append/redirect a mutation onto a read-only
-    # command. Their presence forces the command to be treated as non-read-only.
-    _BASH_MUTATION_OPS = (">", ">>", "|", ";", "&&", "||", "`", "$(", "&")
-    # git subcommands that are unambiguously read-only (others — commit/push/
-    # checkout/tag/stash/config-set/branch -d… — can mutate, so are blocked).
-    _READONLY_GIT_SUBCMDS = {
-        "status", "log", "diff", "show", "rev-parse", "describe", "blame",
-        "ls-files", "ls-tree", "cat-file", "shortlog",
-    }
-    # Per-program flags that turn an otherwise-read-only allowlisted command into
-    # a mutating one. `-i` is program-specific (sed: in-place edit; but grep/ls
-    # `-i` are read-only), so it's keyed by program rather than global.
-    _BASH_MUTATING_FLAGS = {
-        "sed": ("-i", "--in-place"),  # also matches `-i.bak` (prefix check)
-        "find": ("-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"),
-        "awk": ("-i",),  # gawk -i inplace
-    }
+    # Plan-mode enforcement data + logic live in plan_policy.py. These aliases
+    # keep the historical class-attribute surface (read by unit tests and the
+    # agent's own delegating methods below) pointing at the single source there.
+    _PLAN_BLOCKED_TOOLS = plan_policy.PLAN_BLOCKED_TOOLS
+    _PLAN_FILE_SUFFIX = plan_policy.PLAN_FILE_SUFFIX
+    _READONLY_BASH_CMDS = plan_policy.READONLY_BASH_CMDS
+    _BASH_MUTATION_OPS = plan_policy.BASH_MUTATION_OPS
+    _READONLY_GIT_SUBCMDS = plan_policy.READONLY_GIT_SUBCMDS
+    _BASH_MUTATING_FLAGS = plan_policy.BASH_MUTATING_FLAGS
 
     def __init__(
         self,
@@ -774,69 +734,8 @@ class LangGraphAgent:
 
     @staticmethod
     def _sanitize_tool_pairs(messages: List[BaseMessage]) -> List[BaseMessage]:
-        """Drop orphaned tool calls/results so the provider doesn't 400.
-
-        A tool exchange must stay paired: every assistant ``tool_call`` needs a
-        following ``ToolMessage`` with the same id, and every ``ToolMessage``
-        needs a preceding assistant call with that id. An orphan on either side
-        makes strict providers (e.g. the OpenAI Responses API) reject the whole
-        request:
-
-        * orphaned **result** → "No tool call found for function call output …"
-        * orphaned **call**   → "No tool output found for function call …"
-
-        Orphans arise when a turn is cut short (recursion limit, stream error,
-        interrupt) or when history is sliced (compaction) in a way the boundary
-        guard didn't catch — and once one is persisted in ``agent.messages`` it
-        breaks *every* subsequent turn. This is a defensive, id-based repair:
-
-        * Collect the ids of all tool results present.
-        * From each assistant message, keep only tool_calls whose id has a
-          result; if that empties the calls and the message has no visible text,
-          drop the message entirely (it carried nothing but orphaned calls).
-        * Drop any tool result whose id has no surviving originating call.
-
-        Returns a new list; inputs are not mutated. A clean history passes
-        through unchanged.
-        """
-        result_ids = {
-            m.tool_call_id
-            for m in messages
-            if isinstance(m, ToolMessage) and getattr(m, "tool_call_id", None)
-        }
-
-        # First pass: fix assistant messages, tracking which call ids survive.
-        kept_call_ids: set = set()
-        intermediate: List[BaseMessage] = []
-        for msg in messages:
-            calls = getattr(msg, "tool_calls", None)
-            if isinstance(msg, AIMessage) and calls:
-                good = [c for c in calls if c.get("id") in result_ids]
-                if len(good) == len(calls):
-                    kept_call_ids.update(c.get("id") for c in good)
-                    intermediate.append(msg)
-                    continue
-                if good:
-                    kept_call_ids.update(c.get("id") for c in good)
-                    intermediate.append(msg.model_copy(update={"tool_calls": good}))
-                    continue
-                # No surviving calls: keep the turn only if it has visible text.
-                if str(msg.content).strip():
-                    intermediate.append(msg.model_copy(update={"tool_calls": []}))
-                # else drop the message entirely (it was only orphaned calls)
-                continue
-            intermediate.append(msg)
-
-        # Second pass: drop tool results whose originating call didn't survive.
-        cleaned: List[BaseMessage] = [
-            m
-            for m in intermediate
-            if not (
-                isinstance(m, ToolMessage)
-                and getattr(m, "tool_call_id", None) not in kept_call_ids
-            )
-        ]
-        return cleaned
+        """Delegates to :func:`message_sanitizer.sanitize_tool_pairs`."""
+        return message_sanitizer.sanitize_tool_pairs(messages)
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with current state using streaming.
@@ -1379,215 +1278,55 @@ class LangGraphAgent:
 
     @staticmethod
     def _elide_middle(text: str, limit: int = 72) -> str:
-        """Shorten ``text`` to ``limit`` chars keeping BOTH ends.
+        """Delegates to :func:`tool_formatting.elide_middle`."""
+        return tool_formatting.elide_middle(text, limit)
 
-        A long value (e.g. a shell command or a path) is most informative at its
-        head AND tail — the program/path at the front and the meaningful
-        subcommand/flags at the end. Middle elision (``head…tail``) preserves
-        both, unlike a plain head cut that hides the tail.
-        """
-        if len(text) <= limit:
-            return text
-        keep = limit - 1  # room for the ellipsis
-        head = (keep + 1) // 2
-        tail = keep // 2
-        return f"{text[:head]}…{text[-tail:]}"
-
-    @classmethod
-    def _format_tool_call(cls, tool_call: dict) -> str:
-        """Compact one-line ``name(arg=value, …)`` rendering of a tool call.
-
-        Argument values are stringified and middle-elided so a large payload
-        (e.g. file content for a write, or a long command) doesn't flood the
-        marker line while keeping both informative ends visible.
-        """
-        name = tool_call.get("name", "tool")
-        args = tool_call.get("args") or {}
-        parts = []
-        for key, value in args.items():
-            text = str(value).replace("\n", " ")
-            parts.append(f"{key}={cls._elide_middle(text)}")
-        return f"{name}({', '.join(parts)})"
+    @staticmethod
+    def _format_tool_call(tool_call: dict) -> str:
+        """Delegates to :func:`tool_formatting.format_tool_call`."""
+        return tool_formatting.format_tool_call(tool_call)
 
     @staticmethod
     def record_turn_tool_calls(tool_calls) -> list:
-        """Capture tool calls for the ctrl+o "expand last turn" view.
+        """Delegates to :func:`tool_formatting.record_turn_tool_calls`."""
+        return tool_formatting.record_turn_tool_calls(tool_calls)
 
-        Returns ``[{"name", "args"}]`` with the **raw, un-elided** args (unlike
-        the marker line, which middle-elides for compactness). The result is
-        stashed so the input reader can reprint the full call the user only saw
-        truncated. Tolerant of odd shapes — a non-dict entry is skipped.
-        """
-        out = []
-        for tc in tool_calls or []:
-            if not isinstance(tc, dict):
-                continue
-            out.append(
-                {"name": tc.get("name", "tool"), "args": tc.get("args") or {}}
-            )
-        return out
-
-    # Matches a key that is really a ``field="value"`` (or field='value', or
-    # bare field=value) expression — a common small-model malformation where
-    # the model emits Python-call syntax as a single JSON arg key.
-    _ARG_KEY_EXPR = re.compile(r'^\s*([A-Za-z_]\w*)\s*=\s*(.*?)\s*$', re.DOTALL)
-
-    @classmethod
-    def _normalize_tool_args(cls, args: Any) -> Any:
-        """Repair a common malformed tool-args shape from smaller models.
-
-        Models sometimes emit ``{'query="USPTO fees"': ''}`` instead of
-        ``{'query': 'USPTO fees'}`` — i.e. they pack a ``field=value`` expression
-        into a single dict KEY with an empty value. Detect that exact shape and
-        rebuild it into the intended ``{field: value}``, stripping surrounding
-        quotes from the value. Anything that doesn't match is returned unchanged,
-        so well-formed args are never touched.
-        """
-        if not isinstance(args, dict) or len(args) != 1:
-            return args
-        (key, value), = args.items()
-        # Only attempt a repair when the value is empty (the tell-tale sign);
-        # a real single-arg call has its value populated, not in the key.
-        if value not in ("", None):
-            return args
-        m = cls._ARG_KEY_EXPR.match(str(key))
-        if not m:
-            return args
-        field, raw = m.group(1), m.group(2)
-        if (raw.startswith('"') and raw.endswith('"')) or (
-            raw.startswith("'") and raw.endswith("'")
-        ):
-            raw = raw[1:-1]
-        return {field: raw}
+    @staticmethod
+    def _normalize_tool_args(args: Any) -> Any:
+        """Delegates to :func:`tool_formatting.normalize_tool_args`."""
+        return tool_formatting.normalize_tool_args(args)
 
     def _is_blocked_by_plan_mode(self, tool_name: str, tool_args: dict = None) -> bool:
         """True when plan mode is active and this tool/call would mutate.
 
-        Enforced client-side at the tool chokepoints (the MCP server can't see
-        client state). Read-only tools and the memory notebook always pass.
-        Three tools are CONDITIONAL:
-
-        * ``execute_bash`` — allowed if the command is read-only (see
-          :meth:`_is_readonly_bash`), else blocked.
-        * ``fs_write`` / ``file_edit`` — allowed only when writing the plan file
-          (a single Markdown file under the plans dir), else blocked.
-
-        Everything else in ``_PLAN_BLOCKED_TOOLS`` is unconditionally blocked.
+        Thin wrapper over :func:`plan_policy.is_blocked_by_plan_mode` that reads
+        the live plan-mode flag from ``self._plan_mode_provider`` (the MCP server
+        can't see client state, so this is enforced client-side at the tool
+        chokepoints).
         """
-        if not self._plan_mode_provider():
-            return False
-        if tool_name not in self._PLAN_BLOCKED_TOOLS:
-            return False
-
-        args = tool_args or {}
-        if tool_name == "execute_bash":
-            return not self._is_readonly_bash(str(args.get("command", "")))
-        if tool_name in ("fs_write", "file_edit"):
-            return not self._is_plan_file(str(args.get("path", "")))
-        return True
-
-    @classmethod
-    def _is_readonly_bash(cls, command: str) -> bool:
-        """Heuristically decide if a shell command is read-only (plan-mode safe).
-
-        Conservative: the leading program must be in the read-only allowlist,
-        the command must contain no operator that could chain/redirect a
-        mutation, and a ``git`` command must use a read-only subcommand. Anything
-        uncertain returns False (so it stays blocked).
-        """
-        cmd = (command or "").strip()
-        if not cmd:
-            return False
-        if any(op in cmd for op in cls._BASH_MUTATION_OPS):
-            return False
-        tokens = cmd.split()
-        prog = tokens[0]
-        if prog not in cls._READONLY_BASH_CMDS:
-            return False
-        # Reject program-specific mutating flags (e.g. `sed -i`, `sed -i.bak`,
-        # `find … -delete`/`-exec`) even though the program is allowlisted.
-        bad_flags = cls._BASH_MUTATING_FLAGS.get(prog, ())
-        for tok in tokens[1:]:
-            if any(tok == f or tok.startswith(f) for f in bad_flags):
-                return False
-        if prog == "git":
-            sub = tokens[1] if len(tokens) > 1 else ""
-            return sub in cls._READONLY_GIT_SUBCMDS
-        return True
-
-    def _is_plan_file(self, path: str) -> bool:
-        """True if ``path`` is the writable plan file (under the plans dir)."""
-        if not path:
-            return False
-        try:
-            target = Path(os.path.expanduser(path)).resolve()
-            base = plans_dir().resolve()
-            return (
-                target.suffix == self._PLAN_FILE_SUFFIX
-                and base in target.parents
-            )
-        except Exception:
-            return False
-
-    def _plan_mode_block_message(self, tool_name: str) -> str:
-        """The ToolMessage returned when a tool is blocked by plan mode.
-
-        Tailored per tool so the model knows the read-only escape hatch (run a
-        read-only shell command, or write the plan file) rather than just
-        erroring out.
-        """
-        if tool_name == "execute_bash":
-            return (
-                "Blocked: plan mode is active (read-only). Only read-only shell "
-                "commands (e.g. ls, cat, grep, git status/log/diff) are allowed "
-                "while planning. Investigate with read-only tools and present a "
-                "plan; the user must exit plan mode (/plan) before mutating "
-                "commands can run."
-            )
-        if tool_name in ("fs_write", "file_edit"):
-            try:
-                plan_hint = str(plans_dir())
-            except Exception:
-                plan_hint = "the plans directory"
-            return (
-                "Blocked: plan mode is active (read-only). You may only write your "
-                f"plan as a Markdown file under {plan_hint}. Editing other files is "
-                "blocked — present a plan for the user to review; the user must "
-                "exit plan mode (/plan) before other changes can be made."
-            )
-        return (
-            "Blocked: plan mode is active (read-only). Present a plan for the user "
-            "to review; the user must exit plan mode (/plan) before this tool can "
-            "run."
+        return plan_policy.is_blocked_by_plan_mode(
+            tool_name, tool_args, plan_active=self._plan_mode_provider()
         )
 
-    # Matches pydantic's "Field required" line, capturing the missing field name
-    # (the line above the "Field required" message is the field path).
-    _MISSING_FIELD_RE = re.compile(
-        r"^\s*(\w[\w.]*)\s*\n\s*Field required", re.MULTILINE
-    )
+    @staticmethod
+    def _is_readonly_bash(command: str) -> bool:
+        """Delegates to :func:`plan_policy.is_readonly_bash`."""
+        return plan_policy.is_readonly_bash(command)
 
-    @classmethod
-    def _tool_error_message(cls, tool_name: str, exc: Exception) -> str:
-        """Turn a tool exception into model-facing guidance.
+    @staticmethod
+    def _is_plan_file(path: str) -> bool:
+        """Delegates to :func:`plan_policy.is_plan_file`."""
+        return plan_policy.is_plan_file(path)
 
-        A pydantic arg-validation failure (raised when the model calls a tool
-        with a required argument missing — e.g. ``file_edit`` without
-        ``new_string``) is otherwise reported as opaque pydantic text the model
-        tends to retry verbatim. Translate the common "Field required" case into
-        a plain instruction so the model corrects the CALL rather than looping.
-        """
-        text = str(exc)
-        missing = cls._MISSING_FIELD_RE.findall(text)
-        if missing:
-            fields = ", ".join(sorted(set(missing)))
-            return (
-                f"Error: the call to `{tool_name}` is missing required "
-                f"argument(s): {fields}. Provide every required argument and try "
-                f"again — do not omit them. (For file_edit, `new_string` is "
-                f"required; pass \"\" to delete text.)"
-            )
-        return f"Error: {text}"
+    @staticmethod
+    def _plan_mode_block_message(tool_name: str) -> str:
+        """Delegates to :func:`plan_policy.plan_mode_block_message`."""
+        return plan_policy.plan_mode_block_message(tool_name)
+
+    @staticmethod
+    def _tool_error_message(tool_name: str, exc: Exception) -> str:
+        """Delegates to :func:`tool_formatting.tool_error_message`."""
+        return tool_formatting.tool_error_message(tool_name, exc)
 
     # Tools gated by a hard confirmation prompt, keyed by category.
     _CONFIRM_BASH_TOOLS = {"execute_bash"}
@@ -1944,177 +1683,3 @@ class LangGraphAgent:
         self._messages.clear()
         self._thinking = None
 
-
-def convert_strands_messages_to_langchain(
-    messages: List[Dict[str, Any]],
-) -> List[BaseMessage]:
-    """Convert Strands message format to LangChain messages.
-
-    Args:
-        messages: List of Strands-format messages
-
-    Returns:
-        List of LangChain BaseMessage objects
-    """
-    langchain_messages = []
-
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", [])
-
-        text_content = ""
-        reasoning_text = ""
-        tool_calls = []
-        tool_results = []
-
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    if "text" in block:
-                        text_content += block["text"]
-                    elif "reasoningContent" in block:
-                        rc = block["reasoningContent"]
-                        reasoning_text += rc.get("reasoningText", {}).get("text", "")
-                    elif "toolUse" in block:
-                        tool_calls.append(block["toolUse"])
-                    elif "toolResult" in block:
-                        tool_results.append(block["toolResult"])
-                elif isinstance(block, str):
-                    text_content += block
-        elif isinstance(content, str):
-            text_content = content
-
-        if role == "user":
-            if tool_results:
-                for result in tool_results:
-                    langchain_messages.append(
-                        ToolMessage(
-                            content=str(result.get("content", "")),
-                            tool_call_id=result.get("toolUseId", ""),
-                        )
-                    )
-            else:
-                langchain_messages.append(HumanMessage(content=text_content))
-        elif role == "assistant":
-            additional_kwargs = {}
-            if reasoning_text:
-                additional_kwargs["reasoning_content"] = reasoning_text
-            if tool_calls:
-                formatted_tool_calls = [
-                    {
-                        "id": tc.get("toolUseId", ""),
-                        "name": tc.get("name", ""),
-                        "args": tc.get("input", {}),
-                    }
-                    for tc in tool_calls
-                ]
-                langchain_messages.append(
-                    AIMessage(
-                        content=text_content,
-                        tool_calls=formatted_tool_calls,
-                        additional_kwargs=additional_kwargs,
-                    )
-                )
-            else:
-                langchain_messages.append(
-                    AIMessage(
-                        content=text_content,
-                        additional_kwargs=additional_kwargs,
-                    )
-                )
-        elif role == "system":
-            langchain_messages.append(SystemMessage(content=text_content))
-
-    return langchain_messages
-
-
-def convert_langchain_messages_to_strands(
-    messages: List[BaseMessage],
-) -> List[Dict[str, Any]]:
-    """Convert LangChain messages to Strands format.
-
-    Args:
-        messages: List of LangChain BaseMessage objects
-
-    Returns:
-        List of Strands-format messages
-    """
-    strands_messages = []
-
-    for msg in messages:
-        content_blocks = []
-
-        if isinstance(msg, HumanMessage):
-            content_blocks.append({"text": str(msg.content)})
-            strands_messages.append({"role": "user", "content": content_blocks})
-
-        elif isinstance(msg, AIMessage):
-            # Extract reasoning content from additional_kwargs (Ollama, LiteLLM)
-            reasoning_text = ""
-            if hasattr(msg, "additional_kwargs") and msg.additional_kwargs:
-                reasoning_text = msg.additional_kwargs.get("reasoning_content", "")
-
-            if msg.content:
-                if isinstance(msg.content, list):
-                    # Bedrock format: list of content blocks
-                    for block in msg.content:
-                        if isinstance(block, dict):
-                            block_type = block.get("type", "")
-                            if block_type == "thinking":
-                                # Preserve reasoning as reasoningContent block
-                                thinking_text = block.get("thinking", "")
-                                if thinking_text:
-                                    content_blocks.append(
-                                        {
-                                            "reasoningContent": {
-                                                "reasoningText": {"text": thinking_text}
-                                            }
-                                        }
-                                    )
-                            elif block_type == "text":
-                                text = block.get("text", "")
-                                if text:
-                                    content_blocks.append({"text": text})
-                            elif "text" in block:
-                                content_blocks.append({"text": block["text"]})
-                else:
-                    content_blocks.append({"text": str(msg.content)})
-
-            # Add reasoning from additional_kwargs if not already added from content blocks
-            if reasoning_text and not any(
-                "reasoningContent" in b for b in content_blocks
-            ):
-                content_blocks.insert(
-                    0,
-                    {"reasoningContent": {"reasoningText": {"text": reasoning_text}}},
-                )
-
-            if msg.tool_calls:
-                for tc in msg.tool_calls:
-                    content_blocks.append(
-                        {
-                            "toolUse": {
-                                "toolUseId": tc.get("id", ""),
-                                "name": tc.get("name", ""),
-                                "input": tc.get("args", {}),
-                            }
-                        }
-                    )
-            strands_messages.append({"role": "assistant", "content": content_blocks})
-
-        elif isinstance(msg, ToolMessage):
-            content_blocks.append(
-                {
-                    "toolResult": {
-                        "toolUseId": msg.tool_call_id,
-                        "content": [{"text": str(msg.content)}],
-                    }
-                }
-            )
-            strands_messages.append({"role": "user", "content": content_blocks})
-
-        elif isinstance(msg, SystemMessage):
-            content_blocks.append({"text": str(msg.content)})
-            strands_messages.append({"role": "system", "content": content_blocks})
-
-    return strands_messages

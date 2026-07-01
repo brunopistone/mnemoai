@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 from mnemoai.utils.logger import logger
 
 from ..error_handler import tool_error_handler
+from .safety import classify_shell_command
 
 
 def register_execute_bash_tools(mcp: FastMCP) -> None:
@@ -43,6 +44,25 @@ def register_execute_bash_tools(mcp: FastMCP) -> None:
             JSON string with stdout, stderr, and exit_status
         """
         logger.debug(f"Tool execute_bash called with command: {command}")
+
+        # Server-side hard floor against catastrophic, irreversible commands
+        # (rm -rf /, mkfs, dd to a device, shutdown, fork bomb, …). This enforces
+        # the docstring's safety rules below the client layer, since the MCP
+        # server can be driven directly. Ordinary destructive-but-scoped commands
+        # are NOT blocked here — they stay gated by the client confirmation.
+        verdict = classify_shell_command(command)
+        if verdict.blocked:
+            logger.warning(
+                "execute_bash blocked command (rule=%s): %s", verdict.rule, command
+            )
+            return json.dumps(
+                {
+                    "error": True,
+                    "blocked": True,
+                    "message": verdict.reason,
+                    "command": command,
+                }
+            )
 
         # start_new_session puts the shell (and its children) in their own
         # process group so a timeout can kill the whole tree, not just the shell.
