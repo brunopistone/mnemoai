@@ -545,13 +545,15 @@ def _dialog_input(
     return app.run()
 
 
-def _dialog_radio(title: str, options: list, default=None):
+def _dialog_radio(title: str, options: list, default=None, info: str = ""):
     """Centered single-choice list; returns the chosen value or ``_DIALOG_CANCEL``.
 
     ``options`` is ``[(value, label), …]``. **↑/↓** move the highlight, **Enter**
     confirms the highlighted item immediately (no Tab-to-button), **Esc**
     cancels. The Enter binding is attached to the RadioList itself so it isn't
-    swallowed by the widget's own handler.
+    swallowed by the widget's own handler. ``info`` (optional) is shown above the
+    list — used to surface the "Current setup" overview *inside* the dialog,
+    since the full-screen dialog otherwise hides it from scrollback.
     """
 
     radio = RadioList(values=options, default=default)
@@ -567,12 +569,17 @@ def _dialog_radio(title: str, options: list, default=None):
     # both select and accept — otherwise a global Enter binding is shadowed.
     radio.control.key_bindings.add("enter")(lambda event: _ok())
 
+    body_items = []
+    if info:
+        body_items.append(Label(text=info))
+    body_items.append(
+        Label(text="↑/↓ to move · Enter to confirm · Esc to cancel")
+    )
+    body_items.append(radio)
+
     dialog = Dialog(
         title=title,
-        body=HSplit(
-            [Label(text="↑/↓ to move · Enter to confirm · Esc to cancel"), radio],
-            padding=1,
-        ),
+        body=HSplit(body_items, padding=1),
         buttons=[
             Button(text="OK", handler=_ok),
             Button(text="Cancel", handler=_cancel),
@@ -732,20 +739,23 @@ def _ask_choice(
     valid: set,
     default: Optional[str] = None,
     labels: Optional[dict] = None,
+    info: str = "",
 ) -> str:
     """Prompt for one of ``valid`` keys, RE-ASKING on an invalid entry.
 
     On a TTY, when ``labels`` (``{key: human_label}``) is given, this is a
     centered single-choice dialog (↑/↓ + Enter). **Esc** cancels the whole flow
-    (raises ``_Cancelled``), consistent with the other prompts. Otherwise it
-    falls back to the plain ``input()`` re-ask loop: Enter accepts ``default``;
-    Ctrl+C / Ctrl+D cancels; a wrong value re-prompts.
+    (raises ``_Cancelled``), consistent with the other prompts. ``info`` is shown
+    inside the dialog (e.g. the "Current setup" overview, which the full-screen
+    dialog would otherwise hide). Otherwise it falls back to the plain ``input()``
+    re-ask loop: Enter accepts ``default``; Ctrl+C / Ctrl+D cancels; a wrong value
+    re-prompts.
     """
     if _is_tty() and labels:
         # Preserve the natural key order (dict insertion order of `labels`).
         options = [(k, labels.get(k, k)) for k in labels if k in valid]
         chosen = _dialog_radio(
-            prompt, options, default=default if default in valid else None
+            prompt, options, default=default if default in valid else None, info=info
         )
         if chosen is _DIALOG_CANCEL:
             raise _Cancelled()
@@ -1284,16 +1294,29 @@ def _prompt_max_tokens(text: str, section: str) -> str:
     return _set_field(text, section, "MAX_TOKENS", answer)
 
 
-def _print_current_setup(text: str) -> None:
-    """Print the current chat/vision/embeddings models. Vision and embeddings
-    are optional and only shown when present in the config.
+def _current_setup_text(text: str) -> str:
+    """Build the multi-line "Current setup" overview (chat/vision/embeddings).
+
+    Vision and embeddings are optional and shown as "(not configured)" when
+    absent. Returned as a string so it can be printed to scrollback (non-TTY)
+    or rendered *inside* the selection dialog (TTY) — the latter matters because
+    the full-screen dialog covers scrollback, so a plain print() is invisible
+    while the user is choosing which model to edit.
     """
-    print("  Current setup:")
-    print(f"    Chat (LLM):  {_section_summary(text, 'MODEL_ID') or '(not set)'}")
     vision = _section_summary(text, "VISION_MODEL_ID")
-    print(f"    Vision:      {vision if vision else '(not configured)'}")
     embeddings = _section_summary(text, "EMBED_MODEL_ID")
-    print(f"    Embeddings:  {embeddings if embeddings else '(not configured)'}")
+    return (
+        "Current setup:\n"
+        f"  Chat (LLM):  {_section_summary(text, 'MODEL_ID') or '(not set)'}\n"
+        f"  Vision:      {vision if vision else '(not configured)'}\n"
+        f"  Embeddings:  {embeddings if embeddings else '(not configured)'}"
+    )
+
+
+def _print_current_setup(text: str) -> None:
+    """Print the current chat/vision/embeddings models (indented for scrollback)."""
+    for line in _current_setup_text(text).splitlines():
+        print(f"  {line}")
 
 
 def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
@@ -1551,7 +1574,11 @@ def run_params_override() -> Optional[Path]:
     try:
         valid = set(labels)
         choice = _ask_choice(
-            "Which model's parameters to tune?", valid, "1", labels=labels
+            "Which model's parameters to tune?",
+            valid,
+            "1",
+            labels=labels,
+            info=_current_setup_text(text),
         )
         section, label = _PARAM_SECTIONS[choice]
         print(f"\n  -- {label} parameters --")
@@ -1615,7 +1642,11 @@ def run_model_override() -> Optional[Path]:
         # Only the configured sections are selectable; re-ask on a bad choice.
         valid = set(labels)
         choice = _ask_choice(
-            "Which model to change?", valid, "1", labels=labels
+            "Which model to change?",
+            valid,
+            "1",
+            labels=labels,
+            info=_current_setup_text(text),
         )
         section, label, is_llm = _MODEL_SECTIONS[choice]
         print(f"\n  -- {label} --")
