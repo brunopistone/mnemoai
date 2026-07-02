@@ -1,6 +1,5 @@
 """Chat interface handling for the application."""
 
-import contextlib
 import datetime as _dt
 import os
 import re
@@ -17,7 +16,12 @@ from mnemoai.client.memory.episodic_memory import (
 )
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.skill_store import SkillStore
-from mnemoai.client.ui.tui import PromptReader, confirm_inline, select_from_list
+from mnemoai.client.ui.tui import (
+    PinnedPromptReader,
+    _ExitRepl,
+    confirm_inline,
+    select_from_list,
+)
 from mnemoai.utils.config import config
 from mnemoai.utils.configurator import (
     run_model_override,
@@ -478,13 +482,12 @@ class ChatInterface:
     def run_chat_loop(self) -> None:
         """Run the main chat loop.
 
-        A TTY session reads input via :class:`~mnemoai.client.ui.tui.PromptReader`
-        (prompt_toolkit runs only while reading a line — rich prompt, completion,
-        history, ctrl+o); a non-TTY session (pipes / CI / tests) uses a plain
-        ``input()``. Either way the submitted line goes through :meth:`_dispatch`,
-        and the query then streams to the terminal with ordinary ``print()`` — so
-        wrapping, the ``●`` answer marker, markdown, and the spinner all render as
-        before.
+        On a TTY this is the pinned-input UI (:meth:`_run_pinned_loop`): the ``>``
+        prompt stays fixed at the bottom while each query runs on a worker thread
+        and its output — answer, styled reasoning/tool blocks — streams above it in
+        native scrollback. A non-TTY session (pipes / CI / tests) uses a plain
+        ``input()`` loop (:meth:`_plain_loop`). Either way the submitted line goes
+        through :meth:`_dispatch`.
         """
         self.__welcome_message()
 
@@ -492,27 +495,23 @@ class ChatInterface:
             hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
             and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
         )
-        reader = self._build_prompt_reader() if is_tty else None
+        if is_tty:
+            self._run_pinned_loop()
+        else:
+            self._plain_loop()
 
-        # Free up Ctrl+O as an app key: by default the terminal binds Ctrl+O to
-        # VDISCARD ("flush pending output"), so pressing it *while a reply is
-        # streaming* would freeze output and echo "^O". Disabling it for the
-        # session lets our ctrl+o panel toggle own the key everywhere. Restored
-        # on exit. No-op when not a TTY / termios unavailable.
-        with self._ctrl_o_freed(is_tty):
-            self._chat_loop(reader)
+    def _plain_loop(self) -> None:
+        """Plain ``input()`` REPL for non-TTY use (pipes / CI / tests).
 
-    def _chat_loop(self, reader) -> None:
-        """The read → dispatch REPL, shared by the TTY and non-TTY paths."""
+        No prompt_toolkit app — reads a line, dispatches it, repeats.
+        Ctrl+C / Ctrl+D twice exits.
+        """
         interrupt_count = 0
         last_interrupt_time = 0
 
         while True:
             try:
-                if reader is not None:
-                    query = reader.read()
-                else:
-                    query = input("> ")
+                query = input("> ")
                 interrupt_count = 0
             except (KeyboardInterrupt, EOFError):
                 current_time = time.time()
@@ -540,48 +539,89 @@ class ChatInterface:
                     pass
                 break
 
-    @contextlib.contextmanager
-    def _ctrl_o_freed(self, is_tty: bool):
-        """Disable the terminal's Ctrl+O (VDISCARD) for the session, restoring after.
+    def _run_pinned_loop(self) -> None:
+        """Drive the pinned-input REPL (the default TTY UI).
 
-        VDISCARD toggles "discard terminal output" — pressing Ctrl+O mid-stream
-        would otherwise freeze the streamed reply and echo ``^O``. We set it to
-        the POSIX "disabled" value so Ctrl+O is a plain byte our app can bind.
-        Best-effort and fully guarded: any platform/termios issue → no-op.
+        The `>` prompt + an animated status toolbar stay pinned while each query
+        runs on a worker thread and streams output above them. A spinner *sink*
+        is attached so the spinner-control code (in the agent/callback) flips
+        toolbar state instead of writing `\\r` (which would fight the pinned
+        prompt's redraw). Ctrl+C / Ctrl+D twice exits.
         """
-        if not is_tty:
-            yield
-            return
-        try:
-            import termios
+        from mnemoai.client.ui.spinner import (
+            Spinner,
+            SpinnerStatus,
+            spinner_toolbar_text,
+        )
 
-            fd = sys.stdin.fileno()
-            saved = termios.tcgetattr(fd)
-            new = termios.tcgetattr(fd)
-            # cc is index 6; _POSIX_VDISABLE marks a control char as disabled.
-            new[6][termios.VDISCARD] = getattr(termios, "_POSIX_VDISABLE", b"\xff")
-            termios.tcsetattr(fd, termios.TCSANOW, new)
-        except Exception:
-            yield
-            return
-        try:
-            yield
-        finally:
-            try:
-                termios.tcsetattr(fd, termios.TCSANOW, saved)
-            except Exception:
-                pass
+        # Route spinner control to a shared status the toolbar reads.
+        status = SpinnerStatus()
+        self.client.spinner = Spinner(sink=status)
+        self.client.callback_handler.spinner = self.client.spinner
+        if getattr(self.client, "agent", None) is not None:
+            self.client.agent.callbacks = [self.client.callback_handler]
+            # Pinned UI: collapsed "Thought for Ns…" block + styled tool blocks.
+            self.client.agent.styled_turn_view = True
 
-    def _build_prompt_reader(self):
-        """Construct the prompt_toolkit input reader for the TTY path."""
-        return PromptReader(
+        # Slash commands that open a full-screen dialog (or restart via execv).
+        # A nested full-screen app can't run inside the pinned app, so these are
+        # run via reader.run_dialog: it EXITS the app (terminal returns to cooked
+        # mode), runs the command with the normal dialogs, then relaunches the
+        # pinned app. Query turns and other commands run inline as usual.
+        dialog_cmds = ("/load", "/config", "/model", "/params", "/memory")
+
+        def _dispatch(line: str):
+            # Reuse the shared slash/query handler; map its exit sentinel to the
+            # REPL's. Ctrl+C inside a turn is swallowed by _dispatch already.
+            first = line.strip().split(maxsplit=1)[0].lower() if line.strip() else ""
+            if first in dialog_cmds:
+                result = self._pinned_reader.run_dialog(lambda: self._dispatch(line))
+            else:
+                result = self._dispatch(line)
+            return _ExitRepl if result is self._EXIT else None
+
+        reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
             commands=self._COMMANDS,
             history=self.command_history,
-            tool_calls_provider=lambda: getattr(
-                self.client.agent, "last_turn_tool_calls", []
-            ),
+            dispatch=_dispatch,
+            toolbar_text=lambda: spinner_toolbar_text(status),
+            on_cancel=lambda: None,  # Esc interrupt is handled inside the reader
         )
+
+        # Route the worker-thread confirmation gate through the app (a plain
+        # input() would fight the live app for stdin). The reader suspends the
+        # app, prompts above it, and returns yes/no/all.
+        if getattr(self.client, "agent", None) is not None:
+            self.client.agent._confirm_ui = reader.confirm_ui
+        # Dialogs (/load, /config, …) also run on the worker thread; expose the
+        # reader so _dispatch can route them through the app (see _in_pinned_app).
+        self._pinned_reader = reader
+
+        interrupt_count = 0
+        last_interrupt_time = 0.0
+        while True:
+            try:
+                reader.run()
+                break  # dispatch returned _ExitRepl
+            except (KeyboardInterrupt, EOFError):
+                current_time = time.time()
+                if current_time - last_interrupt_time > 2:
+                    interrupt_count = 0
+                interrupt_count += 1
+                last_interrupt_time = current_time
+                if interrupt_count == 1:
+                    print(
+                        "\n\033[97m(To exit, press Ctrl+C or Ctrl+D again or type "
+                        "\033[92m/quit\033[97m)\033[0m"
+                    )
+                    continue
+                print("\nExiting...")
+                break
+        try:
+            self.client.clear_context()
+        except KeyboardInterrupt:
+            pass
 
     def _dispatch(self, query: str):
         """Handle one submitted line: slash command or query.

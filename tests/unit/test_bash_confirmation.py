@@ -132,3 +132,43 @@ def test_memory_non_write_action_not_gated(agent, monkeypatch):
     # An unknown/read action touches no file, so it proceeds even with gate on.
     assert _run_memory(agent, monkeypatch,
                        {"action": "view"}, "n", toggle=True) is True
+
+
+# --- Pinned-UI confirmation hook (_confirm_ui) ---
+
+
+def _run_hook(agent, monkeypatch, answer, *, category="bash",
+              tool="execute_bash", args=None):
+    """Drive _confirm_tool with a _confirm_ui hook returning ``answer``."""
+    args = args if args is not None else {"command": "ls"}
+    monkeypatch.setattr(
+        agent_mod.config, "get",
+        lambda k, d=None: True
+        if k in ("REQUIRE_BASH_CONFIRMATION", "REQUIRE_WRITE_CONFIRMATION")
+        else d,
+    )
+    monkeypatch.setattr(agent_mod.sys.stdin, "isatty", lambda: True)
+    agent._trusted_confirm_categories = set()
+    agent._confirm_ui = lambda header, detail, cat: answer
+    return agent._confirm_tool(tool, args)
+
+
+def test_confirm_ui_yes_proceeds(agent, monkeypatch):
+    assert _run_hook(agent, monkeypatch, "yes") is True
+
+
+def test_confirm_ui_no_declines(agent, monkeypatch):
+    assert _run_hook(agent, monkeypatch, "no") is False
+
+
+def test_confirm_ui_all_trusts_category(agent, monkeypatch):
+    # "all" proceeds AND records the category so later calls skip the prompt.
+    assert _run_hook(agent, monkeypatch, "all") is True
+    assert "bash" in agent._trusted_confirm_categories
+
+
+def test_confirm_ui_hook_absent_uses_legacy_input(agent, monkeypatch):
+    # No _confirm_ui set → legacy input() path (this is what the default UI and
+    # the bare-object tests rely on).
+    assert not hasattr(agent, "_confirm_ui")
+    assert _run(agent, monkeypatch, "execute_bash", {"command": "ls"}, "y") is True

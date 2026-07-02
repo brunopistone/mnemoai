@@ -9,6 +9,39 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-07-02
+
+### Changed
+
+- **Pinned-input terminal UI (Claude-Code / Kiro style) is now the default on a
+  TTY.** The `>` input stays fixed at the bottom of the terminal while a query
+  runs; the answer, a green-bordered **"Thought for Ns…"** reasoning block, and
+  styled **`ToolName` + `↳ arg=value`** tool blocks stream _above_ it in native
+  scrollback (wrapping, scrollback, and copy/paste preserved). Built on a
+  persistent, non-full-screen prompt_toolkit `Application` with the query on a
+  worker thread and output routed via `patch_stdout`. New behaviors:
+  - **Esc / Ctrl+C cancels the in-flight turn** (interrupts the worker; the turn
+    ends with "Operation was cancelled."); when idle, Ctrl+C/Ctrl+D twice exits.
+  - **Input queue:** typing during a running turn shows a dim `> … (queued)` line
+    and runs FIFO after the current turn — never a concurrent query. Each queued
+    line is echoed to scrollback (paired with its own answer) only when it starts.
+  - **Confirmations** (`Proceed?` for bash/writes) are answered with an in-app
+    `y`/`n`/`a` keypress.
+  - **Dialog commands** (`/load`, `/config`, `/model`, `/params`, `/memory clear`)
+    briefly drop the pinned app to show their normal full-screen dialogs, then
+    relaunch — and no longer print the redundant banner / "Current setup"
+    overview to scrollback (only the final outcome line remains; `/config`'s
+    overwrite caveat now rides in the confirmation prompt).
+  - The animated status shows `⠙ Thinking… (esc to cancel)` with cycling dots.
+  - **Non-TTY sessions** (pipes / CI / tests) keep the plain `input()` loop.
+
+### Removed
+
+- The previous **app-per-prompt** input reader (`PromptReader`) and its `Ctrl+O`
+  tool-call panel — the styled tool blocks now show full arguments inline, so the
+  panel is redundant. Also removed the associated `VDISCARD`/termios handling and
+  the now-unused `last_turn_tool_calls` capture.
+
 ## [0.13.1] — 2026-07-01
 
 ### Fixed
@@ -31,8 +64,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 ### Added
 
 - **Server-side safety policies (`server/tools/safety/`).** The catastrophic-command
-  and system-path limits the tool docstrings advertise are now *enforced inside the
-  MCP server*, not only by the client's confirmation gate — so they hold even if the
+  and system-path limits the tool docstrings advertise are now _enforced inside the
+  MCP server_, not only by the client's confirmation gate — so they hold even if the
   server is driven directly.
   - `bash_policy.classify_shell_command` blocks a small, curated set of
     irreversible, system-destroying commands: recursive force-deletes of a
@@ -76,9 +109,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
     heuristic, and the associated data tables.
   - `client/agent/tool_formatting.py` — tool-call marker rendering, ctrl+o capture,
     arg-normalization, and tool-error translation.
-  No behavior change; all existing unit tests pass unchanged. The heavier
-  streaming / tool-execution / orchestration paths intentionally stay in `agent.py`
-  until they have unit coverage.
+    No behavior change; all existing unit tests pass unchanged. The heavier
+    streaming / tool-execution / orchestration paths intentionally stay in `agent.py`
+    until they have unit coverage.
 - `requirements.txt`: collapsed the redundant `mcp` / `mcp[cli]` pins into a single
   `mcp[cli]>=1.26.0`, and dropped `uv` from runtime deps (it's an install/dev tool,
   not imported at runtime).
@@ -103,7 +136,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   as full-screen dialogs (text, yes/no, and single-choice lists). Consistent
   keys throughout: **Enter confirms, Esc cancels** (cancelling aborts the flow
   with nothing written). Text fields prefill the current value when you're
-  editing an existing setting; a fresh model name is offered as a *suggestion*
+  editing an existing setting; a fresh model name is offered as a _suggestion_
   (empty field) rather than a prefilled default; **mandatory fields won't advance
   while empty**. Everything degrades to the previous `input()` prompts when not a
   TTY.
@@ -123,7 +156,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   `ollama.embed()`, whose host comes from the `OLLAMA_HOST` env var (or the lib
   default) — so a stray `OLLAMA_HOST` pointing at another server (e.g. a
   `llama-swap` port left over from a local-engine experiment) hijacked the embed
-  request, which 400'd and degraded *silently* to the sha256 fallback vectors
+  request, which 400'd and degraded _silently_ to the sha256 fallback vectors
   ("semantic search will be DEGRADED"). It now builds an explicit
   `ollama.Client(host=…)` from `RAG.EMBED_MODEL_ID.HOST`/`PORT` (default
   `localhost:11434`), matching how the LLM and vision controllers resolve their
@@ -150,8 +183,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   capable model still did ~80× in one session while trying to DELETE text), the
   raw pydantic "Field required" text was handed back and retried verbatim in a
   loop. Such failures are now translated into plain guidance naming the missing
-  argument(s) (e.g. *"the call to `file_edit` is missing required argument(s):
-  new_string … pass \"\" to delete text"*), and `file_edit`'s description now
+  argument(s) (e.g. _"the call to `file_edit` is missing required argument(s):
+  new_string … pass \"\" to delete text"_), and `file_edit`'s description now
   states all three args are required and documents `new_string=""` for deletion
   (with an example), steering wholesale rewrites toward `fs_write`.
 

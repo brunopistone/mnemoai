@@ -62,14 +62,15 @@ The client manages the conversation flow and user interaction.
   - `message_codec.py`: Strands ↔ LangChain message conversion
   - `message_sanitizer.py`: repairs orphaned tool-call/result pairs so strict providers don't reject the request
   - `plan_policy.py`: plan-mode block decision + read-only-bash heuristic + data tables
-  - `tool_formatting.py`: tool-call marker rendering, `Ctrl+O` capture, arg normalization, tool-error translation
+  - `tool_formatting.py`: tool-call marker rendering, arg normalization, tool-error translation
 - **`mcp_tool_wrapper.py`**: MCP to LangChain adapter
   - Wraps MCP tools as LangChain BaseTool
   - Handles async/sync conversion
 - **`ui/`**: User interface components
   - `chat_interface.py`: Interactive chat loop with command handling
-  - `tui.py`: prompt_toolkit input reader (slash completion, history, `Ctrl+O` tool-call panel) + dialogs; app-per-prompt, degrades to `input()` off-TTY
-  - `spinner.py`: Loading animations
+  - `tui.py`: pinned-input prompt_toolkit UI — `>` stays at the bottom while output streams above it (via `patch_stdout`); slash completion, history, input queue, Esc/Ctrl+C cancel, in-app confirmations, full-screen dialogs; degrades to a plain `input()` loop off-TTY
+  - `turn_view.py`: styled "Thought for Ns…" reasoning block + `ToolName`/`↳ arg` tool blocks shown above the pinned input
+  - `spinner.py`: status/spinner animation (stdout mode + a state sink for the pinned UI)
 - **`managers/`**: Business logic
   - `agent_conversation_manager.py`: Conversation state and token tracking
   - `user_profile_manager.py`: Automatic user profiling and learning

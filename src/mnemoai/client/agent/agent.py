@@ -3,6 +3,7 @@
 import operator
 import re
 import sys
+import time
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -25,6 +26,7 @@ from mnemoai.client.agent.orchestrator import (
 )
 from mnemoai.client.agent.reasoning_utils import disable_reasoning, restore_reasoning
 from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
+from mnemoai.client.ui import turn_view
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
@@ -99,6 +101,11 @@ class LangGraphAgent:
         self.system_prompt = system_prompt
         self.verbose = verbose
         self.callbacks = callbacks or []
+        # When True (set by the pinned-input UI), reasoning is buffered and shown
+        # as a collapsed "Thought for Ns…" block and tool calls render as a styled
+        # name + ↳arg block (client/ui/turn_view). Default False keeps the classic
+        # inline gray-reasoning + [⚙ …] marker rendering untouched.
+        self.styled_turn_view = False
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
         self._code_formatter = CodeFormatter()
@@ -106,10 +113,6 @@ class LangGraphAgent:
         # (via the "a = allow" option at a Proceed? prompt). Skips re-prompting
         # for that whole category until the process restarts.
         self._trusted_confirm_categories: set = set()
-        # Tool calls made during the CURRENT turn, captured raw (un-elided) for
-        # the ctrl+o "expand last turn" view. Reset at the start of each invoke()
-        # and appended at the tool-marker sites (main loop + orchestrator worker).
-        self.last_turn_tool_calls: list = []
         self.router = router
         self.orchestrator_enabled = orchestrator_enabled and router is not None
         # Bound on the model<->tool loop. Claude Code has no hard step cap —
@@ -533,10 +536,6 @@ class LangGraphAgent:
 
             # Execute tools
             self._stop_spinner()
-            # Capture raw tool calls for ctrl+o (independent of verbose).
-            self.last_turn_tool_calls.extend(
-                self.record_turn_tool_calls(response.tool_calls)
-            )
             if self.verbose:
                 for tc in response.tool_calls:
                     print(
@@ -947,6 +946,11 @@ class LangGraphAgent:
         answer_marker_printed = False
         building_tool_args = False
         response = None
+        # Styled-turn-view (pinned UI): buffer reasoning to render a single
+        # collapsed "Thought for Ns…" block instead of streaming gray tokens.
+        styled = getattr(self, "styled_turn_view", False)
+        reasoning_buf: List[str] = []
+        reasoning_started = None
 
         try:
             for chunk in active_model.stream(messages, config=config):
@@ -969,7 +973,16 @@ class LangGraphAgent:
                     self._stop_spinner()
 
                 if reasoning_content and self.verbose and print_reasoning:
-                    print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
+                    if styled:
+                        # Buffer + time it; the collapsed block prints once, just
+                        # before the answer (or when the stream ends).
+                        if reasoning_started is None:
+                            reasoning_started = time.time()
+                        reasoning_buf.append(reasoning_content)
+                    else:
+                        print(
+                            f"\033[90m{reasoning_content}\033[0m", end="", flush=True
+                        )
                     had_reasoning = True
 
                 # A tool call streams its arguments as many chunks that carry NO
@@ -994,7 +1007,17 @@ class LangGraphAgent:
                         building_tool_args = False
                         self._stop_spinner()
                     if not answer_marker_printed:
-                        if had_reasoning:
+                        if styled and reasoning_buf:
+                            # Emit the collapsed "Thought for Ns…" block, then a
+                            # blank line before the answer.
+                            self._flush_reasoning_block(
+                                reasoning_buf, reasoning_started
+                            )
+                            reasoning_buf = []
+                            had_reasoning = False
+                            print("", flush=True)
+                            chunk_content = chunk_content.lstrip("\n")
+                        elif had_reasoning:
                             # Reasoning already printed (gray) above — separate
                             # it from the answer with a blank line.
                             print("\n\n", end="", flush=True)
@@ -1016,6 +1039,11 @@ class LangGraphAgent:
             # still emitted (not silently dropped) and the terminal color reset.
             if answer_marker_printed:
                 self._code_formatter.flush()
+            # Reasoning with no following visible content (e.g. the model went
+            # straight to a tool call): still show the collapsed block so the
+            # thinking isn't lost.
+            if styled and reasoning_buf:
+                self._flush_reasoning_block(reasoning_buf, reasoning_started)
         except KeyboardInterrupt:
             raise
         except Exception as e:
@@ -1046,6 +1074,21 @@ class LangGraphAgent:
         """
         # Cyan ● bullet + a trailing space; no newline so the answer follows it.
         print("\033[36m●\033[0m ", end="", flush=True)
+
+    def _flush_reasoning_block(self, parts: list, started: Optional[float]) -> None:
+        """Print the collapsed 'Thought for Ns…' block from buffered reasoning.
+
+        Styled-turn-view only. ``parts`` are the accumulated reasoning chunks and
+        ``started`` the monotonic-ish start time; renders via
+        :mod:`client.ui.turn_view`. No-op if there's nothing to show.
+        """
+        text = "".join(parts).strip()
+        if not text:
+            return
+        seconds = (time.time() - started) if started is not None else 0.0
+        block = turn_view.render_reasoning_block(text, seconds)
+        if block:
+            print(block, flush=True)
 
     def _stop_spinner(self) -> None:
         """Stop the spinner and mark first token received."""
@@ -1308,11 +1351,6 @@ class LangGraphAgent:
         return tool_formatting.format_tool_call(tool_call)
 
     @staticmethod
-    def record_turn_tool_calls(tool_calls) -> list:
-        """Delegates to :func:`tool_formatting.record_turn_tool_calls`."""
-        return tool_formatting.record_turn_tool_calls(tool_calls)
-
-    @staticmethod
     def _normalize_tool_args(args: Any) -> Any:
         """Delegates to :func:`tool_formatting.normalize_tool_args`."""
         return tool_formatting.normalize_tool_args(args)
@@ -1415,6 +1453,20 @@ class LangGraphAgent:
             return True  # non-interactive: can't prompt, don't block
 
         self._stop_spinner()
+
+        # The pinned-input UI installs a `_confirm_ui` hook: the confirmation runs
+        # on the worker thread, but a plain input() there fights the live app for
+        # stdin. The hook captures an in-app y/N/a keypress and returns
+        # "yes"|"no"|"all". When absent (the non-TTY plain loop, or a bare object
+        # in unit tests), fall through to the legacy print()+input() path.
+        confirm_ui = getattr(self, "_confirm_ui", None)
+        if confirm_ui is not None:
+            answer = confirm_ui(header, detail, category)
+            if answer == "all":
+                self._trusted_confirm_categories.add(category)
+                return True
+            return answer == "yes"
+
         # Yellow header + the action detail, then a strict y/N/a prompt.
         # "a" = allow this whole category for the rest of the session.
         print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
@@ -1448,22 +1500,28 @@ class LangGraphAgent:
 
         route_tools = self._get_route_tools(state)
 
-        # Capture raw tool calls for ctrl+o (independent of verbose, so the
-        # expansion works even in --no-verbose). Accumulates across the turn's
-        # steps; the marker only shows an elided line.
-        self.last_turn_tool_calls.extend(
-            self.record_turn_tool_calls(last_message.tool_calls)
-        )
-
         # Print a visible tool-invocation marker so reasoning before a tool call
         # is separated from reasoning after it (otherwise the two run together).
-        # Mirrors the gray "[Step …]" markers the orchestrator prints.
+        # Mirrors the gray "[Step …]" markers the orchestrator prints. In styled
+        # mode (pinned UI) render the name + ↳arg block instead of the compact
+        # [⚙ …] marker.
         if self.verbose:
             for tool_call in last_message.tool_calls:
-                print(
-                    f"\n\033[90m[⚙ {self._format_tool_call(tool_call)}]\033[0m\n",
-                    flush=True,
-                )
+                if getattr(self, "styled_turn_view", False):
+                    print(
+                        "\n"
+                        + turn_view.render_tool_call(
+                            tool_call.get("name", "tool"),
+                            self._normalize_tool_args(tool_call.get("args") or {}),
+                        )
+                        + "\n",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"\n\033[90m[⚙ {self._format_tool_call(tool_call)}]\033[0m\n",
+                        flush=True,
+                    )
 
         tool_results = []
         for tool_call in last_message.tool_calls:
@@ -1577,9 +1635,6 @@ class LangGraphAgent:
         Returns:
             Agent response as string
         """
-        # Fresh capture for this turn (ctrl+o shows the MOST RECENT turn's calls).
-        self.last_turn_tool_calls = []
-
         # The model sees the full prompt (incl. any ephemeral plan-mode banner)
         # for THIS turn, but only the clean prompt is persisted — so a saved
         # conversation never carries a stale "plan mode is active" instruction.

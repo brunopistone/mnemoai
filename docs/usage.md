@@ -52,14 +52,28 @@ Assistant: [Uses fs_read tool and displays content]
 | `/memory`          | View the curated persistent memory (`MEMORY.md`); `/memory clear` wipes it (with a y/N confirm)                                                                                                                                                                                                                                                                                               |
 | `/plan`            | Toggle **plan mode** — an enforced read-only mode. While ON, the agent investigates and presents a plan; **read-only** shell commands (`ls`, `cat`, `grep`, `git status/log/diff`, …) still run and it may draft the plan to a `.md` file under the plans dir, but file edits, mutating shell commands, git writes, and background tasks are **hard-blocked** until you `/plan` again to exit |
 
+### The prompt
+
+On an interactive terminal the input `>` stays **pinned at the bottom** of the
+screen while the assistant works; the answer, its reasoning, and tool activity
+stream **above** it (native scrollback and copy/paste are preserved). You can
+keep typing during a turn — see the shortcuts below.
+
 ### Keyboard Shortcuts
 
-- `Ctrl+J`: Insert new line in input
-- `Enter`: Submit message
-- `Ctrl+C`: Interrupt operation (press twice to exit)
-- `Ctrl+O`: At the prompt, toggle a panel showing the last turn's tool calls with their full arguments (press again to hide)
+- `Ctrl+J`: Insert a new line in the input (`Enter` submits)
+- `Enter`: Submit the message. **While the assistant is working**, a submitted
+  message is **queued** (shown as a dim `> … (queued)` line) and runs after the
+  current turn finishes — it never starts a second query in parallel.
+- `Esc`: Cancel the turn that's currently running
+- `Ctrl+C`: Cancel the running turn; when nothing is running, press twice (or
+  `Ctrl+D`) to exit
+- `/` then a letter: shows a slash-command completion menu (↑/↓ to move,
+  `Enter`/`Tab` to accept)
 
-In dialogs (the `/load` picker and the `/config`, `/model`, `/params` prompts): arrow keys move, `Enter` confirms, `Esc` cancels.
+In dialogs (the `/load` picker and the `/config`, `/model`, `/params` prompts):
+arrow keys move, `Enter` confirms, `Esc` cancels. These briefly take over the
+full screen, then return you to the pinned prompt.
 
 ### Verbose Mode
 

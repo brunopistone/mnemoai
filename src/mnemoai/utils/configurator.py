@@ -1215,19 +1215,31 @@ def run_reconfigure() -> Optional[Path]:
     """
     dest = config_path()
 
-    print()
-    print("=" * 64)
-    print("  Reconfigure Mnemo AI")
-    print("=" * 64)
+    # On a TTY the prompts are full-screen dialogs, so the scrollback banner +
+    # WARNING would just clutter (and the overwrite caveat rides in the first
+    # confirmation prompt below). Only print the banner/WARNING for the non-TTY
+    # plain-input fallback, where there's no dialog to carry it.
+    if not _is_tty():
+        print()
+        print("=" * 64)
+        print("  Reconfigure Mnemo AI")
+        print("=" * 64)
+        if dest.is_file():
+            print(f"  WARNING: this will OVERWRITE your existing config at:\n    {dest}")
+            print("  Your current settings will be replaced by the answers you give")
+            print("  now. (Other runtime data — conversations, memory, etc. — is kept.)")
+        else:
+            print(f"  No config found yet; this will create one at:\n    {dest}")
+
+    # Fold the overwrite caveat into the confirmation question so it's still seen
+    # on a TTY (inside the dialog), without a separate scrollback block.
     if dest.is_file():
-        print(f"  WARNING: this will OVERWRITE your existing config at:\n    {dest}")
-        print("  Your current settings will be replaced by the answers you give")
-        print("  now. (Other runtime data — conversations, memory, etc. — is kept.)")
+        confirm_q = "Reconfigure now? This OVERWRITES your existing config (y/N)"
     else:
-        print(f"  No config found yet; this will create one at:\n    {dest}")
+        confirm_q = "Create a new config now? (y/N)"
 
     try:
-        answer = _ask("Reconfigure now? (y/N)", "N")
+        answer = _ask(confirm_q, "N")
         if not (answer and answer.strip().lower().startswith("y")):
             print("  Cancelled. Existing config left untouched.")
             return None
@@ -1555,22 +1567,25 @@ def run_params_override() -> Optional[Path]:
         "3": _get_field(text, "EMBED_MODEL_ID", "NAME") is not None,
     }
 
-    print()
-    print("=" * 64)
-    print("  Tune inference parameters")
-    print("=" * 64)
-    _print_current_setup(text)
     labels = {
         k: label for k, (_, label) in _PARAM_SECTIONS.items() if available.get(k)
     }
+    # On a TTY the picker is a full-screen dialog that shows the title and the
+    # current-setup overview INSIDE it (passed as info=), so the scrollback
+    # banner/overview/hint here would just duplicate it — print only for the
+    # non-TTY plain-input fallback.
     if not _is_tty():
+        print()
+        print("=" * 64)
+        print("  Tune inference parameters")
+        print("=" * 64)
+        _print_current_setup(text)
         print("\n  Which model's parameters do you want to tune? Only inference")
         print("  params are changed; provider, name, and connection stay as-is")
         print("  (use /model for those).\n")
         for k, lbl in labels.items():
             print(f"    {k}) {lbl}")
-
-    print(_CANCEL_HINT)
+        print(_CANCEL_HINT)
     try:
         valid = set(labels)
         choice = _ask_choice(
@@ -1623,21 +1638,23 @@ def run_model_override() -> Optional[Path]:
     available["2"] = _get_field(text, "VISION_MODEL_ID", "NAME") is not None
     available["3"] = _get_field(text, "EMBED_MODEL_ID", "NAME") is not None
 
-    print()
-    print("=" * 64)
-    print("  Override a model")
-    print("=" * 64)
-    _print_current_setup(text)
     labels = {
         k: label for k, (_, label, _) in _MODEL_SECTIONS.items() if available.get(k)
     }
+    # On a TTY the picker is a full-screen dialog carrying its own title and the
+    # current-setup overview (passed as info=), so the scrollback banner/overview/
+    # hint would duplicate it — print only for the non-TTY plain-input fallback.
     if not _is_tty():
+        print()
+        print("=" * 64)
+        print("  Override a model")
+        print("=" * 64)
+        _print_current_setup(text)
         print("\n  Which model do you want to change? Only that section is edited;")
         print("  everything else in your config is left as-is.\n")
         for k, lbl in labels.items():
             print(f"    {k}) {lbl}")
-
-    print(_CANCEL_HINT)
+        print(_CANCEL_HINT)
     try:
         # Only the configured sections are selectable; re-ask on a bad choice.
         valid = set(labels)
