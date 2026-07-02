@@ -15,32 +15,22 @@ class EmbeddingsController:
     """Controller for embedding model operations across different providers."""
 
     def __init__(self, embed_model_config: dict = None) -> None:
-        """Initialize embeddings controller.
-
-        Args:
-            embed_model_config: Optional embedding model configuration
-        """
         self.embed_model_config = embed_model_config or config.get("RAG", {}).get(
             "EMBED_MODEL_ID", {}
         )
         self.embed_model_type = self.embed_model_config.get("TYPE", "ollama")
         self.embed_model_name = self.embed_model_config.get("NAME", "mxbai-embed-large")
         self.region = self.embed_model_config.get("REGION", "us-east-1")
-        # OpenAI-compatible connection (optional): base URL + key. Used by both
-        # the litellm and openai embedding paths so a LOCAL server
-        # (llama-server / LM Studio / vLLM, e.g. behind llama-swap) can serve
-        # embeddings. API_BASE is canonical; ENDPOINT_URL is an accepted alias.
+        # Optional OpenAI-compatible connection (API_BASE, alias ENDPOINT_URL, +
+        # API_KEY) so a local server can serve embeddings.
         self.api_base = self.embed_model_config.get(
             "API_BASE"
         ) or self.embed_model_config.get("ENDPOINT_URL")
         self.api_key = self.embed_model_config.get("API_KEY")
 
-        # Expected embedding dimension. Used ONLY for the SHA256/zeros fallback
-        # vectors and the empty-result shape — real embeddings pass through at
-        # the provider's native size untouched. An explicit ``DIMENSION`` config
-        # key wins (set it to your embedder's real dim so the fallback matches
-        # and the vector store stays consistent if the provider ever flaps);
-        # otherwise fall back to a known-model lookup, then 1024.
+        # Dimension used ONLY for fallback vectors / empty-result shape (real
+        # embeddings keep their native size). Explicit DIMENSION wins, else a
+        # known-model lookup, else 1024.
         model_dims = {
             "mxbai-embed-large": 1024,
             "nomic-embed-text": 768,
@@ -54,59 +44,36 @@ class EmbeddingsController:
         else:
             self.dim = model_dims.get(self.embed_model_name, 1024)
 
-        # Initialize embedding cache for performance
         embeddings_config = config.get("RAG", {}).get("EMBEDDINGS", {})
         self.cache_enabled = embeddings_config.get("CACHE_ENABLED", True)
         self.cache_size = embeddings_config.get("CACHE_SIZE", 1000)
         self._embedding_cache = {}  # {cache_key: embedding_vector}
-        self._cache_order = []  # List of keys for LRU tracking
+        self._cache_order = []  # LRU tracking
 
         if self.cache_enabled:
             logger.debug(f"Embedding cache enabled with max size: {self.cache_size}")
 
     def _cache_key(self, text: str) -> str:
-        """Generate cache key for text using MD5 hash.
-
-        Args:
-            text: Text to generate key for
-
-        Returns:
-            MD5 hash of text
-        """
+        """MD5 cache key for a text."""
         return hashlib.md5(text.encode()).hexdigest()
 
     def _update_cache(self, text: str, embedding: np.ndarray) -> None:
-        """Add embedding to cache with LRU eviction.
-
-        Args:
-            text: Text that was embedded
-            embedding: Embedding vector
-        """
+        """Add an embedding to the cache with LRU eviction."""
         key = self._cache_key(text)
-
-        # Add to cache
         self._embedding_cache[key] = embedding
 
-        # Update LRU order
         if key in self._cache_order:
             self._cache_order.remove(key)
         self._cache_order.append(key)
 
-        # Evict oldest if cache is full
         while len(self._embedding_cache) > self.cache_size:
             oldest_key = self._cache_order.pop(0)
             if oldest_key in self._embedding_cache:
                 del self._embedding_cache[oldest_key]
 
     def embed(self, texts: List[str]) -> np.ndarray:
-        """Embed texts using configured provider with optional caching.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of embeddings with shape (n, dim)
-        """
+        """Embed texts via the configured provider (with optional caching);
+        returns an ``(n, dim)`` array."""
         logger.debug(
             f"Embedding {len(texts)} texts using {self.embed_model_type} model '{self.embed_model_name}'"
         )
@@ -114,64 +81,47 @@ class EmbeddingsController:
             logger.warning("Empty text list provided to embed()")
             return np.array([], dtype=np.float32).reshape(0, self.dim or 768)
 
-        # Check cache if enabled
-        if self.cache_enabled:
-            cached_embeddings = []
-            uncached_texts = []
-            uncached_indices = []
-
-            for i, text in enumerate(texts):
-                key = self._cache_key(text)
-                if key in self._embedding_cache:
-                    # Cache hit
-                    cached_embeddings.append((i, self._embedding_cache[key]))
-                    # Update LRU order
-                    if key in self._cache_order:
-                        self._cache_order.remove(key)
-                        self._cache_order.append(key)
-                else:
-                    # Cache miss
-                    uncached_texts.append(text)
-                    uncached_indices.append(i)
-
-            # Log cache performance
-            if cached_embeddings:
-                logger.debug(
-                    f"Cache hit: {len(cached_embeddings)}/{len(texts)} embeddings"
-                )
-
-            # If all cached, return immediately
-            if not uncached_texts:
-                return np.vstack([emb for _, emb in sorted(cached_embeddings)])
-
-            # Embed uncached texts
-            new_embeddings = self._embed_uncached(uncached_texts)
-
-            # Cache the new embeddings
-            for text, embedding in zip(uncached_texts, new_embeddings):
-                self._update_cache(text, embedding)
-
-            # Reconstruct full result in original order
-            results = [None] * len(texts)
-            for i, embedding in cached_embeddings:
-                results[i] = embedding
-            for i, idx in enumerate(uncached_indices):
-                results[idx] = new_embeddings[i]
-
-            return np.vstack(results)
-        else:
-            # Cache disabled, embed directly
+        if not self.cache_enabled:
             return self._embed_uncached(texts)
 
+        cached_embeddings = []
+        uncached_texts = []
+        uncached_indices = []
+
+        for i, text in enumerate(texts):
+            key = self._cache_key(text)
+            if key in self._embedding_cache:
+                cached_embeddings.append((i, self._embedding_cache[key]))
+                if key in self._cache_order:
+                    self._cache_order.remove(key)
+                    self._cache_order.append(key)
+            else:
+                uncached_texts.append(text)
+                uncached_indices.append(i)
+
+        if cached_embeddings:
+            logger.debug(
+                f"Cache hit: {len(cached_embeddings)}/{len(texts)} embeddings"
+            )
+
+        if not uncached_texts:
+            return np.vstack([emb for _, emb in sorted(cached_embeddings)])
+
+        new_embeddings = self._embed_uncached(uncached_texts)
+        for text, embedding in zip(uncached_texts, new_embeddings):
+            self._update_cache(text, embedding)
+
+        # Reassemble in original order.
+        results = [None] * len(texts)
+        for i, embedding in cached_embeddings:
+            results[i] = embedding
+        for i, idx in enumerate(uncached_indices):
+            results[idx] = new_embeddings[i]
+
+        return np.vstack(results)
+
     def _embed_uncached(self, texts: List[str]) -> np.ndarray:
-        """Embed texts without caching (internal method).
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of embeddings
-        """
+        """Dispatch to the provider-specific embed method (no caching)."""
         if self.embed_model_type == "ollama":
             return self._embed_ollama(texts)
         elif self.embed_model_type == "bedrock":
@@ -188,21 +138,9 @@ class EmbeddingsController:
             )
 
     def _embed_ollama(self, texts: List[str]) -> np.ndarray:
-        """Embed using Ollama.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of embeddings
-        """
-        # Honor the configured HOST/PORT (matching the LLM and vision controllers'
-        # _initialize_ollama_model) instead of letting the bare ollama.embed()
-        # silently fall back to $OLLAMA_HOST — otherwise an OLLAMA_HOST pointing
-        # at a different server (e.g. a llama-swap port from a local-engine
-        # experiment) hijacks the embed call and it fails, degrading silently to
-        # fallback vectors. Resolved here (only the Ollama path needs it) rather
-        # than in __init__, which runs for every provider.
+        """Embed using Ollama at the configured HOST/PORT."""
+        # Honor HOST/PORT instead of letting bare ollama.embed() fall back to
+        # $OLLAMA_HOST (which could hijack the call to a different server).
         host = "http://{}:{}".format(
             self.embed_model_config.get("HOST", "localhost"),
             self.embed_model_config.get("PORT", 11434),
@@ -220,14 +158,7 @@ class EmbeddingsController:
             return self._embed_fallback(texts)
 
     def _embed_bedrock(self, texts: List[str]) -> np.ndarray:
-        """Embed using AWS Bedrock.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of embeddings
-        """
+        """Embed using AWS Bedrock."""
         try:
             client = boto3.client("bedrock-runtime", region_name=self.region)
 
@@ -247,18 +178,10 @@ class EmbeddingsController:
             return self._embed_fallback(texts)
 
     def _embed_openai(self, texts: List[str]) -> np.ndarray:
-        """Embed using OpenAI or any OpenAI-compatible server.
+        """Embed via OpenAI or an OpenAI-compatible server.
 
-        Honors ``API_BASE`` (alias ``ENDPOINT_URL``) + ``API_KEY`` so a local
-        server — ``llama-server`` / LM Studio / vLLM, e.g. behind ``llama-swap``
-        — can provide embeddings, matching the chat controller. Falls back to
-        the OpenAI API (``OPENAI_API_KEY``) when no base URL is set.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of embeddings
+        Honors ``API_BASE`` (alias ``ENDPOINT_URL``) + ``API_KEY`` for a local
+        server; falls back to the OpenAI API (``OPENAI_API_KEY``).
         """
         try:
             client_kwargs = {}
@@ -267,8 +190,7 @@ class EmbeddingsController:
             if self.api_key:
                 client_kwargs["api_key"] = self.api_key
             elif self.api_base:
-                # Local servers ignore auth; a placeholder lets the client build
-                # without a real OPENAI_API_KEY.
+                # Local servers ignore auth; placeholder key so the client builds.
                 client_kwargs["api_key"] = "sk-local"
             client = OpenAI(**client_kwargs)
             response = client.embeddings.create(
@@ -283,14 +205,7 @@ class EmbeddingsController:
             return self._embed_fallback(texts)
 
     def _embed_sagemaker(self, texts: List[str]) -> np.ndarray:
-        """Embed using AWS SageMaker.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of embeddings
-        """
+        """Embed using AWS SageMaker."""
         try:
             client = boto3.client("sagemaker-runtime", region_name=self.region)
 
@@ -310,19 +225,8 @@ class EmbeddingsController:
             return self._embed_fallback(texts)
 
     def _embed_litellm(self, texts: List[str]) -> np.ndarray:
-        """Embed using LiteLLM (100+ providers via one OpenAI-style API).
-
-        `litellm.embedding(model, input, api_base, api_key)` returns an
-        OpenAI-shaped response: vectors live at `response.data[i]["embedding"]`.
-        `API_BASE`/`API_KEY` are optional — omitted keys fall back to the
-        provider's own env vars (e.g. OPENAI_API_KEY).
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of embeddings
-        """
+        """Embed via LiteLLM (OpenAI-shaped response; API_BASE/API_KEY optional,
+        else the provider's own env vars)."""
         try:
             from litellm import embedding as litellm_embedding
 
@@ -344,19 +248,10 @@ class EmbeddingsController:
             return self._embed_fallback(texts)
 
     def _embed_fallback(self, texts: List[str]) -> np.ndarray:
-        """Fallback to deterministic SHA256-based embeddings with warning.
-
-        Args:
-            texts: List of text strings to embed
-
-        Returns:
-            NumPy array of deterministic embeddings
-        """
-        # Get fallback configuration
+        """Deterministic SHA256-based embeddings (degraded; logs a warning)."""
         fallback_config = config.get("RAG", {}).get("EMBEDDINGS", {})
         fallback_type = fallback_config.get("FALLBACK_TYPE", "sha256")
 
-        # Prominent warning about degraded functionality
         logger.warning(
             f"⚠️  Using fallback embeddings ({fallback_type}) - semantic search will be DEGRADED. "
             f"Embeddings will not capture semantic meaning. "
@@ -376,15 +271,7 @@ class EmbeddingsController:
         return np.vstack(out)
 
     def _extract_embeddings_from_response(self, resp: Any) -> List[List[float]]:
-        """Extract embeddings from Ollama response.
-
-        Args:
-            resp: Ollama API response
-
-        Returns:
-            List of embedding vectors
-        """
-        # Handle dict response
+        """Extract embedding vectors from an Ollama response (dict or object)."""
         if isinstance(resp, dict):
             if "embeddings" in resp:
                 return resp["embeddings"]
@@ -392,7 +279,6 @@ class EmbeddingsController:
                 emb = resp["embedding"]
                 return [emb] if isinstance(emb[0], (int, float)) else emb
 
-        # Handle object with attributes
         if hasattr(resp, "embeddings"):
             raw = resp.embeddings
             if isinstance(raw, list):

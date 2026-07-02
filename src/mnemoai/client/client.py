@@ -51,30 +51,23 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         spinner: Optional[Spinner] = None,
         spinner_lock: Optional[threading.Lock] = None,
     ) -> None:
-        """Initialize the streaming callback handler.
-
-        Args:
-            spinner: Spinner instance for UI feedback
-            spinner_lock: Thread lock for spinner operations
-        """
         self.spinner = spinner
         self.spinner_lock = spinner_lock or threading.Lock()
         self.first_token_received = False
 
     def on_llm_new_token(self, token: str, **kwargs) -> None:
-        """Handle new tokens from the LLM.
+        """Stop the spinner on the first VISIBLE ANSWER token.
 
-        Stop the spinner only on a token that carries VISIBLE text. Some models
-        (e.g. Anthropic via Bedrock) stream redacted/secret reasoning tokens
-        with empty text before the answer — stopping on those would leave a dead
-        pause (spinner gone, nothing printed) until the visible answer arrives,
-        so we keep spinning until real text shows up.
-
-        Args:
-            token: The new token
-            **kwargs: Additional arguments
+        Skips empty reasoning tokens and tool-call argument tokens (a big
+        fs_write streams its file_text as arg tokens with no content); stopping
+        on those would freeze the spinner for the whole silent stretch.
         """
         if not token or not str(token).strip():
+            return
+        # Tool-call argument fragments aren't answer text.
+        chunk = kwargs.get("chunk")
+        message = getattr(chunk, "message", None)
+        if message is not None and getattr(message, "tool_call_chunks", None):
             return
         if not self.first_token_received and self.spinner:
             with self.spinner_lock:
@@ -83,24 +76,13 @@ class StreamingCallbackHandler(BaseCallbackHandler):
                     self.first_token_received = True
 
     def on_tool_start(self, serialized, input_str, **kwargs) -> None:
-        """Handle tool execution start.
-
-        Args:
-            serialized: Serialized tool info
-            input_str: Tool input
-            **kwargs: Additional arguments
-        """
+        """Stop the spinner when a tool starts."""
         if self.spinner:
             with self.spinner_lock:
                 self.spinner.stop()
 
     def on_tool_end(self, output, **kwargs) -> None:
-        """Handle tool execution end.
-
-        Args:
-            output: Tool output
-            **kwargs: Additional arguments
-        """
+        """Restart the spinner when a tool finishes."""
         if self.spinner:
             with self.spinner_lock:
                 self.first_token_received = False
@@ -118,20 +100,11 @@ class LangGraphClient:
         self,
         verbose: bool = False,
     ) -> None:
-        """Initialize the LangGraph client.
-
-        Args:
-            verbose: Enable verbose mode to show thinking process
-        """
         self.verbose_mode = verbose
 
-        # The MCP server runs as a subprocess via module invocation
-        # (`python -m mnemoai.server.server`). Ensure the child
-        # can import the package whether we're running from a checkout (package
-        # under <repo>/src) or installed (site-packages): prepend the package's
-        # parent dir to PYTHONPATH. `import mnemoai` resolves to
-        # .../mnemoai/__init__.py, so two dirnames up is the dir
-        # that must be importable.
+        # The MCP server runs as a subprocess (`python -m mnemoai.server.server`).
+        # Prepend the package's parent dir to PYTHONPATH so the child can import
+        # mnemoai from a checkout (<repo>/src) or an install (site-packages).
         import mnemoai
 
         pkg_parent = os.path.dirname(
@@ -148,38 +121,31 @@ class LangGraphClient:
             args=["-m", "mnemoai.server.server"],
             env=env,
         )
-        # The built-in server is always launched; any servers declared in
-        # ~/.mnemoai/mcp.json are launched alongside it and their tools merged.
+        # Built-in server always launched; servers in ~/.mnemoai/mcp.json are
+        # launched alongside it and their tools merged.
         external_servers = load_external_servers()
         self.mcp_client = MultiMCPClient(self.server_params, external_servers)
 
-        # System prompt
         self.profile_manager = UserProfileManager()
         self.system_prompt = self._build_system_prompt()
 
-        # Session
         profile_name = config.get("PROFILE", {}).get("NAME", "default")
         self.session_id = f"{profile_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # Components
         self.agent: Optional[LangGraphAgent] = None
         self.tools = None
         self.model = None
 
-        # Plan mode (user-toggled, enforced client-side): when True the agent
-        # hard-blocks mutating/exec tools and is told to research + present a
-        # plan instead of acting. Toggled by the /plan chat command.
+        # User-toggled (/plan), enforced client-side: hard-blocks mutating/exec
+        # tools and tells the model to research + present a plan.
         self.plan_mode_active: bool = False
 
-        # LLM controller
         self.llm_controller = LangChainLLMController(verbose=self.verbose_mode)
 
-        # Managers
         self.conversation_manager = AgentConversationManager(
             max_tokens=config.get("MAX_CONVERSATION_TOKENS", 1024 * 4)
         )
 
-        # UI
         self.spinner = Spinner()
         self.spinner_lock = threading.Lock()
         self.callback_handler = StreamingCallbackHandler(
@@ -187,37 +153,27 @@ class LangGraphClient:
             spinner_lock=self.spinner_lock,
         )
 
-        # Episodic memory
         self.episodic_memory = None
         if config.get("ENABLE_EPISODIC_MEMORY", False):
             self._initialize_episodic_memory()
 
-        # ACE components (Reflector + Playbook)
         self.reflector = None
         self.playbook = None
         if config.get("ENABLE_PLAYBOOK", False):
             self._initialize_playbook()
 
-        # Previous interaction tracking
         self.previous_query = None
         self.previous_response = None
         self.previous_messages = None
 
-        # The conversation file currently "open" — set when a conversation is
-        # loaded or first saved, so a later bare /save overwrites the same file
-        # (the loaded session) instead of creating a new timestamped one. Reset
-        # by /clear (a fresh conversation). A /save with an explicit path updates
-        # it to that path.
+        # The currently-"open" conversation file: set on load or first save so a
+        # bare /save overwrites it; reset by /clear.
         self.current_conversation_path = None
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt with profile information.
-
-        Returns:
-            Complete system prompt string
-        """
-        # config.system_prompt reads SYSTEM_PROMPT from prompts.yaml and raises
-        # PromptError if it's missing (no fallback) — a clean fail-fast.
+        """Build the system prompt (SYSTEM_PROMPT + profile/memory/skills)."""
+        # config.system_prompt reads SYSTEM_PROMPT from prompts.yaml (fail-fast if
+        # missing).
         system_prompt = config.system_prompt
         current_date = date.today().strftime("%Y-%m-%d")
         system_prompt = system_prompt.format(current_date=current_date)
@@ -232,8 +188,7 @@ class LangGraphClient:
         if memory_context:
             system_prompt = f"{system_prompt}\n\n{memory_context}"
 
-        # Tier-1 skill metadata: name+description of each installed skill, so the
-        # model knows what it can load on demand via the use_skill tool.
+        # Tier-1 skill metadata (name+description) for the use_skill tool.
         skills_context = self._inject_skills_context()
         if skills_context:
             system_prompt = f"{system_prompt}\n\n{skills_context}"
@@ -242,25 +197,17 @@ class LangGraphClient:
 
     @staticmethod
     def _sanitize_for_path(name: str) -> str:
-        """Make a model id safe to use as a directory name.
-
-        Thin delegate to ``utils.paths.sanitize_model_name`` (kept for callers
-        and tests that reference it on the client).
-        """
+        """Delegate to ``utils.paths.sanitize_model_name`` (kept for callers)."""
         return sanitize_model_name(name)
 
     def _model_scoped_dir(self) -> str:
-        """Return ``<app_home>/{profile}/models/{model}/`` (created).
-
-        Episodic memory and the ACE playbook are scoped per chat model so
-        switching models doesn't contaminate memory/strategies built with a
-        different one. Conversations, RAG, and todos remain profile-scoped.
-        """
+        """``<app_home>/{profile}/models/{model}/`` (created) — episodic memory
+        and the playbook are model-scoped so switching models doesn't mix them."""
         model_name = config.get("MODEL_ID", {}).get("NAME", "default")
         return str(model_dir(model_name))
 
     def _initialize_episodic_memory(self) -> None:
-        """Initialize episodic memory if enabled."""
+        """Initialize episodic memory (model-scoped)."""
         logger.debug("Initializing episodic memory...")
 
         embed_model_config = config.get("RAG", {}).get("EMBED_MODEL_ID")
@@ -269,8 +216,7 @@ class LangGraphClient:
                 "RAG.EMBED_MODEL_ID must be configured for episodic memory"
             )
 
-        # Scope episodic memory per chat model so switching models doesn't
-        # contaminate the vector store built with a different one.
+        # Model-scoped so switching models doesn't contaminate the vector store.
         episodic_path = os.path.join(self._model_scoped_dir(), "episodic_memory")
         os.makedirs(episodic_path, exist_ok=True)
 
@@ -296,12 +242,11 @@ class LangGraphClient:
         """Initialize ACE Reflector and Playbook store."""
         logger.debug("Initializing ACE Playbook...")
 
-        # Scope the playbook per chat model: strategies learned from one model's
-        # successes/failures shouldn't leak into a different model's runs.
+        # Model-scoped so one model's strategies don't leak into another's runs.
         playbook_path = os.path.join(self._model_scoped_dir(), "playbook")
         os.makedirs(playbook_path, exist_ok=True)
 
-        # Get embeddings for semantic deduplication if available
+        # Embeddings for semantic deduplication, if available.
         embeddings = None
         if config.get("RAG", {}).get("EMBED_MODEL_ID"):
             try:
@@ -327,18 +272,12 @@ class LangGraphClient:
         logger.debug(f"✓ Playbook initialized ({stats['total_entries']} entries)")
 
     def start(self, verbose: bool = False) -> None:
-        """Start the client and initialize the agent.
-
-        Args:
-            verbose: Enable verbose mode to show thinking process
-        """
+        """Start the client and initialize the agent."""
         try:
             self.verbose_mode = verbose
 
-            # Fail fast if prompts.yaml is missing a required prompt. Prompts are
-            # read only from prompts.yaml (no config.yaml, no in-code defaults):
-            # mandatory prompts must exist, and a feature's prompt is required
-            # when that feature is enabled.
+            # Fail fast if prompts.yaml is missing a required prompt (a feature's
+            # prompt is required when that feature is enabled).
             config.validate_prompts(
                 routing=config.get("ENABLE_ROUTING", False),
                 orchestration=config.get("ENABLE_ORCHESTRATION", False),
@@ -348,17 +287,14 @@ class LangGraphClient:
                 self.tools = self.mcp_client.list_tools_sync()
                 logger.info(f"Loaded {len(self.tools)} tools from MCP server")
 
-                # Initialize RAG session if enabled
                 if config.get("ENABLE_RAG", False):
                     self._initialize_rag_session()
-
-                # Initialize chunk cache
                 self._initialize_chunk_cache()
 
                 self.llm_controller.initialize_model(callbacks=[self.callback_handler])
                 self.model = self.llm_controller.get_model()
 
-                # Build system prompt with playbook context
+                # Append playbook context to the system prompt.
                 system_prompt_with_context = self.system_prompt
                 if self.playbook:
                     playbook_context = self._get_playbook_context()
@@ -367,7 +303,6 @@ class LangGraphClient:
                             f"{self.system_prompt}\n\n{playbook_context}"
                         )
 
-                # Initialize query router if enabled
                 router = None
                 tool_routes = None
                 if config.get("ENABLE_ROUTING", False):
@@ -375,7 +310,7 @@ class LangGraphClient:
                     tool_routes = ROUTE_TOOLS
                     logger.info("Query routing enabled")
 
-                # Orchestration requires routing
+                # Orchestration requires routing.
                 orchestrator_enabled = (
                     config.get("ENABLE_ORCHESTRATION", False) and router is not None
                 )
@@ -399,14 +334,7 @@ class LangGraphClient:
             raise e
 
     def query(self, prompt: str) -> str:
-        """Send a query to the agent.
-
-        Args:
-            prompt: User's query
-
-        Returns:
-            Agent's response
-        """
+        """Send a query to the agent and return its response."""
         if not self.agent:
             raise RuntimeError("Client not started. Call start() first.")
 
@@ -418,16 +346,14 @@ class LangGraphClient:
             if self.episodic_memory:
                 prompt = self._inject_episodic_context(prompt)
 
-            # Plan mode: remind the model every turn that it's read-only (the
-            # system prompt is frozen at session start, so inject per-query).
-            # This supersedes other instructions.
+            # Plan mode: remind the model per-turn that it's read-only (the
+            # system prompt is frozen at session start).
             if self.plan_mode_active:
                 prompt = self._plan_mode_reminder() + prompt
 
             with self.mcp_client:
                 response = self.agent(prompt)
 
-                # Flush any remaining buffered code
                 if hasattr(self.agent, "_code_formatter"):
                     self.agent._code_formatter.flush()
 
@@ -446,7 +372,6 @@ class LangGraphClient:
                 token_count = self._count_context_tokens()
                 print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
 
-                # Store for episodic memory evaluation
                 if self.episodic_memory:
                     self.previous_query = prompt
                     self.previous_response = response
@@ -460,8 +385,7 @@ class LangGraphClient:
             return "Operation was cancelled."
 
         except Exception as e:
-            # Surface a clean, user-facing message for any model/MCP/runtime
-            # failure instead of letting it bubble to the chat-loop catch-all.
+            # Clean user-facing message for any model/MCP/runtime failure.
             with self.spinner_lock:
                 self.spinner.stop()
             logger.error(f"Query failed: {e}", exc_info=True)
@@ -476,16 +400,10 @@ class LangGraphClient:
                 self.spinner.stop()
 
     def compact_conversation(self, focus_instructions: str = "") -> bool:
-        """Manually compact the conversation (the /compact command).
+        """Manually compact the conversation (/compact); True if it ran.
 
-        Summarizes older messages and keeps recent turns verbatim.
-
-        Args:
-            focus_instructions: Optional guidance on what the summary should
-                emphasize.
-
-        Returns:
-            True if compaction ran, False if there was nothing to compact.
+        Summarizes older messages, keeping recent turns verbatim.
+        ``focus_instructions`` optionally guides what the summary emphasizes.
         """
         if not self.agent:
             return False
@@ -496,11 +414,7 @@ class LangGraphClient:
         )
 
     def reflect_and_learn(self, task: str) -> None:
-        """Run reflection on the last interaction and update playbook.
-
-        Args:
-            task: The original user task
-        """
+        """Reflect on the last interaction and update the playbook."""
         if not self.reflector or not self.playbook:
             return
 
@@ -520,12 +434,8 @@ class LangGraphClient:
             logger.error(f"Reflection failed: {e}")
 
     def _inject_memory_context(self) -> str:
-        """Get the curated MEMORY.md contents, wrapped for the system prompt.
-
-        Hermes-style persistent memory: the whole file is injected once at
-        session start (a frozen snapshot, since this is built at agent
-        construction). Returns "" when disabled or empty.
-        """
+        """Curated MEMORY.md contents wrapped for the system prompt (a frozen
+        snapshot injected once at session start); "" when disabled or empty."""
         if not config.get("ENABLE_MEMORY", True):
             return ""
         from mnemoai.client.memory.memory_store import MemoryStore
@@ -536,12 +446,8 @@ class LangGraphClient:
         return f"[Persistent Memory]\n{contents}"
 
     def _inject_skills_context(self) -> str:
-        """Get the tier-1 ``<available_skills>`` block for the system prompt.
-
-        Lists each installed skill's name+description (cheap, always-on) so the
-        model can load a full body on demand via the ``use_skill`` tool. Returns
-        "" when skills are disabled or none are installed.
-        """
+        """Tier-1 ``<available_skills>`` block (each skill's name+description) for
+        the system prompt; "" when disabled or none installed."""
         if not config.get("ENABLE_SKILLS", True):
             return ""
         from mnemoai.client.memory.skill_store import (
@@ -552,17 +458,13 @@ class LangGraphClient:
         return format_available_skills(SkillStore().list_metadata())
 
     def _get_playbook_context(self) -> str:
-        """Get formatted playbook context for system prompt.
-
-        Returns:
-            Formatted playbook strategies or empty string
-        """
+        """Formatted general playbook strategies for the system prompt, or ""."""
         if not self.playbook:
             return ""
 
-        # Get all entries for system prompt (not task-specific)
+        # Empty task → general (not task-specific) strategies.
         entries = self.playbook.get_relevant_entries(
-            task="",  # Empty task gets general strategies
+            task="",
             top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
             include_failures=True,
         )
@@ -570,14 +472,7 @@ class LangGraphClient:
         return self.playbook.format_for_prompt(entries) if entries else ""
 
     def _inject_playbook_context(self, prompt: str) -> str:
-        """Inject task-specific playbook strategies into the prompt.
-
-        Args:
-            prompt: Original prompt
-
-        Returns:
-            Prompt with playbook context prepended
-        """
+        """Prepend task-specific playbook strategies to the prompt."""
         relevant_entries = self.playbook.get_relevant_entries(
             task=prompt,
             top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
@@ -591,11 +486,7 @@ class LangGraphClient:
         return prompt
 
     def _get_conversation_context(self) -> str:
-        """Extract text context from current conversation.
-
-        Returns:
-            Concatenated text from recent messages
-        """
+        """Concatenated text from the recent conversation messages."""
         if not self.agent or not self.agent.messages:
             return ""
 
@@ -612,21 +503,12 @@ class LangGraphClient:
         return " ".join(context_parts)
 
     def _compute_similarity(self, text1: str, text2: str) -> float:
-        """Compute similarity between two texts.
-
-        Uses embeddings if available, falls back to lexical similarity.
-
-        Args:
-            text1: First text
-            text2: Second text
-
-        Returns:
-            Similarity score (0-1)
-        """
+        """Similarity (0-1) between two texts: embeddings if available, else
+        Jaccard on word sets."""
         if not text1 or not text2:
             return 0.0
 
-        # Try semantic similarity with embeddings
+        # Semantic similarity via embeddings.
         if config.get("RAG", {}).get("EMBED_MODEL_ID"):
             try:
                 from mnemoai.models.controllers.embeddings_controller import (
@@ -643,7 +525,6 @@ class LangGraphClient:
             except Exception:
                 pass
 
-        # Fallback: Jaccard similarity on word sets
         words1 = set(text1.lower().split())
         words2 = set(text2.lower().split())
         if not words1 or not words2:
@@ -653,12 +534,8 @@ class LangGraphClient:
         return intersection / union if union > 0 else 0.0
 
     def _plan_mode_reminder(self) -> str:
-        """The read-only plan-mode reminder prepended to every prompt while on.
-
-        A firm, supersedes-everything instruction injected into the user turn each 
-        turn (the system prompt is frozen at session start). Tells the model it MUST NOT 
-        mutate, that the only writable path is the plan file, and to ask the user instead of guessing.
-        """
+        """The read-only plan-mode reminder prepended to every prompt while on
+        (the system prompt is frozen at session start, so it's injected per-turn)."""
         try:
             plan_hint = str(plans_dir())
         except Exception:
@@ -683,24 +560,15 @@ class LangGraphClient:
         )
 
     def _inject_episodic_context(self, prompt: str) -> str:
-        """Inject episodic memory context into the prompt.
+        """Prepend relevant, non-redundant episodic memory to the prompt.
 
-        Uses similarity (semantic or lexical) to determine:
-        1. If the query relates to the current conversation (skip injection)
-        2. If retrieved episodes add new information vs. being redundant
-
-        Args:
-            prompt: Original prompt
-
-        Returns:
-            Prompt with episodic context prepended (if relevant and non-redundant)
+        Uses similarity to skip injection when the query is a follow-up to the
+        current conversation, and to drop episodes redundant with it.
         """
         conversation_context = self._get_conversation_context()
 
-        # Skip episodic injection for short/vague follow-up queries when there's
-        # an active conversation. Short queries like "can you search?", "yes",
-        # "tell me more", "what about X?" are almost always follow-ups that only
-        # make sense in the current conversation context.
+        # Skip for short follow-ups ("yes", "tell me more") mid-conversation —
+        # they only make sense in the current context.
         if conversation_context:
             query_words = prompt.strip().split()
             short_query_threshold = config.get("EPISODIC_MEMORY", {}).get(
@@ -713,7 +581,7 @@ class LangGraphClient:
                 )
                 return prompt
 
-        # If there's existing conversation, check if query relates to it
+        # Skip if the query clearly relates to the ongoing conversation.
         if conversation_context:
             query_to_conv_similarity = self._compute_similarity(
                 prompt, conversation_context
@@ -724,7 +592,6 @@ class LangGraphClient:
             if query_to_conv_similarity > follow_up_threshold:
                 return prompt
 
-        # Retrieve similar episodes
         similar_episodes = self.episodic_memory.retrieve_similar_episodes(
             prompt, top_k=5
         )
@@ -740,7 +607,7 @@ class LangGraphClient:
         if not relevant_episodes:
             return prompt
 
-        # Filter episodes redundant with current conversation
+        # Drop episodes redundant with the current conversation.
         if conversation_context:
             redundancy_threshold = config.get("EPISODIC_MEMORY", {}).get(
                 "REDUNDANCY_THRESHOLD", 0.5
@@ -758,7 +625,6 @@ class LangGraphClient:
         if not relevant_episodes:
             return prompt
 
-        # Format and inject
         context = "[Episodic Memory - Similar Past Tasks]\n"
         for i, ep in enumerate(relevant_episodes, 1):
             task = ep.get("task", "Unknown task")[:70]
@@ -779,11 +645,7 @@ class LangGraphClient:
         return f"{context}\n\n{prompt}"
 
     def _count_context_tokens(self) -> int:
-        """Count total tokens in the current conversation context.
-
-        Returns:
-            Total token count
-        """
+        """Total tokens in the current context (system prompt + messages)."""
         total_tokens = 0
         if self.system_prompt:
             total_tokens += count_tokens(self.system_prompt)
@@ -805,11 +667,9 @@ class LangGraphClient:
         if self.agent:
             self.agent.system_prompt = self.system_prompt
 
-        # A cleared context is a fresh conversation — the next /save should make
-        # a new file, not overwrite the previously loaded/saved one.
+        # Fresh conversation: the next /save makes a new file.
         self.current_conversation_path = None
 
-        # Flush RAG database when clearing context
         if config.get("ENABLE_RAG", False):
             self._flush_rag_store()
 
@@ -911,15 +771,11 @@ class LangGraphClient:
             logger.warning(f"Failed to reset RAG store: {e}")
 
     def save_conversation(self, timestamp: str = None, path: str = None) -> None:
-        """Save conversation to a JSON file.
+        """Save the conversation to a JSON file.
 
-        Args:
-            timestamp: Optional timestamp for the default filename.
-            path: Optional destination. If a directory (existing, or ending in a
-                separator), the conversation is saved there with the default
-                ``conversation_<ts>.json`` name. Otherwise it's treated as a full
-                file path (a ``.json`` suffix is added if missing). When omitted,
-                saves to the profile's ``conversations/`` directory.
+        ``path`` may be a directory (saves ``conversation_<ts>.json`` there) or a
+        file path (``.json`` added if missing); omitted → the profile's
+        ``conversations/`` dir (or the open conversation, if any).
         """
         if not self.agent:
             logger.error("Agent not initialized")
@@ -931,7 +787,7 @@ class LangGraphClient:
 
             if path:
                 expanded = os.path.expanduser(path)
-                # Treat as a directory when it exists as one or ends with a sep.
+                # Directory if it exists as one or ends with a separator.
                 if os.path.isdir(expanded) or path.endswith(("/", os.sep)):
                     os.makedirs(expanded, exist_ok=True)
                     filepath = os.path.join(expanded, default_name)
@@ -941,9 +797,7 @@ class LangGraphClient:
                         os.makedirs(parent, exist_ok=True)
                     filepath = expanded if expanded.endswith(".json") else expanded + ".json"
             elif self.current_conversation_path:
-                # A conversation is "open" (loaded, or saved earlier this session):
-                # overwrite it so /save updates the same file the user is working
-                # in, rather than spawning a new timestamped copy.
+                # Overwrite the open conversation rather than spawn a copy.
                 filepath = self.current_conversation_path
             else:
                 filepath = os.path.join(str(conversations_dir()), default_name)
@@ -966,7 +820,7 @@ class LangGraphClient:
             with open(filepath, "w") as f:
                 json.dump(conversation_data, f, indent=2, default=str)
 
-            # Remember the file so subsequent bare /save calls update it in place.
+            # Remember it so a bare /save updates it in place.
             self.current_conversation_path = filepath
 
             print(f"Conversation saved to {filepath}")
@@ -975,13 +829,7 @@ class LangGraphClient:
             logger.error(f"Failed to save conversation: {e}")
 
     def list_saved_conversations(self) -> list:
-        """List saved conversation files, newest first.
-
-        Returns:
-            A list of ``Path`` objects for ``*.json`` files in the profile's
-            ``conversations/`` directory, sorted most-recently-modified first.
-            Empty if none exist.
-        """
+        """``Path`` objects for saved ``*.json`` conversations, newest first."""
         try:
             d = conversations_dir()
             files = [p for p in d.glob("*.json") if p.is_file()]
@@ -992,14 +840,7 @@ class LangGraphClient:
             return []
 
     def load_conversation(self, file_path: str) -> bool:
-        """Load conversation from file.
-
-        Args:
-            file_path: Path to the conversation file
-
-        Returns:
-            True if successful, False otherwise
-        """
+        """Load a conversation from ``file_path``; True on success."""
         try:
             normalized_path = os.path.expanduser(file_path)
             if not os.path.exists(normalized_path):
@@ -1019,9 +860,8 @@ class LangGraphClient:
                 conversation_messages
             )
 
-            # Repair conversations saved before the ephemeral plan-mode banner was
-            # kept out of history: strip any stored <plan-mode-active> block so a
-            # reloaded chat doesn't make the model believe it's still in plan mode.
+            # Strip any stored <plan-mode-active> block (older saves) so a
+            # reloaded chat doesn't believe it's still in plan mode.
             for m in langchain_messages:
                 content = getattr(m, "content", None)
                 if isinstance(content, str) and "<plan-mode-active>" in content:
@@ -1030,8 +870,7 @@ class LangGraphClient:
             if self.agent:
                 self.agent.messages.clear()
                 self.agent.messages.extend(langchain_messages)
-                # Mark this as the open conversation so a later bare /save writes
-                # back to the same file instead of creating a new one.
+                # Mark as open so a bare /save writes back to the same file.
                 self.current_conversation_path = normalized_path
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"

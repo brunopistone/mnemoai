@@ -1,36 +1,22 @@
-"""Styled rendering of a turn's reasoning and tool calls (pinned-input UI).
+"""Styled ANSI rendering of a turn's reasoning and tool calls (pinned-input UI).
 
-Pure string builders — no I/O, no prompt_toolkit — so they're unit-testable and
-usable from either the agent (which prints above the pinned region) or tests.
-The visual language mirrors modern agentic CLIs:
-
-- a reasoning block with a green left border, a ``Thought for Ns…`` header, and
-  the reasoning text indented under a ``↳`` connector;
-- tool invocations as ``ToolName`` on its own line with each argument indented
-  under a ``↳ key=value`` connector.
-
-ANSI is used directly (not prompt_toolkit widgets) because these lines are
-written into native scrollback ABOVE the pinned input, not drawn in the live
-region. Colors degrade harmlessly on terminals that ignore them.
+Pure string builders (no I/O, no prompt_toolkit) written into native scrollback
+above the pinned input; colors degrade harmlessly where unsupported.
 """
 
-# ANSI helpers. Kept local so this module has no dependencies.
+import threading
+
 _GREEN = "\033[32m"
 _GRAY = "\033[90m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
 
-# The green vertical bar drawn at the left of a reasoning block, and the
-# connector that introduces an indented detail line.
 _BAR = f"{_GREEN}▌{_RESET}"
 _CONNECTOR = "↳"
 
 
 def format_duration(seconds: float) -> str:
-    """Human, compact duration for the ``Thought for …`` header.
-
-    ``0.4`` → ``"0s"``, ``1`` → ``"1s"``, ``12.7`` → ``"12s"``, ``90`` → ``"1m30s"``.
-    """
+    """Compact duration for the header: 0.4→"0s", 90→"1m30s"."""
     total = int(round(seconds))
     if total < 60:
         return f"{total}s"
@@ -38,26 +24,10 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m{secs}s"
 
 
-def render_reasoning_block(reasoning: str, seconds: float) -> str:
-    """Build the green-border reasoning block.
-
-    Args:
-        reasoning: The model's reasoning text (may be multi-line / empty).
-        seconds: How long the reasoning took, for the header.
-
-    Returns:
-        A multi-line string ready to print, or ``""`` when there's no reasoning
-        (a non-reasoning model / empty reasoning collapses to nothing — no empty
-        block, per the design).
-    """
-    text = (reasoning or "").strip()
-    if not text:
-        return ""
-
-    header = f"{_BAR} {_BOLD}Thought for {format_duration(seconds)}…{_RESET}"
-    lines = [header]
-    # Each reasoning line is dimmed and indented under a connector. Blank lines
-    # inside the reasoning are preserved (as a bare bar) so paragraphs read.
+def _bordered(header: str, text: str) -> str:
+    """Green-border block: bold header, then reasoning indented under the bar."""
+    lines = [f"{_BAR} {_BOLD}{header}{_RESET}"]
+    # Blank lines kept as a bare bar so paragraphs read.
     for i, raw in enumerate(text.split("\n")):
         connector = _CONNECTOR if i == 0 else " "
         if raw.strip():
@@ -67,13 +37,61 @@ def render_reasoning_block(reasoning: str, seconds: float) -> str:
     return "\n".join(lines)
 
 
-def render_tool_call(name: str, args: dict) -> str:
-    """Build the styled block for one tool invocation.
+def render_reasoning_block(reasoning: str, seconds: float) -> str:
+    """Final "Thought for Ns…" block committed to scrollback; "" when empty."""
+    text = (reasoning or "").strip()
+    if not text:
+        return ""
+    return _bordered(f"Thought for {format_duration(seconds)}…", text)
 
-    ``ToolName`` in bold on its own line, then each argument on an indented
-    ``↳ key=value`` line (dimmed). Long values are shown in full here (the
-    compact ``[⚙ …]`` marker elsewhere is the elided one). Newlines in a value
-    are flattened to keep one arg per line.
+
+def render_live_reasoning(reasoning: str, seconds: float) -> str:
+    """In-progress "Thinking… (Ns)" block for the transient region; "" when empty."""
+    text = (reasoning or "").strip()
+    if not text:
+        return ""
+    return _bordered(f"Thinking… ({format_duration(seconds)})", text)
+
+
+class ReasoningStatus:
+    """Thread-safe live-reasoning buffer shared between the agent (worker thread,
+    appends chunks) and the pinned UI (renders the transient block)."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._parts: list = []
+        self._started: float = 0.0
+        self.active = False
+
+    def start(self, now: float) -> None:
+        with self._lock:
+            self._parts = []
+            self._started = now
+            self.active = True
+
+    def append(self, text: str) -> None:
+        with self._lock:
+            self._parts.append(text)
+
+    def stop(self) -> None:
+        with self._lock:
+            self.active = False
+
+    def render(self, now: float) -> str:
+        """The live block to show now, or "" when idle/empty."""
+        with self._lock:
+            if not self.active:
+                return ""
+            text = "".join(self._parts)
+            elapsed = now - self._started
+        return render_live_reasoning(text, elapsed)
+
+
+def render_tool_call(name: str, args: dict) -> str:
+    """Build one tool block: bold ``ToolName`` then dimmed ``↳ key=value`` lines.
+
+    Values are shown in full (unlike the elided ``[⚙ …]`` marker); newlines are
+    flattened to one arg per line.
     """
     lines = [f"{_BOLD}{name or 'tool'}{_RESET}"]
     for key, value in (args or {}).items():

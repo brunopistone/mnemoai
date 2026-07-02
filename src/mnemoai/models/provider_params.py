@@ -1,22 +1,12 @@
 """Single source of truth for the config keys each provider consumes.
 
-This module owns, per modality (``MODEL_ID`` / ``VISION_MODEL_ID`` /
-``EMBED_MODEL_ID``) and per provider ``TYPE``:
-
-- the **passthrough inference params** — config key -> the client kwarg it maps
-  to, and whether it goes into the main kwargs or a nested ``model_kwargs`` —
-  consumed by the controllers via :func:`build_kwargs`;
-- the **connection/auth** keys and **special** keys the controller handles
-  inline (region, host/port, endpoint, reasoning specials, …);
-
-so :func:`supported_keys` can report exactly what a provider accepts. The
-controllers build their client kwargs from this table (no inline ``if
-self.x is not None`` ladders), and the configurator prunes any key a provider
-doesn't accept when ``/model`` switches providers. One definition feeds both —
-change it here when a provider starts/stops reading a key.
-
-Derived strictly from ``models/llm_controller.py`` and
-``models/vision_model_controller.py`` ``_initialize_*_model`` methods.
+Per modality (``MODEL_ID`` / ``VISION_MODEL_ID`` / ``EMBED_MODEL_ID``) and
+provider ``TYPE``, records the passthrough inference params (config key → client
+kwarg + destination, consumed via :func:`build_kwargs`) plus the connection/auth
+and controller-handled "special" keys. Feeds both the controllers (which build
+their kwargs from this table) and the configurator (which prunes unsupported
+keys on a ``/model`` provider switch). Mirrors the controllers'
+``_initialize_*_model`` methods — keep in sync.
 """
 
 from collections import namedtuple
@@ -208,12 +198,9 @@ _VISION = {
 }
 
 # --- RAG.EMBED_MODEL_ID: mirrors embeddings_controller -----------------------
-# Embeddings use no inference params — only connection/identity. The Ollama
-# embed path uses the default host, so only REGION matters for bedrock/sagemaker.
-# DIMENSION: optional override of the embedding vector size (used for the
-# fallback/empty-result shape; real embeddings pass through natively). It's the
-# one embeddings knob that's both recognized by `supported_keys` (so /model
-# keeps it) AND tunable (so /params can edit it) — hence it lives in `special`.
+# Embeddings take no inference params, only connection/identity. DIMENSION is an
+# optional vector-size override (fallback shape only); it's in `special` so it's
+# both kept by /model and tunable via /params.
 _EMBED = {
     "ollama": {"params": [], "connection": {"HOST", "PORT"}, "special": {"DIMENSION"}},
     "bedrock": {"params": [], "connection": {"REGION"}, "special": {"DIMENSION"}},
@@ -245,11 +232,8 @@ def providers(section: str) -> Tuple[str, ...]:
 
 
 def supported_keys(section: str, provider: str) -> Optional[set]:
-    """All config keys ``provider`` accepts for ``section`` (excluding NAME/TYPE).
-
-    Returns None for an unknown section/provider so callers can choose not to
-    prune anything in that case.
-    """
+    """All config keys ``provider`` accepts for ``section`` (excl. NAME/TYPE);
+    None for an unknown section/provider (so callers can skip pruning)."""
     entry = _TABLES.get(section, {}).get(provider)
     if entry is None:
         return None
@@ -262,14 +246,8 @@ def supported_keys(section: str, provider: str) -> Optional[set]:
 
 
 def tunable_params(section: str, provider: str) -> Optional[set]:
-    """Inference/generation keys ``provider`` accepts for ``section``.
-
-    This is :func:`supported_keys` minus the connection/auth keys (HOST, PORT,
-    REGION, API_PROTOCOL, INPUT_FORMAT, API_BASE, API_KEY, ENDPOINT_URL) and
-    NAME/TYPE — i.e. exactly the generation knobs (temperature, top_p, penalties,
-    reasoning, stop, stream, …) the ``/params`` command lets the user tune.
-    Returns None for an unknown section/provider.
-    """
+    """Generation knobs ``provider`` accepts for ``section`` — :func:`supported_keys`
+    minus connection/auth keys, i.e. what ``/params`` may tune; None if unknown."""
     entry = _TABLES.get(section, {}).get(provider)
     if entry is None:
         return None
@@ -277,36 +255,22 @@ def tunable_params(section: str, provider: str) -> Optional[set]:
 
 
 def extra_params(model_id: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the raw ``EXTRA_PARAMS`` passthrough dict from a model section.
+    """A copy of the ``EXTRA_PARAMS`` passthrough dict, or ``{}``.
 
-    ``EXTRA_PARAMS`` is a generic escape hatch: a mapping of arbitrary key/value
-    pairs forwarded verbatim to the underlying model (merged into its
-    ``model_kwargs`` / request body) with **no interpretation** by mnemoai. It
-    lets users set provider-specific knobs the curated registry doesn't model —
-    e.g. ``reasoning_effort`` / ``reasoning`` (OpenAI, Mantle responses),
-    ``thinking`` (Anthropic, Mantle anthropic), ``verbosity``, ``service_tier`` —
-    without a code change. The user supplies the provider's own parameter names.
-
-    Args:
-        model_id: A model section dict (MODEL_ID / VISION_MODEL_ID / EMBED).
-
-    Returns:
-        A shallow copy of the EXTRA_PARAMS dict, or ``{}`` when absent/empty.
-        A non-dict value is ignored (returns ``{}``) so a malformed config
-        degrades gracefully instead of crashing model construction.
+    A generic escape hatch merged verbatim into the model's request body (no
+    interpretation) for provider knobs the registry doesn't model (e.g.
+    ``reasoning``, ``thinking``, ``verbosity``). A non-dict value → ``{}``.
     """
     raw = (model_id or {}).get("EXTRA_PARAMS")
     return dict(raw) if isinstance(raw, dict) and raw else {}
 
 
 def build_kwargs(section: str, provider: str, controller: Any) -> Tuple[Dict, Dict]:
-    """Build (main_kwargs, model_kwargs) for a provider from a controller.
+    """Build ``(main_kwargs, model_kwargs)`` for a provider from a controller.
 
-    Reads each spec's value off ``controller`` (e.g. ``controller.temperature``)
-    and emits it under the spec's client kwarg name, into the main dict or the
-    nested ``model_kwargs`` dict per ``dest``. STOP is included when truthy;
-    every other param when ``is not None`` — matching the original controller
-    init logic exactly.
+    Reads each spec's value off ``controller`` and emits it under the spec's
+    client kwarg, into main or nested ``model_kwargs`` per ``dest``. STOP is
+    included when truthy; every other param when ``is not None``.
     """
     entry = _TABLES.get(section, {}).get(provider, {})
     main: Dict[str, Any] = {}

@@ -1,18 +1,4 @@
-"""Shared token-counting helper.
-
-Lives in ``utils`` so both the client and the MCP server import it from a neutral
-place — previously the client reached into ``server.tools`` for ``count_tokens``,
-coupling the two layers across the MCP boundary.
-
-Counting is a length *estimate*, not an encoding for the model:
-- Ollama (and other char-based providers): character-count ÷ approximation factor.
-- Everything else (OpenAI/Bedrock/SageMaker/…): tiktoken's ``gpt-4`` encoder with
-  ``disallowed_special=()`` so literal special-token text (e.g. a file containing
-  ``<|endoftext|>``) is counted as ordinary text rather than raising.
-
-The encoder is created lazily on first use so importing this module has no
-side effects and stays config-independent (keeps it unit-testable).
-"""
+"""Shared token-counting helper."""
 
 from mnemoai.utils.config import config
 

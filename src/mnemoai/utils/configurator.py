@@ -1,13 +1,8 @@
-"""First-run interactive configurator.
+"""Interactive configurator (first-run setup + /config, /model, /params).
 
-When no ``config.yaml`` can be resolved, walk the user through creating one at
-``<app_home>/config.yaml`` by picking a provider template and filling in a few
-fields. The rich prompt blocks and comments in the templates are preserved:
-edits are line-targeted, never a YAML round-trip (which would drop comments).
-
-Entry points:
-- ``config_exists()`` — True if a config is already resolvable (skip setup)
-- ``run_first_run_setup()`` — interactive flow; returns the written Path or None
+Walks the user through creating/editing ``<app_home>/config.yaml`` from a
+provider template. Edits are line-targeted (never a YAML round-trip) so the
+templates' comments and prompt blocks are preserved.
 """
 
 import getpass
@@ -55,10 +50,7 @@ _PROVIDERS = {
     "7": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
 }
 
-# Human-facing label for each provider TYPE. The stored config value is the
-# canonical key (left); the label (right) is what the menus show — e.g. Mantle
-# is a Bedrock access path, so it reads "bedrock-mantle". Unlisted types fall
-# back to their key.
+# Human-facing menu label per provider TYPE (stored value is the canonical key).
 _PROVIDER_LABELS = {
     "ollama": "ollama",
     "bedrock": "bedrock",
@@ -77,38 +69,23 @@ _MANTLE_PROTOCOLS = {
     "3": ("anthropic", "Anthropic Messages (/anthropic) — Claude models"),
 }
 
-# Which config keys each provider actually consumes is owned by the model layer
-# (models/provider_params.py), derived from the controller init methods. The
-# configurator imports it so the two never drift; see _prune_unsupported_params.
-# MAX_CONVERSATION_TOKENS is a top-level key (not part of a model section), so
-# it's never pruned by the section-level logic.
-
-
 def _templates_dir() -> Path:
-    """Directory holding the packaged config templates (ships next to this module)."""
+    """Directory holding the packaged config templates (next to this module)."""
     return Path(__file__).resolve().parent
 
 
 def config_exists() -> bool:
-    """True if a config is already resolvable, so first-run setup should be skipped.
-
-    Delegates to the same resolution the app uses ($MNEMOAI_CONFIG
-    -> <app_home>/config.yaml -> repo fallback), so any of those existing counts.
-    """
+    """True if a config is already resolvable (so first-run setup is skipped)."""
     return Config._resolve_config_path() is not None
 
 
 def _set_in_section(text: str, section: str, key: str, value: str) -> str:
-    """Replace ``  key: ...`` for the first indented ``key`` inside top-level ``section``.
-
-    Only the first occurrence within the section is changed; the rest of the
-    file (including identically-named keys in other sections) is untouched.
-    """
+    """Replace the first indented ``key`` inside top-level ``section`` in place."""
     out = []
     in_section = False
     done = False
     for line in text.splitlines():
-        # A top-level key starts at column 0 and is "NAME:" or "NAME: value".
+        # A top-level key starts at column 0.
         if line and not line[0].isspace():
             in_section = line.split(":", 1)[0].strip() == section
         if in_section and not done:
@@ -122,13 +99,7 @@ def _set_in_section(text: str, section: str, key: str, value: str) -> str:
 
 
 def _set_or_add_in_section(text: str, section: str, key: str, value: str) -> str:
-    """Set ``key`` inside ``section``, inserting it if absent.
-
-    Like ``_set_in_section`` when the key already exists; otherwise the key is
-    added right after the section header, indented to match the section's
-    other children (defaults to two spaces). Only the first matching top-level
-    section is touched.
-    """
+    """Set ``key`` inside ``section``, inserting it after the header if absent."""
     if _get_in_section(text, section, key) is not None:
         return _set_in_section(text, section, key, value)
 
@@ -145,7 +116,7 @@ def _set_or_add_in_section(text: str, section: str, key: str, value: str) -> str
                 out.append(f"{child_indent}{key}: {value}")
                 inserted = True
             continue
-        # Track the section's child indentation from its first indented line.
+        # Track child indentation from the section's first indented line.
         if in_section and line and line[0].isspace():
             child_indent = line[: len(line) - len(line.lstrip())]
         out.append(line)
@@ -158,10 +129,8 @@ def _indent_of(line: str) -> int:
 
 
 def _find_section(lines: list, section: str) -> int:
-    """Return the index of the first header line ``<indent>section:`` (no inline
-    value), at any depth, or -1. Used by the depth-agnostic field editors so
-    nested sections like ``RAG.EMBED_MODEL_ID`` are reachable.
-    """
+    """Index of the first header line ``section:`` (no inline value) at any depth,
+    or -1 — so nested sections like ``RAG.EMBED_MODEL_ID`` are reachable."""
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped == f"{section}:" or stripped.startswith(f"{section}:") and not stripped.split(":", 1)[1].strip():
@@ -170,11 +139,7 @@ def _find_section(lines: list, section: str) -> int:
 
 
 def _get_field(text: str, section: str, key: str) -> Optional[str]:
-    """Read ``key`` from within ``section`` at any depth (stripped of comments).
-
-    Scans the section body — lines indented deeper than the header — stopping
-    when indentation returns to the header's level or shallower.
-    """
+    """Read ``key`` from within ``section`` at any depth (comments stripped)."""
     lines = text.splitlines()
     idx = _find_section(lines, section)
     if idx < 0:
@@ -190,11 +155,7 @@ def _get_field(text: str, section: str, key: str) -> Optional[str]:
 
 
 def _set_field(text: str, section: str, key: str, value: str) -> str:
-    """Set ``key`` within ``section`` at any depth, inserting it if absent.
-
-    Replaces the existing line in place, or inserts right after the header at
-    the body's indentation. Only the first matching section is touched.
-    """
+    """Set ``key`` within ``section`` at any depth, inserting it if absent."""
     lines = text.splitlines()
     idx = _find_section(lines, section)
     if idx < 0:
@@ -212,9 +173,8 @@ def _set_field(text: str, section: str, key: str, value: str) -> str:
         m = re.match(rf"(\s+){re.escape(key)}:(?:\s.*)?$", line)
         if m:
             key_indent = len(m.group(1))
-            # If the old value was a block (list/mapping), its lines are indented
-            # deeper than the key — drop them so replacing e.g. a multi-line
-            # STOP list with an inline value doesn't leave orphaned items behind.
+            # Drop a deeper-indented block value (e.g. a STOP list) so replacing
+            # it with an inline value leaves no orphaned items.
             end = j + 1
             while end < len(lines):
                 nxt = lines[end]
@@ -232,14 +192,8 @@ def _set_field(text: str, section: str, key: str, value: str) -> str:
 
 
 def _remove_field(text: str, section: str, key: str) -> str:
-    """Remove ``key`` (and its block) from within ``section`` at any depth.
-
-    Drops the ``key:`` line plus any deeper-indented continuation lines (a
-    list like ``STOP:`` or a nested mapping) and any immediately-preceding
-    comment lines describing it. No-op when the section or key is absent. Used
-    to make an optional field fall back to the provider default, or to strip
-    provider-specific params when switching providers.
-    """
+    """Remove ``key`` (its line, block value, and leading comments) from
+    ``section`` at any depth; no-op when absent."""
     lines = text.splitlines()
     idx = _find_section(lines, section)
     if idx < 0:
@@ -253,10 +207,10 @@ def _remove_field(text: str, section: str, key: str) -> str:
         if m:
             key_indent = len(m.group(1))
             start = j
-            # Absorb preceding comment lines that belong to this key.
+            # Absorb this key's leading comment lines.
             while start - 1 > idx and lines[start - 1].strip().startswith("#"):
                 start -= 1
-            # Absorb the key line + any deeper-indented continuation lines.
+            # Absorb the key line + deeper-indented continuation lines.
             end = j + 1
             while end < len(lines):
                 nxt = lines[end]
@@ -287,7 +241,7 @@ def _list_section_keys(text: str, section: str) -> list:
         if body_indent is None:
             body_indent = _indent_of(line)
         if _indent_of(line) != body_indent:
-            continue  # nested deeper (e.g. a list item) — not a direct key
+            continue  # nested deeper — not a direct key
         m = re.match(r"\s*([A-Za-z0-9_]+):", line)
         if m:
             keys.append(m.group(1))
@@ -295,13 +249,8 @@ def _list_section_keys(text: str, section: str) -> list:
 
 
 def _prune_unsupported_params(text: str, section: str, provider: str) -> str:
-    """Drop keys the ``provider`` doesn't consume for ``section``.
-
-    The supported-key registry lives in ``models.provider_params`` (derived
-    from the controller init methods), so this prunes any stale parameter left
-    over from a previous provider — connection, auth, and inference alike.
-    ``NAME``/``TYPE`` are always kept; an unknown provider prunes nothing.
-    """
+    """Drop keys the ``provider`` doesn't consume for ``section`` (per the
+    registry); keeps NAME/TYPE; unknown provider prunes nothing."""
     allowed = supported_keys(section, provider)
     if allowed is None:
         return text  # unknown provider/section — don't touch anything
@@ -313,16 +262,11 @@ def _prune_unsupported_params(text: str, section: str, provider: str) -> str:
 
 
 def _clear_inference_params(text: str, section: str, keep: set = None) -> str:
-    """Remove model-specific inference/generation params from ``section``.
+    """Remove model-specific inference params (temperature, penalties, reasoning,
+    …) from ``section`` on a model change; connection/identity keys untouched.
 
-    Inference params (temperature, top_p, top_k, penalties, reasoning, stop,
-    stream, …) are tuned per model, and a value good for one model can be wrong
-    for or rejected by another. ``/model`` calls this on a model change so the
-    new model starts from its own defaults; the user re-tunes via ``/params``.
-    Connection/auth/identity keys (HOST, REGION, NAME, TYPE, …) are untouched.
-    ``keep`` names inference keys to preserve (e.g. MAX_TOKENS, prompted
-    separately). Uses the union of every provider's tunable set so a leftover
-    from a different provider is cleared too.
+    ``keep`` preserves named inference keys (e.g. MAX_TOKENS). Clears the union
+    of every provider's tunable set so leftovers from another provider go too.
     """
     keep = keep or set()
     inference: set = set()
@@ -338,12 +282,8 @@ def _clear_inference_params(text: str, section: str, keep: set = None) -> str:
 
 
 def _remove_top_section(text: str, section: str) -> str:
-    """Remove a top-level ``section:`` block (header + its indented body).
-
-    Also drops immediately-preceding comment lines that belong to the section.
-    Used to drop an optional section (e.g. VISION_MODEL_ID) when the user opts
-    out. Only top-level sections are handled.
-    """
+    """Remove a top-level ``section:`` block (header, body, and leading comments)
+    — e.g. VISION_MODEL_ID when the user opts out."""
     lines = text.splitlines()
     out = []
     i = 0
@@ -353,7 +293,7 @@ def _remove_top_section(text: str, section: str) -> str:
             re.match(rf"{re.escape(section)}:", line)
             and not line.split(":", 1)[1].strip()
         ):
-            # Drop any contiguous comment lines we already emitted for it.
+            # Drop this section's already-emitted leading comments.
             while out and out[-1].lstrip().startswith("#"):
                 out.pop()
             i += 1
@@ -390,13 +330,8 @@ def _set_top_level_or_add(text: str, key: str, value: str) -> str:
 
 
 def _sync_doc_max_tokens(text: str) -> str:
-    """Keep ``DOC_MAX_TOKENS`` at 25% of ``MAX_CONVERSATION_TOKENS``.
-
-    The document read cap should scale with the context window rather than be
-    tuned by hand, so every configurator flow (/config, /model, /params) derives
-    it here from the current ``MAX_CONVERSATION_TOKENS``. No-ops if the context
-    window is missing or unparseable, leaving any existing value untouched.
-    """
+    """Set ``DOC_MAX_TOKENS`` to 25% of ``MAX_CONVERSATION_TOKENS`` (so the doc
+    read cap scales with the context window); no-op if the latter is unparseable."""
     raw = _get_top_level(text, "MAX_CONVERSATION_TOKENS")
     if raw is None:
         return text
@@ -409,11 +344,7 @@ def _sync_doc_max_tokens(text: str) -> str:
 
 
 def _get_in_section(text: str, section: str, key: str) -> Optional[str]:
-    """Read the value of the first indented ``key`` inside top-level ``section``.
-
-    Returns the inline value (stripped of trailing comments), or None if the
-    key isn't present. Mirrors ``_set_in_section``'s targeting.
-    """
+    """Read the first indented ``key`` inside top-level ``section`` (or None)."""
     in_section = False
     for line in text.splitlines():
         if line and not line[0].isspace():
@@ -440,16 +371,12 @@ class _Cancelled(Exception):
     """User aborted the configurator step (Ctrl+C / Ctrl+D)."""
 
 
-# Shown once at the top of an interactive flow so the user knows how to bail.
 _CANCEL_HINT = "  (Press Ctrl+C or Ctrl+D at any prompt to cancel — nothing is saved.)"
 
 
 def _is_tty() -> bool:
-    """True on an interactive terminal (prompt_toolkit dialogs can render).
-
-    When False (pipes / CI / tests) the ``_ask_*`` helpers keep their plain
-    ``input()`` behavior so scripted / non-terminal use never blocks on a modal.
-    """
+    """True on an interactive terminal (dialogs can render); else the ``_ask_*``
+    helpers fall back to plain ``input()`` so scripted use never blocks."""
     return (
         hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
         and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
@@ -467,20 +394,11 @@ def _dialog_input(
     suggestion: Optional[str] = None,
     required: bool = False,
 ):
-    """Centered text-input dialog; returns the text, or ``_DIALOG_CANCEL``.
+    """Centered text-input dialog; returns the text or ``_DIALOG_CANCEL``.
 
-    Two ways to seed the field:
-      * ``default`` — PREFILLED into the box (cursor at END, so typing appends
-        and you can edit in place). Use when there's a real current value to keep.
-      * ``suggestion`` — shown only as a hint line; the box stays EMPTY. Use when
-        you want to propose a value without forcing the user to clear it (e.g. a
-        model name). On an empty Enter the suggestion is returned as a fallback.
-
-    When ``required`` and the resolved value is empty, **the dialog refuses to
-    confirm** — it shows an error and keeps the field open (Esc still cancels).
-
-    **Enter** confirms from anywhere, **Esc** cancels (no Tab-to-button dance, no
-    "Enter on Cancel = OK" footgun). Stock (readable) styling.
+    ``default`` prefills the box (editable in place); ``suggestion`` is a
+    display-only hint returned as a fallback on empty Enter (unless ``required``,
+    which then blocks an empty confirm). Enter confirms, Esc cancels.
     """
     field = TextArea(
         text=default or "",
@@ -496,9 +414,7 @@ def _dialog_input(
     hint_label = Label(text=base_hint)
 
     def _resolve() -> str:
-        # Empty box + a suggestion → take the suggestion as a fallback, UNLESS
-        # the field is required (then the suggestion is display-only and the
-        # user must type a real value — an empty confirm is blocked below).
+        # Empty box + suggestion → use the suggestion, unless required.
         text = field.text
         if not text.strip() and suggestion and not required:
             return suggestion
@@ -507,7 +423,6 @@ def _dialog_input(
     def _ok() -> None:
         value = _resolve()
         if required and not value.strip():
-            # Refuse to advance on an empty mandatory field; nudge and stay open.
             hint_label.text = "This field is required — please enter a value."
             return
         get_app().exit(result=value)
@@ -546,16 +461,12 @@ def _dialog_input(
 
 
 def _dialog_radio(title: str, options: list, default=None, info: str = ""):
-    """Centered single-choice list; returns the chosen value or ``_DIALOG_CANCEL``.
+    """Centered single-choice list (↑/↓ move, Enter confirms, Esc cancels);
+    returns the chosen value or ``_DIALOG_CANCEL``.
 
-    ``options`` is ``[(value, label), …]``. **↑/↓** move the highlight, **Enter**
-    confirms the highlighted item immediately (no Tab-to-button), **Esc**
-    cancels. The Enter binding is attached to the RadioList itself so it isn't
-    swallowed by the widget's own handler. ``info`` (optional) is shown above the
-    list — used to surface the "Current setup" overview *inside* the dialog,
-    since the full-screen dialog otherwise hides it from scrollback.
+    ``options`` is ``[(value, label), …]``. ``info`` (optional) is shown above
+    the list to surface the "Current setup" overview inside the dialog.
     """
-
     radio = RadioList(values=options, default=default)
 
     def _ok() -> None:
@@ -564,9 +475,7 @@ def _dialog_radio(title: str, options: list, default=None, info: str = ""):
     def _cancel() -> None:
         get_app().exit(result=_DIALOG_CANCEL)
 
-    # Enter confirms the *highlighted* row. RadioList binds Enter internally to
-    # "select current", so we override it on the control's own key bindings to
-    # both select and accept — otherwise a global Enter binding is shadowed.
+    # Bind Enter on the control itself (RadioList shadows a global Enter binding).
     radio.control.key_bindings.add("enter")(lambda event: _ok())
 
     body_items = []
@@ -604,11 +513,8 @@ def _dialog_radio(title: str, options: list, default=None, info: str = ""):
 
 
 def _dialog_yesno(title: str, default: bool):
-    """Centered yes/no dialog. Returns True/False, or ``_DIALOG_CANCEL`` on Esc.
-
-    **Y/N** keys or ←/→ + **Enter** choose; **Esc** cancels the whole flow
-    (distinct from "No"), consistent with the other dialogs.
-    """
+    """Centered yes/no dialog (Y/N or ←/→ + Enter); True/False, or
+    ``_DIALOG_CANCEL`` on Esc (distinct from "No")."""
     def _yes() -> None:
         get_app().exit(result=True)
 
@@ -668,21 +574,11 @@ def _ask(
     suggestion: Optional[str] = None,
     required: bool = False,
 ) -> Optional[str]:
-    """Prompt for a value, returning ``default`` on empty input, EOF, or cancel.
+    """Prompt for a value, returning ``default`` on empty input/EOF/cancel.
 
-    ``suggestion`` proposes a value WITHOUT prefilling the field (the box stays
-    empty; an empty Enter falls back to the suggestion). Use it instead of
-    ``default`` when you don't want to force the user to clear a prefilled value
-    — e.g. a model name.
-
-    ``required`` makes an empty value unacceptable: the flow won't advance until
-    a non-empty value is entered (the suggestion becomes display-only — it is NOT
-    used as an auto-fallback for a required field). On a TTY this is a centered
-    dialog; else plain ``input()`` that re-asks on empty.
-
-    Cancelling (Esc on a dialog, Ctrl+C / Ctrl+D otherwise) aborts the whole
-    flow via ``_Cancelled`` — consistent with every other prompt — so nothing is
-    half-applied.
+    ``suggestion`` proposes a value without prefilling (empty Enter falls back to
+    it, unless ``required`` — then it's display-only and an empty value re-asks).
+    Cancelling raises ``_Cancelled`` so nothing is half-applied.
     """
     if _is_tty():
         val = _dialog_input(prompt, default, suggestion=suggestion, required=required)
@@ -707,15 +603,9 @@ def _ask(
 
 
 def _ask_required(prompt: str, default: Optional[str] = None) -> str:
-    """Prompt for a value; cancelling (Esc / Ctrl+C / Ctrl+D) aborts the flow.
-
-    Unlike :func:`_ask`, cancelling aborts (raises ``_Cancelled``) rather than
-    silently returning the default. Empty input keeps ``default`` when one is
-    given; with NO default, an empty value is rejected and re-asked (the value is
-    mandatory). On a TTY this is a centered dialog; otherwise plain ``input()``.
-    """
+    """Prompt for a value; empty input keeps ``default``, or (with no default)
+    re-asks. Cancelling raises ``_Cancelled``."""
     if _is_tty():
-        # required=True only when there's no default to fall back on.
         val = _dialog_input(prompt, default, required=default is None)
         if val is _DIALOG_CANCEL:
             raise _Cancelled()
@@ -741,18 +631,14 @@ def _ask_choice(
     labels: Optional[dict] = None,
     info: str = "",
 ) -> str:
-    """Prompt for one of ``valid`` keys, RE-ASKING on an invalid entry.
+    """Prompt for one of ``valid`` keys, re-asking on an invalid entry.
 
-    On a TTY, when ``labels`` (``{key: human_label}``) is given, this is a
-    centered single-choice dialog (↑/↓ + Enter). **Esc** cancels the whole flow
-    (raises ``_Cancelled``), consistent with the other prompts. ``info`` is shown
-    inside the dialog (e.g. the "Current setup" overview, which the full-screen
-    dialog would otherwise hide). Otherwise it falls back to the plain ``input()``
-    re-ask loop: Enter accepts ``default``; Ctrl+C / Ctrl+D cancels; a wrong value
-    re-prompts.
+    On a TTY with ``labels`` (``{key: human_label}``) this is a single-choice
+    dialog (``info`` shown inside it); else a plain ``input()`` re-ask loop.
+    Cancelling raises ``_Cancelled``.
     """
     if _is_tty() and labels:
-        # Preserve the natural key order (dict insertion order of `labels`).
+        # Preserve labels' insertion order.
         options = [(k, labels.get(k, k)) for k in labels if k in valid]
         chosen = _dialog_radio(
             prompt, options, default=default if default in valid else None, info=info
@@ -775,14 +661,10 @@ def _ask_number(
     kind: str = "int",
     allow_none: bool = False,
 ) -> Optional[str]:
-    """Prompt for an int/float, RE-ASKING until the input parses.
+    """Prompt for an int/float, re-asking until it parses.
 
-    - Enter / accept-with-default -> ``default`` (returned as-is).
-    - "none" (case-insensitive) -> returns ``None`` when ``allow_none``.
-    - A non-numeric entry re-prompts instead of being accepted.
-    Esc / Ctrl+C / Ctrl+D cancels the flow (raises ``_Cancelled``).
-    On a TTY each attempt is an ``input_dialog``; otherwise plain ``input()``.
-    Returns the validated numeric string, the default, or None.
+    Enter/default returns ``default``; "none" returns None when ``allow_none``;
+    a non-numeric entry re-prompts. Cancelling raises ``_Cancelled``.
     """
     while True:
         answer = _ask_required(prompt, default)
@@ -798,8 +680,7 @@ def _ask_number(
             return answer
         except ValueError:
             label = "a number" if kind == "float" else "an integer"
-            # In dialog mode there's no scrollback line to read, so surface the
-            # validation error in the next dialog's title.
+            # No scrollback in dialog mode → surface the error in the next title.
             msg = f"'{answer}' is not {label}" + (
                 " (or 'none')" if allow_none else ""
             )
@@ -810,13 +691,8 @@ def _ask_number(
 
 
 def _ask_bool(prompt: str, default: bool) -> bool:
-    """Prompt for a yes/no answer, defaulting to ``default`` on empty input.
-
-    On a TTY this is a centered yes/no dialog (Y/N or ←/→ + Enter); **Esc**
-    cancels the whole flow (raises ``_Cancelled``), consistent with the other
-    prompts. Otherwise it keeps the plain ``input()`` prompt (Ctrl+C / Ctrl+D
-    cancels).
-    """
+    """Prompt yes/no, defaulting to ``default`` on empty input; cancelling raises
+    ``_Cancelled``."""
     if _is_tty():
         result = _dialog_yesno(prompt, default)
         if result is _DIALOG_CANCEL:
@@ -847,16 +723,11 @@ def _truthy(value: Optional[str]) -> bool:
 
 
 def _prompt_provider_type(section: str, current: str) -> str:
-    """Prompt for a provider TYPE as a numbered menu, returning the chosen key.
-
-    Options come from the registry (so embeddings, which has no Mantle path,
-    only offers its own providers) and are shown with their human label
-    (``bedrock-mantle`` for ``mantle``). The current type is the default; an
-    invalid choice keeps it. Returns the canonical config value (e.g. ``mantle``).
-    """
+    """Prompt for a provider TYPE (from the registry), returning the chosen
+    canonical key; ``current`` is the default."""
     options = list(providers(section))
     if current not in options:
-        # Unknown/legacy current value — still offer it so it can be kept.
+        # Offer an unknown/legacy current value so it can be kept.
         options = [current] + options
     default_key = str(options.index(current) + 1)
 
@@ -879,11 +750,8 @@ def _prompt_provider_type(section: str, current: str) -> str:
 
 
 def _prompt_mantle_protocol(text: str, section: str) -> str:
-    """Prompt for the Mantle API protocol of ``section`` and set it.
-
-    Skips writing an explicit ``chat_completions`` (the implicit default) when
-    it wasn't already present, so an Enter-through stays a no-op.
-    """
+    """Prompt for and set ``section``'s Mantle API protocol; leaves an absent
+    ``chat_completions`` (the default) unwritten so Enter-through is a no-op."""
     existing = _get_field(text, section, "API_PROTOCOL")
     current = existing or "chat_completions"
     default_key = next((k for k, (v, _) in _MANTLE_PROTOCOLS.items() if v == current), "1")
@@ -902,15 +770,11 @@ def _prompt_mantle_protocol(text: str, section: str) -> str:
 
 
 def _prompt_provider_connection(text: str, section: str, provider: str):
-    """Prompt the connection/auth keys ``provider`` needs for ``section``.
+    """Prompt the connection/auth keys ``provider`` needs for ``section`` (per
+    the registry). Shared by /config and /model.
 
-    Section-aware via the ``provider_params`` registry: a key is only prompted
-    when the provider actually consumes it for this section (e.g. ``INPUT_FORMAT``
-    for SageMaker chat but not embeddings; ``HOST``/``PORT`` only for Ollama).
-    Used by BOTH ``/config`` and ``/model`` so the two ask the same things.
-
-    Returns ``(text, conn)`` where ``conn`` holds the mirrorable connection
-    values (HOST/PORT/REGION) the vision section can reuse.
+    Returns ``(text, conn)`` where ``conn`` holds the HOST/PORT/REGION values the
+    vision section can reuse.
     """
     allowed = supported_keys(section, provider) or set()
     conn = {}
@@ -934,10 +798,8 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
         ) or "openai_chat"
         text = _set_field(text, section, "INPUT_FORMAT", fmt)
     if "API_PROTOCOL" in allowed and provider == "mantle":
-        # Mantle's protocol is a required, 3-way choice the configurator walks
-        # through. For direct OpenAI, API_PROTOCOL is an optional advanced
-        # opt-in (chat_completions default vs responses) the user sets by hand,
-        # so the configurator doesn't prompt for it.
+        # Mantle's protocol is a required 3-way choice; OpenAI's is an advanced
+        # hand-set opt-in the configurator doesn't prompt for.
         text = _prompt_mantle_protocol(text, section)
     if provider == "litellm":
         if "API_BASE" in allowed:
@@ -958,8 +820,7 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
             if v:
                 text = _set_field(text, section, "ENDPOINT_URL", v)
     if provider == "openai" and "API_BASE" in allowed:
-        # Point at an OpenAI-compatible server (local llama-server / LM Studio /
-        # vLLM) instead of the OpenAI API. Blank keeps the default (api.openai.com).
+        # Optional OpenAI-compatible server; blank keeps api.openai.com.
         v = _ask(
             "OpenAI-compatible base URL (optional, blank for the OpenAI API)",
             _get_field(text, section, "API_BASE") or "",
@@ -974,8 +835,7 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
             if v:
                 text = _set_field(text, section, "API_KEY", v)
 
-    # Embeddings: optional vector-size override (used for the SHA256 fallback;
-    # real embeddings pass through at the provider's native size).
+    # Embeddings: optional vector-size override (fallback only).
     if section == "EMBED_MODEL_ID":
         v = _ask(
             "Embedding dimension (optional; blank = auto-detect)",
@@ -984,7 +844,7 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
         if v:
             text = _set_field(text, section, "DIMENSION", v)
 
-    # Credential notes (env-based auth the configurator can't set for the user).
+    # Credential notes (env-based auth the configurator can't set).
     if provider == "bedrock":
         print("  Note: Bedrock uses your AWS credentials (`aws configure`) or a")
         print("  Bedrock API key (AWS_BEARER_TOKEN_BEDROCK env var).")
@@ -1007,34 +867,24 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
 def _build_config(
     provider: str, default_model: str, template_text: str, template_file: str = ""
 ) -> str:
-    """Prompt for the fields that vary and patch them into the template text.
+    """Prompt for the fields that vary and patch them into the template.
 
-    Only fields a typical user needs to change are prompted; everything else
-    (RAG/episodic/playbook tuning, the large prompt blocks, etc.) keeps the
-    template's values. Each prompt's default is read from the template so a
-    user can press Enter through the whole flow.
-
-    ``template_file`` identifies the source template; openai/sagemaker/litellm
-    reuse the Ollama-shaped base (``config.yaml.example``) and have their model
-    sections transformed for the chosen provider.
+    Only commonly-changed fields are prompted; the rest keep the template's
+    values (each default read from it, so Enter-through works). openai/anthropic/
+    sagemaker/litellm reuse the Ollama-shaped base and transform their sections.
     """
     text = template_text
     transform_from_base = (
         template_file == "config.yaml.example" and provider != "ollama"
     )
 
-    # STOP sequences are kept in the example template for documentation, but
-    # not written into a generated config (they're easy to get wrong and only
-    # apply to some models). Drop them from both model sections up front.
+    # Drop documentation-only STOP sequences from a generated config.
     text = _remove_field(text, "MODEL_ID", "STOP")
     text = _remove_field(text, "VISION_MODEL_ID", "STOP")
 
-    # The base template (config.yaml.example) is Ollama-shaped. For providers
-    # that reuse it (openai/anthropic/sagemaker/litellm), set TYPE and prune the
-    # keys the new provider doesn't consume so we start from a clean section.
-    # The vision section: OpenAI and Anthropic (Claude) are multimodal, so set
-    # vision to the same provider; SageMaker/LiteLLM have no first-class vision
-    # path, so leave vision as Ollama (the user can keep or drop it below).
+    # For providers reusing the Ollama-shaped base, set TYPE and prune unsupported
+    # keys. OpenAI/Anthropic are multimodal, so mirror the vision section to them;
+    # SageMaker/LiteLLM leave vision as Ollama.
     if transform_from_base:
         text = _set_in_section(text, "MODEL_ID", "TYPE", provider)
         text = _prune_unsupported_params(text, "MODEL_ID", provider)
@@ -1044,31 +894,24 @@ def _build_config(
 
     # --- Chat model ---
     print("\n  -- Chat model --")
-    # `default_model` is an EXAMPLE for the provider, not a current value — offer
-    # it as a suggestion so the field stays empty and the user just types theirs.
-    # The model name is mandatory: an empty value can't advance the setup.
+    # default_model is an example (suggestion, not prefilled); name is mandatory.
     model = _ask("Chat model name", suggestion=default_model, required=True)
     if model:
         text = _set_in_section(text, "MODEL_ID", "NAME", model)
 
-    # Connection/auth prompts for the provider (shared with /model), plus the
-    # mirrorable connection values (HOST/PORT/REGION) for the vision section.
+    # Connection/auth prompts (shared with /model); conn holds HOST/PORT/REGION
+    # to mirror into the vision section.
     text, conn = _prompt_provider_connection(text, "MODEL_ID", provider)
 
-    # MAX_TOKENS (output tokens) is optional — 'none' / blank drops it so the
-    # provider default applies.
     text = _prompt_max_tokens(text, "MODEL_ID")
 
-    # Max context window (top-level MAX_CONVERSATION_TOKENS) is mandatory; always
-    # written, defaulting to the template's value (or 65536 if missing). Must be
-    # an integer — re-asks on bad input.
+    # Mandatory context window; defaults to the template value (or 65536).
     ctx = _ask_number(
         "Max context window",
         default=_get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
         kind="int",
     )
     text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
-    # Keep the document read cap at 25% of the context window.
     text = _sync_doc_max_tokens(text)
 
     # --- Vision model (optional) ---
@@ -1077,18 +920,14 @@ def _build_config(
         vision = _ask("Vision model name", _get_in_section(text, "VISION_MODEL_ID", "NAME"))
         if vision:
             text = _set_in_section(text, "VISION_MODEL_ID", "NAME", vision)
-        # Mirror the chat model's connection (host/port or region) into the
-        # vision section — it usually runs on the same host/region.
+        # Mirror the chat model's connection (same host/region, usually).
         for k, v in conn.items():
             if _get_in_section(text, "VISION_MODEL_ID", k) is not None:
                 text = _set_in_section(text, "VISION_MODEL_ID", k, v)
-        # If the vision section is Mantle, its protocol is per-model — ask for it.
         if (_get_in_section(text, "VISION_MODEL_ID", "TYPE") or "").lower() == "mantle":
             text = _prompt_mantle_protocol(text, "VISION_MODEL_ID")
         text = _prompt_max_tokens(text, "VISION_MODEL_ID")
     else:
-        # Drop the vision section entirely; image description stays disabled
-        # until the user adds VISION_MODEL_ID back (e.g. via /config or /model).
         text = _remove_top_section(text, "VISION_MODEL_ID")
         print("  -> Vision disabled (no VISION_MODEL_ID).")
 
@@ -1134,15 +973,10 @@ def _build_config(
 
 
 def _run_configurator(dest: Path) -> Optional[Path]:
-    """Shared flow: pick a provider, fill the template, write to ``dest``.
-
-    The caller handles any "first run?" / "overwrite?" gating and confirmation
-    before calling this. Returns the written Path, or None if a template was
-    missing.
-    """
+    """Pick a provider, fill the template, write to ``dest`` (caller handles
+    first-run/overwrite gating); returns the Path, or None if a template's missing."""
     print(_CANCEL_HINT)
     provider_labels = {k: label for k, (_, _, label, _) in _PROVIDERS.items()}
-    # Non-TTY fallback still prints the menu; the dialog shows labels itself.
     if not _is_tty():
         print("\n  Choose your LLM provider:")
         for k, lbl in provider_labels.items():
@@ -1181,11 +1015,7 @@ def _run_configurator(dest: Path) -> Optional[Path]:
 
 
 def run_first_run_setup() -> Optional[Path]:
-    """Interactively create a first ``config.yaml``.
-
-    Returns the written Path, or None if the user declined or a template was
-    missing. Safe to call only when stdin is interactive (caller's check).
-    """
+    """Interactively create a first ``config.yaml``; returns the Path or None."""
     dest = config_path()
 
     print()
@@ -1207,18 +1037,12 @@ def run_first_run_setup() -> Optional[Path]:
 
 
 def run_reconfigure() -> Optional[Path]:
-    """Re-run the configurator over an existing config (the ``/config`` command).
-
-    Warns that the current ``config.yaml`` will be overwritten and asks for
-    confirmation before restarting the setup flow. Returns the written Path,
-    or None if the user declined or a template was missing.
-    """
+    """Re-run the configurator over an existing config (``/config``), confirming
+    the overwrite first; returns the written Path or None."""
     dest = config_path()
 
-    # On a TTY the prompts are full-screen dialogs, so the scrollback banner +
-    # WARNING would just clutter (and the overwrite caveat rides in the first
-    # confirmation prompt below). Only print the banner/WARNING for the non-TTY
-    # plain-input fallback, where there's no dialog to carry it.
+    # On a TTY the dialogs carry the caveat, so only the non-TTY fallback prints
+    # the banner/WARNING here.
     if not _is_tty():
         print()
         print("=" * 64)
@@ -1231,8 +1055,7 @@ def run_reconfigure() -> Optional[Path]:
         else:
             print(f"  No config found yet; this will create one at:\n    {dest}")
 
-    # Fold the overwrite caveat into the confirmation question so it's still seen
-    # on a TTY (inside the dialog), without a separate scrollback block.
+    # Fold the overwrite caveat into the confirmation so a TTY still sees it.
     if dest.is_file():
         confirm_q = "Reconfigure now? This OVERWRITES your existing config (y/N)"
     else:
@@ -1250,9 +1073,8 @@ def run_reconfigure() -> Optional[Path]:
         return None
 
 
-# Model sections that /model can override: key -> (config section, label,
-# whether it's the chat LLM — which gets the context-window prompt).
-# Embeddings lives nested under RAG.
+# /model-overridable sections: key -> (config section, label, is_chat_llm — the
+# LLM also gets the context-window prompt).
 _MODEL_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)", True),
     "2": ("VISION_MODEL_ID", "Vision model", False),
@@ -1261,10 +1083,8 @@ _MODEL_SECTIONS = {
 
 
 def _section_summary(text: str, section: str) -> Optional[str]:
-    """One-line summary of a model section, or None if it isn't configured.
-
-    Example: ``mantle / anthropic.claude-haiku-4-5 (us-east-1, anthropic)``.
-    """
+    """One-line summary of a model section (e.g. ``bedrock-mantle / … (us-east-1,
+    anthropic)``), or None if not configured."""
     name = _get_field(text, section, "NAME")
     if not name:
         return None
@@ -1286,14 +1106,8 @@ def _section_summary(text: str, section: str) -> Optional[str]:
 
 
 def _prompt_max_tokens(text: str, section: str) -> str:
-    """Prompt for the optional MAX_TOKENS of a model section.
-
-    MAX_TOKENS (max output tokens) is optional and model-specific, so it
-    defaults to ``none`` (the provider default) rather than carrying over the
-    previous model's value. Convention:
-      * Enter / 'none' -> no MAX_TOKENS (provider default; key removed)
-      * a number       -> set it
-    """
+    """Prompt for the optional MAX_TOKENS of a section (Enter/'none' → remove the
+    key = provider default; a number → set it)."""
     answer = _ask_number(
         "Max output tokens (number, or 'none' for provider default)",
         default="none",
@@ -1301,20 +1115,13 @@ def _prompt_max_tokens(text: str, section: str) -> str:
         allow_none=True,
     )
     if answer is None:
-        # 'none' (or Enter on the 'none' default) -> drop the key.
         return _remove_field(text, section, "MAX_TOKENS")
     return _set_field(text, section, "MAX_TOKENS", answer)
 
 
 def _current_setup_text(text: str) -> str:
-    """Build the multi-line "Current setup" overview (chat/vision/embeddings).
-
-    Vision and embeddings are optional and shown as "(not configured)" when
-    absent. Returned as a string so it can be printed to scrollback (non-TTY)
-    or rendered *inside* the selection dialog (TTY) — the latter matters because
-    the full-screen dialog covers scrollback, so a plain print() is invisible
-    while the user is choosing which model to edit.
-    """
+    """The "Current setup" overview (chat/vision/embeddings) as a string, so it
+    can print to scrollback (non-TTY) or render inside the selection dialog."""
     vision = _section_summary(text, "VISION_MODEL_ID")
     embeddings = _section_summary(text, "EMBED_MODEL_ID")
     return (
@@ -1332,15 +1139,8 @@ def _print_current_setup(text: str) -> None:
 
 
 def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
-    """Prompt for one model section's fields and patch them into ``text``.
-
-    Defaults are read from the current config so the user can press Enter to
-    keep a value. The provider type itself is editable, so a section can be
-    switched between providers (e.g. ollama -> bedrock). Connection prompts
-    follow the chosen type. MAX_TOKENS is prompted for the chat (LLM) and
-    vision models; the context window (MAX_CONVERSATION_TOKENS) only for the
-    chat model (``is_llm``). Embeddings has neither.
-    """
+    """Prompt for one model section (provider type included, so it can switch
+    providers) and patch ``text``; context window only for the chat LLM."""
     cur_type = (_get_field(text, section, "TYPE") or "ollama").lower()
     new_type = _prompt_provider_type(section, cur_type)
     text = _set_field(text, section, "TYPE", new_type)
@@ -1349,26 +1149,15 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     if name:
         text = _set_field(text, section, "NAME", name)
 
-    # Prompt the provider's connection/auth keys (shared with /config), so
-    # /model asks the same mandatory params — region, Mantle protocol,
-    # SageMaker input format, LiteLLM API base/key, etc.
+    # Connection/auth prompts (shared with /config).
     text, _ = _prompt_provider_connection(text, section, new_type)
 
-    # On a provider switch, strip every parameter the new provider doesn't
-    # consume (connection, auth, and inference alike), per the model layer's
-    # supported-key registry — so no stale, unsupported keys are left behind
-    # (e.g. REGION/API_PROTOCOL after mantle -> ollama, HOST/PORT/penalties
-    # after ollama -> bedrock). The keys just written for the new provider are
-    # in its allowed set, so they survive.
+    # On a provider switch, strip keys the new provider doesn't consume.
     if new_type != cur_type:
         text = _prune_unsupported_params(text, section, new_type)
 
-    # Inference/generation params (temperature, top_p, penalties, reasoning,
-    # stop, stream, …) are MODEL-specific: a value tuned for one model can be
-    # wrong for — or outright rejected by — another (e.g. newer Claude/GPT
-    # models reject `temperature`). So clear them on ANY model change and let
-    # the new model's defaults apply; the user re-tunes deliberately via
-    # /params. MAX_TOKENS is excluded here because it's prompted just below.
+    # Clear model-specific inference params on any model change (a value tuned
+    # for one model may be rejected by another); MAX_TOKENS is prompted below.
     text = _clear_inference_params(text, section, keep={"MAX_TOKENS"})
 
     print(
@@ -1377,30 +1166,23 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         "to tune them."
     )
 
-    # MAX_TOKENS (output tokens) is optional, for chat and vision (not embeddings).
+    # MAX_TOKENS is optional, for chat and vision (not embeddings).
     if section in ("MODEL_ID", "VISION_MODEL_ID"):
         text = _prompt_max_tokens(text, section)
 
     if is_llm:
-        # Max context window is the top-level MAX_CONVERSATION_TOKENS (feeds
-        # Ollama num_ctx and the compaction budget). It is mandatory and
-        # model-specific, so it defaults to 65536 rather than carrying over the
-        # previous model's value.
+        # Context window (feeds num_ctx + compaction budget); defaults to 65536.
         ctx = _ask_number("Max context window", default="65536", kind="int")
         text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
-        # Keep the document read cap at 25% of the context window.
         text = _sync_doc_max_tokens(text)
 
     return text
 
 
-# --- /params: tune the inference/generation parameters of a model -----------
-# Metadata for every tunable key the registry may report (provider_params.
-# tunable_params). Each entry: (kind, hint) where kind drives validation/parsing
-# and hint is shown in the prompt. The *set* of keys offered for a given model
-# is the provider's tunable set from the registry (so we never prompt a key the
-# provider ignores); this table only supplies how to prompt/validate each.
-#   kind: "float" | "int" | "bool" | "list" | one of an enum's allowed values
+# --- /params: tune a model's inference parameters ---------------------------
+# (kind, hint) per tunable key — kind drives validation, hint is the prompt.
+# Which keys are offered comes from the registry's tunable set; this only says
+# how to prompt/validate each. kind: float | int | bool | list | enum:a,b,c
 _PARAM_META = {
     "TEMPERATURE": ("float", "sampling temperature, e.g. 0.7"),
     "TOP_P": ("float", "nucleus sampling, 0-1"),
@@ -1428,9 +1210,8 @@ _PARAM_ORDER = [
     "DIMENSION",
 ]
 
-# /params can tune the chat, vision, and embeddings models. The embeddings model
-# exposes only DIMENSION; chat/vision expose the generation knobs. key ->
-# (config section, label).
+# /params-tunable sections: key -> (config section, label). Embeddings exposes
+# only DIMENSION; chat/vision expose the generation knobs.
 _PARAM_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)"),
     "2": ("VISION_MODEL_ID", "Vision model"),
@@ -1439,11 +1220,8 @@ _PARAM_SECTIONS = {
 
 
 def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
-    """Validate/normalize a raw answer for a param, or return None if invalid.
-
-    Returns the YAML scalar string to write (e.g. "0.7", "true",
-    "[\"</s>\"]"), or None when the input doesn't fit the kind (caller re-asks).
-    """
+    """Return the YAML scalar to write for a param answer, or None if invalid
+    for the kind (caller re-asks)."""
     raw = raw.strip()
     if kind == "float":
         try:
@@ -1468,7 +1246,6 @@ def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
         items = [p.strip() for p in raw.split(",") if p.strip()]
         if not items:
             return None
-        # YAML flow sequence with double-quoted items.
         return "[" + ", ".join('"' + it.replace('"', '\\"') + '"' for it in items) + "]"
     if kind.startswith("enum:"):
         allowed = kind.split(":", 1)[1].split(",")
@@ -1477,17 +1254,9 @@ def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
 
 
 def _prompt_one_param(text: str, section: str, key: str, kind: str, hint: str) -> str:
-    """Prompt for a single inference param and patch ``text`` accordingly.
-
-    The field is PREFILLED with the current value (empty when the param is at
-    its provider default, i.e. absent from the config) — consistent with the
-    /model text fields. Convention:
-      * Enter (value unchanged / left empty) -> keep as-is. An empty box that
-        stays empty means "provider default": the key is NOT written.
-      * ``none`` -> clear it (remove the key; provider default applies).
-      * a valid value -> set it (re-asks on invalid input).
-      * Esc -> cancel the whole flow.
-    """
+    """Prompt for one inference param (prefilled with the current value) and
+    patch ``text``: unchanged/empty keeps it, ``none`` clears it, a valid value
+    sets it (re-asks on invalid), Esc cancels."""
     current = _get_field(text, section, key)
     base_hint = hint
     if kind.startswith("enum:"):
@@ -1497,21 +1266,17 @@ def _prompt_one_param(text: str, section: str, key: str, kind: str, hint: str) -
 
     prompt_hint = base_hint
     while True:
-        # Prefill the current value; empty box == provider default (unset).
         answer = _ask(f"{key} [{prompt_hint}] ('none' to clear)", default=current)
-        # No current + left empty -> keep the provider default (write nothing).
         if answer is None:
             return text
         answer = answer.strip()
-        # Unchanged (equals current, or empty when there was no current) -> keep.
         if answer == "" or answer == (current or ""):
-            return text
+            return text  # unchanged → keep
         if answer.lower() == "none":
             return _remove_field(text, section, key)
         value = _validate_param(key, kind, answer)
         if value is None:
-            # Surface the error in the next prompt (a full-screen dialog hides
-            # any print() behind it); the non-TTY path still shows it inline.
+            # Surface the error in the next prompt (a dialog hides any print()).
             err = f"'{answer}' is not a valid {kind.split(':', 1)[0]} value"
             if _is_tty():
                 prompt_hint = f"{base_hint} — {err}, try again"
@@ -1522,13 +1287,8 @@ def _prompt_one_param(text: str, section: str, key: str, kind: str, hint: str) -
 
 
 def _prompt_inference_params(text: str, section: str) -> str:
-    """Prompt every inference param the section's provider accepts.
-
-    The provider TYPE is read from the section; the set of tunable keys comes
-    from the registry (``tunable_params``) so only params the provider actually
-    consumes are offered. MAX_CONVERSATION_TOKENS (context window) and the
-    connection/auth keys are out of scope here — those live in /model.
-    """
+    """Prompt every inference param the section's provider accepts (from the
+    registry). Context window and connection keys are /model's job, not here."""
     provider = (_get_field(text, section, "TYPE") or "ollama").lower()
     tunable = tunable_params(section, provider)
     if not tunable:
@@ -1546,14 +1306,9 @@ def _prompt_inference_params(text: str, section: str) -> str:
 
 
 def run_params_override() -> Optional[Path]:
-    """Tune the inference parameters of a configured model (the ``/params`` command).
-
-    Asks which model to tune — chat (LLM) or vision (whichever are configured) —
-    then walks the generation params that model's provider accepts (temperature,
-    top_p, penalties, reasoning, stop, stream, …), editing only those keys in
-    place. Provider/name/connection are unchanged here — use /model for those.
-    Returns the written Path, or None if cancelled or nothing changed.
-    """
+    """Tune a configured model's inference parameters (``/params``); edits only
+    those keys (use /model for provider/name/connection). Returns the Path, or
+    None if cancelled or unchanged."""
     dest = config_path()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")
@@ -1570,10 +1325,8 @@ def run_params_override() -> Optional[Path]:
     labels = {
         k: label for k, (_, label) in _PARAM_SECTIONS.items() if available.get(k)
     }
-    # On a TTY the picker is a full-screen dialog that shows the title and the
-    # current-setup overview INSIDE it (passed as info=), so the scrollback
-    # banner/overview/hint here would just duplicate it — print only for the
-    # non-TTY plain-input fallback.
+    # On a TTY the picker dialog carries the title + overview (info=), so only
+    # the non-TTY fallback prints them here.
     if not _is_tty():
         print()
         print("=" * 64)
@@ -1602,8 +1355,7 @@ def run_params_override() -> Optional[Path]:
         print("\n  Cancelled. Config left untouched.")
         return None
 
-    # Keep the document read cap at 25% of the context window (corrects a
-    # hand-edited value even when no inference param changed).
+    # Re-sync the doc read cap (corrects a hand-edited value too).
     new_text = _sync_doc_max_tokens(new_text)
 
     if new_text == text:
@@ -1618,13 +1370,8 @@ def run_params_override() -> Optional[Path]:
 
 
 def run_model_override() -> Optional[Path]:
-    """Override just one model section in the existing config (``/model``).
-
-    Asks which model to change — chat (LLM), vision, or embeddings (the last
-    only when RAG/embeddings is configured) — then edits only that section in
-    place, preserving everything else. Returns the written Path, or None if the
-    user cancelled or there's no config to edit.
-    """
+    """Override one model section in place (``/model``), preserving the rest;
+    returns the written Path, or None if cancelled or there's no config."""
     dest = config_path()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")
@@ -1632,8 +1379,7 @@ def run_model_override() -> Optional[Path]:
 
     text = dest.read_text()
 
-    # Vision and embeddings are optional; only offer them when present in the
-    # config (chat/LLM is always present). Track which choices are available.
+    # Vision/embeddings are optional; only offer them when present (LLM always is).
     available = {"1": True}
     available["2"] = _get_field(text, "VISION_MODEL_ID", "NAME") is not None
     available["3"] = _get_field(text, "EMBED_MODEL_ID", "NAME") is not None
@@ -1641,9 +1387,8 @@ def run_model_override() -> Optional[Path]:
     labels = {
         k: label for k, (_, label, _) in _MODEL_SECTIONS.items() if available.get(k)
     }
-    # On a TTY the picker is a full-screen dialog carrying its own title and the
-    # current-setup overview (passed as info=), so the scrollback banner/overview/
-    # hint would duplicate it — print only for the non-TTY plain-input fallback.
+    # On a TTY the picker dialog carries the title + overview (info=); print here
+    # only for the non-TTY fallback.
     if not _is_tty():
         print()
         print("=" * 64)
@@ -1656,7 +1401,6 @@ def run_model_override() -> Optional[Path]:
             print(f"    {k}) {lbl}")
         print(_CANCEL_HINT)
     try:
-        # Only the configured sections are selectable; re-ask on a bad choice.
         valid = set(labels)
         choice = _ask_choice(
             "Which model to change?",

@@ -1,14 +1,9 @@
 """Plan-mode enforcement policy (pure logic).
 
-Plan mode is a user-toggled, client-side hard gate: while active, mutating /
-shell-executing tools are blocked at the tool chokepoint, regardless of what the
-model does. This module holds the *decision* logic and its data tables; the agent
-keeps thin delegating methods (`_is_blocked_by_plan_mode`, `_is_readonly_bash`,
-`_is_plan_file`) that call in here, so its public surface — and the unit tests
-that build a bare agent — are unchanged.
-
-The functions here take an explicit ``plan_active`` flag rather than reading agent
-state, which keeps them pure and directly testable.
+Plan mode is a user-toggled client-side hard gate: while active, mutating/
+shell-executing tools are blocked at the tool chokepoint. Functions take an
+explicit ``plan_active`` flag (not agent state) to stay pure and testable; the
+agent keeps thin delegating methods over them.
 """
 
 import os
@@ -16,12 +11,8 @@ from pathlib import Path
 
 from mnemoai.utils.paths import plans_dir
 
-# Mutating / shell-executing tools hard-blocked while plan mode is active.
-# Read-only tools (fs_read, glob/grep search, web, document readers) and the
-# `memory` notebook are allowed.
-# NOTE: execute_bash, fs_write, and file_edit are blocked CONDITIONALLY (see
-# is_blocked_by_plan_mode): read-only bash and writes to the plan file are
-# permitted; everything else here is an unconditional block.
+# Tools hard-blocked in plan mode. execute_bash/fs_write/file_edit are blocked
+# CONDITIONALLY (see is_blocked_by_plan_mode); the rest unconditionally.
 PLAN_BLOCKED_TOOLS = {
     "execute_bash",
     "fs_write",
@@ -31,14 +22,10 @@ PLAN_BLOCKED_TOOLS = {
     "start_background_task",
 }
 
-# In plan mode, fs_write/file_edit are allowed ONLY for the plan file (a single
-# writable path under the plans dir). Everything else writing is blocked.
+# fs_write/file_edit are allowed only for the plan file (a .md under plans_dir).
 PLAN_FILE_SUFFIX = ".md"
 
-# Read-only shell commands permitted in plan mode (the leading program must be
-# one of these AND the command must contain no shell operator that could chain a
-# mutation — see is_readonly_bash). Conservative on purpose: when in doubt, the
-# command is treated as NOT read-only and blocked.
+# Leading programs allowed in plan mode (subject to is_readonly_bash checks).
 READONLY_BASH_CMDS = {
     "ls", "cat", "head", "tail", "less", "more", "pwd", "echo", "find",
     "grep", "rg", "egrep", "fgrep", "wc", "stat", "file", "tree", "du",
@@ -46,18 +33,15 @@ READONLY_BASH_CMDS = {
     "ps", "uname", "id", "diff", "sort", "uniq", "cut", "awk", "sed",
     "realpath", "readlink", "basename", "dirname", "git",
 }
-# Shell operators that could append/redirect a mutation onto a read-only
-# command. Their presence forces the command to be treated as non-read-only.
+# Shell operators that could chain/redirect a mutation → treat as non-read-only.
 BASH_MUTATION_OPS = (">", ">>", "|", ";", "&&", "||", "`", "$(", "&")
-# git subcommands that are unambiguously read-only (others — commit/push/
-# checkout/tag/stash/config-set/branch -d… — can mutate, so are blocked).
+# git subcommands that are unambiguously read-only (others can mutate → blocked).
 READONLY_GIT_SUBCMDS = {
     "status", "log", "diff", "show", "rev-parse", "describe", "blame",
     "ls-files", "ls-tree", "cat-file", "shortlog",
 }
-# Per-program flags that turn an otherwise-read-only allowlisted command into a
-# mutating one. `-i` is program-specific (sed: in-place edit; but grep/ls `-i`
-# are read-only), so it's keyed by program rather than global.
+# Per-program flags that make an allowlisted command mutating (keyed by program
+# since `-i` means in-place for sed but is read-only for grep/ls).
 BASH_MUTATING_FLAGS = {
     "sed": ("-i", "--in-place"),  # also matches `-i.bak` (prefix check)
     "find": ("-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"),
@@ -68,10 +52,8 @@ BASH_MUTATING_FLAGS = {
 def is_readonly_bash(command: str) -> bool:
     """Heuristically decide if a shell command is read-only (plan-mode safe).
 
-    Conservative: the leading program must be in the read-only allowlist, the
-    command must contain no operator that could chain/redirect a mutation, and a
-    ``git`` command must use a read-only subcommand. Anything uncertain returns
-    False (so it stays blocked).
+    Conservative — leading program allowlisted, no mutation operator, read-only
+    git subcommand, no in-place flags; anything uncertain returns False.
     """
     cmd = (command or "").strip()
     if not cmd:
@@ -130,12 +112,8 @@ def is_blocked_by_plan_mode(
 
 
 def plan_mode_block_message(tool_name: str) -> str:
-    """The ToolMessage returned when a tool is blocked by plan mode.
-
-    Tailored per tool so the model knows the read-only escape hatch (run a
-    read-only shell command, or write the plan file) rather than just erroring
-    out.
-    """
+    """ToolMessage for a plan-mode block, tailored per tool to point at the
+    read-only escape hatch (read-only shell, or writing the plan file)."""
     if tool_name == "execute_bash":
         return (
             "Blocked: plan mode is active (read-only). Only read-only shell "

@@ -189,7 +189,6 @@ class TestToolArgStreamingSpinner:
         events = []
         a._start_spinner = lambda label="Thinking": events.append(("start", label))
         a._stop_spinner = lambda: events.append(("stop", None))
-        a._print_answer_marker = lambda: None
         return a, events
 
     def test_spinner_restarts_while_building_tool_args(self):

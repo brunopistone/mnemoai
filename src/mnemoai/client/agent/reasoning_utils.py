@@ -12,14 +12,7 @@ from typing import Any, Dict
 
 
 def disable_reasoning(model) -> Dict[str, Any]:
-    """Temporarily disable reasoning/thinking on a model.
-
-    Args:
-        model: LangChain chat model
-
-    Returns:
-        Saved state to pass to restore_reasoning()
-    """
+    """Temporarily disable reasoning/thinking; returns saved state for restore."""
     saved: Dict[str, Any] = {}
 
     # Ollama wrapper / LiteLLM: a boolean `reasoning` toggle. Guard on bool so
@@ -51,19 +44,10 @@ def disable_reasoning(model) -> Dict[str, Any]:
             saved["converse_temperature"] = model.temperature
             model.temperature = 0.1
 
-    # ChatOpenAI on the Responses API (e.g. Mantle GPT-5 / Grok). These are
-    # reasoning models: with reasoning on, a short auxiliary call (classify /
-    # decompose) spends its whole token budget reasoning and returns empty
-    # `content`. Setting effort to "none" makes the model answer directly.
-    #
-    # Two shapes exist depending on how the model was built:
-    #   * reasoning={"effort": …, "summary": …}  — a `reasoning` OBJECT (current
-    #     build; requests a visible summary). Set its effort to "none" in place.
-    #   * reasoning_effort="…"                    — a scalar enum (legacy / direct
-    #     OpenAI chat). Set it to "none".
-    # We must NOT set `reasoning_effort` when a `reasoning` object is present:
-    # the Responses API rejects both together ("unexpected keyword argument
-    # 'reasoning_effort'").
+    # ChatOpenAI on the Responses API (Mantle GPT-5 / Grok): with reasoning on, a
+    # short auxiliary call spends its budget reasoning and returns empty content;
+    # effort "none" makes it answer directly. Two mutually-exclusive shapes — a
+    # `reasoning` dict or a scalar `reasoning_effort` (the API rejects both).
     if getattr(model, "use_responses_api", False):
         reasoning_obj = getattr(model, "reasoning", None)
         if isinstance(reasoning_obj, dict):
@@ -85,12 +69,7 @@ def disable_reasoning(model) -> Dict[str, Any]:
 
 
 def restore_reasoning(model, saved: Dict[str, Any]) -> None:
-    """Restore reasoning/thinking settings on a model.
-
-    Args:
-        model: LangChain chat model
-        saved: State from disable_reasoning()
-    """
+    """Restore reasoning/thinking settings saved by disable_reasoning()."""
     if "reasoning" in saved:
         model.reasoning = saved["reasoning"]
     if "thinking" in saved:
@@ -106,16 +85,10 @@ def restore_reasoning(model, saved: Dict[str, Any]) -> None:
 
 
 def extract_visible_text(content) -> str:
-    """Extract visible text from a response content, stripping reasoning.
+    """Extract visible text from AIMessage.content, stripping reasoning.
 
     Handles plain strings (with optional <think>/<thinking> tags) and
-    Bedrock-style content blocks (list of dicts with 'type').
-
-    Args:
-        content: AIMessage.content (str or list of blocks)
-
-    Returns:
-        Visible text with thinking removed
+    Bedrock-style content blocks (list of typed dicts).
     """
     if isinstance(content, list):
         return "".join(

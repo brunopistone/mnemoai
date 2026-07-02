@@ -18,19 +18,13 @@ class LangChainLLMController(BaseModelController):
     """LLM Controller using LangChain model abstractions."""
 
     def __init__(self, verbose: bool = False) -> None:
-        """Initialize LLM controller.
-
-        Args:
-            verbose: Enable verbose mode to show thinking process
-        """
         self.verbose_mode = verbose
         self.model_id = config.get("MODEL_ID")
         self.model_name = self.model_id["NAME"]
         self.model_type = self.model_id["TYPE"]
         self.region = self.model_id.get("REGION", "us-east-1")
-        # Optional custom Bedrock endpoint (e.g. Bedrock Mantle:
-        # https://bedrock-mantle.<region>.api.aws). Routes standard SigV4
-        # Converse calls to that endpoint when set; default endpoint otherwise.
+        # Optional custom Bedrock endpoint (e.g. Mantle); routes SigV4 Converse
+        # calls there when set.
         self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
         self.frequency_penalty = self.model_id.get("FREQUENCY_PENALTY", None)
         self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
@@ -50,11 +44,7 @@ class LangChainLLMController(BaseModelController):
         self.model: Optional[BaseChatModel] = None
 
     def initialize_model(self, callbacks: list[BaseCallbackHandler] = None) -> None:
-        """Initialize the LLM model based on configured type.
-
-        Args:
-            callbacks: Optional list of callback handlers for streaming
-        """
+        """Initialize the LLM model based on the configured ``TYPE``."""
         if self.model_type == "bedrock":
             self._initialize_bedrock_model(callbacks)
         elif self.model_type == "mantle":
@@ -91,9 +81,8 @@ class LangChainLLMController(BaseModelController):
             kwargs["endpoint_url"] = self.endpoint_url
             logger.info(f"Using custom Bedrock endpoint: {self.endpoint_url}")
 
-        # Enable thinking/reasoning for Claude models
+        # Extended thinking for Claude models.
         if self.reasoning_model:
-            # Map REASONING_EFFORT to budget_tokens when set
             effort_to_tokens = {
                 "low": 1024,
                 "medium": 8192,
@@ -112,28 +101,17 @@ class LangChainLLMController(BaseModelController):
                     "budget_tokens": budget,
                 }
             }
-            # Older Claude models require temperature=1 with thinking; newer
-            # ones reject the parameter entirely. Only override when a
-            # temperature was explicitly configured.
+            # Older Claude requires temperature=1 with thinking (newer rejects it).
             if self.temperature is not None:
                 kwargs["temperature"] = 1.0
 
-        # Generic passthrough: forward EXTRA_PARAMS verbatim (e.g. extra
-        # additional_model_request_fields the registry doesn't model).
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatBedrockConverse(**kwargs)
 
     def _initialize_mantle_model(self, callbacks: list = None) -> None:
-        """Initialize an AWS Bedrock Mantle model.
-
-        Mantle authenticates with a short-lived bearer token derived from
-        standard AWS (SigV4) credentials. Model IDs are bare provider names
-        (e.g. ``qwen.qwen3-32b``, ``openai.gpt-5.4``, ``anthropic.claude-haiku-4-5``).
-
-        The protocol is chosen with ``API_PROTOCOL`` (chat_completions |
-        responses | anthropic); see ``models.mantle_factory``.
-        """
+        """Initialize an AWS Bedrock Mantle model (see ``models.mantle_factory``;
+        protocol chosen via ``API_PROTOCOL``)."""
         from mnemoai.models.mantle_factory import build_mantle_model
 
         self.model = build_mantle_model(
@@ -166,7 +144,6 @@ class LangChainLLMController(BaseModelController):
         if self.model_id.get("API_KEY"):
             kwargs["api_key"] = self.model_id["API_KEY"]
 
-        # Generic passthrough: merge EXTRA_PARAMS into the request body.
         model_kwargs.update(extra_params(self.model_id))
 
         self.model = ChatLiteLLM(model_kwargs=model_kwargs, **kwargs)
@@ -179,7 +156,6 @@ class LangChainLLMController(BaseModelController):
         port = self.model_id.get("PORT", 11434)
         base_url = f"http://{host}:{port}"
 
-        # Build kwargs
         passthrough, _ = build_kwargs("MODEL_ID", "ollama", self)
         kwargs = {
             "model": self.model_name,
@@ -187,36 +163,24 @@ class LangChainLLMController(BaseModelController):
             "callbacks": callbacks,
             **passthrough,
         }
-
-        # Set context window
         kwargs["num_ctx"] = self.max_conversation_tokens
 
-        # Enable reasoning output for thinking models when verbose
+        # Surface reasoning output for thinking models when verbose.
         if self.verbose_mode:
             kwargs["reasoning"] = True
 
-        # Generic passthrough: forward EXTRA_PARAMS verbatim.
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatOllamaWrapper(**kwargs)
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
-        """Initialize an OpenAI-compatible model using LangChain.
+        """Initialize an OpenAI-compatible model.
 
-        Talks to the OpenAI API by default, but ``API_BASE`` (alias
-        ``ENDPOINT_URL``) points it at ANY OpenAI-compatible server — e.g. a
-        local ``llama-server`` (llama.cpp), LM Studio, vLLM, or llama-swap —
-        making those first-class local back ends without a separate provider.
-        Local servers usually need no real key, so ``API_KEY`` defaults to a
-        placeholder when a custom base URL is set.
-
-        ``API_PROTOCOL`` selects the API: ``chat_completions`` (default) or
-        ``responses``. On the Responses API, a reasoning model can return a
-        *summary* of its reasoning, but only if asked — so when
-        ``REASONING_EFFORT`` is set we send ``reasoning={"effort": …,
-        "summary": "auto"}`` (a first-class ChatOpenAI field) and the agent's
-        extractor surfaces the streamed summary. On Chat Completions there is no
-        readable reasoning, so ``REASONING_EFFORT`` stays the plain enum.
+        ``API_BASE`` (alias ``ENDPOINT_URL``) points at any OpenAI-compatible
+        server (local llama-server / LM Studio / vLLM); a placeholder key is used
+        when a custom base URL is set. ``API_PROTOCOL`` selects chat_completions
+        (default) or responses — on responses, ``REASONING_EFFORT`` is sent as
+        ``reasoning={effort, summary:"auto"}`` so the summary is visible.
         """
         from langchain_openai import ChatOpenAI
 
@@ -231,16 +195,13 @@ class LangChainLLMController(BaseModelController):
             **passthrough,
         }
 
-        # Point at an OpenAI-compatible server (local llama-server / LM Studio /
-        # vLLM, etc.) when configured. API_BASE is the canonical key; ENDPOINT_URL
-        # is accepted as an alias for symmetry with the other providers.
+        # API_BASE (canonical) or ENDPOINT_URL (alias) → OpenAI-compatible server.
         base_url = self.model_id.get("API_BASE") or self.endpoint_url
         if base_url:
             kwargs["base_url"] = base_url
             logger.info(f"Using OpenAI-compatible endpoint: {base_url}")
-        # A local server typically ignores auth; provide a placeholder key so the
-        # client constructs without a real OPENAI_API_KEY. An explicit API_KEY
-        # (or the env var, used when none is set here) still wins.
+        # Local servers ignore auth; a placeholder key lets the client construct
+        # without OPENAI_API_KEY. An explicit API_KEY (or env var) still wins.
         if self.model_id.get("API_KEY"):
             kwargs["api_key"] = self.model_id["API_KEY"]
         elif base_url:
@@ -249,10 +210,8 @@ class LangChainLLMController(BaseModelController):
         extra = extra_params(self.model_id)
         if protocol == "responses":
             kwargs["use_responses_api"] = True
-            # On the Responses API, REASONING_EFFORT -> a `reasoning` object that
-            # also requests a summary (so it's visible). build_kwargs put the
-            # bare enum in model_kwargs; lift it out and upgrade it, unless the
-            # user already set their own `reasoning`/`reasoning_effort`.
+            # Upgrade the bare reasoning_effort to a reasoning={effort, summary}
+            # object (so the summary is visible), unless the user set their own.
             model_kwargs.pop("reasoning_effort", None)
             if (
                 self.reasoning_effort
@@ -263,16 +222,13 @@ class LangChainLLMController(BaseModelController):
                     "effort": self.reasoning_effort,
                     "summary": "auto",
                 }
-            # `reasoning`/`reasoning_effort` are first-class args; lift any from
-            # EXTRA_PARAMS so they don't collide in model_kwargs.
+            # First-class args; lift from EXTRA_PARAMS to avoid a model_kwargs clash.
             if "reasoning" in extra:
                 kwargs["reasoning"] = extra.pop("reasoning")
             if "reasoning_effort" in extra:
                 kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
 
-        # reasoning_effort (chat_completions: o1/o3) stays in model_kwargs.
-        # EXTRA_PARAMS is merged in too — the generic passthrough for any other
-        # request-body key (verbosity, service_tier, …).
+        # chat_completions reasoning_effort stays in model_kwargs; merge EXTRA_PARAMS.
         model_kwargs.update(extra)
         if model_kwargs:
             kwargs["model_kwargs"] = model_kwargs
@@ -280,14 +236,8 @@ class LangChainLLMController(BaseModelController):
         self.model = ChatOpenAI(**kwargs)
 
     def _initialize_anthropic_model(self, callbacks: list = None) -> None:
-        """Initialize a direct Anthropic API model via langchain-anthropic.
-
-        Talks to ``api.anthropic.com`` (or a custom ``ENDPOINT_URL``) using
-        ``ANTHROPIC_API_KEY`` (env) or the config ``API_KEY``. This is distinct
-        from the Bedrock Mantle ``anthropic`` *protocol*, which reaches Claude
-        through Bedrock. STOP maps to Anthropic's ``stop_sequences``; extended
-        thinking is enabled via REASONING/REASONING_EFFORT/THINKING_TOKENS.
-        """
+        """Initialize a direct Anthropic API model (``api.anthropic.com`` or a
+        custom ``ENDPOINT_URL``), distinct from the Mantle anthropic protocol."""
         from langchain_anthropic import ChatAnthropic
 
         logger.info("Initializing Anthropic model via LangChain...")
@@ -308,14 +258,9 @@ class LangChainLLMController(BaseModelController):
             kwargs["base_url"] = self.endpoint_url
             logger.info(f"Using custom Anthropic endpoint: {self.endpoint_url}")
 
-        # Extended thinking for Claude models. Anthropic requires the thinking
-        # budget to be < max_tokens, so bump max_tokens if needed, and (per the
-        # API) temperature must be unset/1 when thinking is enabled. Enabled by
-        # EITHER REASONING: true OR REASONING_EFFORT (effort alone is enough, to
-        # match the OpenAI responses behavior). The request FORM depends on the
-        # model version — newer Claude (Opus 4.7+) rejects the old
-        # enabled+budget form and needs adaptive + output_config.effort — so the
-        # shared helper picks the right shape.
+        # Extended thinking (REASONING or REASONING_EFFORT). Budget must be
+        # < max_tokens (bump if needed) and temperature/top_p/top_k are dropped.
+        # _anthropic_thinking_kwargs picks the version-specific request form.
         if self.reasoning_model or self.reasoning_effort:
             from mnemoai.models.mantle_factory import _anthropic_thinking_kwargs
 
@@ -341,9 +286,7 @@ class LangChainLLMController(BaseModelController):
             kwargs.pop("top_p", None)
             kwargs.pop("top_k", None)
 
-        # Generic passthrough: forward EXTRA_PARAMS verbatim (e.g. a `thinking`
-        # override, or newer `output_config`/`effort` knobs). Applied last so an
-        # explicit EXTRA_PARAMS wins over the derived defaults above.
+        # EXTRA_PARAMS applied last so an explicit override wins.
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatAnthropic(**kwargs)
@@ -365,25 +308,16 @@ class LangChainLLMController(BaseModelController):
             **passthrough,
         }
 
-        # Generic passthrough: forward EXTRA_PARAMS verbatim.
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatSageMaker(**kwargs)
 
     def get_model(self) -> BaseChatModel:
-        """Get the initialized LLM model instance, initializing if needed.
-
-        Returns:
-            Initialized LangChain chat model instance
-        """
+        """The initialized LLM model, initializing it if needed."""
         if self.model is None:
             self.initialize_model()
         return self.model
 
     def get_model_type(self) -> str:
-        """Get the model type string.
-
-        Returns:
-            Model type (bedrock, ollama, openai, sagemaker)
-        """
+        """The model type string (bedrock, ollama, openai, …)."""
         return self.model_type

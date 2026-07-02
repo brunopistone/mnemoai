@@ -43,25 +43,14 @@ class AgentState(TypedDict):
 class LangGraphAgent:
     """LangGraph-based agent with streaming support."""
 
-    # Task-agnostic "meta" tools bound on EVERY route (incl. the no-tools
-    # simple_qa route), regardless of how the query was classified:
-    #   - memory: a "remember this" request classifies as simple_qa.
-    #   - describe_image: an image can be referenced in any kind of query
-    #     ("what's in this image?" classifies as simple_qa/knowledge), and the
-    #     vision tool must be reachable there — otherwise the model falls back to
-    #     reading a binary file as text.
-    #   - fs_read: read-only and universal (handles every format via its mode).
-    #     A user can reference a file in ANY query ("what's in config.yaml?"
-    #     classifies as simple_qa/knowledge), so reading must never be gated out.
-    #   - use_skill: loads an authored skill's instructions on demand. A request
-    #     matching a skill can classify as simple_qa (e.g. "write a commit
-    #     message"), so the loader must reach every route or the skill could
-    #     never trigger (same reasoning as external MCP tools, see 0.8.21).
+    # Task-agnostic "meta" tools bound on EVERY route (incl. no-tools simple_qa),
+    # since a matching query can classify onto any route: memory ("remember
+    # this"), describe_image (any query may reference an image), fs_read
+    # (universal read), use_skill (a skill-matching query may be simple_qa).
     _ALWAYS_AVAILABLE_TOOLS = {"memory", "describe_image", "fs_read", "use_skill"}
 
-    # Plan-mode enforcement data + logic live in plan_policy.py. These aliases
-    # keep the historical class-attribute surface (read by unit tests and the
-    # agent's own delegating methods below) pointing at the single source there.
+    # Aliases keeping the historical class-attribute surface (used by unit tests
+    # and the delegating methods) pointing at the single source in plan_policy.
     _PLAN_BLOCKED_TOOLS = plan_policy.PLAN_BLOCKED_TOOLS
     _PLAN_FILE_SUFFIX = plan_policy.PLAN_FILE_SUFFIX
     _READONLY_BASH_CMDS = plan_policy.READONLY_BASH_CMDS
@@ -88,12 +77,12 @@ class LangGraphAgent:
             tools: List of LangChain tools
             system_prompt: System prompt for the agent
             verbose: Enable verbose mode for thinking display
-            callbacks: Optional list of callback handlers for streaming
-            router: Optional QueryRouter for query classification
-            tool_routes: Optional dict mapping route names to tool name lists
-            orchestrator_enabled: Enable orchestrator for 'full' route
-            plan_mode_provider: Optional callable returning True while the user
-                has plan mode active; gates the mutating tools client-side.
+            callbacks: Optional streaming callback handlers
+            router: Optional QueryRouter for classification
+            tool_routes: Optional route-name → tool-name-list mapping
+            orchestrator_enabled: Enable the orchestrator for the 'full' route
+            plan_mode_provider: Callable returning True while plan mode is active
+                (gates the mutating tools client-side).
         """
         self._plan_mode_provider = plan_mode_provider or (lambda: False)
         self.model = model
@@ -101,57 +90,43 @@ class LangGraphAgent:
         self.system_prompt = system_prompt
         self.verbose = verbose
         self.callbacks = callbacks or []
-        # When True (set by the pinned-input UI), reasoning is buffered and shown
-        # as a collapsed "Thought for Ns…" block and tool calls render as a styled
-        # name + ↳arg block (client/ui/turn_view). Default False keeps the classic
-        # inline gray-reasoning + [⚙ …] marker rendering untouched.
+        # When True (pinned-input UI), reasoning is buffered into a collapsed
+        # "Thought for Ns…" block and tool calls render as a styled name+↳arg
+        # block; default False keeps the inline gray reasoning + [⚙ …] marker.
         self.styled_turn_view = False
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
         self._code_formatter = CodeFormatter()
-        # Confirmation categories the user chose to trust for this session
-        # (via the "a = allow" option at a Proceed? prompt). Skips re-prompting
-        # for that whole category until the process restarts.
+        # Categories the user chose to trust this session (the "a = allow" option),
+        # skipping re-prompts until restart.
         self._trusted_confirm_categories: set = set()
         self.router = router
         self.orchestrator_enabled = orchestrator_enabled and router is not None
-        # Bound on the model<->tool loop. Claude Code has no hard step cap —
-        # context compaction is the real limiter and the loop runs until the
-        # model stops calling tools. LangGraph requires a finite recursion_limit
-        # (its runaway guard), so we set it high enough that legitimate long
-        # tasks never hit it; compaction keeps context in check. Configurable.
+        # Runaway guard on the model<->tool loop, set high (default 200) so real
+        # long tasks never hit it; compaction is the actual context limiter.
         self.recursion_limit = config.get("LLM", {}).get("RECURSION_LIMIT", 200)
-        # Some endpoints (notably Bedrock Mantle reasoning models on the
-        # Responses API) intermittently return a completely empty response
-        # — no content, no reasoning, no tool calls. A retry reliably recovers
-        # it. Bounded by LLM.MAX_RETRIES (default 2 extra attempts).
+        # Some endpoints (Bedrock Mantle reasoning models on the Responses API)
+        # intermittently return a fully empty response; a retry recovers it.
         self._empty_response_retries = max(
             0, int(config.get("LLM", {}).get("MAX_RETRIES", 2))
         )
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
 
-        # External (mcp.json) tools aren't named in any route allowlist, so
-        # they'd be filtered out of every specific route. Treat any tool not
-        # referenced by a route as external. Kept as an attribute so the
-        # orchestrator can describe them when decomposing tasks.
+        # External (mcp.json) tools aren't in any route allowlist; tracked so the
+        # orchestrator can describe them and they can be bound on every route.
         self.external_tools: List[BaseTool] = []
 
-        # Build per-route tool subsets and model bindings
+        # Build per-route tool subsets and model bindings.
         self.tools_by_route: Optional[Dict[str, List[BaseTool]]] = None
         self.models_by_route: Optional[Dict[str, BaseChatModel]] = None
         if router and tool_routes:
             self.tools_by_route = {}
             self.models_by_route = {}
-            # Meta tools are task-agnostic and must be reachable on EVERY route,
-            # including the no-tools 'simple_qa' route. The 'memory' tool is one:
-            # a "remember this" request classifies as simple_qa, so without this
-            # it could never be called. These are excluded from external_tools so
-            # the orchestrator doesn't redundantly describe them.
+            # Meta tools reach every route (incl. simple_qa); excluded from
+            # external_tools so the orchestrator doesn't re-describe them.
             always_tools = [t for t in tools if t.name in self._ALWAYS_AVAILABLE_TOOLS]
-            # Any tool not named in a route allowlist AND not a meta tool is
-            # external (mcp.json). Append it to non-empty specific routes so
-            # configured MCP tools are reachable, not just via 'full'.
+            # Any tool not in a route allowlist and not a meta tool is external.
             known_names = {
                 n for names in tool_routes.values() if names for n in names
             }
@@ -165,12 +140,8 @@ class LangGraphAgent:
                 if tool_names is None:
                     route_tools = tools  # 'full' already binds everything
                 elif not tool_names:
-                    # e.g. simple_qa: built-in meta tools only — BUT external
-                    # (mcp.json) tools are user-configured capabilities and must
-                    # stay reachable even here. A short factual question ("what
-                    # time is it in Singapore?") classifies as simple_qa, so
-                    # without this an external server like `time` would be
-                    # invisible on the very route such questions land in.
+                    # simple_qa: meta tools only, plus external tools (which must
+                    # stay reachable even here — a factual question lands here).
                     route_tools = list(always_tools) + external_tools
                 else:
                     matched = [t for t in tools if t.name in tool_names]
@@ -184,28 +155,15 @@ class LangGraphAgent:
 
     @property
     def messages(self) -> List[BaseMessage]:
-        """Get the message history.
-
-        Returns:
-            List of messages
-        """
+        """The message history."""
         return self._messages
 
     @messages.setter
     def messages(self, value: List[BaseMessage]) -> None:
-        """Set the message history.
-
-        Args:
-            value: List of messages to set
-        """
         self._messages = value
 
     def _build_graph(self) -> StateGraph:
-        """Build the LangGraph state graph.
-
-        Returns:
-            Compiled state graph
-        """
+        """Build and compile the LangGraph state graph."""
         workflow = StateGraph(AgentState)
 
         if self.router:
@@ -236,20 +194,11 @@ class LangGraphAgent:
         return workflow.compile()
 
     def _route_after_classify(self, state: AgentState) -> str:
-        """Route to orchestrator for 'full' tasks, agent otherwise.
+        """Route 'full' tasks to the orchestrator, others to the agent.
 
-        A 'full' classification still goes to the normal call_model ``agent``
-        path when the query is trivial (short, signal-free chit-chat or a
-        clarification): orchestrating it into a single subtask adds overhead and
-        previously could surface a blank answer, while ``agent`` binds the same
-        tools and has the empty-turn safety net. Only substantive 'full' tasks
-        are actually decomposed.
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            "orchestrator" or "agent"
+        A trivial 'full' query (short/signal-free) still goes to ``agent`` —
+        decomposing it adds overhead for no gain. Only substantive 'full' tasks
+        are decomposed.
         """
         if state.get("route") == "full":
             query = ""
@@ -262,19 +211,12 @@ class LangGraphAgent:
         return "agent"
 
     def _classify(self, state: AgentState) -> Dict[str, Any]:
-        """Classify the query and set the route in state.
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            Updated state with route
-        """
+        """Classify the query and set the route in state."""
         messages = state["messages"]
         if not messages:
             return {"route": "full"}
 
-        # Build conversation context from recent messages (excluding the last)
+        # Conversation context from recent messages (excluding the last).
         context = ""
         if len(messages) > 1:
             recent = messages[-min(4, len(messages)) : -1]
@@ -290,21 +232,9 @@ class LangGraphAgent:
         return {"route": route}
 
     def _orchestrate(self, state: AgentState) -> Dict[str, Any]:
-        """Decompose a complex task into subtasks, execute workers, aggregate.
-
-        This node handles the full orchestration pipeline:
-        1. Decompose the query into subtasks via LLM
-        2. Execute each subtask with a route-specific worker loop
-        3. Aggregate results into a final response
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            Updated state with the final aggregated response
-        """
+        """Decompose the task into subtasks, run a worker per subtask, aggregate."""
         messages = state["messages"]
-        # Extract user query (skip system prompt)
+        # Extract user query (skip system prompt).
         query = ""
         for msg in reversed(messages):
             if isinstance(msg, HumanMessage):
@@ -314,10 +244,8 @@ class LangGraphAgent:
         if not query:
             return {"messages": [AIMessage(content="No query found.")]}
 
-        # Step 1: Decompose task into subtasks. If external (mcp.json) tools are
-        # configured, tell the decomposer about them so it can deliberately
-        # route subtasks needing them to the 'full' category (which binds every
-        # tool) — otherwise the decomposer, unaware they exist, can't target them.
+        # Step 1: decompose into subtasks. External tools are described to the
+        # decomposer so it can route subtasks needing them to 'full'.
         orchestrator_prompt = get_orchestrator_prompt()
         orchestrator_prompt += self._external_tools_prompt_block()
         logger.debug("Orchestrator: decomposing task")
@@ -332,7 +260,6 @@ class LangGraphAgent:
             desc = subtask["description"]
             category = subtask["category"]
 
-            # Print subtask header
             total = len(subtasks)
             short_desc = desc[:70] + ("..." if len(desc) > 70 else "")
             print(
@@ -340,7 +267,7 @@ class LangGraphAgent:
                 flush=True,
             )
 
-            # Get route-specific model and tools
+            # Route-specific model and tools.
             if category == "full" or not self.tools_by_route:
                 worker_tools = self.tools
                 worker_model = self.model_with_tools
@@ -351,7 +278,7 @@ class LangGraphAgent:
                 worker_tools = self.tools_by_route.get(category, self.tools)
                 worker_model = self.models_by_route.get(category, self.model_with_tools)
 
-            # Build worker prompt with context from previous results
+            # Prepend context from previously-completed steps.
             worker_prompt = desc
             if worker_results:
                 context_parts = []
@@ -383,12 +310,12 @@ class LangGraphAgent:
                 }
             )
 
-        # Collect all intermediate worker messages for conversation saving
+        # Collect all intermediate worker messages for conversation saving.
         all_worker_messages: List[BaseMessage] = []
         for wr in worker_results:
             all_worker_messages.extend(wr.get("messages", []))
 
-        # Step 3: Aggregate results
+        # Step 3: aggregate.
         if len(subtasks) == 1:
             final_content = worker_results[0]["result"]
         else:
@@ -414,12 +341,9 @@ class LangGraphAgent:
     def _external_tools_prompt_block(self) -> str:
         """Prompt fragment listing external MCP tools for the decomposer.
 
-        The orchestrator prompt only knows the built-in categories. External
-        (mcp.json) tools don't belong to any of them, so without this the
-        decomposer can't deliberately route a subtask toward one. We list the
-        external tool names + descriptions and instruct it to use the 'full'
-        category for subtasks that need them ('full' binds every tool). Empty
-        string when there are no external tools, so the prompt is unchanged.
+        The orchestrator prompt only knows built-in categories, so external tools
+        are listed here with an instruction to route subtasks needing them to
+        'full'. Empty string when there are none.
         """
         if not self.external_tools:
             return ""
@@ -444,24 +368,15 @@ class LangGraphAgent:
     def _decompose_task(
         self, query: str, orchestrator_prompt: str, valid_categories: set
     ) -> List[Dict[str, Any]]:
-        """Call the LLM to decompose a task into subtasks.
-
-        Args:
-            query: The user's original query
-            orchestrator_prompt: System prompt for decomposition
-            valid_categories: Set of valid category names
-
-        Returns:
-            List of subtask dicts
-        """
+        """Call the LLM to decompose a task into subtask dicts."""
         messages = [
             SystemMessage(content=orchestrator_prompt),
             HumanMessage(content=query),
         ]
 
-        # Suppress callbacks to keep spinner running, and disable reasoning
-        # so the JSON subtask list lands in response.content (reasoning
-        # models otherwise leave content empty and parsing fails).
+        # Suppress callbacks (keeps the spinner up) and disable reasoning so the
+        # JSON subtask list lands in response.content (reasoning models else
+        # leave content empty and parsing fails).
         saved_callbacks = getattr(self.model, "callbacks", None)
         saved_reasoning = None
         try:
@@ -486,17 +401,10 @@ class LangGraphAgent:
         prompt: str,
         max_iterations: int = 10,
     ) -> tuple:
-        """Execute a worker agent loop with streaming until completion.
+        """Run a worker agent loop (streaming) until completion.
 
-        Args:
-            worker_model: Model with route-specific tools bound
-            worker_tools: Tools available to this worker
-            prompt: The worker's task prompt
-            max_iterations: Safety limit for agent loop
-
-        Returns:
-            Tuple of (final_text, worker_messages) where worker_messages
-            contains all intermediate AI and Tool messages for saving
+        Returns ``(final_text, worker_messages)`` where ``worker_messages`` holds
+        the intermediate AI/Tool messages for saving.
         """
         worker_messages: List[BaseMessage] = []
         if self.system_prompt:
@@ -517,24 +425,21 @@ class LangGraphAgent:
 
             worker_messages.append(response)
 
-            # If no tool calls, worker is done
+            # No tool calls → worker is done.
             if not isinstance(response, AIMessage) or not response.tool_calls:
                 visible = self._extract_visible(response.content)
-                # Reasoning-only / empty turn: nothing was streamed to the
-                # screen, so the orchestrator would surface a blank answer.
-                # Salvage a visible reply (same guarantee as _call_model).
+                # Reasoning-only/empty turn: salvage a visible reply so the
+                # orchestrator doesn't surface a blank answer.
                 if not visible:
                     visible = self._salvage_empty_worker_turn(
                         worker_messages, config, worker_model
                     )
                 self._stop_spinner()
-                # Return non-system messages for conversation saving
                 saveable = [
                     m for m in worker_messages if not isinstance(m, SystemMessage)
                 ]
                 return visible or str(response.content), saveable
 
-            # Execute tools
             self._stop_spinner()
             if self.verbose:
                 for tc in response.tool_calls:
@@ -548,7 +453,7 @@ class LangGraphAgent:
                 tool_args = self._normalize_tool_args(tc["args"])
 
                 tool = next((t for t in worker_tools if t.name == tool_name), None)
-                # Fall back to all tools if not found in worker subset
+                # Fall back to all tools if not in the worker subset.
                 if not tool:
                     tool = next((t for t in self.tools if t.name == tool_name), None)
 
@@ -599,8 +504,7 @@ class LangGraphAgent:
 
         self._stop_spinner()
         saveable = [m for m in worker_messages if not isinstance(m, SystemMessage)]
-        # Salvage the last visible output rather than discarding it behind a
-        # generic "completed" string, and flag that the step was truncated.
+        # Salvage the last visible output and flag the step as truncated.
         partial = self._last_visible_from(worker_messages)
         truncated_note = (
             f"(Step stopped after {max_iterations} tool iterations without "
@@ -614,15 +518,9 @@ class LangGraphAgent:
     ) -> str:
         """Recover a visible answer when a worker turn produced none.
 
-        A worker can finish with no tool calls and no visible text — typically a
-        reasoning model that streamed only hidden thinking on a trivial prompt.
-        Nothing was streamed to the screen, so the orchestrator would otherwise
-        surface a blank answer. Mirror :meth:`_call_model`'s guarantee: retry
-        once with reasoning disabled (streamed, so the answer prints), and if
-        that still yields nothing, print and return a visible fallback. The
-        recovered message is appended to ``worker_messages`` so it's saved.
-
-        Returns the visible answer text (never empty).
+        Mirrors :meth:`_call_model`'s guarantee: retry once with reasoning
+        disabled (streamed), else print and return a visible fallback. The
+        recovered message is appended to ``worker_messages``. Never returns empty.
         """
         logger.debug("Worker produced no visible content; salvaging.")
         retry_messages = list(worker_messages) + [
@@ -652,7 +550,7 @@ class LangGraphAgent:
                 worker_messages.append(retry_response)
                 return visible
 
-        # Still nothing usable: surface a fallback so the turn is never silent.
+        # Still nothing usable: surface a fallback (never a silent turn).
         fallback = (
             "I wasn't able to produce a response for that. "
             "Could you rephrase or give me a bit more detail?"
@@ -668,16 +566,7 @@ class LangGraphAgent:
         worker_results: List[Dict[str, Any]],
         aggregator_prompt: str,
     ) -> str:
-        """Aggregate worker results into a final response via LLM.
-
-        Args:
-            original_query: The user's original query
-            worker_results: List of worker result dicts
-            aggregator_prompt: System prompt for aggregation
-
-        Returns:
-            Aggregated response text
-        """
+        """Aggregate worker results into a final response via the LLM."""
         results_text = "\n\n".join(
             f"## Subtask: {r['task']}\n{r['result']}" for r in worker_results
         )
@@ -704,28 +593,14 @@ class LangGraphAgent:
         return self._extract_visible(response.content) or str(response.content)
 
     def _get_route_model(self, state: AgentState):
-        """Get the model binding for the current route.
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            Model with appropriate tools bound
-        """
+        """The model binding for the current route (falls back to all tools)."""
         route = state.get("route")
         if route and self.models_by_route:
             return self.models_by_route.get(route, self.model_with_tools)
         return self.model_with_tools
 
     def _get_route_tools(self, state: AgentState) -> List[BaseTool]:
-        """Get the tool list for the current route.
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            List of tools available for the route
-        """
+        """The tool list for the current route (falls back to all tools)."""
         route = state.get("route")
         if route and self.tools_by_route:
             return self.tools_by_route.get(route, self.tools)
@@ -737,20 +612,11 @@ class LangGraphAgent:
         return message_sanitizer.sanitize_tool_pairs(messages)
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
-        """Call the model with current state using streaming.
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            Updated state with model response
-        """
+        """Call the model with the current state, streaming the response."""
         messages = list(state["messages"])
 
-        # Repair any orphaned tool call/result pair before sending — an orphan
-        # inherited from earlier history (cut-short turn, sliced context) would
-        # otherwise make the provider reject EVERY subsequent turn with
-        # "No tool output found for function call …".
+        # Repair orphaned tool call/result pairs — an orphan from earlier history
+        # would make the provider reject every subsequent turn.
         messages = self._sanitize_tool_pairs(messages)
 
         if self.system_prompt and (
@@ -760,11 +626,9 @@ class LangGraphAgent:
 
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
-        # Spin while we wait for the model's first token (it's stopped as soon as
-        # visible text/reasoning streams, or when tools start). Started here —
-        # not left to the predecessor node — so the gap between the last tool
-        # result and the final answer never shows a frozen terminal. Idempotent:
-        # Spinner.start() no-ops if it's already running. Mirrors _aggregate().
+        # Spin while awaiting the first token (stopped once text/reasoning streams
+        # or tools start). Started here so the gap after the last tool result
+        # never shows a frozen terminal. Idempotent.
         self._start_spinner()
 
         active_model = self._get_route_model(state)
@@ -778,11 +642,9 @@ class LangGraphAgent:
         thinking = self._extract_thinking(response)
         visible = self._extract_visible(response.content)
 
-        # The streaming path yields chunks with no response_metadata, so a
-        # token-truncated turn (status=incomplete / finish_reason=length) is
-        # invisible while streaming. When the streamed turn comes back empty
-        # (no text, no tool call), do ONE authoritative non-streaming invoke to
-        # get definitive content + metadata before deciding what went wrong.
+        # Streaming chunks carry no response_metadata, so a token-truncated turn
+        # is invisible while streaming. On an empty streamed turn, do one
+        # authoritative non-streaming invoke to get definitive content + metadata.
         if not visible and not response.tool_calls:
             authoritative = active_model.invoke(messages, config=config)
             if authoritative is not None:
@@ -790,11 +652,9 @@ class LangGraphAgent:
                 thinking = self._extract_thinking(response)
                 visible = self._extract_visible(response.content)
 
-        # Turn cut short by the output-token limit before any answer (common
-        # with reasoning models on a low MAX_TOKENS: reasoning consumes the
-        # whole budget). Checked BEFORE the reasoning-retry below — retrying
-        # can't help when the budget itself is the limit, and would just
-        # truncate again. Surface an actionable message, not a silent turn.
+        # Turn cut short by the output-token limit before any answer (reasoning
+        # ate the whole budget). Checked BEFORE the reasoning-retry — retrying
+        # can't help when the budget is the limit. Surface an actionable message.
         if (
             not visible
             and not response.tool_calls
@@ -820,8 +680,7 @@ class LangGraphAgent:
             print(truncated.content, flush=True)
             return {"messages": [truncated], "thinking": thinking}
 
-        # If model produced only reasoning with no visible content,
-        # retry once with reasoning disabled
+        # Only reasoning, no visible content: retry once with reasoning disabled.
         if thinking and not visible and not response.tool_calls:
             if not response.additional_kwargs.get("reasoning_content"):
                 response.additional_kwargs["reasoning_content"] = thinking
@@ -861,8 +720,7 @@ class LangGraphAgent:
                         retry_response.additional_kwargs["reasoning_content"] = thinking
                     return {"messages": [retry_response], "thinking": thinking}
 
-            # Both attempts yielded no usable output: surface a fallback so the
-            # user never sees a silent turn.
+            # Both attempts yielded nothing usable: surface a fallback (never silent).
             fallback = AIMessage(
                 content=(
                     "I wasn't able to produce a response for that. "
@@ -885,20 +743,11 @@ class LangGraphAgent:
         model=None,
         mark_answer: bool = False,
     ) -> tuple:
-        """Stream model response, handling spinner and output.
+        """Stream a model response, handling spinner and output.
 
-        Args:
-            messages: Messages to send to the model
-            config: LangChain config dict
-            print_reasoning: Whether to print reasoning in gray
-            model: Optional model override (defaults to self.model_with_tools)
-            mark_answer: Print a marker before the answer when no reasoning is
-                shown, so it's visually distinct from the user's prompt. Set on
-                user-facing answer turns; left off for worker streams (which
-                already carry a `[Step N/N]` header).
-
-        Returns:
-            Tuple of (response, had_reasoning)
+        Retries a completely empty turn (transient endpoint hiccup) up to
+        ``_empty_response_retries`` times. ``mark_answer`` prints a marker before
+        the answer on user-facing turns. Returns ``(response, had_reasoning)``.
         """
         active_model = model or self.model_with_tools
         attempts = getattr(self, "_empty_response_retries", 0) + 1
@@ -906,9 +755,8 @@ class LangGraphAgent:
             response, had_reasoning = self._stream_once(
                 active_model, messages, config, print_reasoning, mark_answer
             )
-            # Retry only a *completely* empty turn (no content, no reasoning,
-            # no tool calls) — a transient endpoint hiccup, not a real answer.
-            # The reasoning-only case is handled separately by the caller.
+            # Retry only a completely empty turn; the reasoning-only case is the
+            # caller's responsibility.
             if not self._is_empty_response(response) or attempt == attempts - 1:
                 return response, had_reasoning
             logger.debug(
@@ -946,9 +794,10 @@ class LangGraphAgent:
         answer_marker_printed = False
         building_tool_args = False
         response = None
-        # Styled-turn-view (pinned UI): buffer reasoning to render a single
-        # collapsed "Thought for Ns…" block instead of streaming gray tokens.
+        # Styled-turn-view (pinned UI): buffer reasoning; also feed a live sink
+        # (if wired) so it streams in the transient region, then commits.
         styled = getattr(self, "styled_turn_view", False)
+        sink = getattr(self, "reasoning_sink", None) if styled else None
         reasoning_buf: List[str] = []
         reasoning_started = None
 
@@ -956,13 +805,12 @@ class LangGraphAgent:
             for chunk in active_model.stream(messages, config=config):
                 chunk_content, reasoning_content = self._extract_content(chunk)
 
-                # Stop the spinner only when something is about to be DISPLAYED:
-                # visible answer text, or reasoning we'll actually print. Some
-                # models reasoning chunks whose text we never show — stopping
-                # on those leaves a dead pause (spinner gone, nothing printed)
-                # until the answer arrives. Keep spinning through hidden reasoning.
+                # Stop the spinner only for what's displayed NOW. Styled mode
+                # buffers reasoning (nothing shows until the answer), so reasoning
+                # there must keep the spinner running — else a dead pause.
                 will_show_reasoning = bool(
                     reasoning_content and self.verbose and print_reasoning
+                    and not styled
                 )
                 if (
                     first_token
@@ -974,23 +822,23 @@ class LangGraphAgent:
 
                 if reasoning_content and self.verbose and print_reasoning:
                     if styled:
-                        # Buffer + time it; the collapsed block prints once, just
-                        # before the answer (or when the stream ends).
+                        # Buffer for the final block; also feed the live sink.
                         if reasoning_started is None:
                             reasoning_started = time.time()
+                            if sink is not None:
+                                sink.start(time.monotonic())
                         reasoning_buf.append(reasoning_content)
+                        if sink is not None:
+                            sink.append(reasoning_content)
                     else:
                         print(
                             f"\033[90m{reasoning_content}\033[0m", end="", flush=True
                         )
                     had_reasoning = True
 
-                # A tool call streams its arguments as many chunks that carry NO
-                # visible content — for a large arg (e.g. fs_write's file_text of
-                # a big document) this is a long, silent stretch. If the spinner
-                # was already stopped (by reasoning above) it would look frozen,
-                # so re-raise a "Preparing …" spinner and keep it up until the
-                # tool marker prints. Guarded on self.callbacks (same as the stop).
+                # Tool-arg chunks carry no visible content — a long silent stretch
+                # for a big arg. Re-raise a "Preparing …" spinner so it doesn't
+                # look frozen until the tool marker prints.
                 if (
                     not chunk_content
                     and self.callbacks
@@ -1001,15 +849,13 @@ class LangGraphAgent:
                     self._start_spinner("Preparing tool call")
 
                 if chunk_content:
-                    # Real answer text arrived after tool-arg chunks (rare, but a
-                    # model can interleave) — drop the preparing spinner first.
+                    # Real answer text after tool-arg chunks (interleaved) — drop
+                    # the preparing spinner first.
                     if building_tool_args:
                         building_tool_args = False
                         self._stop_spinner()
                     if not answer_marker_printed:
                         if styled and reasoning_buf:
-                            # Emit the collapsed "Thought for Ns…" block, then a
-                            # blank line before the answer.
                             self._flush_reasoning_block(
                                 reasoning_buf, reasoning_started
                             )
@@ -1018,42 +864,40 @@ class LangGraphAgent:
                             print("", flush=True)
                             chunk_content = chunk_content.lstrip("\n")
                         elif had_reasoning:
-                            # Reasoning already printed (gray) above — separate
-                            # it from the answer with a blank line.
+                            # Separate gray reasoning above from the answer.
                             print("\n\n", end="", flush=True)
                             had_reasoning = False
                             chunk_content = chunk_content.lstrip("\n")
                         if mark_answer:
-                            # Marker before the first answer chunk so the reply
-                            # is visually distinct from the prompt (and from the
-                            # gray reasoning). The answer continues on the same
-                            # line, after the marker.
-                            self._print_answer_marker()
+                            # Prepend the marker to the first answer chunk so it's
+                            # part of the SAME committed line — a separate flushed
+                            # marker write is a lone partial line the pinned UI
+                            # repaint erases before the answer joins it.
+                            chunk_content = self._answer_marker() + chunk_content
                         answer_marker_printed = True
                     self._code_formatter.process_chunk(chunk_content)
 
                 response = chunk if response is None else response + chunk
 
-            # Stream finished cleanly: flush the formatter so a trailing
-            # backtick or a response that ended inside an unclosed code fence is
-            # still emitted (not silently dropped) and the terminal color reset.
+            # Flush the formatter so a trailing backtick / unclosed code fence is
+            # still emitted and the terminal color is reset.
             if answer_marker_printed:
                 self._code_formatter.flush()
-            # Reasoning with no following visible content (e.g. the model went
-            # straight to a tool call): still show the collapsed block so the
-            # thinking isn't lost.
+                # Terminate the answer line NOW. patch_stdout only commits a line
+                # on a newline; without this the streamed answer sits uncommitted
+                # in the buffer and a pinned-UI repaint (during the post-turn work
+                # before [Context]) erases it. Styled/pinned mode only.
+                if styled:
+                    print(flush=True)
+            # Reasoning with no following content (model went straight to a tool
+            # call): still show the block so the thinking isn't lost.
             if styled and reasoning_buf:
                 self._flush_reasoning_block(reasoning_buf, reasoning_started)
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            # A streaming error shouldn't lose the whole turn. Any partial
-            # `response` accumulated before the error is, by definition,
-            # truncated — it may be missing content or tool_calls. So always
-            # retry once with a single non-streaming call and prefer its
-            # complete, authoritative result; only keep the partial if the
-            # non-streaming retry yields nothing. (Without this, a mid-stream
-            # parse failure could surface as an empty/incomplete turn.)
+            # Don't lose the turn on a stream error: retry once non-streaming and
+            # prefer its complete result; keep the partial only if that yields none.
             logger.warning(f"Streaming error: {e}; falling back to non-streaming")
             self._stop_spinner()
             try:
@@ -1062,26 +906,24 @@ class LangGraphAgent:
                     response = full
             except Exception as e2:
                 logger.error(f"Non-streaming fallback also failed: {e2}")
+        finally:
+            # Never leave a lingering transient block (cancel / error / no flush).
+            if sink is not None:
+                sink.stop()
 
         return response, had_reasoning
 
-    def _print_answer_marker(self) -> None:
-        """Print a subtle marker before a streamed answer.
-
-        A small cyan bullet makes the assistant's reply visually distinct from
-        the user's prompt (and from any gray reasoning printed above it). The
-        answer continues on the same line, right after the marker.
-        """
-        # Cyan ● bullet + a trailing space; no newline so the answer follows it.
-        print("\033[36m●\033[0m ", end="", flush=True)
+    @staticmethod
+    def _answer_marker() -> str:
+        """The cyan ● prefix for a streamed answer (prepended to the first chunk)."""
+        return "\033[36m●\033[0m "
 
     def _flush_reasoning_block(self, parts: list, started: Optional[float]) -> None:
-        """Print the collapsed 'Thought for Ns…' block from buffered reasoning.
-
-        Styled-turn-view only. ``parts`` are the accumulated reasoning chunks and
-        ``started`` the monotonic-ish start time; renders via
-        :mod:`client.ui.turn_view`. No-op if there's nothing to show.
-        """
+        """Commit the collapsed 'Thought for Ns…' block to scrollback and clear
+        the live sink; no-op if empty."""
+        sink = getattr(self, "reasoning_sink", None)
+        if sink is not None:
+            sink.stop()  # clear the transient view before the block commits
         text = "".join(parts).strip()
         if not text:
             return
@@ -1104,12 +946,7 @@ class LangGraphAgent:
                     cb.spinner.stop()
 
     def _start_spinner(self, label: str = "Thinking") -> None:
-        """Restart the spinner and reset first token flag.
-
-        Args:
-            label: Text shown next to the animated glyph (e.g. "Running command"
-                while a tool executes), so a slow tool never looks stuck.
-        """
+        """Restart the spinner (with ``label``) and reset the first-token flag."""
         for cb in self.callbacks:
             if hasattr(cb, "spinner") and cb.spinner:
                 lock = getattr(cb, "spinner_lock", None)
@@ -1124,12 +961,7 @@ class LangGraphAgent:
                         cb.first_token_received = False
 
     def _tool_progress_label(self, tool_name: str, tool_args: dict) -> str:
-        """A short 'still working' label shown while a tool runs.
-
-        Keeps the user informed during a slow ``tool.invoke()`` (e.g. executing
-        Python, a long shell command, a web fetch) so it never looks stuck while
-        it's just waiting for completion.
-        """
+        """A short 'still working' label shown while a slow tool runs."""
         if tool_name == "execute_bash":
             cmd = str(tool_args.get("command", "")).strip().replace("\n", " ")
             if len(cmd) > 50:
@@ -1152,13 +984,8 @@ class LangGraphAgent:
     _SELF_REPORTING_TOOLS = {"web_crawler"}
 
     def _invoke_tool(self, tool, tool_name: str, tool_args: dict):
-        """Invoke a tool, showing a progress spinner unless the tool reports itself.
-
-        Most tools give no feedback while running, so a per-tool spinner keeps a
-        slow call from looking frozen. Tools in ``_SELF_REPORTING_TOOLS`` emit
-        their own live progress; we leave the spinner stopped for those so the
-        two don't overwrite each other on the terminal.
-        """
+        """Invoke a tool with a progress spinner, unless it's self-reporting
+        (``_SELF_REPORTING_TOOLS`` emit their own progress → spinner left off)."""
         if tool_name in self._SELF_REPORTING_TOOLS:
             self._stop_spinner()
             return tool.invoke(tool_args)
@@ -1171,11 +998,9 @@ class LangGraphAgent:
 
     @staticmethod
     def _reasoning_summary_text(block: dict) -> str:
-        """Pull the text out of an OpenAI Responses ``reasoning`` summary block.
+        """Concatenate an OpenAI Responses ``reasoning`` summary block's text.
 
-        Shape (from langchain_openai's Responses streaming):
-        ``{"type":"reasoning","summary":[{"type":"summary_text","text":…}, …]}``.
-        Returns the concatenated summary text (empty if none).
+        Shape: ``{"type":"reasoning","summary":[{"type":"summary_text","text":…}]}``.
         """
         summary = block.get("summary")
         if not isinstance(summary, list):
@@ -1187,26 +1012,19 @@ class LangGraphAgent:
         )
 
     def _extract_thinking(self, response) -> Optional[str]:
-        """Extract thinking/reasoning content from a response.
+        """Extract thinking/reasoning from a response, or None.
 
-        Checks all possible sources: additional_kwargs, Bedrock content blocks,
-        OpenAI Responses reasoning-summary blocks, and <think>/<thinking> tags in
-        string content.
-
-        Args:
-            response: AIMessage response
-
-        Returns:
-            Thinking text or None
+        Checks additional_kwargs, Bedrock content blocks, OpenAI Responses
+        reasoning-summary blocks, and <think>/<thinking> tags.
         """
-        # 1. Check additional_kwargs (Ollama via wrapper, LiteLLM)
+        # 1. additional_kwargs (Ollama via wrapper, LiteLLM).
         if hasattr(response, "additional_kwargs"):
             thinking = response.additional_kwargs.get("reasoning_content")
             if thinking:
                 return thinking
 
-        # 2. Check content blocks: Bedrock-style {"type":"thinking"} and the
-        #    OpenAI Responses {"type":"reasoning","summary":[…]} summary shape.
+        # 2. Content blocks: Bedrock {"type":"thinking"} and OpenAI Responses
+        #    {"type":"reasoning","summary":[…]}.
         if isinstance(response.content, list):
             parts = []
             for block in response.content:
@@ -1220,7 +1038,7 @@ class LangGraphAgent:
             if parts:
                 return "".join(parts)
 
-        # 3. Check <think>/<thinking> tags in string content (Ollama raw)
+        # 3. <think>/<thinking> tags in string content (Ollama raw).
         if isinstance(response.content, str):
             match = re.search(
                 r"<think(?:ing)?>(.*?)</think(?:ing)?>",
@@ -1234,20 +1052,10 @@ class LangGraphAgent:
 
     @staticmethod
     def _was_truncated_by_tokens(response) -> bool:
-        """Detect a turn cut short by the output-token limit.
+        """True if the turn was cut short by the output-token limit.
 
-        Reasoning models on the OpenAI Responses API (e.g. Mantle Grok / GPT-5)
-        spend output tokens reasoning before they answer. With a small
-        ``MAX_TOKENS`` the budget is consumed mid-reasoning and the answer is
-        never emitted: ``response_metadata`` reports ``status: "incomplete"``
-        with ``incomplete_details.reason == "max_output_tokens"``. Chat /
-        Converse providers signal the same via a ``length`` finish reason.
-
-        Args:
-            response: The model response (AIMessage).
-
-        Returns:
-            True if the turn was truncated by the token limit.
+        Responses API reports ``incomplete_details.reason == "max_output_tokens"``;
+        Chat/Converse providers signal a ``length`` finish reason.
         """
         meta = getattr(response, "response_metadata", None) or {}
         details = meta.get("incomplete_details") or {}
@@ -1257,14 +1065,7 @@ class LangGraphAgent:
         return finish in ("length", "max_tokens")
 
     def _extract_visible(self, content) -> str:
-        """Extract visible content, stripping thinking tags.
-
-        Args:
-            content: Response content (str or list of blocks)
-
-        Returns:
-            Visible text content
-        """
+        """Extract visible text, stripping <think>/<thinking> tags."""
         if isinstance(content, str):
             return re.sub(
                 r"<think(?:ing)?>.*?</think(?:ing)?>",
@@ -1281,45 +1082,27 @@ class LangGraphAgent:
         return ""
 
     def _disable_reasoning(self) -> dict:
-        """Temporarily disable reasoning/thinking on the model.
-
-        Returns:
-            Saved state to pass to _restore_reasoning()
-        """
+        """Temporarily disable reasoning; returns saved state for _restore."""
         return disable_reasoning(self.model)
 
     def _restore_reasoning(self, saved: dict) -> None:
-        """Restore reasoning/thinking settings on the model.
-
-        Args:
-            saved: State from _disable_reasoning()
-        """
+        """Restore reasoning settings saved by _disable_reasoning()."""
         restore_reasoning(self.model, saved)
 
     def _extract_content(self, chunk) -> tuple[str, str]:
-        """Extract content and reasoning from a chunk.
-
-        Args:
-            chunk: Streaming chunk from the model
-
-        Returns:
-            Tuple of (content, reasoning_content)
-        """
+        """Extract ``(content, reasoning_content)`` from a streaming chunk."""
         raw_content = chunk.content if chunk.content else ""
         chunk_content = ""
         reasoning_content = ""
 
         if isinstance(raw_content, list):
-            # Bedrock format
+            # Bedrock / Responses content blocks.
             for block in raw_content:
                 if isinstance(block, dict):
                     block_type = block.get("type", "")
                     if block_type == "thinking":
                         reasoning_content += block.get("thinking", "")
                     elif block_type == "reasoning":
-                        # OpenAI Responses API (e.g. Mantle GPT-5) streams a
-                        # reasoning SUMMARY as {"type":"reasoning","summary":[
-                        # {"type":"summary_text","text":…}]}.
                         reasoning_content += self._reasoning_summary_text(block)
                     elif block_type == "text":
                         chunk_content += block.get("text", "")
@@ -1328,13 +1111,13 @@ class LangGraphAgent:
         else:
             chunk_content = str(raw_content) if raw_content else ""
 
-        # Check for reasoning in additional_kwargs (Ollama, LiteLLM)
+        # Reasoning in additional_kwargs (Ollama, LiteLLM).
         if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
             reasoning = chunk.additional_kwargs.get("reasoning_content", "")
             if reasoning:
                 reasoning_content = reasoning
 
-        # Strip </think> tag from content if present (for models that include it)
+        # Strip a stray </think> tag some models include.
         if "</think>" in chunk_content:
             chunk_content = chunk_content.replace("</think>", "").strip()
 
@@ -1393,17 +1176,12 @@ class LangGraphAgent:
     _CONFIRM_MEMORY_TOOLS = {"memory"}
 
     def _confirm_tool(self, tool_name: str, tool_args: dict) -> bool:
-        """Ask the user to approve a destructive tool before it runs (Claude Code-style).
+        """Ask the user to approve a destructive tool before it runs.
 
-        Returns True to proceed, False if the user declines. Gates shell commands
-        (``execute_bash``, toggle ``REQUIRE_BASH_CONFIRMATION``, default True),
-        file writes (``fs_write``/``file_edit``, ``REQUIRE_WRITE_CONFIRMATION``,
-        default True), and memory writes (``memory``, ``REQUIRE_MEMORY_CONFIRMATION``,
-        default **False** — auto-save like Hermes); every other tool proceeds.
-        The prompt is a hard gate enforced here in the client (which owns the
-        terminal) — the MCP server is a piped subprocess and can't prompt.
-        Non-interactive runs (no TTY, e.g. tests/CI) auto-proceed so they
-        don't hang.
+        Returns True to proceed. Gates shell (``execute_bash``), file writes
+        (``fs_write``/``file_edit``), and memory writes, each behind its
+        ``REQUIRE_*`` toggle; every other tool proceeds. Enforced client-side (the
+        MCP subprocess can't prompt); non-TTY runs auto-proceed.
         """
         if tool_name in self._CONFIRM_BASH_TOOLS:
             category, toggle, toggle_default, header, detail = (
@@ -1445,7 +1223,7 @@ class LangGraphAgent:
 
         if not config.get(toggle, toggle_default):
             return True
-        # Already trusted for this session (user answered "a" earlier).
+        # Already trusted this session (user answered "a" earlier).
         trusted = getattr(self, "_trusted_confirm_categories", None)
         if trusted is not None and category in trusted:
             return True
@@ -1454,11 +1232,9 @@ class LangGraphAgent:
 
         self._stop_spinner()
 
-        # The pinned-input UI installs a `_confirm_ui` hook: the confirmation runs
-        # on the worker thread, but a plain input() there fights the live app for
-        # stdin. The hook captures an in-app y/N/a keypress and returns
-        # "yes"|"no"|"all". When absent (the non-TTY plain loop, or a bare object
-        # in unit tests), fall through to the legacy print()+input() path.
+        # The pinned-input UI installs a `_confirm_ui` hook (in-app y/N/a keypress
+        # → yes|no|all) since a plain input() would fight the live app for stdin.
+        # Absent (plain loop / unit-test bare object) → legacy print()+input().
         confirm_ui = getattr(self, "_confirm_ui", None)
         if confirm_ui is not None:
             answer = confirm_ui(header, detail, category)
@@ -1467,7 +1243,6 @@ class LangGraphAgent:
                 return True
             return answer == "yes"
 
-        # Yellow header + the action detail, then a strict y/N/a prompt.
         # "a" = allow this whole category for the rest of the session.
         print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
         try:
@@ -1483,14 +1258,7 @@ class LangGraphAgent:
         return answer in ("y", "yes")
 
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
-        """Execute tools based on the last AI message.
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            Updated state with tool results
-        """
+        """Execute the tool calls on the last AI message."""
         last_message = state["messages"][-1]
 
         if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
@@ -1500,11 +1268,8 @@ class LangGraphAgent:
 
         route_tools = self._get_route_tools(state)
 
-        # Print a visible tool-invocation marker so reasoning before a tool call
-        # is separated from reasoning after it (otherwise the two run together).
-        # Mirrors the gray "[Step …]" markers the orchestrator prints. In styled
-        # mode (pinned UI) render the name + ↳arg block instead of the compact
-        # [⚙ …] marker.
+        # Visible tool marker so reasoning before/after a call is separated. In
+        # styled mode (pinned UI) render the name + ↳arg block, else the [⚙ …] one.
         if self.verbose:
             for tool_call in last_message.tool_calls:
                 if getattr(self, "styled_turn_view", False):
@@ -1529,7 +1294,7 @@ class LangGraphAgent:
             tool_args = self._normalize_tool_args(tool_call["args"])
             tool_id = tool_call["id"]
 
-            # Look up in route tools first, fall back to all tools
+            # Route tools first, then fall back to all tools.
             tool = next((t for t in route_tools if t.name == tool_name), None)
             if not tool:
                 tool = next((t for t in self.tools if t.name == tool_name), None)
@@ -1545,7 +1310,7 @@ class LangGraphAgent:
                         )
                     )
                     continue
-                # Hard gate: ask the user before running a shell command.
+                # Hard gate: confirm destructive tools before running.
                 if not self._confirm_tool(tool_name, tool_args):
                     tool_results.append(
                         ToolMessage(
@@ -1587,36 +1352,19 @@ class LangGraphAgent:
         return {"messages": tool_results}
 
     def _should_continue(self, state: AgentState) -> str:
-        """Determine if the agent should continue or end.
-
-        Args:
-            state: Current agent state
-
-        Returns:
-            "continue" if tools should be executed, "end" otherwise
-        """
+        """"continue" if the last AI message has tool calls, else "end"."""
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             return "continue"
         return "end"
 
     def __call__(self, prompt: str) -> str:
-        """Invoke the agent with a prompt.
-
-        Args:
-            prompt: User prompt
-
-        Returns:
-            Agent response as string
-        """
+        """Invoke the agent with a prompt."""
         return self.invoke(prompt)
 
-    # Ephemeral, per-turn reminder blocks the client prepends to a prompt (e.g.
-    # the plan-mode banner). They're true only for the turn they're sent on, so
-    # they go to the model THIS turn but must NOT be persisted in history — a
-    # saved/reloaded conversation that kept a "plan mode is active" banner makes
-    # the model believe it's still in plan mode. Matched and stripped before the
-    # prompt is stored.
+    # Ephemeral per-turn reminder blocks (e.g. the plan-mode banner) the client
+    # prepends: sent to the model this turn but stripped before storage, so a
+    # reloaded conversation never carries a stale "plan mode is active" banner.
     _EPHEMERAL_BLOCK_RE = re.compile(
         r"<plan-mode-active>.*?</plan-mode-active>\s*", re.DOTALL
     )
@@ -1627,22 +1375,12 @@ class LangGraphAgent:
         return cls._EPHEMERAL_BLOCK_RE.sub("", text)
 
     def invoke(self, prompt: str) -> str:
-        """Invoke the agent with a prompt.
-
-        Args:
-            prompt: User prompt
-
-        Returns:
-            Agent response as string
-        """
-        # The model sees the full prompt (incl. any ephemeral plan-mode banner)
-        # for THIS turn, but only the clean prompt is persisted — so a saved
-        # conversation never carries a stale "plan mode is active" instruction.
+        """Invoke the agent with a prompt; returns the response string."""
+        # Model sees the full prompt this turn; only the clean prompt is stored.
         stored_prompt = self._strip_ephemeral(prompt)
         self._messages.append(HumanMessage(content=stored_prompt))
 
-        # Build the turn the model actually runs on: clean history + the full
-        # current prompt (clean stored turn swapped for the reminder-bearing one).
+        # The turn the model runs on: clean history + the full current prompt.
         model_messages = self._messages[:-1] + [HumanMessage(content=prompt)]
         initial_state: AgentState = {
             "messages": model_messages,
@@ -1655,10 +1393,7 @@ class LangGraphAgent:
                 SystemMessage(content=self.system_prompt)
             ] + list(initial_state["messages"])
 
-        # Bound the model<->tools loop. This is a runaway guard, not a normal
-        # stopping point — set high (default 200, configurable) so legitimate
-        # long tasks run to completion, with context compaction as the real
-        # limiter (like Claude Code). Hitting it means a likely stuck loop.
+        # recursion_limit is a runaway guard; hitting it means a likely stuck loop.
         try:
             result = self.graph.invoke(
                 initial_state, config={"recursion_limit": self.recursion_limit}
@@ -1682,11 +1417,9 @@ class LangGraphAgent:
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
 
-        # Collect only the NEW assistant/tool messages produced this turn. Skip
-        # SystemMessage, the already-stored history, and any HumanMessage — the
-        # user turn was stored above as the CLEAN prompt, so we must not re-add
-        # the reminder-bearing HumanMessage the model actually ran on (which is
-        # a distinct object and would otherwise look "new").
+        # Keep only the NEW assistant/tool messages. Skip System/Human — the user
+        # turn was already stored as the clean prompt, so the reminder-bearing
+        # HumanMessage the model ran on must not be re-added.
         new_messages = [
             m
             for m in final_messages
@@ -1695,17 +1428,14 @@ class LangGraphAgent:
         ]
         self._messages.extend(new_messages)
 
-        # Prefer the most recent AI turn that actually has visible text.
+        # Prefer the most recent AI turn with visible text.
         for msg in reversed(final_messages):
             if isinstance(msg, AIMessage) and not msg.tool_calls:
                 visible = self._extract_visible(msg.content)
                 if visible:
                     return visible
 
-        # No visible final answer (the model ended on an empty turn — e.g. it
-        # called a tool, got an error/timeout result, then said nothing). Never
-        # return a silent empty string: salvage the last tool result so the user
-        # learns what happened, else fall back to a generic message.
+        # Empty final turn: salvage the last tool result rather than return "".
         last_tool = self._last_tool_result(final_messages)
         if last_tool:
             return f"The last tool reported:\n{last_tool}"
@@ -1715,16 +1445,7 @@ class LangGraphAgent:
         )
 
     def _last_visible_from(self, messages: List[BaseMessage]) -> str:
-        """Return the most recent visible AI text from a message list.
-
-        Used to salvage a partial answer when the agent loop is cut short.
-
-        Args:
-            messages: Message history to scan (most recent last)
-
-        Returns:
-            Visible text of the last AIMessage with content, or empty string
-        """
+        """Most recent visible AI text (to salvage a cut-short answer), or ""."""
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 visible = self._extract_visible(msg.content)
@@ -1733,12 +1454,8 @@ class LangGraphAgent:
         return ""
 
     def _last_tool_result(self, messages: List[BaseMessage]) -> str:
-        """Return the most recent ToolMessage content (trimmed), or "".
-
-        Used to salvage a useful answer when the model ends on an empty turn
-        right after a tool ran (e.g. a bash timeout): the tool's result is the
-        most informative thing we can still show the user.
-        """
+        """Most recent ToolMessage content (trimmed to 500 chars), or "" — to
+        salvage something useful when the model ends on an empty post-tool turn."""
         for msg in reversed(messages):
             if isinstance(msg, ToolMessage):
                 text = str(msg.content).strip()
@@ -1747,11 +1464,7 @@ class LangGraphAgent:
         return ""
 
     def get_thinking(self) -> Optional[str]:
-        """Get the thinking content from the last response.
-
-        Returns:
-            Thinking content or None
-        """
+        """The thinking content from the last response, or None."""
         return self._thinking
 
     def clear_messages(self) -> None:

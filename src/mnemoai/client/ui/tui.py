@@ -1,19 +1,11 @@
 """Pinned-input prompt_toolkit UI + dialogs for the chat loop.
 
-``PinnedPromptReader`` is the interactive TTY UI: a persistent (non-full-screen)
-prompt_toolkit ``Application`` that keeps the ``>`` input pinned at the bottom of
-the terminal while each query runs on a worker thread and its output streams
-*above* it (via ``patch_stdout``) into native scrollback — so wrapping, copy/paste
-and scrollback are preserved (the Claude-Code / Kiro layout). It handles slash
-completion, history, an animated status/spinner line, Esc-to-cancel, an input
-queue, in-app y/N/a confirmations, and exit-then-relaunch for full-screen dialog
-commands (``/load``, ``/config``, …).
-
-Also provides the full-screen dialogs used by ``/load`` and the configurator
-(``select_from_list``, ``confirm_inline``): Enter confirms, Esc cancels.
-
-Non-TTY sessions (pipes / CI / tests) never use this — the chat loop degrades to
-plain ``input()``.
+``PinnedPromptReader`` is the interactive TTY UI (Claude-Code / Kiro layout): a
+non-full-screen ``Application`` keeps the ``>`` input pinned at the bottom while
+queries run on a worker thread and output streams above it via ``patch_stdout``.
+Also provides the full-screen dialogs (``select_from_list``, ``confirm_inline``)
+used by ``/load`` and the configurator. Non-TTY sessions degrade to plain
+``input()`` and never use this.
 """
 
 import sys
@@ -24,6 +16,7 @@ from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.filters import Condition
+from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import History, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.defaults import load_key_bindings
@@ -44,31 +37,21 @@ from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
 
-# The default ``bottom-toolbar`` class is reverse-video (a solid light bar). The
-# pinned status/queue lines should read like dim console text, not a highlighted
-# status bar, so override to plain gray on the default background.
+# Override the default reverse-video bottom-toolbar so the pinned status/queue
+# lines read as dim console text, not a highlighted bar.
 _TUI_STYLE = Style(
     [
         ("bottom-toolbar", "noreverse bg:default fg:#888888"),
         ("bottom-toolbar.text", "noreverse bg:default fg:#888888"),
-        # Pinned-input status line (spinner): dim gray on the default background,
-        # so it reads as a subtle status, not a highlighted bar.
         ("pinned-status", "noreverse bg:default fg:#888888"),
-        # Confirmation prompt shown in the status region: yellow, to stand out.
         ("pinned-confirm", "noreverse bg:default fg:ansiyellow bold"),
-        # Queued (not-yet-started) messages shown live above the input: dim.
         ("pinned-queued", "noreverse bg:default fg:#888888"),
     ]
 )
 
 
 class SlashCommandCompleter(Completer):
-    """Suggest slash commands, but only when the line starts with '/'.
-
-    Ported from the former ``ChatInterface._SlashCommandCompleter`` so behavior
-    is identical: a message that doesn't begin with '/' yields no completions,
-    and only a single leading token (no space) is completed.
-    """
+    """Suggest slash commands, only when the line is a single leading '/' token."""
 
     def __init__(self, commands: List[tuple]) -> None:
         self._commands = commands
@@ -105,21 +88,14 @@ def _dialog_is_tty() -> bool:
 class PinnedPromptReader:
     """Pinned-input REPL with the ``>`` input fixed at the BOTTOM of the screen.
 
-    Runs a custom (non-full-screen) prompt_toolkit ``Application`` whose layout is
-    a small bottom region — a status line (spinner, shown only while busy) *above*
-    the ``>`` input line. ``patch_stdout(raw=True)`` routes all ordinary
-    ``print()`` output **above** that region, so messages/answers/tool markers
-    scroll up in native terminal scrollback while the input stays pinned at the
-    very bottom (the Claude-Code / Kiro layout). Native wrapping + copy/paste are
-    preserved (not a full-screen app).
-
-    Submitting a line enqueues it (``accept_handler`` runs on the app's event-loop
-    thread); a background worker coroutine drains the queue **one at a time** and
-    runs each line via ``asyncio.to_thread`` — on a worker thread because
-    ``client.query()`` calls ``asyncio.run()`` internally, which raises on a thread
-    that already owns a running loop. So the input stays live and responsive while
-    a turn generates; a second Enter queues (FIFO), never launching a concurrent
-    query. This is the default interactive UI on a TTY.
+    A non-full-screen prompt_toolkit ``Application`` keeps a status line + ``>``
+    input pinned at the bottom while ``patch_stdout(raw=True)`` routes output
+    above it into native scrollback (the Claude-Code / Kiro layout; wrapping and
+    copy/paste preserved). Submitting enqueues a line; a worker coroutine drains
+    the queue one at a time via ``asyncio.to_thread`` — a worker thread is
+    required because ``client.query()`` calls ``asyncio.run()``, which raises on a
+    thread already owning a loop. A second Enter queues (FIFO), never running a
+    concurrent query. Default interactive UI on a TTY.
     """
 
     def __init__(
@@ -130,25 +106,26 @@ class PinnedPromptReader:
         dispatch: Callable[[str], Any],
         history: Optional[History] = None,
         toolbar_text: Optional[Callable[[], Any]] = None,
+        reasoning_text: Optional[Callable[[], str]] = None,
         on_cancel: Optional[Callable[[], None]] = None,
     ) -> None:
         """Build the pinned app.
 
         Args:
-            prompt_text: Returns the input prefix each render (e.g. ``> `` / HTML
-                with a plan-mode tag) — re-evaluated so the tag updates live.
+            prompt_text: Returns the input prefix each render (re-evaluated so a
+                plan-mode tag updates live).
             commands: Slash-command ``(cmd, desc)`` pairs for completion.
-            dispatch: Called on a worker thread with the submitted line; returns
-                :data:`_ExitRepl` to end the REPL, else ``None``.
+            dispatch: Called on a worker thread; returns :data:`_ExitRepl` to end
+                the REPL, else ``None``.
             history: Optional shared prompt history.
-            toolbar_text: Returns the status-line content (animated spinner). An
-                empty string hides the status line (region shrinks to just input).
-            on_cancel: Called (UI thread) on Esc during a running turn — requests
-                cancellation of the in-flight query (wired in a later stage).
+            toolbar_text: Returns the status-line content; empty hides the line.
+            reasoning_text: Returns the live-reasoning ANSI block; empty hides it.
+            on_cancel: Called (UI thread) on Esc during a turn to request cancel.
         """
         self._prompt_text = prompt_text
         self._dispatch = dispatch
         self._toolbar_text = toolbar_text or (lambda: "")
+        self._reasoning_text = reasoning_text or (lambda: "")
         self._on_cancel = on_cancel
         self._busy = False
         self._pending = 0  # queued-but-not-started lines (for the status line)
@@ -172,10 +149,8 @@ class PinnedPromptReader:
             multiline=False,
             history=self._history,
             completer=SlashCommandCompleter(commands),
-            # Live slash-command completions. NOTE: intentionally NOT combined
-            # with enable_history_search — prompt_toolkit warns the two conflict
-            # (both react to text changes), which made the popup appear only
-            # intermittently. ↑/↓ still navigate history (plain, not prefix-match).
+            # NOT combined with enable_history_search — ptk warns they conflict
+            # (both react to text changes), making the popup appear only sometimes.
             complete_while_typing=True,
             accept_handler=self._on_accept,
         )
@@ -191,12 +166,8 @@ class PinnedPromptReader:
         return [("class:pinned-status", text)] if text else []
 
     def _queued_text(self):
-        """Formatted text listing messages queued (submitted, not yet started).
-
-        Shown live in the pinned region so a message typed during a busy turn is
-        visibly acknowledged — dim ``> …`` lines that clear once each is
-        dequeued and echoed for real (in :meth:`_worker`).
-        """
+        """Dim ``> … (queued)`` lines for submitted-but-not-started messages,
+        acknowledging them live until :meth:`_worker` dequeues and echoes each."""
         lines = []
         for i, q in enumerate(self._queued_lines):
             prefix = "\n" if i else ""
@@ -207,15 +178,9 @@ class PinnedPromptReader:
     _MENU_RESERVE = 8
 
     def _input_height(self) -> Dimension:
-        """Height of the input window: 1 line, growing to reserve menu space.
-
-        When a completion menu is active (``complete_state`` populated — which,
-        with ``complete_while_typing`` on, happens as soon as a matching prefix is
-        typed), reserve ``_MENU_RESERVE`` rows below the input so the menu Float
-        always has room to render — even with the input pinned at the terminal
-        bottom (scrollback scrolls up to make the room). Collapses back to one
-        line when there are no completions, so there's no permanent gap.
-        """
+        """Input height: 1 line, growing to reserve ``_MENU_RESERVE`` rows when a
+        completion menu is active so it has room even with the input at the
+        terminal bottom. Collapses back when there are no completions."""
         if not get_app().is_done and self._buffer.complete_state is not None:
             return Dimension(min=self._MENU_RESERVE)
         return Dimension()
@@ -232,12 +197,7 @@ class PinnedPromptReader:
                 buffer=self._buffer,
                 input_processors=[BeforeInput(self._prompt_text)],
             ),
-            # Dynamic height: normally the input hugs one line, but when a
-            # completion menu is (about to be) shown, grow to reserve rows for it
-            # so the menu always has somewhere to render — even with the input
-            # pinned at the terminal bottom (scrollback scrolls up to make room).
-            # Mirrors PromptSession._get_default_buffer_control_height.
-            height=self._input_height,
+            height=self._input_height,  # reserves menu space (see _input_height)
             wrap_lines=True,
         )
         status_window = ConditionalContainer(
@@ -248,7 +208,6 @@ class PinnedPromptReader:
             ),
             filter=has_status,
         )
-        # Queued messages (dim) shown above the status line while they wait.
         queued_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._queued_text),
@@ -257,11 +216,22 @@ class PinnedPromptReader:
             ),
             filter=Condition(lambda: bool(self._queued_lines)),
         )
+        # Live reasoning (styled block) shown transiently above the status line;
+        # the final block commits to scrollback when the answer starts.
+        reasoning_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(lambda: ANSI(self._reasoning_text())),
+                dont_extend_height=True,
+                wrap_lines=True,  # else long reasoning runs off the right edge
+            ),
+            filter=Condition(lambda: bool(self._reasoning_text())),
+        )
 
         root = FloatContainer(
-            content=HSplit([queued_window, status_window, input_window]),
+            content=HSplit(
+                [queued_window, reasoning_window, status_window, input_window]
+            ),
             floats=[
-                # Slash-command completions pop up just above the input.
                 Float(
                     xcursor=True,
                     ycursor=True,
@@ -276,10 +246,8 @@ class PinnedPromptReader:
                 [load_key_bindings(), self._make_bindings()]
             ),
             style=_TUI_STYLE,
-            # Non-full-screen: the layout is pinned at the bottom, prints scroll
-            # above it (via patch_stdout). ~10 Hz refresh animates the spinner.
-            full_screen=False,
-            refresh_interval=0.1,
+            full_screen=False,  # pinned at bottom; prints scroll above via patch_stdout
+            refresh_interval=0.1,  # ~10 Hz, animates the spinner
             erase_when_done=True,
         )
 
@@ -301,15 +269,12 @@ class PinnedPromptReader:
 
         @kb.add("c-c")
         def _(event) -> None:
-            """Ctrl+C cancels an in-flight turn; when idle, aborts (exit path).
-
-            Mirrors Esc during a turn — interrupt the worker thread (client.query
-            turns the KeyboardInterrupt into "Operation was cancelled."). Only
-            when nothing is running does Ctrl+C fall through to the caller's
-            double-press-to-exit handling.
-            """
+            """Ctrl+C: cancel an in-flight turn; else clear a non-empty input;
+            else (empty input) exit via the double-press path."""
             if self._busy:
                 self._request_cancel()
+            elif event.current_buffer.text:
+                event.current_buffer.reset()  # clear the line, don't exit
             else:
                 event.app.exit(exception=KeyboardInterrupt)
 
@@ -319,9 +284,8 @@ class PinnedPromptReader:
             if not event.current_buffer.text:
                 event.app.exit(exception=EOFError)
 
-        # In-app confirmation: while a Proceed? prompt is pending, y/n/a answer
-        # it (and are swallowed so they don't reach the input buffer). Eager so
-        # they win over the default self-insert binding.
+        # While a Proceed? prompt is pending, y/n/a answer it (eager, so they win
+        # over self-insert and never reach the input buffer).
         confirming = Condition(lambda: self._confirm_pending)
 
         @kb.add("y", filter=confirming, eager=True)
@@ -349,13 +313,11 @@ class PinnedPromptReader:
     # --- accept / run / worker -----------------------------------------------
 
     def _on_accept(self, buff: Buffer) -> bool:
-        """Enqueue the submitted line (runs on the app's event-loop thread).
+        """Enqueue the submitted line (on the event-loop thread).
 
-        The line is NOT committed to scrollback here — only when the worker
-        starts it (see :meth:`_worker`), so each ``>`` echo sits directly above
-        its own answer. While it waits, it's shown live in the pinned region
-        (:meth:`_queued_text`) so a message typed during a busy turn is visibly
-        acknowledged. Returns False so prompt_toolkit clears the input.
+        Not echoed to scrollback here — only when :meth:`_worker` starts it, so
+        each ``>`` sits directly above its own answer; meanwhile it shows live via
+        :meth:`_queued_text`. Returns False so prompt_toolkit clears the input.
         """
         text = buff.text
         if text.strip() and self._queue is not None:
@@ -365,13 +327,8 @@ class PinnedPromptReader:
         return False
 
     def run(self) -> None:
-        """Run the pinned REPL until dispatch exits or Ctrl+C/Ctrl+D.
-
-        Synchronous entry point. Wraps the session in ``patch_stdout`` so worker
-        prints render above the pinned region, and drives the async app + worker.
-        Re-raises ``KeyboardInterrupt`` / ``EOFError`` so the caller applies its
-        double-press-to-exit handling.
-        """
+        """Run the pinned REPL (sync entry) under ``patch_stdout`` until dispatch
+        exits or Ctrl+C/Ctrl+D; re-raises KeyboardInterrupt/EOFError to the caller."""
         import asyncio
 
         with patch_stdout(raw=True):
@@ -381,18 +338,16 @@ class PinnedPromptReader:
         import asyncio
 
         self._queue = asyncio.Queue()
-        # The app's event loop — needed to marshal worker-thread requests
-        # (confirmations, dialogs) back onto the UI thread.
+        # Needed to marshal worker-thread requests (confirmations, dialogs) back
+        # onto the UI thread.
         self._loop = asyncio.get_event_loop()
         worker = asyncio.ensure_future(self._worker())
         try:
             while True:
                 result = await self._app.run_async()
                 if result is _RESTART and self._pending_dialog is not None:
-                    # A dialog command asked to run outside the app. The app has
-                    # now fully stopped (terminal back to cooked mode), so run the
-                    # dialog here, hand back its result, then rebuild + relaunch
-                    # the pinned app to continue the session.
+                    # App has fully stopped (terminal back to cooked mode): run the
+                    # dialog, hand back its result, then rebuild + relaunch.
                     func, box, done = self._pending_dialog
                     self._pending_dialog = None
                     try:
@@ -408,13 +363,11 @@ class PinnedPromptReader:
             worker.cancel()
 
     def confirm_ui(self, header: str, detail: str, category: str) -> str:
-        """In-app y/N/a confirmation (called from the worker thread).
+        """In-app y/N/a confirmation (from the worker thread).
 
-        A query can't exit the app (it's mid-turn), and ``input()`` can't read
-        while the app owns stdin in raw mode. So this captures a single keypress
-        THROUGH the running app: it shows the prompt in the pinned status region
-        and installs temporary ``y``/``n``/``a`` bindings, blocking this worker
-        thread on an ``Event`` until one is pressed. Returns ``"yes"|"no"|"all"``.
+        ``input()`` can't read while the app owns stdin in raw mode, so this
+        shows the prompt in the status region, arms the y/n/a bindings, and blocks
+        the worker on an ``Event`` until a key is pressed. Returns yes|no|all.
         """
         import threading
 
@@ -435,10 +388,9 @@ class PinnedPromptReader:
             done.set()
             self._app.invalidate()
 
-        # Bindings are consulted via _confirm_pending in the key handlers below.
         self._confirm_answer = _answer
         self._confirm_pending = True
-        # Echo the prompt above the region too, so it's visible in scrollback.
+        # Echo the prompt into scrollback too.
         self._loop.call_soon_threadsafe(
             lambda: run_in_terminal(
                 lambda: print(
@@ -458,11 +410,8 @@ class PinnedPromptReader:
     def run_dialog(self, func):
         """Run a blocking full-screen dialog command by EXITING the app first.
 
-        A nested full-screen prompt_toolkit ``Application`` can't run inside the
-        running one, and ``input()`` can't read while the app owns stdin. So this
-        (called from the worker thread) asks the app to exit, waits for the loop
-        to fully stop, runs ``func`` in the now-cooked terminal — where the normal
-        full-screen dialogs and ``input()`` work — then signals the run loop to
+        A nested full-screen app can't run inside the running one. So (from the
+        worker thread) exit the app, run ``func`` in the now-cooked terminal, then
         relaunch the pinned app. Blocks the worker for ``func``'s return value.
         """
         import threading
@@ -474,7 +423,6 @@ class PinnedPromptReader:
         box = {}
 
         def _stop_app() -> None:
-            # Ask the run loop to: stop the app, run func, restart the app.
             self._pending_dialog = (func, box, done)
             self._app.exit(result=_RESTART)
 
@@ -502,9 +450,8 @@ class PinnedPromptReader:
                     pass
             self._busy = True
             self._cancelled = False
-            # Echo the line NOW (at dispatch), not at submit — so a queued line's
-            # `>` prints directly above its own answer, keeping each input paired
-            # with its output even when several were queued during a long turn.
+            # Echo NOW (at dispatch, not submit) so a queued line's `>` prints
+            # directly above its own answer.
             await run_in_terminal(lambda line=line: print(f"\033[36m>\033[0m {line}"))
             if self._app is not None:
                 self._app.invalidate()
@@ -521,28 +468,23 @@ class PinnedPromptReader:
                 return
 
     def _dispatch_tracked(self, line: str):
-        """Run ``dispatch`` on the pool thread, recording its id for cancellation.
-
-        Esc injects ``KeyboardInterrupt`` into this exact thread (see
-        :meth:`_request_cancel`); ``client.query()`` already turns that into a
-        clean "Operation was cancelled." so no work is corrupted.
-        """
+        """Run ``dispatch`` on the pool thread, recording its id so Esc can inject
+        KeyboardInterrupt into it (client.query turns that into a clean cancel)."""
         import threading
 
         self._worker_tid = threading.get_ident()
         try:
             return self._dispatch(line)
         except KeyboardInterrupt:
-            # Cancellation landed here rather than inside query() (e.g. between
-            # steps). Swallow so the REPL continues; the turn is abandoned.
+            # Cancellation landed between steps rather than inside query(); swallow
+            # so the REPL continues (turn abandoned).
             return None
 
     def _request_cancel(self) -> None:
         """Inject KeyboardInterrupt into the busy worker thread (Esc handler).
 
-        Uses ``PyThreadState_SetAsyncExc`` — the only way to interrupt a blocking
-        call on another thread. Best-effort and idempotent (guarded by
-        ``_cancelled``); a no-op if no turn is running.
+        ``PyThreadState_SetAsyncExc`` is the only way to interrupt a blocking call
+        on another thread. Best-effort, idempotent, no-op when idle.
         """
         import ctypes
 
@@ -550,7 +492,6 @@ class PinnedPromptReader:
         if not self._busy or tid is None or self._cancelled:
             return
         self._cancelled = True
-        # Print a hint above the pinned region so the user knows it registered.
         run_in_terminal(lambda: print("\033[90m(cancelling…)\033[0m"))
         ctypes.pythonapi.PyThreadState_SetAsyncExc(
             ctypes.c_long(tid), ctypes.py_object(KeyboardInterrupt)
@@ -567,12 +508,8 @@ class PinnedPromptReader:
 
 
 def confirm_inline(message: str) -> bool:
-    """Ask a yes/no question inline (no screen clear), default No.
-
-    Uses prompt_toolkit's ``confirm`` on a TTY (styled y/n that stays in the
-    normal terminal flow); falls back to plain ``input()`` otherwise. Ctrl+C /
-    Ctrl+D / EOF are treated as No.
-    """
+    """Inline yes/no question, default No (ptk ``confirm`` on a TTY, else
+    ``input()``); Ctrl+C/Ctrl+D/EOF are treated as No."""
     if _dialog_is_tty():
         try:
             return confirm(message)
@@ -594,15 +531,9 @@ def select_from_list(
     *,
     cancel_text: str = "Cancel",
 ) -> Optional[Any]:
-    """Let the user pick one value from ``options`` via a full-screen menu.
-
-    ``options`` is ``[(value, label), …]``; returns the chosen ``value`` or
-    ``None`` if cancelled/empty. On a TTY this is a centered dialog where
-    **↑/↓ move, Enter confirms the highlighted item, Esc cancels** — no
-    Tab-to-button step (the stock ``radiolist_dialog`` requires Tab to reach
-    Ok/Cancel, which is unintuitive for a pick-one menu). When stdin isn't a TTY
-    it degrades to a numbered ``input()`` prompt so pipes / tests never block on
-    a modal that can't render.
+    """Pick one value from ``options`` (``[(value, label), …]``) via a full-screen
+    menu; returns the chosen value or None. TTY: ↑/↓ move, Enter confirms, Esc
+    cancels. Non-TTY: a numbered ``input()`` prompt so pipes/tests never block.
     """
     if not options:
         return None
@@ -636,12 +567,9 @@ _CANCEL = object()
 
 
 def _radio_pick(title: str, options: List[tuple]):
-    """Full-screen single-pick menu: ↑/↓ move, Enter confirms, Esc cancels.
-
-    Returns the chosen value, or ``_CANCEL``. Enter is bound on the RadioList's
-    own control so it confirms the highlighted row directly — no Tab-to-button
-    (the stock ``radiolist_dialog`` requires Tab, which is unintuitive here).
-    """
+    """Full-screen single-pick menu (↑/↓ move, Enter confirms, Esc cancels);
+    returns the chosen value or ``_CANCEL``. Enter is bound on the RadioList so it
+    confirms the highlighted row directly (no Tab-to-button step)."""
     radio = RadioList(values=options)
 
     def _ok() -> None:

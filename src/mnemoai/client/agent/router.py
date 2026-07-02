@@ -47,16 +47,11 @@ _SIGNAL_RES = (_IMAGE_EXT_RE, _URL_RE, _PATH_RE, _DOC_EXT_RE)
 
 
 def is_trivial_query(query: str) -> bool:
-    """True for a short, signal-free query that isn't worth orchestrating.
+    """True for a short, signal-free query not worth orchestrating.
 
-    The orchestrator (decompose → workers → aggregate) only earns its overhead
-    on genuinely complex, multi-step tasks. A brief conversational prompt with no
-    file/URL/doc signal ("can you do it?", "please do it", "what do you think?")
-    should go straight to the normal call_model path — which binds the same tools
-    and has the empty-turn safety net — instead of being decomposed into a single
-    trivial subtask (which previously could surface a blank answer). Conservative:
-    only very short, signal-free queries qualify; anything substantial or carrying
-    a content signal is left to normal routing.
+    Decomposition only earns its overhead on complex tasks; a brief signal-free
+    prompt goes straight to call_model. Conservative — only very short,
+    signal-free queries qualify.
     """
     q = (query or "").strip()
     if not q:
@@ -125,15 +120,7 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
 
 
 def get_classifier_prompt() -> str:
-    """Get the routing/classifier prompt from prompts.yaml.
-
-    Returns:
-        The ROUTING_PROMPT string.
-
-    Raises:
-        PromptError: if ROUTING_PROMPT is missing — routing is enabled, so its
-        prompt is required (no in-code fallback).
-    """
+    """Get the ROUTING_PROMPT (query classifier) from prompts.yaml."""
     return config.require_prompt("ROUTING_PROMPT")
 
 
@@ -141,29 +128,15 @@ class QueryRouter:
     """Routes queries to appropriate tool subsets based on classification."""
 
     def __init__(self, model: BaseChatModel) -> None:
-        """Initialize the query router.
-
-        Args:
-            model: LangChain chat model for classification
-        """
         self.model = model
         self._valid_routes = set(ROUTE_TOOLS.keys())
 
     def fast_route(self, query: str) -> Optional[str]:
         """Route deterministically from unambiguous signals, or None.
 
-        Returns a route only when the query has exactly ONE clear signal (or is
-        a plain greeting). With multiple signals it returns ``full`` (the task
-        spans categories — bind everything); with none it returns None so the
-        caller falls back to the LLM classifier. The bias is deliberate: a lone
-        signal routes for free and reliably, but anything mixed/ambiguous never
-        under-binds tools.
-
-        Args:
-            query: The user's query (the latest message text).
-
-        Returns:
-            A route name, or None to defer to the LLM classifier.
+        Exactly ONE clear signal (or a greeting) routes directly; 2+ signals →
+        ``full`` (spans categories, bind everything); none → None to defer to
+        the LLM classifier. Biased to never under-bind tools.
         """
         q = (query or "").strip()
         if not q:
@@ -197,18 +170,10 @@ class QueryRouter:
         query: str,
         conversation_context: str = "",
     ) -> str:
-        """Classify a query into a route category.
+        """Classify a query into a route (one of ROUTE_TOOLS keys).
 
-        First tries a deterministic heuristic fast-path (:meth:`fast_route`) to
-        avoid an LLM round-trip on obvious cases; falls back to the LLM
+        Tries the deterministic :meth:`fast_route` first; falls back to the LLM
         classifier only when the heuristics are inconclusive.
-
-        Args:
-            query: The user's query
-            conversation_context: Recent conversation for context
-
-        Returns:
-            Route name (one of ROUTE_TOOLS keys)
         """
         # Deterministic fast-path — free, instant, not subject to classifier
         # misclassification. Skipped when there's conversation context, so short
@@ -271,17 +236,8 @@ class QueryRouter:
             return "full"
 
     def _parse_route(self, content: str) -> str:
-        """Parse the model's classification response into a valid route.
-
-        Handles thinking tags, extra whitespace, quotes, etc.
-
-        Args:
-            content: Raw model response (str or content-block list)
-
-        Returns:
-            A valid route name, or "" if the response was empty / unrecognized
-            (the caller decides whether to retry or fall back to "full").
-        """
+        """Parse the model response into a valid route (thinking tags/quotes
+        tolerated); returns "" when empty/unrecognized for the caller to retry."""
         # Handle Bedrock-/Responses-style list content blocks (reasoning on)
         if isinstance(content, list):
             text = "".join(

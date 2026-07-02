@@ -11,29 +11,14 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 
 def sanitize_tool_pairs(messages: List[BaseMessage]) -> List[BaseMessage]:
-    """Drop orphaned tool calls/results so the provider doesn't 400.
+    """Drop orphaned tool calls/results so strict providers don't 400.
 
-    A tool exchange must stay paired: every assistant ``tool_call`` needs a
-    following ``ToolMessage`` with the same id, and every ``ToolMessage`` needs a
-    preceding assistant call with that id. An orphan on either side makes strict
-    providers (e.g. the OpenAI Responses API) reject the whole request:
-
-    * orphaned **result** → "No tool call found for function call output …"
-    * orphaned **call**   → "No tool output found for function call …"
-
-    Orphans arise when a turn is cut short (recursion limit, stream error,
-    interrupt) or when history is sliced (compaction) in a way the boundary guard
-    didn't catch — and once one is persisted in ``agent.messages`` it breaks
-    *every* subsequent turn. This is a defensive, id-based repair:
-
-    * Collect the ids of all tool results present.
-    * From each assistant message, keep only tool_calls whose id has a result; if
-      that empties the calls and the message has no visible text, drop the message
-      entirely (it carried nothing but orphaned calls).
-    * Drop any tool result whose id has no surviving originating call.
-
-    Returns a new list; inputs are not mutated. A clean history passes through
-    unchanged.
+    Every assistant ``tool_call`` needs a following ``ToolMessage`` with the same
+    id and vice versa; an orphan (from a cut-short turn or a compaction slice)
+    makes providers like the OpenAI Responses API reject the request. Keeps only
+    calls whose id has a result and drops results with no surviving call; an
+    assistant message left with no calls and no text is dropped. Returns a new
+    list (inputs not mutated); a clean history passes through unchanged.
     """
     result_ids = {
         m.tool_call_id

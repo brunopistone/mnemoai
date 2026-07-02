@@ -9,27 +9,12 @@ from mnemoai.utils.logger import logger
 
 
 def get_orchestrator_prompt() -> str:
-    """Get the orchestrator (task-decomposition) prompt from prompts.yaml.
-
-    Returns:
-        The ORCHESTRATOR_PROMPT string.
-
-    Raises:
-        PromptError: if missing — only called when orchestration is enabled, so
-        the prompt is required (no in-code fallback).
-    """
+    """Get the ORCHESTRATOR_PROMPT (task-decomposition) from prompts.yaml."""
     return config.require_prompt("ORCHESTRATOR_PROMPT")
 
 
 def get_aggregator_prompt() -> str:
-    """Get the aggregator (result-synthesis) prompt from prompts.yaml.
-
-    Returns:
-        The AGGREGATOR_PROMPT string.
-
-    Raises:
-        PromptError: if missing (required when orchestration is enabled).
-    """
+    """Get the AGGREGATOR_PROMPT (result-synthesis) from prompts.yaml."""
     return config.require_prompt("AGGREGATOR_PROMPT")
 
 
@@ -38,17 +23,10 @@ def parse_subtasks(
     fallback_query: str,
     valid_categories: set,
 ) -> List[Dict[str, Any]]:
-    """Parse the orchestrator's response into a list of subtasks.
+    """Parse the orchestrator response into ``[{description, category}]``.
 
-    Handles thinking tags, markdown fences, and malformed JSON gracefully.
-
-    Args:
-        content: Raw model response
-        fallback_query: Original query to use if parsing fails
-        valid_categories: Set of valid category names
-
-    Returns:
-        List of subtask dicts with 'description' and 'category' keys
+    Tolerant of thinking tags, markdown fences, and malformed JSON — falls back
+    to a single ``full`` subtask from ``fallback_query`` when parsing fails.
     """
     # Handle Bedrock-style list content blocks (thinking enabled)
     if isinstance(content, list):
