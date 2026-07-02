@@ -19,14 +19,7 @@ from langchain_core.messages import (
 def convert_strands_messages_to_langchain(
     messages: List[Dict[str, Any]],
 ) -> List[BaseMessage]:
-    """Convert Strands message format to LangChain messages.
-
-    Args:
-        messages: List of Strands-format messages
-
-    Returns:
-        List of LangChain BaseMessage objects
-    """
+    """Convert Strands-format messages to LangChain messages."""
     langchain_messages = []
 
     for msg in messages:
@@ -102,14 +95,7 @@ def convert_strands_messages_to_langchain(
 def convert_langchain_messages_to_strands(
     messages: List[BaseMessage],
 ) -> List[Dict[str, Any]]:
-    """Convert LangChain messages to Strands format.
-
-    Args:
-        messages: List of LangChain BaseMessage objects
-
-    Returns:
-        List of Strands-format messages
-    """
+    """Convert LangChain messages to Strands format."""
     strands_messages = []
 
     for msg in messages:

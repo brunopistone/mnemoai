@@ -9,6 +9,43 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-07-02
+
+### Added
+
+- **Live "stream-then-collapse" reasoning in the pinned UI.** Reasoning now
+  streams live inside a green-bordered **"Thinking… (Ns)"** block in the
+  transient region, then commits to scrollback as the collapsed **"Thought for
+  Ns…"** block once the answer begins. Implemented with a thread-safe
+  `ReasoningStatus` sink (`client/ui/turn_view.py`) the agent's worker thread
+  appends to and the reader renders; long lines wrap to the terminal width.
+
+### Fixed
+
+- **Spinner no longer freezes during a large `fs_write` (or any big tool
+  argument).** Tool-call argument tokens stream as many non-empty tokens with no
+  visible content; the streaming callback used to stop the spinner on them and
+  never restart it, so the UI looked frozen for the whole write. It now ignores
+  tool-argument tokens (detected via the chunk's `tool_call_chunks`) and stops
+  only on real answer text.
+- **No more "dead pause" while a reasoning model thinks.** In the styled UI
+  reasoning is buffered, so the spinner must keep running through it; it was
+  stopping on the first reasoning chunk and leaving the terminal blank.
+- **The `●` answer marker and streamed answer no longer disappear.**
+  `patch_stdout` only commits a line to scrollback on a newline; the streamed
+  answer had no trailing newline and was erased by a pinned-UI repaint before
+  `[Context: …]` printed. The answer line is now newline-terminated immediately,
+  and the `●` marker is prepended to the first answer chunk (one committed line)
+  rather than a separate write that could be erased on its own.
+- **Ctrl+C on a non-empty input clears the line** instead of leaving the typed
+  text; an empty line still needs a second Ctrl+C/Ctrl+D to exit.
+
+### Changed
+
+- Condensed docstrings and inline comments across `client/`, `models/`, and
+  `utils/configurator.py` — one-line docstrings, comments only where intent
+  isn't obvious; no behavior change.
+
 ## [0.14.0] — 2026-07-02
 
 ### Changed

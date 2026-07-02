@@ -200,8 +200,9 @@ def _harness_counting_marker(retries=0):
 
     def _mark():
         a._marker_calls += 1
+        return "«M»"  # sentinel prefix so tests can assert placement too
 
-    a._print_answer_marker = _mark
+    a._answer_marker = _mark
     return a
 
 
@@ -258,6 +259,34 @@ def test_answer_marker_printed_after_reasoning():
     assert a._marker_calls == 1
 
 
+def test_marker_prepended_to_first_answer_bytes():
+    # The marker must be the leading bytes of the answer's committed output — not
+    # a separate write — so it can't be erased independently of the answer.
+    import contextlib
+    import io
+
+    from mnemoai.utils.formatting.code_formatter import CodeFormatter
+
+    a = _AgentStreamHarness.make(retries=0)
+    a.callbacks = ["cb"]
+    a._code_formatter = CodeFormatter()
+
+    class _Multi:
+        def stream(self, messages, config=None):
+            for piece in ("Hello ", "there"):
+                yield _Chunk(content=piece)
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        a._stream_response(["msg"], {}, model=_Multi(), mark_answer=True)
+
+    out = buf.getvalue()
+    assert "●" in out
+    # Marker comes before the answer text, on the same line (no newline between).
+    assert out.index("●") < out.index("Hello")
+    assert "\n" not in out[out.index("●"):out.index("Hello")]
+
+
 def test_spinner_kept_running_through_hidden_reasoning():
     # Regression: a model that streams reasoning we DON'T display (redacted, or
     # non-verbose — e.g. Anthropic via Bedrock) must keep the spinner running
@@ -299,6 +328,97 @@ def test_spinner_kept_running_through_hidden_reasoning():
     assert len(stops) == 1
     # The visible answer did get printed.
     assert "visible answer" in buf.getvalue()
+
+
+def test_spinner_kept_running_through_buffered_reasoning_styled():
+    # Regression (pinned UI): styled mode buffers reasoning, so the spinner's one
+    # stop must fire at the ANSWER, not on the first reasoning chunk (dead pause).
+    import contextlib
+    import io
+
+    a = _AgentStreamHarness.make(retries=0)
+    a.verbose = True  # verbose, but styled → reasoning is buffered, not streamed
+    a.styled_turn_view = True
+    a.callbacks = ["cb"]
+    a._flush_reasoning_block = lambda parts, started: None
+
+    # Track how many reasoning chunks had been consumed when the spinner stopped.
+    seen = {"reasoning_chunks": 0, "answer": False}
+    stop_state = []
+    a._stop_spinner = lambda: stop_state.append(dict(seen))
+
+    def _extract(ch):
+        content = getattr(ch, "content", "")
+        reasoning = getattr(ch, "reasoning", "")
+        if reasoning:
+            seen["reasoning_chunks"] += 1
+        if content:
+            seen["answer"] = True
+        return content, reasoning
+
+    a._extract_content = _extract
+
+    class _RC(_Chunk):
+        def __init__(self, content="", reasoning=""):
+            super().__init__(content=content)
+            self.reasoning = reasoning
+
+    class _Model:
+        def stream(self, messages, config=None):
+            yield _RC(reasoning="thinking 1")
+            yield _RC(reasoning="thinking 2")
+            yield _RC(reasoning="thinking 3")
+            yield _RC(content="the answer")
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        a._stream_response(["msg"], {}, model=_Model(), mark_answer=True)
+
+    # One stop, and only after the answer arrived (not during buffered reasoning).
+    assert len(stop_state) == 1
+    assert stop_state[0]["answer"] is True, (
+        "spinner stopped during buffered reasoning (dead pause)"
+    )
+    assert "the answer" in buf.getvalue()
+
+
+def test_reasoning_sink_fed_live_then_stopped():
+    # styled mode with a live sink: reasoning chunks are appended as they stream,
+    # and the sink is stopped (transient view cleared) when the answer commits.
+    import contextlib
+    import io
+
+    from mnemoai.client.ui.turn_view import ReasoningStatus
+
+    a = _AgentStreamHarness.make(retries=0)
+    a.verbose = True
+    a.styled_turn_view = True
+    a.callbacks = ["cb"]
+    a.reasoning_sink = ReasoningStatus()
+
+    appended = []
+    a.reasoning_sink.append = lambda t: appended.append(t)
+    a._extract_content = lambda ch: (
+        getattr(ch, "content", ""), getattr(ch, "reasoning", "")
+    )
+
+    class _RC(_Chunk):
+        def __init__(self, content="", reasoning=""):
+            super().__init__(content=content)
+            self.reasoning = reasoning
+
+    class _Model:
+        def stream(self, messages, config=None):
+            yield _RC(reasoning="step 1 ")
+            yield _RC(reasoning="step 2")
+            yield _RC(content="answer")
+
+    with contextlib.redirect_stdout(io.StringIO()):
+        a._stream_response(["msg"], {}, model=_Model(), mark_answer=True)
+
+    # Both reasoning chunks were fed live, and the sink ended stopped (cleared).
+    assert appended == ["step 1 ", "step 2"]
+    assert a.reasoning_sink.active is False
 
 
 # --- Worker-loop (orchestrator) empty-turn salvage ---------------------------

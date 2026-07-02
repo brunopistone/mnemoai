@@ -7,7 +7,9 @@ text and tool args survive verbatim and that empty inputs collapse to nothing.
 """
 
 from mnemoai.client.ui.turn_view import (
+    ReasoningStatus,
     format_duration,
+    render_live_reasoning,
     render_reasoning_block,
     render_tool_call,
 )
@@ -69,3 +71,47 @@ class TestToolCall:
     def test_missing_name_falls_back(self):
         out = render_tool_call("", {"a": 1})
         assert "tool" in out
+
+
+class TestLiveReasoning:
+    def test_shows_thinking_header_and_text(self):
+        out = render_live_reasoning("weighing options", 5)
+        assert "Thinking…" in out
+        assert "5s" in out
+        assert "weighing options" in out
+
+    def test_empty_collapses(self):
+        assert render_live_reasoning("", 3) == ""
+
+
+class TestReasoningStatus:
+    def test_idle_renders_empty(self):
+        assert ReasoningStatus().render(now=10.0) == ""
+
+    def test_active_renders_appended_text(self):
+        s = ReasoningStatus()
+        s.start(now=0.0)
+        s.append("first ")
+        s.append("second")
+        out = s.render(now=4.0)
+        assert "first second" in out
+        assert "4s" in out  # elapsed = now - started
+
+    def test_stop_clears(self):
+        s = ReasoningStatus()
+        s.start(now=0.0)
+        s.append("thinking")
+        assert s.render(now=1.0) != ""
+        s.stop()
+        assert s.render(now=2.0) == ""
+
+    def test_restart_resets_text_and_clock(self):
+        s = ReasoningStatus()
+        s.start(now=0.0)
+        s.append("old")
+        s.start(now=10.0)  # new turn
+        s.append("new")
+        out = s.render(now=12.0)
+        assert "new" in out
+        assert "old" not in out
+        assert "2s" in out

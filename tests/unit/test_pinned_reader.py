@@ -309,3 +309,60 @@ class TestSinkSpinner:
         # Without a sink, the spinner keeps its stdout-animation API (thread-based).
         sp = Spinner()
         assert sp._sink is None
+
+
+class _FakeBuffer:
+    def __init__(self, text=""):
+        self.text = text
+
+    def reset(self):
+        self.text = ""
+
+
+class _FakeEvent:
+    def __init__(self, buffer, app):
+        self.current_buffer = buffer
+        self.app = app
+
+
+def _ctrl_c_handler(reader):
+    """Extract the c-c key handler from the reader's bindings."""
+    for b in reader._make_bindings().bindings:
+        keys = tuple(getattr(k, "value", k) for k in b.keys)
+        if keys == ("c-c",):
+            return b.handler
+    raise AssertionError("no c-c binding found")
+
+
+class TestCtrlC:
+    def test_clears_non_empty_input_when_idle(self):
+        r = _reader(lambda line: None)
+        r._busy = False
+        app = _FakeApp()
+        buf = _FakeBuffer("sdadssad")
+        _ctrl_c_handler(r)(_FakeEvent(buf, app))
+        assert buf.text == ""       # input cleared
+        assert app.exited is False  # did NOT exit
+
+    def test_empty_input_exits_when_idle(self):
+        r = _reader(lambda line: None)
+        r._busy = False
+
+        class _ExitApp:
+            exc = None
+
+            def exit(self, exception=None):
+                self.exc = exception
+
+        app = _ExitApp()
+        _ctrl_c_handler(r)(_FakeEvent(_FakeBuffer(""), app))
+        assert app.exc is KeyboardInterrupt  # empty line → exit path
+
+    def test_busy_turn_cancels_not_clears(self):
+        r = _reader(lambda line: None)
+        r._busy = True
+        r._worker_tid = None  # _request_cancel no-ops safely
+        buf = _FakeBuffer("typed while running")
+        _ctrl_c_handler(r)(_FakeEvent(buf, _FakeApp()))
+        # A running turn is cancelled; the input text is left intact.
+        assert buf.text == "typed while running"

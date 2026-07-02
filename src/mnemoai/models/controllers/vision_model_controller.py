@@ -16,11 +16,6 @@ class VisionModelController(BaseModelController):
     """Vision model controller using LangChain abstractions."""
 
     def __init__(self, verbose: bool = False) -> None:
-        """Initialize vision model controller.
-
-        Args:
-            verbose: Enable verbose mode
-        """
         self.verbose_mode = verbose
         self.model_id = config.get("VISION_MODEL_ID")
         self.model_name = self.model_id["NAME"]
@@ -120,6 +115,7 @@ class VisionModelController(BaseModelController):
         # Point at an OpenAI-compatible server (local llama-server / LM Studio /
         # vLLM with a vision model, etc.) when configured. API_BASE is canonical;
         # ENDPOINT_URL is an accepted alias.
+        # API_BASE (canonical) or ENDPOINT_URL (alias) → OpenAI-compatible server.
         base_url = self.model_id.get("API_BASE") or self.endpoint_url
         if base_url:
             kwargs["base_url"] = base_url
@@ -127,8 +123,7 @@ class VisionModelController(BaseModelController):
             kwargs["api_key"] = self.model_id["API_KEY"]
         elif base_url:
             kwargs["api_key"] = "sk-local"
-        # Generic passthrough into the request body (reasoning_effort is a
-        # first-class arg; the rest go via model_kwargs).
+        # reasoning_effort is a first-class arg; the rest go via model_kwargs.
         extra = extra_params(self.model_id)
         if "reasoning_effort" in extra:
             kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
@@ -138,13 +133,8 @@ class VisionModelController(BaseModelController):
         self.model = ChatOpenAI(**kwargs)
 
     def _initialize_anthropic_model(self) -> None:
-        """Initialize a direct Anthropic API vision model via ChatAnthropic.
-
-        Claude is multimodal, so the OpenAI-style ``image_url`` content list
-        from ``format_request`` is accepted directly. Uses ``ANTHROPIC_API_KEY``
-        (env) or the config ``API_KEY``; ``ENDPOINT_URL`` overrides the base URL.
-        Distinct from the Mantle ``anthropic`` protocol (Claude via Bedrock).
-        """
+        """Initialize a direct Anthropic API vision model (Claude is multimodal;
+        accepts the OpenAI ``image_url`` content directly)."""
         from langchain_anthropic import ChatAnthropic
 
         logger.debug("Initializing Anthropic vision model via LangChain...")
@@ -160,20 +150,13 @@ class VisionModelController(BaseModelController):
             kwargs["api_key"] = self.api_key
         if self.endpoint_url:
             kwargs["base_url"] = self.endpoint_url
-        # Generic passthrough (e.g. thinking={...}).
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatAnthropic(**kwargs)
 
     def _initialize_mantle_model(self) -> None:
-        """Initialize a Bedrock Mantle vision model.
-
-        Delegates to the shared Mantle factory so the vision path supports the
-        same protocols as the chat controller (chat_completions | responses |
-        anthropic), selected via ``API_PROTOCOL``. The existing
-        ``format_request`` emits the OpenAI ``image_url`` content format, which
-        the OpenAI-compatible protocols accept directly.
-        """
+        """Initialize a Bedrock Mantle vision model via the shared factory (same
+        protocols as the chat controller)."""
         from mnemoai.models.mantle_factory import build_mantle_model
 
         self.model = build_mantle_model(
@@ -185,13 +168,8 @@ class VisionModelController(BaseModelController):
         )
 
     def _initialize_sagemaker_model(self) -> None:
-        """Initialize a SageMaker vision model.
-
-        Reuses ``ChatSageMaker`` with the ``openai_chat`` input format, which
-        passes the multimodal ``content`` list (text + ``image_url`` blocks
-        from ``format_request``) straight through to the endpoint. The endpoint
-        must serve a vision-capable model that accepts the OpenAI image format.
-        """
+        """Initialize a SageMaker vision model (``ChatSageMaker`` + ``openai_chat``
+        format; endpoint must accept the OpenAI image format)."""
         from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
 
         logger.debug("Initializing SageMaker vision model via ChatSageMaker...")
@@ -215,13 +193,8 @@ class VisionModelController(BaseModelController):
         self.model = ChatSageMaker(**kwargs)
 
     def _initialize_litellm_model(self) -> None:
-        """Initialize a LiteLLM vision model.
-
-        ``ChatLiteLLM`` forwards the OpenAI-style multimodal ``content`` list
-        (text + ``image_url`` base64 data URI) that ``format_request`` produces,
-        so any LiteLLM vision-capable model works. ``API_BASE``/``API_KEY`` are
-        optional — omitted, LiteLLM uses the provider's own env vars.
-        """
+        """Initialize a LiteLLM vision model (forwards the OpenAI multimodal
+        content; API_BASE/API_KEY optional, else the provider's env vars)."""
         from langchain_litellm import ChatLiteLLM
 
         logger.debug("Initializing LiteLLM vision model via ChatLiteLLM...")
@@ -241,11 +214,7 @@ class VisionModelController(BaseModelController):
         self.model = ChatLiteLLM(**kwargs)
 
     def get_model(self) -> BaseChatModel:
-        """Get the initialized vision model instance.
-
-        Returns:
-            Initialized LangChain chat model instance
-        """
+        """The initialized vision model, initializing it if needed."""
         if self.model is None:
             self.initialize_model()
         return self.model
@@ -253,20 +222,9 @@ class VisionModelController(BaseModelController):
     def format_request(
         self, question: str, image_data: bytes, image_ext: str = "png"
     ) -> HumanMessage:
-        """Format request for vision model using LangChain message format.
-
-        Args:
-            question: Question string
-            image_data: Raw image bytes
-            image_ext: Image file extension (default: "png")
-
-        Returns:
-            LangChain HumanMessage with multimodal content
-        """
-        # Convert image bytes to base64
+        """Build a multimodal ``HumanMessage`` (text + base64 image)."""
         image_base64 = base64.b64encode(image_data).decode("utf-8")
 
-        # Determine MIME type
         mime_types = {
             "png": "image/png",
             "jpg": "image/jpeg",
@@ -276,7 +234,6 @@ class VisionModelController(BaseModelController):
         }
         mime_type = mime_types.get(image_ext.lower(), "image/png")
 
-        # Create multimodal message content
         content = [
             {"type": "text", "text": question},
             {
@@ -290,16 +247,7 @@ class VisionModelController(BaseModelController):
     def describe_image(
         self, question: str, image_data: bytes, image_ext: str = "png"
     ) -> str:
-        """Describe an image using the vision model.
-
-        Args:
-            question: Question about the image
-            image_data: Raw image bytes
-            image_ext: Image file extension
-
-        Returns:
-            Model's description/response
-        """
+        """Describe an image using the vision model."""
         if self.model is None:
             self.initialize_model()
 
@@ -323,8 +271,7 @@ class VisionModelController(BaseModelController):
             parts = []
             for block in content:
                 if isinstance(block, dict):
-                    # Only collect text blocks; skip reasoning/tool/other blocks.
-                    # Blocks default to "text" when no type is given (Bedrock).
+                    # Text blocks only (type defaults to "text" for Bedrock).
                     if block.get("type", "text") == "text" and "text" in block:
                         parts.append(block["text"])
                 elif isinstance(block, str):

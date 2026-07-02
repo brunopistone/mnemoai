@@ -44,22 +44,12 @@ def _claude_version(name: str) -> Optional[Tuple[int, int]]:
 
 
 def _anthropic_thinking_kwargs(name: str, effort: Optional[str], budget: int) -> dict:
-    """Pick the thinking request form Claude's API expects for this model.
+    """Pick the extended-thinking request form Claude's API expects per version.
 
-    The Anthropic Messages API changed how extended thinking is requested:
-
-    * **Opus 4.7+**: ``thinking={"type":"adaptive","display":"summarized"}`` plus
-      ``output_config={"effort": …}``. The old ``enabled``+``budget_tokens`` form
-      is **rejected** ("thinking.type.enabled is not supported for this model").
-    * **Opus 4.6**: ``thinking={"type":"adaptive"}`` + ``output_config.effort``
-      (``display`` not yet available).
-    * **Older (≤4.5, 3.x)**: ``thinking={"type":"enabled","budget_tokens": …}``;
-      these reject ``adaptive``.
-
-    An unknown/unparseable version assumes the current (adaptive) API; set your
-    own ``thinking`` via ``EXTRA_PARAMS`` if a specific model needs otherwise.
-    Returns a dict of constructor kwargs to merge (``thinking`` and possibly
-    ``output_config``).
+    Opus 4.7+: ``thinking={"type":"adaptive","display":"summarized"}`` +
+    ``output_config.effort``. Opus 4.6: adaptive without ``display``. ≤4.5/3.x:
+    ``thinking={"type":"enabled","budget_tokens": …}`` (reject adaptive). Unknown
+    version assumes adaptive. Returns kwargs to merge.
     """
     version = _claude_version(name)
     use_adaptive = version is None or version >= (4, 6)
@@ -100,36 +90,13 @@ def build_mantle_model(
     reasoning_model: bool = False,
     extra_params: Optional[Dict[str, Any]] = None,
 ) -> BaseChatModel:
-    """Build a LangChain chat model for a Bedrock Mantle endpoint.
+    """Build a LangChain chat model (ChatOpenAI or ChatAnthropic) for Mantle.
 
-    Args:
-        model_id: The MODEL_ID / VISION_MODEL_ID config dict. Reads NAME,
-            REGION, API_PROTOCOL, and optional ENDPOINT_URL.
-        callbacks: Optional LangChain callbacks (chat controller passes these;
-            vision passes None).
-        streaming: Whether to stream (chat controller only; ignored for the
-            Anthropic path which LangChain streams by default).
-        temperature, max_tokens, top_p: Optional inference params; only sent
-            when not None.
-        reasoning_effort: First-class ``REASONING_EFFORT`` knob, translated per
-            protocol — sent as ``reasoning_effort`` on responses/chat_completions
-            and as a ``thinking`` budget (mapped via ``_EFFORT_TO_TOKENS``) on
-            anthropic. ``EXTRA_PARAMS`` overrides it if it sets the same key.
-        thinking_tokens: Thinking budget (token count) used for OLDER Claude
-            models on the anthropic protocol; the value only, NOT a trigger.
-        reasoning_model: Opt-in flag for the anthropic protocol (the config
-            ``REASONING: true``). Thinking is enabled only when this is set OR
-            ``reasoning_effort`` is set — so a non-reasoning Claude isn't sent a
-            ``thinking`` block it would reject. (chat_completions / responses are
-            unaffected — they gate on ``reasoning_effort``.)
-        extra_params: Generic ``EXTRA_PARAMS`` passthrough forwarded verbatim.
-            For chat_completions / responses it is merged into ``model_kwargs``
-            (request body) — e.g. ``reasoning_effort``, ``reasoning``,
-            ``verbosity``. For the anthropic protocol it is passed as top-level
-            constructor kwargs — e.g. ``thinking``.
-
-    Returns:
-        An initialized ChatOpenAI or ChatAnthropic instance.
+    ``model_id`` supplies NAME/REGION/API_PROTOCOL/ENDPOINT_URL. Inference params
+    are sent only when not None. ``reasoning_effort`` is translated per protocol
+    (``reasoning_effort`` on OpenAI protocols, a ``thinking`` budget on anthropic);
+    ``reasoning_model`` opts anthropic into thinking. ``extra_params``
+    (``EXTRA_PARAMS``) is forwarded verbatim and overrides the above.
     """
     extra = dict(extra_params or {})
     name = model_id["NAME"]
@@ -143,11 +110,9 @@ def build_mantle_model(
 
     base_url = _mantle_base_url(region, protocol, model_id.get("ENDPOINT_URL"))
 
-    # Bearer token used as the API key for all three protocols. Prefer an
-    # explicit Bedrock API key (e.g. the short-term `bedrock-api-key-...`
-    # exported as BEDROCK_API_KEY) so the app works without local AWS
-    # credentials; fall back to minting a short-lived token (~12h) from the
-    # standard AWS SigV4 credential chain.
+    # Bearer token as the API key. Prefer an explicit Bedrock API key
+    # (API_KEY / BEDROCK_API_KEY) so it works without local AWS credentials;
+    # else mint a short-lived (~12h) token from the SigV4 chain.
     token = model_id.get("API_KEY") or os.environ.get("BEDROCK_API_KEY")
     if token:
         logger.info("Using Bedrock Mantle API key for authentication")
@@ -161,8 +126,7 @@ def build_mantle_model(
     if protocol == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        # Mantle accepts the bearer token supplied as the Anthropic API key
-        # (sent as the x-api-key header). Anthropic requires max_tokens.
+        # Bearer token supplied as the Anthropic API key; max_tokens required.
         kwargs: Dict[str, Any] = {
             "model": name,
             "anthropic_api_url": base_url,
@@ -175,11 +139,9 @@ def build_mantle_model(
             kwargs["top_p"] = top_p
         if callbacks is not None:
             kwargs["callbacks"] = callbacks
-        # Enable extended thinking only when the user OPTED IN (REASONING_EFFORT
-        # or REASONING: true) — not by default — so a Claude model that doesn't
-        # support thinking isn't sent a `thinking` block it would reject. The
-        # request FORM depends on the model version (newer Claude rejects the old
-        # enabled+budget form), so _anthropic_thinking_kwargs picks the shape.
+        # Enable thinking only when opted in (reasoning_effort / reasoning_model),
+        # so a non-thinking Claude isn't sent a block it rejects.
+        # _anthropic_thinking_kwargs picks the version-specific form.
         if reasoning_effort or reasoning_model:
             budget = (
                 _EFFORT_TO_TOKENS.get(reasoning_effort, thinking_tokens or 2048)
@@ -192,9 +154,7 @@ def build_mantle_model(
             # Anthropic rejects temperature/top_p/top_k when thinking is on.
             kwargs.pop("temperature", None)
             kwargs.pop("top_p", None)
-        # Generic passthrough (e.g. thinking={...}, output_config={...}); applied
-        # last so an explicit EXTRA_PARAMS override wins (e.g. to force a
-        # specific form on a model whose version we mis-detect).
+        # EXTRA_PARAMS applied last so an explicit override wins.
         kwargs.update(extra)
         return ChatAnthropic(**kwargs)
 
@@ -218,29 +178,17 @@ def build_mantle_model(
         kwargs["max_tokens"] = max_tokens
     if top_p is not None:
         kwargs["top_p"] = top_p
-    # Reasoning. The two OpenAI-compatible protocols differ in how reasoning is
-    # exposed, so they're handled differently:
-    #
-    #   responses  -> the Responses API can return a *summary* of the model's
-    #     reasoning, but ONLY if asked (reasoning={"summary": "auto"}); effort
-    #     alone produces hidden reasoning you can't see. So when an effort is set
-    #     we request both, as a `reasoning` object (a first-class ChatOpenAI
-    #     field), and the agent's extractor surfaces the streamed summary.
-    #   chat_completions -> the Chat Completions API takes the plain
-    #     `reasoning_effort` enum and exposes no readable summary.
-    #
-    # EXTRA_PARAMS wins over both (so a user can set their own `reasoning`/
-    # `reasoning_effort`/`summary` and we don't clobber it).
+    # Reasoning differs per protocol: responses needs reasoning={"effort":…,
+    # "summary":"auto"} to get a readable summary (effort alone is hidden);
+    # chat_completions takes the plain reasoning_effort enum. EXTRA_PARAMS wins.
     extra_sets_reasoning = "reasoning" in extra or "reasoning_effort" in extra
     if reasoning_effort and not extra_sets_reasoning:
         if protocol == "responses":
             kwargs["reasoning"] = {"effort": reasoning_effort, "summary": "auto"}
         else:
             kwargs["reasoning_effort"] = reasoning_effort
-    # Generic passthrough: merge EXTRA_PARAMS into the request body so knobs the
-    # registry doesn't model (reasoning_effort, reasoning={...}, verbosity, …)
-    # reach the API. `reasoning` and `reasoning_effort` are first-class ChatOpenAI
-    # args, so lift them out of model_kwargs to avoid a "specified in both" error.
+    # Merge EXTRA_PARAMS into the request body; lift the first-class `reasoning`/
+    # `reasoning_effort` out of model_kwargs to avoid a "specified in both" error.
     if extra:
         if "reasoning" in extra:
             kwargs["reasoning"] = extra.pop("reasoning")

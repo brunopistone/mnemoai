@@ -24,19 +24,8 @@ from mnemoai.utils.logger import logger
 class ChatSageMaker(BaseChatModel):
     """Chat model for SageMaker endpoints.
 
-    Supports multiple input formats:
-    - openai_chat: OpenAI-compatible chat format (messages array)
-    - text_generation: HuggingFace text generation format (inputs string)
-
-    Args:
-        endpoint_name: SageMaker endpoint name
-        region_name: AWS region
-        input_format: Input format type (openai_chat or text_generation)
-        temperature: Sampling temperature
-        max_tokens: Maximum tokens to generate
-        top_p: Top-p sampling parameter
-        top_k: Top-k sampling parameter
-        stop: Stop sequences
+    ``input_format`` selects the payload shape: ``openai_chat`` (messages array)
+    or ``text_generation`` (HuggingFace ``inputs`` string).
     """
 
     endpoint_name: str
@@ -165,7 +154,6 @@ class ChatSageMaker(BaseChatModel):
             message = choice["message"]
             content = message.get("content", "")
 
-            # Extract tool calls if present
             tool_calls = []
             if message.get("tool_calls"):
                 for tc in message["tool_calls"]:
@@ -177,7 +165,6 @@ class ChatSageMaker(BaseChatModel):
                         }
                     )
 
-            # Check for reasoning content
             additional_kwargs = {}
             if message.get("reasoning_content"):
                 additional_kwargs["reasoning_content"] = message["reasoning_content"]
@@ -196,14 +183,7 @@ class ChatSageMaker(BaseChatModel):
             return AIMessage(content=content)
 
     def _extract_thinking(self, content: str) -> tuple[str, Optional[str]]:
-        """Extract thinking/reasoning from </think> tags if present.
-
-        Args:
-            content: Raw response content
-
-        Returns:
-            Tuple of (final_content, reasoning_content)
-        """
+        """Split ``</think>``-tagged reasoning: ``(final_content, reasoning)``."""
         match = re.search(r"^(.*?)</think>\s*(.*)$", content, re.DOTALL)
         if match:
             return match.group(2).strip(), match.group(1).strip()
@@ -228,7 +208,6 @@ class ChatSageMaker(BaseChatModel):
             response_body = response["Body"].read()
             message = self._parse_response(response_body)
 
-            # Check for inline thinking tags
             if message.content and "</think>" in message.content:
                 content, reasoning = self._extract_thinking(message.content)
                 additional_kwargs = dict(message.additional_kwargs)
@@ -295,13 +274,12 @@ class ChatSageMaker(BaseChatModel):
                     content = delta.get("content", "")
                     reasoning = delta.get("reasoning_content", "")
 
-                    # Handle reasoning_content from delta (standard format)
                     additional_kwargs = {}
                     if reasoning:
                         additional_kwargs["reasoning_content"] = reasoning
 
                     if content or reasoning:
-                        # Handle inline </think> tag in content
+                        # Inline </think> tag in content.
                         if content and "</think>" in content:
                             parts = content.split("</think>", 1)
                             in_thinking = False
@@ -338,15 +316,5 @@ class ChatSageMaker(BaseChatModel):
             raise
 
     def bind_tools(self, tools: List[Any], **kwargs) -> "ChatSageMaker":
-        """Bind tools to the model for function calling.
-
-        Args:
-            tools: List of tools to bind
-
-        Returns:
-            New ChatSageMaker instance with tools bound
-        """
-        # Store tools for use in payload building
-        # This is a simplified implementation - full implementation would
-        # convert tools to OpenAI function format
+        """Bind tools for function calling (simplified — currently a no-op)."""
         return self
