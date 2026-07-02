@@ -50,22 +50,6 @@ def format_tool_call(tool_call: dict) -> str:
     return f"{name}({', '.join(parts)})"
 
 
-def record_turn_tool_calls(tool_calls) -> list:
-    """Capture tool calls for the ctrl+o "expand last turn" view.
-
-    Returns ``[{"name", "args"}]`` with the **raw, un-elided** args (unlike the
-    marker line, which middle-elides for compactness). The result is stashed so
-    the input reader can reprint the full call the user only saw truncated.
-    Tolerant of odd shapes — a non-dict entry is skipped.
-    """
-    out = []
-    for tc in tool_calls or []:
-        if not isinstance(tc, dict):
-            continue
-        out.append({"name": tc.get("name", "tool"), "args": tc.get("args") or {}})
-    return out
-
-
 def normalize_tool_args(args: Any) -> Any:
     """Repair a common malformed tool-args shape from smaller models.
 
