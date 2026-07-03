@@ -674,7 +674,10 @@ class ChatInterface:
             if self.client.reflector:
                 self.client.reflect_and_learn(query)
 
-            if response != "Operation was cancelled.":
+            if response == "Operation was cancelled.":
+                # Resolve the transient "(cancelling…)" line to a final state.
+                print("\033[90m⊘ Stopped\033[0m")
+            else:
                 print("\n")
         except KeyboardInterrupt:
             return None
