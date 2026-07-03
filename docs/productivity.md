@@ -73,7 +73,7 @@ grep_search(pattern="import React", output_mode="content")  # Show matched lines
 - `context_lines`: Lines of context around matches
 - `max_results`: Maximum matches per file (default: 100)
 
-**Requirements:** Requires `ripgrep` installed (see Installation section)
+**Requirements:** [ripgrep](getting-started.md#7-recommended-optional-tools) is recommended for full speed; without it, `grep_search` automatically falls back to a slower built-in search.
 
 **Performance:** 10-100x faster than traditional grep for large codebases.
 

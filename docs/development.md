@@ -17,7 +17,7 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 
 **External Tools:**
 
-- **ripgrep**: Required for `grep_search` tool. Install via system package manager (see Installation section). If not installed, the assistant automatically falls back to slower alternatives.
+- **ripgrep**: Used by the `grep_search` tool. Install via system package manager (see [Recommended optional tools](getting-started.md#7-recommended-optional-tools)). If not installed, the assistant automatically falls back to slower alternatives.
 
 **Core Python Packages:**
 

@@ -67,7 +67,7 @@ stay at the repo root.
 ## Detailed File Map
 
 The full per-file reference (every module, its key classes/functions, and
-what it does) lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) to keep
+what it does) lives in [`ARCHITECTURE.md`](ARCHITECTURE.md) to keep
 this file lean. Consult it when you need to locate or understand a specific
 file; the sections below cover the high-level architecture and conventions.
 

@@ -86,7 +86,7 @@ After setup, try a simple prompt:
 What files are in the current directory?
 ```
 
-If the assistant lists files or uses the file-reading tools, the core loop is working.
+If the assistant lists files or uses the file-reading tools, the core loop is working. If something doesn't work, see [Troubleshooting](development.md#troubleshooting).
 
 Useful startup flags:
 

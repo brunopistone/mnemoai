@@ -164,21 +164,14 @@ The RAG system automatically indexes documents for semantic search with **hybrid
 - `search_in_documents(query, top_k)`: Hybrid semantic + BM25 search
 - `clear_documents()`: Clear RAG index
 
-**Configuration:**
+**Search internals:**
 
-- `RAG.CHUNK_TOKENS`: Chunk size (recommended: 512-2048)
-- `RAG.VECTOR_STORE.TYPE`: Choose between `faiss` or `chromadb`
-- `RAG.SEARCH.SEMANTIC_WEIGHT` / `RAG.SEARCH.KEYWORD_WEIGHT`: Configurable hybrid weights
 - Recursive chunking with 10% overlap
 - Hybrid search: BM25 (Okapi BM25 with TF-IDF, term saturation, length normalization) + semantic similarity
 - Independent candidate retrieval from both BM25 and embeddings, merged and re-ranked
 
-**Vector Store Options:**
-
-- **ChromaDB**: Persistent vector database with metadata support (default)
-- **FAISS**: Fast in-memory search with disk persistence
-
-The system uses a **VectorStoreController** for easy switching between stores. All functionality (indexing, searching, clearing) works identically regardless of the chosen store.
+For config keys — chunk size, vector store choice (ChromaDB/FAISS), and
+hybrid search weights — see [RAG Configuration](configuration.md#rag-configuration).
 
 ### User Profile Learning
 
@@ -261,17 +254,8 @@ The episodic memory system learns from successful task completions and retrieves
 - FAISS: `~/.mnemoai/{profile}/models/{model}/episodic_memory/episodic.index`
 - ChromaDB: `~/.mnemoai/{profile}/models/{model}/episodic_memory/`
 
-**Configuration:**
-
-```yaml
-ENABLE_EPISODIC_MEMORY: true
-EPISODIC_MEMORY:
-  STORE_TYPE: chromadb # or faiss
-RAG:
-  EMBED_MODEL_ID: # Required for both stores
-    NAME: qwen3-embedding:0.6b
-    TYPE: ollama
-```
+For the full config reference (all thresholds, hybrid search weights, and
+cleanup limits) see [Episodic Memory Configuration](configuration.md#episodic-memory-configuration).
 
 ### ACE Playbook (Agentic Context Engineering)
 

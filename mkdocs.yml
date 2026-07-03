@@ -43,7 +43,6 @@ nav:
   - Productivity Tools: productivity.md
   - Architecture: architecture-overview.md
   - Development: development.md
-  - Architecture Reference: ARCHITECTURE.md
 
 markdown_extensions:
   - admonition

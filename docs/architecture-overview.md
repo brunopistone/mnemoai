@@ -186,4 +186,4 @@ The kept-verbatim window is bounded by **both** a message count and a token budg
 
 The summary preserves topics, decisions, and **tool calls/results** (which tools ran, their inputs, and outcomes), so the agent retains actionable context after compacting.
 
-For the full per-file reference, see [Architecture Reference](ARCHITECTURE.md).
+For the full per-file reference, see [`ARCHITECTURE.md`](https://github.com/brunopistone/mnemoai/blob/main/ARCHITECTURE.md) in the repository (a repo-only, agent/contributor-facing reference, not part of this docs site).
