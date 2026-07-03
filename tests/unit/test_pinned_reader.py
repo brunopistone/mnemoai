@@ -366,3 +366,28 @@ class TestCtrlC:
         _ctrl_c_handler(r)(_FakeEvent(buf, _FakeApp()))
         # A running turn is cancelled; the input text is left intact.
         assert buf.text == "typed while running"
+
+
+def _escape_binding(reader):
+    """The reader's own bare-Escape binding (its filter gates word-motion)."""
+    for b in reader._make_bindings().bindings:
+        keys = tuple(getattr(k, "value", k) for k in b.keys)
+        if keys == ("escape",):
+            return b
+    raise AssertionError("no escape binding found")
+
+
+class TestEscapeWordMotion:
+    """Bare-Esc is eager only while busy (instant cancel). When idle it must be
+    inactive so macOS Option+←/→ (ESC b / ESC f) reach backward/forward-word
+    instead of self-inserting a literal 'b'/'f'."""
+
+    def test_escape_inactive_when_idle(self):
+        r = _reader(lambda line: None)
+        r._busy = False
+        assert _escape_binding(r).filter() is False
+
+    def test_escape_active_when_busy(self):
+        r = _reader(lambda line: None)
+        r._busy = True
+        assert _escape_binding(r).filter() is True
