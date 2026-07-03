@@ -387,18 +387,47 @@ def _is_tty() -> bool:
 # distinct from a legitimately-empty text entry.
 _DIALOG_CANCEL = object()
 
+# Sentinel returned when the user steps back (Back button / Ctrl+B), distinct
+# from cancel; only shown when a previous wizard step exists.
+_DIALOG_BACK = object()
+
+
+class _GoBack(Exception):
+    """User asked to return to the previous wizard step (Back / Ctrl+B)."""
+
+
+def _dialog_hint(confirm: str, allow_back: bool) -> str:
+    """Build a dialog key hint, inserting the Back cue only when available."""
+    parts = [confirm]
+    if allow_back:
+        parts.append("Ctrl+B to go back")
+    parts.append("Esc to cancel")
+    return " · ".join(parts)
+
+
+def _dialog_buttons(ok, cancel, back=None) -> list:
+    """OK / [Back] / Cancel button row; Back inserted only when ``back`` given."""
+    buttons = [Button(text="OK", handler=ok)]
+    if back is not None:
+        buttons.append(Button(text="Back", handler=back))
+    buttons.append(Button(text="Cancel", handler=cancel))
+    return buttons
+
 
 def _dialog_input(
     title: str,
     default: Optional[str] = None,
     suggestion: Optional[str] = None,
     required: bool = False,
+    allow_back: bool = False,
 ):
-    """Centered text-input dialog; returns the text or ``_DIALOG_CANCEL``.
+    """Centered text-input dialog; returns the text, ``_DIALOG_CANCEL``, or
+    ``_DIALOG_BACK`` (only when ``allow_back``).
 
     ``default`` prefills the box (editable in place); ``suggestion`` is a
     display-only hint returned as a fallback on empty Enter (unless ``required``,
-    which then blocks an empty confirm). Enter confirms, Esc cancels.
+    which then blocks an empty confirm). Enter confirms, Esc cancels, Ctrl+B
+    steps back.
     """
     field = TextArea(
         text=default or "",
@@ -408,7 +437,7 @@ def _dialog_input(
     # Put the cursor at the end so a prefilled default is editable / appendable.
     field.buffer.cursor_position = len(field.text)
 
-    base_hint = "Enter to confirm · Esc to cancel"
+    base_hint = _dialog_hint("Enter to confirm", allow_back)
     if suggestion:
         base_hint = f"Suggestion: {suggestion}  ·  " + base_hint
     hint_label = Label(text=base_hint)
@@ -430,13 +459,13 @@ def _dialog_input(
     def _cancel() -> None:
         get_app().exit(result=_DIALOG_CANCEL)
 
+    def _back() -> None:
+        get_app().exit(result=_DIALOG_BACK)
+
     dialog = Dialog(
         title=title,
         body=HSplit([hint_label, field], padding=1),
-        buttons=[
-            Button(text="OK", handler=_ok),
-            Button(text="Cancel", handler=_cancel),
-        ],
+        buttons=_dialog_buttons(_ok, _cancel, _back if allow_back else None),
         with_background=True,
     )
 
@@ -451,6 +480,11 @@ def _dialog_input(
     def _(event) -> None:
         _cancel()
 
+    if allow_back:
+        @kb.add("c-b")
+        def _(event) -> None:
+            _back()
+
     app = Application(
         layout=Layout(dialog),
         key_bindings=kb,
@@ -460,9 +494,11 @@ def _dialog_input(
     return app.run()
 
 
-def _dialog_radio(title: str, options: list, default=None, info: str = ""):
+def _dialog_radio(
+    title: str, options: list, default=None, info: str = "", allow_back: bool = False
+):
     """Centered single-choice list (↑/↓ move, Enter confirms, Esc cancels);
-    returns the chosen value or ``_DIALOG_CANCEL``.
+    returns the chosen value, ``_DIALOG_CANCEL``, or ``_DIALOG_BACK``.
 
     ``options`` is ``[(value, label), …]``. ``info`` (optional) is shown above
     the list to surface the "Current setup" overview inside the dialog.
@@ -475,24 +511,22 @@ def _dialog_radio(title: str, options: list, default=None, info: str = ""):
     def _cancel() -> None:
         get_app().exit(result=_DIALOG_CANCEL)
 
+    def _back() -> None:
+        get_app().exit(result=_DIALOG_BACK)
+
     # Bind Enter on the control itself (RadioList shadows a global Enter binding).
     radio.control.key_bindings.add("enter")(lambda event: _ok())
 
     body_items = []
     if info:
         body_items.append(Label(text=info))
-    body_items.append(
-        Label(text="↑/↓ to move · Enter to confirm · Esc to cancel")
-    )
+    body_items.append(Label(text=_dialog_hint("↑/↓ move · Enter confirm", allow_back)))
     body_items.append(radio)
 
     dialog = Dialog(
         title=title,
         body=HSplit(body_items, padding=1),
-        buttons=[
-            Button(text="OK", handler=_ok),
-            Button(text="Cancel", handler=_cancel),
-        ],
+        buttons=_dialog_buttons(_ok, _cancel, _back if allow_back else None),
         with_background=True,
     )
 
@@ -503,6 +537,11 @@ def _dialog_radio(title: str, options: list, default=None, info: str = ""):
     def _(event) -> None:
         _cancel()
 
+    if allow_back:
+        @kb.add("c-b")
+        def _(event) -> None:
+            _back()
+
     app = Application(
         layout=Layout(dialog),
         key_bindings=kb,
@@ -512,9 +551,9 @@ def _dialog_radio(title: str, options: list, default=None, info: str = ""):
     return app.run()
 
 
-def _dialog_yesno(title: str, default: bool):
-    """Centered yes/no dialog (Y/N or ←/→ + Enter); True/False, or
-    ``_DIALOG_CANCEL`` on Esc (distinct from "No")."""
+def _dialog_yesno(title: str, default: bool, allow_back: bool = False):
+    """Centered yes/no dialog (Y/N or ←/→ + Enter); True/False,
+    ``_DIALOG_CANCEL`` on Esc (distinct from "No"), or ``_DIALOG_BACK``."""
     def _yes() -> None:
         get_app().exit(result=True)
 
@@ -524,16 +563,22 @@ def _dialog_yesno(title: str, default: bool):
     def _cancel() -> None:
         get_app().exit(result=_DIALOG_CANCEL)
 
+    def _back() -> None:
+        get_app().exit(result=_DIALOG_BACK)
+
     yes_btn = Button(text="Yes", handler=_yes)
     no_btn = Button(text="No", handler=_no)
+    buttons = [yes_btn, no_btn]
+    if allow_back:
+        buttons.append(Button(text="Back", handler=_back))
 
     dialog = Dialog(
         title=title,
         body=HSplit(
-            [Label(text="Y/N or ←/→ + Enter · Esc to cancel")],
+            [Label(text=_dialog_hint("Y/N or ←/→ + Enter", allow_back))],
             padding=1,
         ),
-        buttons=[yes_btn, no_btn],
+        buttons=buttons,
         with_background=True,
     )
 
@@ -554,6 +599,11 @@ def _dialog_yesno(title: str, default: bool):
     def _(event) -> None:
         _cancel()
 
+    if allow_back:
+        @kb.add("c-b")
+        def _(event) -> None:
+            _back()
+
     app = Application(
         layout=Layout(dialog),
         key_bindings=kb,
@@ -563,8 +613,8 @@ def _dialog_yesno(title: str, default: bool):
     # Focus the default button so Tab/←/→ + Enter still works intuitively.
     app.layout.focus(yes_btn if default else no_btn)
     result = app.run()
-    if result is _DIALOG_CANCEL:
-        return _DIALOG_CANCEL
+    if result in (_DIALOG_CANCEL, _DIALOG_BACK):
+        return result
     return bool(result)
 
 
@@ -573,17 +623,23 @@ def _ask(
     default: Optional[str] = None,
     suggestion: Optional[str] = None,
     required: bool = False,
+    allow_back: bool = False,
 ) -> Optional[str]:
     """Prompt for a value, returning ``default`` on empty input/EOF/cancel.
 
     ``suggestion`` proposes a value without prefilling (empty Enter falls back to
     it, unless ``required`` — then it's display-only and an empty value re-asks).
-    Cancelling raises ``_Cancelled`` so nothing is half-applied.
+    Cancelling raises ``_Cancelled``; stepping back raises ``_GoBack``.
     """
     if _is_tty():
-        val = _dialog_input(prompt, default, suggestion=suggestion, required=required)
+        val = _dialog_input(
+            prompt, default, suggestion=suggestion, required=required,
+            allow_back=allow_back,
+        )
         if val is _DIALOG_CANCEL:
             raise _Cancelled()
+        if val is _DIALOG_BACK:
+            raise _GoBack()
         val = val.strip()
         return val or default or (None if required else suggestion)
 
@@ -602,13 +658,18 @@ def _ask(
         return resolved
 
 
-def _ask_required(prompt: str, default: Optional[str] = None) -> str:
+def _ask_required(
+    prompt: str, default: Optional[str] = None, allow_back: bool = False
+) -> str:
     """Prompt for a value; empty input keeps ``default``, or (with no default)
-    re-asks. Cancelling raises ``_Cancelled``."""
+    re-asks. Cancelling raises ``_Cancelled``; stepping back raises ``_GoBack``."""
     if _is_tty():
-        val = _dialog_input(prompt, default, required=default is None)
+        val = _dialog_input(prompt, default, required=default is None,
+                            allow_back=allow_back)
         if val is _DIALOG_CANCEL:
             raise _Cancelled()
+        if val is _DIALOG_BACK:
+            raise _GoBack()
         return val.strip() or (default or "")
 
     suffix = f" [{default}]" if default else ""
@@ -630,25 +691,29 @@ def _ask_choice(
     default: Optional[str] = None,
     labels: Optional[dict] = None,
     info: str = "",
+    allow_back: bool = False,
 ) -> str:
     """Prompt for one of ``valid`` keys, re-asking on an invalid entry.
 
     On a TTY with ``labels`` (``{key: human_label}``) this is a single-choice
     dialog (``info`` shown inside it); else a plain ``input()`` re-ask loop.
-    Cancelling raises ``_Cancelled``.
+    Cancelling raises ``_Cancelled``; stepping back raises ``_GoBack``.
     """
     if _is_tty() and labels:
         # Preserve labels' insertion order.
         options = [(k, labels.get(k, k)) for k in labels if k in valid]
         chosen = _dialog_radio(
-            prompt, options, default=default if default in valid else None, info=info
+            prompt, options, default=default if default in valid else None,
+            info=info, allow_back=allow_back,
         )
         if chosen is _DIALOG_CANCEL:
             raise _Cancelled()
+        if chosen is _DIALOG_BACK:
+            raise _GoBack()
         return chosen
 
     while True:
-        answer = _ask_required(prompt, default)
+        answer = _ask_required(prompt, default, allow_back=allow_back)
         if answer in valid:
             return answer
         print(f"  '{answer}' is not a valid choice; please pick one of: "
@@ -660,14 +725,16 @@ def _ask_number(
     default: Optional[str] = None,
     kind: str = "int",
     allow_none: bool = False,
+    allow_back: bool = False,
 ) -> Optional[str]:
     """Prompt for an int/float, re-asking until it parses.
 
     Enter/default returns ``default``; "none" returns None when ``allow_none``;
-    a non-numeric entry re-prompts. Cancelling raises ``_Cancelled``.
+    a non-numeric entry re-prompts. Cancelling raises ``_Cancelled``; stepping
+    back raises ``_GoBack``.
     """
     while True:
-        answer = _ask_required(prompt, default)
+        answer = _ask_required(prompt, default, allow_back=allow_back)
         if allow_none and answer.strip().lower() == "none":
             return None
         if default is not None and answer == default:
@@ -690,13 +757,15 @@ def _ask_number(
                 print(f"  {msg}; please try again.")
 
 
-def _ask_bool(prompt: str, default: bool) -> bool:
+def _ask_bool(prompt: str, default: bool, allow_back: bool = False) -> bool:
     """Prompt yes/no, defaulting to ``default`` on empty input; cancelling raises
-    ``_Cancelled``."""
+    ``_Cancelled``; stepping back raises ``_GoBack``."""
     if _is_tty():
-        result = _dialog_yesno(prompt, default)
+        result = _dialog_yesno(prompt, default, allow_back=allow_back)
         if result is _DIALOG_CANCEL:
             raise _Cancelled()
+        if result is _DIALOG_BACK:
+            raise _GoBack()
         return result
 
     hint = "Y/n" if default else "y/N"
@@ -707,6 +776,30 @@ def _ask_bool(prompt: str, default: bool) -> bool:
     if not val:
         return default
     return val.startswith("y")
+
+
+def _run_steps(text: str, steps: list) -> str:
+    """Run a wizard's ordered steps with Back support, threading ``text`` through.
+
+    Each step is ``fn(text, allow_back) -> text``: it prompts (passing
+    ``allow_back`` to its ``_ask*`` call) and returns the patched text. Every
+    step but the first is given ``allow_back=True``; a ``_GoBack`` from step *i*
+    rewinds to step *i-1*, restoring the text as it was before that step ran so a
+    re-answer replaces (not stacks on) the earlier one. ``_Cancelled`` propagates.
+    """
+    history = []  # text as it was BEFORE each executed step, indexed by step
+    i = 0
+    while i < len(steps):
+        history = history[:i]
+        history.append(text)
+        try:
+            text = steps[i](text, i > 0)
+            i += 1
+        except _GoBack:
+            # Rewind to the previous step, restoring its pre-run text.
+            i = max(0, i - 1)
+            text = history[i]
+    return text
 
 
 def _set_bool(text: str, key: str, value: bool, section: Optional[str] = None) -> str:
@@ -749,7 +842,7 @@ def _prompt_provider_type(section: str, current: str) -> str:
     return options[int(choice) - 1]
 
 
-def _prompt_mantle_protocol(text: str, section: str) -> str:
+def _prompt_mantle_protocol(text: str, section: str, allow_back: bool = False) -> str:
     """Prompt for and set ``section``'s Mantle API protocol; leaves an absent
     ``chat_completions`` (the default) unwritten so Enter-through is a no-op."""
     existing = _get_field(text, section, "API_PROTOCOL")
@@ -761,7 +854,8 @@ def _prompt_mantle_protocol(text: str, section: str) -> str:
         for k, lbl in labels.items():
             print(f"    {k}) {lbl}")
     choice = _ask_choice(
-        "Mantle API protocol", set(_MANTLE_PROTOCOLS), default_key, labels=labels
+        "Mantle API protocol", set(_MANTLE_PROTOCOLS), default_key, labels=labels,
+        allow_back=allow_back,
     )
     chosen = _MANTLE_PROTOCOLS[choice][0]
     if chosen != existing and not (existing is None and chosen == "chat_completions"):
@@ -769,82 +863,91 @@ def _prompt_mantle_protocol(text: str, section: str) -> str:
     return text
 
 
-def _prompt_provider_connection(text: str, section: str, provider: str):
-    """Prompt the connection/auth keys ``provider`` needs for ``section`` (per
-    the registry). Shared by /config and /model.
-
-    Returns ``(text, conn)`` where ``conn`` holds the HOST/PORT/REGION values the
-    vision section can reuse.
-    """
-    allowed = supported_keys(section, provider) or set()
+def _conn_from_text(text: str, section: str) -> dict:
+    """HOST/PORT/REGION currently set in ``section`` (values the vision section
+    mirrors); read back from ``text`` so it survives step-based prompting."""
     conn = {}
+    for k in ("HOST", "PORT", "REGION"):
+        v = _get_field(text, section, k)
+        if v is not None:
+            conn[k] = v
+    return conn
+
+
+def _optional_field_step(section: str, key: str, prompt: str):
+    """A step for an optional connection field: set it only when non-blank
+    (blank keeps the provider's env/default). Returns ``fn(text, allow_back)``."""
+    def _step(text: str, allow_back: bool) -> str:
+        v = _ask(prompt, _get_field(text, section, key) or "", allow_back=allow_back)
+        return _set_field(text, section, key, v) if v else text
+    return _step
+
+
+def _connection_steps(section: str, provider: str) -> list:
+    """Back-able steps for the connection/auth keys ``provider`` needs (per the
+    registry). Each is ``fn(text, allow_back) -> text``; shared by /config, /model."""
+    allowed = supported_keys(section, provider) or set()
+    steps = []
 
     if "HOST" in allowed:
-        host = _ask("Ollama host", _get_field(text, section, "HOST") or "localhost")
-        text = _set_field(text, section, "HOST", host)
-        conn["HOST"] = host
+        steps.append(lambda t, b: _set_field(
+            t, section, "HOST",
+            _ask("Ollama host", _get_field(t, section, "HOST") or "localhost", allow_back=b)))
     if "PORT" in allowed:
-        port = _ask("Ollama port", _get_field(text, section, "PORT") or "11434")
-        text = _set_field(text, section, "PORT", port)
-        conn["PORT"] = port
+        steps.append(lambda t, b: _set_field(
+            t, section, "PORT",
+            _ask("Ollama port", _get_field(t, section, "PORT") or "11434", allow_back=b)))
     if "REGION" in allowed:
-        region = _ask("AWS region", _get_field(text, section, "REGION") or "us-east-1")
-        text = _set_field(text, section, "REGION", region)
-        conn["REGION"] = region
+        steps.append(lambda t, b: _set_field(
+            t, section, "REGION",
+            _ask("AWS region", _get_field(t, section, "REGION") or "us-east-1", allow_back=b)))
     if "INPUT_FORMAT" in allowed:
-        fmt = _ask(
-            "Input format (openai_chat | huggingface)",
-            _get_field(text, section, "INPUT_FORMAT") or "openai_chat",
-        ) or "openai_chat"
-        text = _set_field(text, section, "INPUT_FORMAT", fmt)
+        steps.append(lambda t, b: _set_field(
+            t, section, "INPUT_FORMAT",
+            _ask("Input format (openai_chat | huggingface)",
+                 _get_field(t, section, "INPUT_FORMAT") or "openai_chat", allow_back=b)
+            or "openai_chat"))
     if "API_PROTOCOL" in allowed and provider == "mantle":
         # Mantle's protocol is a required 3-way choice; OpenAI's is an advanced
         # hand-set opt-in the configurator doesn't prompt for.
-        text = _prompt_mantle_protocol(text, section)
+        steps.append(lambda t, b: _prompt_mantle_protocol(t, section, allow_back=b))
     if provider == "litellm":
         if "API_BASE" in allowed:
-            v = _ask("LiteLLM API base URL (optional)", _get_field(text, section, "API_BASE") or "")
-            if v:
-                text = _set_field(text, section, "API_BASE", v)
+            steps.append(_optional_field_step(section, "API_BASE", "LiteLLM API base URL (optional)"))
         if "API_KEY" in allowed:
-            v = _ask("LiteLLM API key (optional, or via the provider's env var)", _get_field(text, section, "API_KEY") or "")
-            if v:
-                text = _set_field(text, section, "API_KEY", v)
+            steps.append(_optional_field_step(section, "API_KEY", "LiteLLM API key (optional, or via the provider's env var)"))
     if provider == "anthropic":
         if "API_KEY" in allowed:
-            v = _ask("Anthropic API key (optional, or via ANTHROPIC_API_KEY env var)", _get_field(text, section, "API_KEY") or "")
-            if v:
-                text = _set_field(text, section, "API_KEY", v)
+            steps.append(_optional_field_step(section, "API_KEY", "Anthropic API key (optional, or via ANTHROPIC_API_KEY env var)"))
         if "ENDPOINT_URL" in allowed:
-            v = _ask("Anthropic base URL (optional, blank for api.anthropic.com)", _get_field(text, section, "ENDPOINT_URL") or "")
-            if v:
-                text = _set_field(text, section, "ENDPOINT_URL", v)
+            steps.append(_optional_field_step(section, "ENDPOINT_URL", "Anthropic base URL (optional, blank for api.anthropic.com)"))
     if provider == "openai" and "API_BASE" in allowed:
         # Optional OpenAI-compatible server; blank keeps api.openai.com.
-        v = _ask(
-            "OpenAI-compatible base URL (optional, blank for the OpenAI API)",
-            _get_field(text, section, "API_BASE") or "",
-        )
-        if v:
-            text = _set_field(text, section, "API_BASE", v)
+        steps.append(_optional_field_step(section, "API_BASE", "OpenAI-compatible base URL (optional, blank for the OpenAI API)"))
         if "API_KEY" in allowed:
-            v = _ask(
-                "API key (optional; blank uses OPENAI_API_KEY, local servers need none)",
-                _get_field(text, section, "API_KEY") or "",
-            )
-            if v:
-                text = _set_field(text, section, "API_KEY", v)
+            steps.append(_optional_field_step(section, "API_KEY", "API key (optional; blank uses OPENAI_API_KEY, local servers need none)"))
 
     # Embeddings: optional vector-size override (fallback only).
     if section == "EMBED_MODEL_ID":
-        v = _ask(
-            "Embedding dimension (optional; blank = auto-detect)",
-            _get_field(text, section, "DIMENSION") or "",
-        )
-        if v:
-            text = _set_field(text, section, "DIMENSION", v)
+        steps.append(_optional_field_step(section, "DIMENSION", "Embedding dimension (optional; blank = auto-detect)"))
 
-    # Credential notes (env-based auth the configurator can't set).
+    return steps
+
+
+def _prompt_provider_connection(text: str, section: str, provider: str):
+    """Run the connection/auth steps for ``provider`` linearly (no Back) and
+    print the credential note. Returns ``(text, conn)`` where ``conn`` holds the
+    HOST/PORT/REGION the vision section can mirror. Thin wrapper over
+    :func:`_connection_steps` kept for callers that want the one-shot form."""
+    for step in _connection_steps(section, provider):
+        text = step(text, False)
+    _print_credential_note(provider)
+    return text, _conn_from_text(text, section)
+
+
+def _print_credential_note(provider: str) -> None:
+    """Print the env-based auth note for a provider (the configurator can't set
+    these keys itself)."""
     if provider == "bedrock":
         print("  Note: Bedrock uses your AWS credentials (`aws configure`) or a")
         print("  Bedrock API key (AWS_BEARER_TOKEN_BEDROCK env var).")
@@ -860,8 +963,6 @@ def _prompt_provider_connection(text: str, section: str, provider: str):
         print("  Note: Anthropic (Claude API) reads the ANTHROPIC_API_KEY env")
         print("  var, or MODEL_ID.API_KEY. This is the direct api.anthropic.com")
         print("  API — not Bedrock Mantle's 'anthropic' protocol.")
-
-    return text, conn
 
 
 def _build_config(
@@ -892,30 +993,32 @@ def _build_config(
             text = _set_in_section(text, "VISION_MODEL_ID", "TYPE", provider)
             text = _prune_unsupported_params(text, "VISION_MODEL_ID", provider)
 
-    # --- Chat model ---
-    print("\n  -- Chat model --")
-    # default_model is an example (suggestion, not prefilled); name is mandatory.
-    model = _ask("Chat model name", suggestion=default_model, required=True)
-    if model:
-        text = _set_in_section(text, "MODEL_ID", "NAME", model)
+    # --- Chat model --- (name → connection → max_tokens → context, all Back-able)
+    def _name_step(t, b):
+        # default_model is an example (suggestion, not prefilled); name is mandatory.
+        m = _ask("Chat model name", suggestion=default_model, required=True, allow_back=b)
+        return _set_in_section(t, "MODEL_ID", "NAME", m) if m else t
 
-    # Connection/auth prompts (shared with /model); conn holds HOST/PORT/REGION
-    # to mirror into the vision section.
-    text, conn = _prompt_provider_connection(text, "MODEL_ID", provider)
+    def _ctx_step(t, b):
+        # Mandatory context window; defaults to the template value (or 65536).
+        ctx = _ask_number(
+            "Max context window",
+            default=_get_top_level(t, "MAX_CONVERSATION_TOKENS") or "65536",
+            kind="int", allow_back=b,
+        )
+        t = _set_top_level_or_add(t, "MAX_CONVERSATION_TOKENS", ctx or "65536")
+        return _sync_doc_max_tokens(t)
 
-    text = _prompt_max_tokens(text, "MODEL_ID")
-
-    # Mandatory context window; defaults to the template value (or 65536).
-    ctx = _ask_number(
-        "Max context window",
-        default=_get_top_level(text, "MAX_CONVERSATION_TOKENS") or "65536",
-        kind="int",
-    )
-    text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
-    text = _sync_doc_max_tokens(text)
+    text = _run_steps(text, [
+        _name_step,
+        *_connection_steps("MODEL_ID", provider),
+        lambda t, b: _prompt_max_tokens(t, "MODEL_ID", allow_back=b),
+        _ctx_step,
+    ])
+    # HOST/PORT/REGION to mirror into the vision section.
+    conn = _conn_from_text(text, "MODEL_ID")
 
     # --- Vision model (optional) ---
-    print("\n  -- Vision model (image description) --")
     if _ask_bool("Configure a vision model (for image description)?", True):
         vision = _ask("Vision model name", _get_in_section(text, "VISION_MODEL_ID", "NAME"))
         if vision:
@@ -929,24 +1032,19 @@ def _build_config(
         text = _prompt_max_tokens(text, "VISION_MODEL_ID")
     else:
         text = _remove_top_section(text, "VISION_MODEL_ID")
-        print("  -> Vision disabled (no VISION_MODEL_ID).")
 
     # --- Profile ---
-    print("\n  -- Profile --")
     profile = _ask("Profile name (isolates your data)", getpass.getuser() or "default")
     if profile:
         text = _set_in_section(text, "PROFILE", "NAME", profile)
 
     # --- Web search (Brave) ---
-    print("\n  -- Features --")
     brave = _ask("Brave Search API key (optional, press Enter to skip)", "")
     if brave:
         text = _set_top_level(text, "BRAVE_API_KEY", brave)
         text = _set_bool(text, "ENABLE_WEB_SEARCH", True)
     else:
         text = _set_bool(text, "ENABLE_WEB_SEARCH", False)
-        print("  -> Web search disabled (no API key). Set BRAVE_API_KEY and")
-        print("     ENABLE_WEB_SEARCH: true later to enable it.")
 
     # --- Other feature toggles (default from the template) ---
     text = _set_bool(text, "ENABLE_RAG", _ask_bool("Enable RAG (document indexing & search)?", _truthy(_get_top_level(text, "ENABLE_RAG"))))
@@ -961,7 +1059,6 @@ def _build_config(
         orchestration = _ask_bool("Enable orchestration (decompose complex tasks)?", _truthy(_get_top_level(text, "ENABLE_ORCHESTRATION")))
     else:
         orchestration = False
-        print("  -> Orchestration disabled (it requires query routing).")
     text = _set_bool(text, "ENABLE_ORCHESTRATION", orchestration)
 
     text = _set_bool(text, "USE_PROFILING", _ask_bool("Enable user profiling (personalized responses)?", _truthy(_get_in_section(text, "PROFILE", "USE_PROFILING"))), section="PROFILE")
@@ -975,9 +1072,9 @@ def _build_config(
 def _run_configurator(dest: Path) -> Optional[Path]:
     """Pick a provider, fill the template, write to ``dest`` (caller handles
     first-run/overwrite gating); returns the Path, or None if a template's missing."""
-    print(_CANCEL_HINT)
     provider_labels = {k: label for k, (_, _, label, _) in _PROVIDERS.items()}
     if not _is_tty():
+        print(_CANCEL_HINT)
         print("\n  Choose your LLM provider:")
         for k, lbl in provider_labels.items():
             print(f"    {k}) {lbl}")
@@ -991,7 +1088,6 @@ def _run_configurator(dest: Path) -> Optional[Path]:
         print_error(f"Template not found: {template_path}. Cannot continue setup.")
         return None
 
-    print(f"\n  Configuring for: {label}\n")
     template_text = template_path.read_text()
     config_text = _build_config(provider, default_model, template_text, template_file)
 
@@ -999,6 +1095,8 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     dest.write_text(config_text)
 
     print(f"\n  Config written to:\n    {dest}")
+    # Env-based auth reminder survives to scrollback after the restart.
+    _print_credential_note(provider)
     print(f"\n  This file lives in the config/ folder of your app home ({dest.parent.parent}),")
     print("  which also holds the rest of your runtime data (plans, tasks,")
     print("  conversations, RAG indexes, episodic memory, the ACE playbook, and")
@@ -1018,11 +1116,14 @@ def run_first_run_setup() -> Optional[Path]:
     """Interactively create a first ``config.yaml``; returns the Path or None."""
     dest = config_path()
 
-    print()
-    print("=" * 64)
-    print("  Welcome to Mnemo AI — first-run setup")
-    print("=" * 64)
-    print(f"  No config found. Let's create one at:\n    {dest}\n")
+    # On a TTY the confirm dialog carries the framing; only the non-TTY fallback
+    # prints the banner (a full-screen dialog would wipe it anyway).
+    if not _is_tty():
+        print()
+        print("=" * 64)
+        print("  Welcome to Mnemo AI — first-run setup")
+        print("=" * 64)
+        print(f"  No config found. Let's create one at:\n    {dest}\n")
 
     try:
         answer = _ask("Set up a config now? (Y/n)", "Y")
@@ -1105,7 +1206,7 @@ def _section_summary(text: str, section: str) -> Optional[str]:
     return f"{typ} / {name}{suffix}"
 
 
-def _prompt_max_tokens(text: str, section: str) -> str:
+def _prompt_max_tokens(text: str, section: str, allow_back: bool = False) -> str:
     """Prompt for the optional MAX_TOKENS of a section (Enter/'none' → remove the
     key = provider default; a number → set it)."""
     answer = _ask_number(
@@ -1113,6 +1214,7 @@ def _prompt_max_tokens(text: str, section: str) -> str:
         default="none",
         kind="int",
         allow_none=True,
+        allow_back=allow_back,
     )
     if answer is None:
         return _remove_field(text, section, "MAX_TOKENS")
@@ -1140,42 +1242,41 @@ def _print_current_setup(text: str) -> None:
 
 def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     """Prompt for one model section (provider type included, so it can switch
-    providers) and patch ``text``; context window only for the chat LLM."""
+    providers) and patch ``text``; context window only for the chat LLM.
+
+    The provider type is the anchor (chosen first, no Back into it — switching it
+    invalidates the provider-dependent steps that follow); every step after it
+    supports Back (Ctrl+B)."""
     cur_type = (_get_field(text, section, "TYPE") or "ollama").lower()
     new_type = _prompt_provider_type(section, cur_type)
     text = _set_field(text, section, "TYPE", new_type)
 
-    name = _ask("Model name", _get_field(text, section, "NAME"))
-    if name:
-        text = _set_field(text, section, "NAME", name)
-
-    # Connection/auth prompts (shared with /config).
-    text, _ = _prompt_provider_connection(text, section, new_type)
-
-    # On a provider switch, strip keys the new provider doesn't consume.
+    # On a provider switch, strip keys the new provider doesn't consume. Clear
+    # model-specific inference params on any change (a value tuned for one model
+    # may be rejected by another); MAX_TOKENS is prompted below. Done before the
+    # prompts so the connection steps re-add exactly the right keys.
     if new_type != cur_type:
         text = _prune_unsupported_params(text, section, new_type)
-
-    # Clear model-specific inference params on any model change (a value tuned
-    # for one model may be rejected by another); MAX_TOKENS is prompted below.
     text = _clear_inference_params(text, section, keep={"MAX_TOKENS"})
 
-    print(
-        f"  Note: inference parameters (temperature, top_p, penalties, …) were "
-        f"reset to the\n  model defaults for this {section} change. Use /params "
-        "to tune them."
-    )
+    def _name_step(t, b):
+        name = _ask("Model name", _get_field(t, section, "NAME"), allow_back=b)
+        return _set_field(t, section, "NAME", name) if name else t
 
-    # MAX_TOKENS is optional, for chat and vision (not embeddings).
+    steps = [_name_step, *_connection_steps(section, new_type)]
     if section in ("MODEL_ID", "VISION_MODEL_ID"):
-        text = _prompt_max_tokens(text, section)
-
+        steps.append(lambda t, b: _prompt_max_tokens(t, section, allow_back=b))
     if is_llm:
         # Context window (feeds num_ctx + compaction budget); defaults to 65536.
-        ctx = _ask_number("Max context window", default="65536", kind="int")
-        text = _set_top_level_or_add(text, "MAX_CONVERSATION_TOKENS", ctx or "65536")
-        text = _sync_doc_max_tokens(text)
+        def _ctx_step(t, b):
+            ctx = _ask_number("Max context window", default="65536", kind="int",
+                              allow_back=b)
+            t = _set_top_level_or_add(t, "MAX_CONVERSATION_TOKENS", ctx or "65536")
+            return _sync_doc_max_tokens(t)
+        steps.append(_ctx_step)
 
+    text = _run_steps(text, steps)
+    _print_credential_note(new_type)
     return text
 
 
@@ -1253,10 +1354,12 @@ def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
     return raw
 
 
-def _prompt_one_param(text: str, section: str, key: str, kind: str, hint: str) -> str:
+def _prompt_one_param(
+    text: str, section: str, key: str, kind: str, hint: str, allow_back: bool = False
+) -> str:
     """Prompt for one inference param (prefilled with the current value) and
     patch ``text``: unchanged/empty keeps it, ``none`` clears it, a valid value
-    sets it (re-asks on invalid), Esc cancels."""
+    sets it (re-asks on invalid), Esc cancels, Ctrl+B steps back."""
     current = _get_field(text, section, key)
     base_hint = hint
     if kind.startswith("enum:"):
@@ -1266,7 +1369,10 @@ def _prompt_one_param(text: str, section: str, key: str, kind: str, hint: str) -
 
     prompt_hint = base_hint
     while True:
-        answer = _ask(f"{key} [{prompt_hint}] ('none' to clear)", default=current)
+        answer = _ask(
+            f"{key} [{prompt_hint}] ('none' to clear)", default=current,
+            allow_back=allow_back,
+        )
         if answer is None:
             return text
         answer = answer.strip()
@@ -1295,14 +1401,16 @@ def _prompt_inference_params(text: str, section: str) -> str:
         print(f"  Provider '{provider}' exposes no tunable inference parameters here.")
         return text
 
-    print(f"\n  Provider: {provider}. Press Enter to keep a value, type 'none' to")
-    print("  clear it (provider default), or enter a new value.\n")
+    def _step(key, kind, hint):
+        return lambda t, back: _prompt_one_param(t, section, key, kind, hint, back)
+
+    steps = []
     for key in _PARAM_ORDER:
         if key not in tunable:
             continue
         kind, hint = _PARAM_META.get(key, ("str", key))
-        text = _prompt_one_param(text, section, key, kind, hint)
-    return text
+        steps.append(_step(key, kind, hint))
+    return _run_steps(text, steps)
 
 
 def run_params_override() -> Optional[Path]:
@@ -1349,7 +1457,6 @@ def run_params_override() -> Optional[Path]:
             info=_current_setup_text(text),
         )
         section, label = _PARAM_SECTIONS[choice]
-        print(f"\n  -- {label} parameters --")
         new_text = _prompt_inference_params(text, section)
     except (KeyboardInterrupt, _Cancelled):
         print("\n  Cancelled. Config left untouched.")
@@ -1410,7 +1517,6 @@ def run_model_override() -> Optional[Path]:
             info=_current_setup_text(text),
         )
         section, label, is_llm = _MODEL_SECTIONS[choice]
-        print(f"\n  -- {label} --")
         new_text = _prompt_model_section(text, section, is_llm)
     except (KeyboardInterrupt, _Cancelled):
         print("\n  Cancelled. Config left untouched.")
@@ -1422,7 +1528,8 @@ def run_model_override() -> Optional[Path]:
 
     dest.write_text(new_text)
     print(f"\n  Updated {label} in:\n    {dest}")
-    print("  For the full list of parameters you can set per provider, see the")
-    print("  README's 'Model Parameters' section.")
+    print("  Inference parameters were reset to model defaults for this change;")
+    print("  use /params to tune them. For the full per-provider parameter list,")
+    print("  see the README's 'Model Parameters' section.")
     print("=" * 64 + "\n")
     return dest

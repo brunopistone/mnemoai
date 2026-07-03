@@ -119,6 +119,47 @@ class TestStandardBedrockEndpoint:
         ctrl.initialize_model()
         assert "endpoint_url" not in patch_bedrock["ChatBedrockConverse"]
 
+    def test_reasoning_effort_alone_enables_thinking(self, patch_bedrock, monkeypatch):
+        # REASONING_EFFORT without REASONING must still turn thinking on.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "global.anthropic.claude-sonnet-5",
+                "TYPE": "bedrock",
+                "REASONING_EFFORT": "max",
+            },
+        )
+        ctrl.initialize_model()
+        fields = patch_bedrock["ChatBedrockConverse"]["additional_model_request_fields"]
+        assert fields["thinking"]["type"] == "adaptive"
+        assert fields["output_config"] == {"effort": "max"}
+
+    def test_newer_claude_uses_adaptive_not_enabled(self, patch_bedrock, monkeypatch):
+        # Sonnet 5 rejects thinking.type=enabled; the version-aware form is used.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "global.anthropic.claude-sonnet-5",
+                "TYPE": "bedrock",
+                "REASONING": True,
+                "REASONING_EFFORT": "max",
+            },
+        )
+        ctrl.initialize_model()
+        fields = patch_bedrock["ChatBedrockConverse"]["additional_model_request_fields"]
+        assert fields["thinking"]["type"] == "adaptive"
+
+    def test_no_reasoning_sends_no_thinking(self, patch_bedrock, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {"NAME": "global.anthropic.claude-sonnet-5", "TYPE": "bedrock"},
+        )
+        ctrl.initialize_model()
+        assert (
+            "additional_model_request_fields"
+            not in patch_bedrock["ChatBedrockConverse"]
+        )
+
 
 class TestMantleModelType:
     def test_builds_chatopenai_with_token_and_default_endpoint(

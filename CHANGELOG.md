@@ -9,6 +9,41 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-07-03
+
+### Added
+
+- **Back navigation in the config wizards (`/config`, `/model`, `/params`).** Each
+  step now shows a **Back** button (and **Ctrl+B**) that returns to the previous
+  field, keeping what you already entered; Esc still cancels the whole flow. A
+  small step-runner (`_run_steps`) drives the sequences and rewinds cleanly on a
+  Back (restoring the pre-step text so a re-answer replaces, not stacks). Non-TTY
+  runs are unchanged.
+
+### Changed
+
+- **Configurator no longer prints mid-flow noise on a TTY.** Section headers and
+  inline notes (`-- Chat model --`, "Vision disabled", "Configuring for…", the
+  inference-reset note, …) were wiped by the next full-screen dialog anyway; they
+  are dropped on a TTY. Only what's useful after the in-place restart survives to
+  scrollback — the final "Config written / Updated / No changes / Cancelled"
+  outcome and the provider's env-based auth note — plus the unchanged non-TTY
+  fallback banners.
+
+### Fixed
+
+- **Reasoning now surfaces on the `bedrock` provider with newer Claude (Sonnet 5,
+  Opus 4.6+).** Three bugs in the Bedrock path, all only reachable on the newer
+  models: (1) `_initialize_bedrock_model` gated thinking on `REASONING` alone, so
+  `REASONING_EFFORT` by itself sent no thinking directive and no reasoning came
+  back; (2) it hardcoded the old `thinking={"type":"enabled",…}` form, which these
+  models reject with `"thinking.type.enabled" is not supported … use adaptive`
+  (a hard `ValidationException`) — it now reuses the version-aware
+  `_anthropic_thinking_kwargs` (adaptive + `output_config.effort`), matching the
+  Mantle/Anthropic paths; (3) the reasoning extractor didn't recognize the Bedrock
+  Converse `reasoning_content` block shape (`{"type":"reasoning_content",
+  "reasoning_content":{"text":…}}`), so even when text was returned it was dropped.
+
 ## [0.15.0] — 2026-07-02
 
 ### Added

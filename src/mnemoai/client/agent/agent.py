@@ -997,6 +997,17 @@ class LangGraphAgent:
             self._stop_spinner()
 
     @staticmethod
+    def _reasoning_content_text(block: dict) -> str:
+        """Text from a Bedrock Converse ``reasoning_content`` block.
+
+        Shape: ``{"type":"reasoning_content","reasoning_content":{"text":…}}``.
+        """
+        rc = block.get("reasoning_content")
+        if isinstance(rc, dict):
+            return rc.get("text", "")
+        return rc if isinstance(rc, str) else ""
+
+    @staticmethod
     def _reasoning_summary_text(block: dict) -> str:
         """Concatenate an OpenAI Responses ``reasoning`` summary block's text.
 
@@ -1032,6 +1043,8 @@ class LangGraphAgent:
                     continue
                 if block.get("type") == "thinking":
                     parts.append(block.get("thinking", ""))
+                elif block.get("type") == "reasoning_content":
+                    parts.append(self._reasoning_content_text(block))
                 elif block.get("type") == "reasoning":
                     parts.append(self._reasoning_summary_text(block))
             parts = [p for p in parts if p]
@@ -1102,6 +1115,8 @@ class LangGraphAgent:
                     block_type = block.get("type", "")
                     if block_type == "thinking":
                         reasoning_content += block.get("thinking", "")
+                    elif block_type == "reasoning_content":
+                        reasoning_content += self._reasoning_content_text(block)
                     elif block_type == "reasoning":
                         reasoning_content += self._reasoning_summary_text(block)
                     elif block_type == "text":

@@ -967,3 +967,92 @@ def test_prompt_one_param_reasks_on_invalid(monkeypatch):
     text = "MODEL_ID:\n  TYPE: openai\n"
     out = C._prompt_one_param(text, "MODEL_ID", "TEMPERATURE", "float", "temp")
     assert C._get_field(out, "MODEL_ID", "TEMPERATURE") == "0.9"
+
+
+class TestRunStepsBackNavigation:
+    """The wizard step-runner (_run_steps) with Back support. Steps are
+    fn(text, allow_back)->text; a _GoBack rewinds to the previous step and
+    restores the text as it was before that step ran."""
+
+    def test_runs_all_steps_in_order_first_has_no_back(self):
+        from mnemoai.utils import configurator as C
+
+        seen = []
+
+        def step(tag):
+            def _s(text, allow_back):
+                seen.append((tag, allow_back))
+                return text + tag
+            return _s
+
+        out = C._run_steps("", [step("a"), step("b"), step("c")])
+        assert out == "abc"
+        # First step gets allow_back=False; the rest True.
+        assert seen == [("a", False), ("b", True), ("c", True)]
+
+    def test_back_rewinds_and_reruns_previous_step(self):
+        from mnemoai.utils import configurator as C
+
+        calls = []
+
+        def step_a(text, allow_back):
+            calls.append("a")
+            return text + "A"
+
+        # step_b goes Back the first time it runs, then succeeds.
+        state = {"backed": False}
+
+        def step_b(text, allow_back):
+            calls.append("b")
+            if not state["backed"]:
+                state["backed"] = True
+                raise C._GoBack()
+            return text + "B"
+
+        out = C._run_steps("", [step_a, step_b])
+        # a ran, b raised Back, a re-ran, b succeeded.
+        assert calls == ["a", "b", "a", "b"]
+        assert out == "AB"  # a's edit applied once (pre-run text restored on rewind)
+
+    def test_back_restores_pre_step_text_no_stacking(self):
+        from mnemoai.utils import configurator as C
+
+        # step_a appends " x" to a key each run; if Back didn't restore the
+        # pre-run text, re-running would stack " x x".
+        def step_a(text, allow_back):
+            return text + " x"
+
+        state = {"n": 0}
+
+        def step_b(text, allow_back):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise C._GoBack()
+            return text + " y"
+
+        out = C._run_steps("base", [step_a, step_b])
+        assert out == "base x y"  # not "base x x y"
+
+    def test_back_from_first_step_stays_on_first(self):
+        from mnemoai.utils import configurator as C
+
+        state = {"n": 0}
+
+        def only(text, allow_back):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise C._GoBack()  # Back on the first step is a no-op rerun
+            return text + "Z"
+
+        out = C._run_steps("", [only])
+        assert out == "Z"
+        assert state["n"] == 2
+
+    def test_cancelled_propagates(self):
+        from mnemoai.utils import configurator as C
+
+        def boom(text, allow_back):
+            raise C._Cancelled()
+
+        with pytest.raises(C._Cancelled):
+            C._run_steps("", [boom])
