@@ -9,6 +9,7 @@ text and tool args survive verbatim and that empty inputs collapse to nothing.
 from mnemoai.client.ui.turn_view import (
     ReasoningStatus,
     format_duration,
+    render_conversation,
     render_live_reasoning,
     render_reasoning_block,
     render_tool_call,
@@ -115,3 +116,60 @@ class TestReasoningStatus:
         assert "new" in out
         assert "old" not in out
         assert "2s" in out
+
+
+# Duck-typed message stubs: render_conversation reads by class NAME + attributes
+# (no langchain import), so a per-role dynamic type with the right attrs suffices.
+def _msg(cls, content="", tool_calls=None, reasoning=None):
+    m = type(cls, (), {})()
+    m.content = content
+    m.tool_calls = tool_calls or []
+    m.additional_kwargs = {"reasoning_content": reasoning} if reasoning else {}
+    return m
+
+
+def _human(text):
+    return _msg("HumanMessage", content=text)
+
+
+def _ai(content="", tool_calls=None, reasoning=None):
+    return _msg("AIMessage", content=content, tool_calls=tool_calls, reasoning=reasoning)
+
+
+def _tool(content):
+    return _msg("ToolMessage", content=content)
+
+
+class TestRenderConversation:
+    def test_user_prompt_and_answer(self):
+        out = render_conversation([_human("hello there"), _ai("hi back")])
+        assert "hello there" in out
+        assert "hi back" in out
+        # Answer carries the ● marker prefix, user prompt the > prefix.
+        assert "●" in out and ">" in out
+
+    def test_reasoning_block_rendered(self):
+        out = render_conversation([_ai(content="done", reasoning="thinking hard")])
+        assert "Thought" in out
+        assert "thinking hard" in out
+
+    def test_tool_calls_rendered(self):
+        msg = _ai(tool_calls=[{"name": "web_search", "args": {"query": "x"}}])
+        out = render_conversation([msg])
+        assert "web_search" in out
+        assert "query=x" in out
+
+    def test_tool_result_messages_omitted(self):
+        # A ToolMessage's content isn't replayed (its call block is enough).
+        out = render_conversation([_tool("big tool output blob")])
+        assert "big tool output blob" not in out
+
+    def test_block_list_content_extracts_text(self):
+        # Bedrock/Responses answer content is a block list.
+        msg = _ai(content=[{"type": "text", "text": "block answer"}])
+        out = render_conversation([msg])
+        assert "block answer" in out
+
+    def test_empty_messages_render_nothing(self):
+        assert render_conversation([]) == ""
+        assert render_conversation([_ai(content="")]) == ""

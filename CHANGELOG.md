@@ -9,7 +9,17 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
-## [0.16.2] — 2026-07-03
+## [0.17.0] — 2026-07-03
+
+### Added
+
+- **`/load` now replays the conversation to the screen (like Claude Code's
+  `--resume`).** Previously a loaded conversation was restored into context but
+  nothing was shown. It now prints the full transcript to scrollback in the
+  styled view — user prompts, collapsed `Thought…` reasoning blocks,
+  `ToolName ↳ arg=value` tool-call blocks, and `●`-marked answers — before the
+  `[Context: N tokens]` line. New pure `turn_view.render_conversation` builder;
+  tool *results* are omitted (the call block is enough), matching the live UX.
 
 ### Changed
 
