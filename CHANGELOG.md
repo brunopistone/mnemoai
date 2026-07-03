@@ -9,6 +9,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.17.4] — 2026-07-03
+
+### Fixed
+
+- **Orchestrated ("full"-route) turns now render tool calls with the styled
+  block, not the old `[⚙ …]` marker.** `_run_worker_loop` printed the plain
+  marker unconditionally, so a single conversation could mix the new
+  `ToolName ↳ arg=value` blocks with the old style. Both tool-exec chokepoints
+  now share one `_print_tool_marker` helper that honors `styled_turn_view`.
+
 ## [0.17.3] — 2026-07-03
 
 ### Fixed

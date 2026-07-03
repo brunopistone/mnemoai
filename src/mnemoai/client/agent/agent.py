@@ -443,10 +443,7 @@ class LangGraphAgent:
             self._stop_spinner()
             if self.verbose:
                 for tc in response.tool_calls:
-                    print(
-                        f"\n\033[90m[⚙ {self._format_tool_call(tc)}]\033[0m\n",
-                        flush=True,
-                    )
+                    self._print_tool_marker(tc)
             for tc in response.tool_calls:
                 tool_name = tc["name"]
                 tool_id = tc["id"]
@@ -1148,6 +1145,26 @@ class LangGraphAgent:
         """Delegates to :func:`tool_formatting.format_tool_call`."""
         return tool_formatting.format_tool_call(tool_call)
 
+    def _print_tool_marker(self, tool_call: dict) -> None:
+        """Print one tool-call marker: the styled name + ↳arg block (pinned UI)
+        or the plain ``[⚙ …]`` marker. Shared by both tool-exec chokepoints so
+        the main loop and the worker loop render identically."""
+        if getattr(self, "styled_turn_view", False):
+            print(
+                "\n"
+                + turn_view.render_tool_call(
+                    tool_call.get("name", "tool"),
+                    self._normalize_tool_args(tool_call.get("args") or {}),
+                )
+                + "\n",
+                flush=True,
+            )
+        else:
+            print(
+                f"\n\033[90m[⚙ {self._format_tool_call(tool_call)}]\033[0m\n",
+                flush=True,
+            )
+
     @staticmethod
     def _normalize_tool_args(args: Any) -> Any:
         """Delegates to :func:`tool_formatting.normalize_tool_args`."""
@@ -1283,25 +1300,10 @@ class LangGraphAgent:
 
         route_tools = self._get_route_tools(state)
 
-        # Visible tool marker so reasoning before/after a call is separated. In
-        # styled mode (pinned UI) render the name + ↳arg block, else the [⚙ …] one.
+        # Visible tool marker so reasoning before/after a call is separated.
         if self.verbose:
             for tool_call in last_message.tool_calls:
-                if getattr(self, "styled_turn_view", False):
-                    print(
-                        "\n"
-                        + turn_view.render_tool_call(
-                            tool_call.get("name", "tool"),
-                            self._normalize_tool_args(tool_call.get("args") or {}),
-                        )
-                        + "\n",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"\n\033[90m[⚙ {self._format_tool_call(tool_call)}]\033[0m\n",
-                        flush=True,
-                    )
+                self._print_tool_marker(tool_call)
 
         tool_results = []
         for tool_call in last_message.tool_calls:
