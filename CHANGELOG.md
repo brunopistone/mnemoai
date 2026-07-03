@@ -9,6 +9,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.17.2] — 2026-07-03
+
+### Fixed
+
+- **macOS Option+←/→ now jump by word instead of typing `b`/`f`.** Option+←/→
+  send `ESC b` / `ESC f` (backward/forward-word), but the pinned input's
+  `eager=True` bare-Esc binding consumed the `ESC` prefix, leaving the `b`/`f` to
+  self-insert. The eager Esc-to-cancel is now gated to while a turn runs; at the
+  idle prompt Esc stays a prefix so the default word-motion bindings fire.
+
 ## [0.17.1] — 2026-07-03
 
 ### Changed

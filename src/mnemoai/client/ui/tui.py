@@ -259,13 +259,16 @@ class PinnedPromptReader:
             """Ctrl+J inserts a newline (Enter submits)."""
             event.current_buffer.insert_text("\n")
 
-        @kb.add("escape", eager=True)
+        # Eager bare-Esc only while a turn runs (instant cancel). When idle it's
+        # inactive, so Esc stays a prefix and macOS Option+←/→ (which send
+        # ``ESC b`` / ``ESC f``) reach the default backward-word/forward-word
+        # bindings instead of self-inserting a literal ``b``/``f``.
+        @kb.add("escape", eager=True, filter=Condition(lambda: self._busy))
         def _(event) -> None:
             """Esc cancels the in-flight turn (interrupts the worker thread)."""
-            if self._busy:
-                self._request_cancel()
-                if self._on_cancel is not None:
-                    self._on_cancel()
+            self._request_cancel()
+            if self._on_cancel is not None:
+                self._on_cancel()
 
         @kb.add("c-c")
         def _(event) -> None:
