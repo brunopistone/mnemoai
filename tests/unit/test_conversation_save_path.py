@@ -86,3 +86,57 @@ def test_explicit_path_updates_current(tmp_path, monkeypatch):
     assert target.is_file()
     # The explicit path becomes the open conversation for subsequent bare saves.
     assert c.current_conversation_path == str(target)
+
+
+def _write_conv(path, messages):
+    path.write_text(json.dumps({"messages": messages}))
+    return path
+
+
+class TestConversationTitle:
+    """conversation_title derives a picker label from the first real user
+    message, skipping injected context (episodic memory, plan-mode reminder)."""
+
+    def test_first_user_text_becomes_title(self, tmp_path):
+        f = _write_conv(tmp_path / "c.json", [
+            {"role": "system", "content": [{"text": "sys"}]},
+            {"role": "user", "content": [{"text": "Analyze this codebase"}]},
+            {"role": "assistant", "content": [{"text": "sure"}]},
+        ])
+        assert LangGraphClient.conversation_title(f) == "Analyze this codebase"
+
+    def test_long_title_truncated_with_ellipsis(self, tmp_path):
+        long = "x" * 200
+        f = _write_conv(tmp_path / "c.json", [
+            {"role": "user", "content": [{"text": long}]},
+        ])
+        out = LangGraphClient.conversation_title(f, max_len=20)
+        assert len(out) == 20 and out.endswith("…")
+
+    def test_whitespace_and_newlines_collapsed(self, tmp_path):
+        f = _write_conv(tmp_path / "c.json", [
+            {"role": "user", "content": [{"text": "line one\n\n   line two"}]},
+        ])
+        assert LangGraphClient.conversation_title(f) == "line one line two"
+
+    def test_episodic_block_is_skipped(self, tmp_path):
+        injected = '[Episodic Memory - Similar Past Tasks]\n1. "foo" → web_search\n\nReal question here'
+        f = _write_conv(tmp_path / "c.json", [
+            {"role": "user", "content": [{"text": injected}]},
+        ])
+        assert LangGraphClient.conversation_title(f) == "Real question here"
+
+    def test_string_content_supported(self, tmp_path):
+        f = _write_conv(tmp_path / "c.json", [
+            {"role": "user", "content": "plain string prompt"},
+        ])
+        assert LangGraphClient.conversation_title(f) == "plain string prompt"
+
+    def test_empty_or_no_user_message_returns_blank(self, tmp_path):
+        f = _write_conv(tmp_path / "c.json", [
+            {"role": "system", "content": [{"text": "sys"}]},
+        ])
+        assert LangGraphClient.conversation_title(f) == ""
+
+    def test_unreadable_file_returns_blank(self, tmp_path):
+        assert LangGraphClient.conversation_title(tmp_path / "nope.json") == ""

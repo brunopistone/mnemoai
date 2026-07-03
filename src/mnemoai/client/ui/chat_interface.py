@@ -325,8 +325,15 @@ class ChatInterface:
             return f"{s // 86400}d ago"
 
         shown = files[:20]  # cap the menu; older ones load via /load <path>
+        # Label with the auto-derived title (first user message); fall back to
+        # the filename when a conversation has no readable user text.
         options = [
-            (str(p), f"{p.name}  ({_ago(p.stat().st_mtime)})") for p in shown
+            (
+                str(p),
+                f"{self.client.conversation_title(p) or p.name}  "
+                f"({_ago(p.stat().st_mtime)})",
+            )
+            for p in shown
         ]
         title = "Load conversation"
         if len(files) > len(shown):

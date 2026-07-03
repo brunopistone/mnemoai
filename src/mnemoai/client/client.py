@@ -856,6 +856,40 @@ class LangGraphClient:
             logger.error(f"Failed to list saved conversations: {e}")
             return []
 
+    @staticmethod
+    def conversation_title(file_path, max_len: int = 60) -> str:
+        """A short title from a saved conversation's first real user message (like
+        Claude Code's session summary); "" if unreadable/empty.
+
+        Skips injected context (episodic-memory block, plan-mode reminder) so the
+        title is the user's actual words, not a prepended block.
+        """
+        try:
+            with open(os.path.expanduser(str(file_path)), "r") as f:
+                data = json.load(f)
+            messages = data if isinstance(data, list) else data.get("messages", [])
+            for m in messages:
+                if m.get("role") != "user":
+                    continue
+                content = m.get("content", "")
+                text = content if isinstance(content, str) else "".join(
+                    b.get("text", "")
+                    for b in content
+                    if isinstance(b, dict) and "text" in b
+                )
+                text = LangGraphAgent._strip_ephemeral(text)
+                # Episodic block is prepended as "[Episodic Memory …]\n…\n\n<prompt>";
+                # keep only the real prompt after it.
+                if text.lstrip().startswith("[Episodic Memory"):
+                    text = text.split("\n\n", 1)[1] if "\n\n" in text else ""
+                text = " ".join(text.split())  # collapse whitespace/newlines
+                if not text:
+                    continue
+                return text if len(text) <= max_len else text[: max_len - 1] + "…"
+        except Exception:
+            pass
+        return ""
+
     def load_conversation(self, file_path: str) -> bool:
         """Load a conversation from ``file_path``; True on success."""
         try:
