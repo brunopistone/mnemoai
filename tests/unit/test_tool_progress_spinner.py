@@ -223,3 +223,34 @@ class TestToolArgStreamingSpinner:
                        mark_answer=True)
 
         assert not any(e[1] == "Preparing tool call" for e in events if e[0] == "start")
+
+
+class TestToolMarkerStyled:
+    """_print_tool_marker renders the styled block in pinned mode and the plain
+    [⚙ …] marker otherwise — shared by _execute_tools AND the worker loop so a
+    'full'-route turn doesn't fall back to the old marker (UX regression)."""
+
+    def _agent(self, styled):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a.styled_turn_view = styled
+        return a
+
+    def test_styled_renders_name_and_arg_block(self, capsys):
+        a = self._agent(styled=True)
+        a._print_tool_marker({"name": "fs_read", "args": {"path": "/x.pdf", "mode": "PDF"}})
+        out = capsys.readouterr().out
+        assert "fs_read" in out
+        assert "↳ path=/x.pdf" in out and "↳ mode=PDF" in out
+        assert "[⚙" not in out  # NOT the old marker
+
+    def test_unstyled_uses_gear_marker(self, capsys):
+        a = self._agent(styled=False)
+        a._print_tool_marker({"name": "fs_read", "args": {"path": "/x.pdf"}})
+        out = capsys.readouterr().out
+        assert "[⚙" in out
+        assert "fs_read" in out
+
+    def test_missing_styled_attr_defaults_to_plain(self, capsys):
+        a = LangGraphAgent.__new__(LangGraphAgent)  # no styled_turn_view set
+        a._print_tool_marker({"name": "web_search", "args": {}})
+        assert "[⚙" in capsys.readouterr().out
