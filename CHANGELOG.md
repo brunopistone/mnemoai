@@ -9,6 +9,17 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-07-03
+
+### Fixed
+
+- **Spinner no longer disappears during the silent stretch before a tool batch.**
+  On the Responses/Bedrock block protocols the streaming callback's `token` is the
+  repr of a content-block list, so a reasoning block (`{'id':'rs_…'}`) or `[]` is a
+  truthy string that `on_llm_new_token` mistook for visible answer text and stopped
+  the spinner — leaving a dead pause until the next turn. The handler now inspects
+  the chunk's actual blocks and stops only on a non-empty `text` block.
+
 ## [0.16.0] — 2026-07-03
 
 ### Added
@@ -42,7 +53,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   `_anthropic_thinking_kwargs` (adaptive + `output_config.effort`), matching the
   Mantle/Anthropic paths; (3) the reasoning extractor didn't recognize the Bedrock
   Converse `reasoning_content` block shape (`{"type":"reasoning_content",
-  "reasoning_content":{"text":…}}`), so even when text was returned it was dropped.
+"reasoning_content":{"text":…}}`), so even when text was returned it was dropped.
 
 ## [0.15.0] — 2026-07-02
 
