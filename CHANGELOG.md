@@ -9,6 +9,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.17.1] — 2026-07-03
+
+### Changed
+
+- **The `/load` picker now labels each conversation with an auto-derived title**
+  (the first real user message, skipping injected episodic-memory / plan-mode
+  context) instead of the raw `conversation_<timestamp>.json` filename — like
+  Claude Code's resume list. No LLM call: the title is read verbatim from the
+  saved file's first user message (filename shown as fallback when there's none).
+
 ## [0.17.0] — 2026-07-03
 
 ### Added
@@ -19,7 +29,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   styled view — user prompts, collapsed `Thought…` reasoning blocks,
   `ToolName ↳ arg=value` tool-call blocks, and `●`-marked answers — before the
   `[Context: N tokens]` line. New pure `turn_view.render_conversation` builder;
-  tool *results* are omitted (the call block is enough), matching the live UX.
+  tool _results_ are omitted (the call block is enough), matching the live UX.
 
 ### Changed
 
