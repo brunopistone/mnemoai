@@ -82,3 +82,18 @@ def test_blank_query_is_noop(ci):
     assert not any(
         isinstance(c, tuple) and c[0] == "query" for c in ci.client.calls
     )
+
+
+def test_cancelled_query_prints_stopped(ci, capsys):
+    # A cancelled turn must resolve the transient "(cancelling…)" to a final
+    # "Stopped" line (not just silently swallow the response).
+    ci.client.query_return = "Operation was cancelled."
+    ci._dispatch("do a long thing")
+    out = capsys.readouterr().out
+    assert "Stopped" in out
+
+
+def test_normal_query_does_not_print_stopped(ci, capsys):
+    ci.client.query_return = "here is your answer"
+    ci._dispatch("a question")
+    assert "Stopped" not in capsys.readouterr().out

@@ -259,11 +259,13 @@ class PinnedPromptReader:
             """Ctrl+J inserts a newline (Enter submits)."""
             event.current_buffer.insert_text("\n")
 
-        # Eager bare-Esc only while a turn runs (instant cancel). When idle it's
-        # inactive, so Esc stays a prefix and macOS Option+←/→ (which send
-        # ``ESC b`` / ``ESC f``) reach the default backward-word/forward-word
-        # bindings instead of self-inserting a literal ``b``/``f``.
-        @kb.add("escape", eager=True, filter=Condition(lambda: self._busy))
+        # Bare-Esc cancels the in-flight turn — but NOT eager: an eager Esc fires
+        # on the ``ESC`` prefix of macOS Option+←/→ (``ESC b`` / ``ESC f``), so
+        # word-motion while typing (even a queued message mid-turn) would cancel
+        # instead. Non-eager lets prompt_toolkit buffer the prefix, so ``ESC b`` /
+        # ``ESC f`` reach the default backward/forward-word bindings and a lone
+        # Esc still cancels.
+        @kb.add("escape", filter=Condition(lambda: self._busy))
         def _(event) -> None:
             """Esc cancels the in-flight turn (interrupts the worker thread)."""
             self._request_cancel()

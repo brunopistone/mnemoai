@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.17.3] — 2026-07-03
+
+### Fixed
+
+- **Option+←/→ no longer cancels the running turn while typing a queued message.**
+  The bare-Esc cancel binding was `eager`, so it fired on the `ESC` prefix of
+  Option+←/→ (`ESC b` / `ESC f`) before the letter arrived — cancelling instead
+  of moving the cursor. It's now non-eager, so word-motion works while typing
+  (idle or mid-turn) and a lone Esc still cancels.
+- **A cancelled turn now shows `⊘ Stopped`.** The transient `(cancelling…)` line
+  previously never resolved; the cancelled response is now surfaced as a final
+  stopped line.
+
 ## [0.17.2] — 2026-07-03
 
 ### Fixed

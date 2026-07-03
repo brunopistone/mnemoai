@@ -378,9 +378,14 @@ def _escape_binding(reader):
 
 
 class TestEscapeWordMotion:
-    """Bare-Esc is eager only while busy (instant cancel). When idle it must be
-    inactive so macOS Option+←/→ (ESC b / ESC f) reach backward/forward-word
-    instead of self-inserting a literal 'b'/'f'."""
+    """Bare-Esc cancels only while busy, and is NOT eager — so macOS Option+←/→
+    (ESC b / ESC f) reach backward/forward-word instead of the Esc firing on the
+    prefix (which would cancel the turn / drop the sequence). Word-motion must
+    work whether idle OR typing a queued message mid-turn."""
+
+    def test_escape_not_eager(self):
+        # The core fix: eager Esc would consume the ESC prefix of Option+arrow.
+        assert _escape_binding(_reader(lambda line: None)).eager() is False
 
     def test_escape_inactive_when_idle(self):
         r = _reader(lambda line: None)
