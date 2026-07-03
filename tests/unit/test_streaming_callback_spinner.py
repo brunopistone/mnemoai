@@ -2,7 +2,10 @@
 
 The spinner stops only on real ANSWER text — not on empty reasoning tokens or
 tool-call argument tokens (a big fs_write streams its file_text as arg tokens,
-which used to freeze the spinner for the whole write).
+which used to freeze the spinner for the whole write). On the Responses/Bedrock
+block protocols the token is the repr of a content-block LIST, so a reasoning
+block or `[]` is a truthy string but NOT answer text; the handler inspects the
+chunk's blocks instead of trusting the token string.
 """
 
 from langchain_core.messages import AIMessageChunk
@@ -80,4 +83,48 @@ def test_missing_chunk_kwarg_still_stops_on_text():
     sp = _FakeSpinner()
     h = StreamingCallbackHandler(spinner=sp)
     h.on_llm_new_token("Hello")
+    assert sp.stops == 1
+
+
+def _blocks_chunk(blocks):
+    """A chunk whose content is a block LIST (Responses/Bedrock protocols)."""
+    return ChatGenerationChunk(message=AIMessageChunk(content=blocks))
+
+
+def test_reasoning_block_does_not_stop_spinner():
+    # The regression: a reasoning block's repr is a truthy token, but it isn't
+    # answer text — the spinner must stay up (no dead pause before tool calls).
+    sp = _FakeSpinner()
+    h = StreamingCallbackHandler(spinner=sp)
+    block = [{"id": "rs_1", "type": "reasoning"}]
+    h.on_llm_new_token(str(block), chunk=_blocks_chunk(block))
+    h.on_llm_new_token("[]", chunk=_blocks_chunk([]))
+    assert sp.stops == 0
+    assert h.first_token_received is False
+
+
+def test_text_block_stops_spinner():
+    sp = _FakeSpinner()
+    h = StreamingCallbackHandler(spinner=sp)
+    block = [{"type": "text", "text": "Hello"}]
+    h.on_llm_new_token(str(block), chunk=_blocks_chunk(block))
+    assert sp.stops == 1
+
+
+def test_empty_text_block_does_not_stop_spinner():
+    sp = _FakeSpinner()
+    h = StreamingCallbackHandler(spinner=sp)
+    block = [{"type": "text", "text": ""}]
+    h.on_llm_new_token(str(block), chunk=_blocks_chunk(block))
+    assert sp.stops == 0
+
+
+def test_reasoning_blocks_then_text_block_stops_once():
+    # Several reasoning blocks (no stop), then a text block (stops once).
+    sp = _FakeSpinner()
+    h = StreamingCallbackHandler(spinner=sp)
+    h.on_llm_new_token("x", chunk=_blocks_chunk([{"id": "rs_1", "type": "reasoning"}]))
+    h.on_llm_new_token("x", chunk=_blocks_chunk([]))
+    assert sp.stops == 0
+    h.on_llm_new_token("x", chunk=_blocks_chunk([{"type": "text", "text": "Answer"}]))
     assert sp.stops == 1

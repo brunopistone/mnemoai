@@ -56,24 +56,40 @@ class StreamingCallbackHandler(BaseCallbackHandler):
         self.first_token_received = False
 
     def on_llm_new_token(self, token: str, **kwargs) -> None:
-        """Stop the spinner on the first VISIBLE ANSWER token.
-
-        Skips empty reasoning tokens and tool-call argument tokens (a big
-        fs_write streams its file_text as arg tokens with no content); stopping
-        on those would freeze the spinner for the whole silent stretch.
-        """
-        if not token or not str(token).strip():
-            return
-        # Tool-call argument fragments aren't answer text.
+        """Stop the spinner on the first VISIBLE ANSWER token, keeping it up
+        through reasoning and tool-call building (both silent stretches)."""
         chunk = kwargs.get("chunk")
         message = getattr(chunk, "message", None)
+        # Tool-call argument fragments aren't answer text.
         if message is not None and getattr(message, "tool_call_chunks", None):
+            return
+        if not self._chunk_has_visible_text(message, token):
             return
         if not self.first_token_received and self.spinner:
             with self.spinner_lock:
                 if not self.first_token_received:
                     self.spinner.stop()
                     self.first_token_received = True
+
+    @staticmethod
+    def _chunk_has_visible_text(message, token: str) -> bool:
+        """True if this chunk carries visible answer text (not reasoning/empty).
+
+        Responses/Bedrock stream content-block LISTS; a reasoning block or `[]`
+        is a truthy `token` string but not answer text, so check the blocks for a
+        non-empty `text`. Plain-string providers (Ollama) fall back to the token.
+        """
+        content = getattr(message, "content", None)
+        if isinstance(content, list):
+            return any(
+                isinstance(b, dict)
+                and (b.get("type") == "text" or "text" in b)
+                and str(b.get("text", "")).strip()
+                for b in content
+            )
+        if isinstance(content, str):
+            return bool(content.strip())
+        return bool(token and str(token).strip())
 
     def on_tool_start(self, serialized, input_str, **kwargs) -> None:
         """Stop the spinner when a tool starts."""
