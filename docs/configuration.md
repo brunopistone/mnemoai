@@ -515,23 +515,9 @@ EPISODIC_MEMORY:
 
 **Requires:** An embedding model configured via `RAG.EMBED_MODEL_ID` (see [Embeddings Model](#embeddings-model)).
 
-**How it works:**
-
-- Automatically stores successful task completions with full conversation context
-- Uses hybrid search (70% semantic + 30% BM25) to find similar past tasks
-- **Conversation-aware injection**: Only injects episodic memory when relevant
-  - Detects follow-up questions and skips injection (uses conversation context instead)
-  - Filters out episodes redundant with current conversation
-  - Uses semantic similarity (with embeddings) or Jaccard similarity (fallback)
-- Injects compact context showing: task → tools used → outcome
-- Automatic cleanup: keeps max 1000 episodes, removes entries older than 90 days
-
-**Success detection:**
-
-- User feedback: "thanks", "perfect", "great"
-- No error markers in response
-- All tools executed successfully
-- Filters out simple greetings and short responses
+**How it works, success detection, storage paths, and a worked example** of
+the injected context are covered on the conceptual page: see
+[Episodic Memory](advanced-features.md#episodic-memory).
 
 #### Embeddings Model
 

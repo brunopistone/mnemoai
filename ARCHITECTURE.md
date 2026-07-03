@@ -4,6 +4,14 @@ This is the full per-file reference for the codebase, split out of
 `CLAUDE.md` to keep that file lean. See `CLAUDE.md` for the high-level
 architecture, key patterns, configuration, and conventions.
 
+> **Not part of the published docs site.** This file is a repo-only
+> companion to `CLAUDE.md` — a dense per-file reference meant for AI coding
+> agents and contributors working directly in this repository, deliberately
+> kept out of `docs/` so it isn't published to GitHub Pages. For the
+> human-facing architecture overview, see
+> [Architecture](https://brunopistone.github.io/mnemoai/architecture-overview/)
+> on the docs site.
+
 **Paths below are relative to the package root `src/mnemoai/`**
 (e.g. `client/agent/agent.py` is `src/mnemoai/client/agent/agent.py`).
 

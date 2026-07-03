@@ -9,6 +9,14 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.16.2] — 2026-07-03
+
+### Changed
+
+- **Documentation refresh.** Reorganized the docs site (`docs/`, `mkdocs.yml`)
+  and moved the per-file reference `ARCHITECTURE.md` to the repo root (with the
+  matching link update in `CLAUDE.md`). Docs-only — no code or behavior change.
+
 ## [0.16.1] — 2026-07-03
 
 ### Fixed
