@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 from typing import Any, List
 
 import boto3
@@ -47,11 +48,31 @@ class EmbeddingsController:
         embeddings_config = config.get("RAG", {}).get("EMBEDDINGS", {})
         self.cache_enabled = embeddings_config.get("CACHE_ENABLED", True)
         self.cache_size = embeddings_config.get("CACHE_SIZE", 1000)
+        # Cap per-text input as defensive hygiene against a genuinely huge text
+        # OOM-ing the embed runner (tune via RAG.EMBEDDINGS.MAX_INPUT_CHARS, 0
+        # disables). Generous — transient runner EOFs are handled by retry below,
+        # not by truncation.
+        self.max_input_chars = int(embeddings_config.get("MAX_INPUT_CHARS", 200000))
+        # Retry a transient embed-runner failure before degrading to fallback.
+        self._embed_retries = int(embeddings_config.get("RETRIES", 3))
+        self._embed_retry_delay = float(embeddings_config.get("RETRY_DELAY", 0.5))
         self._embedding_cache = {}  # {cache_key: embedding_vector}
         self._cache_order = []  # LRU tracking
 
         if self.cache_enabled:
             logger.debug(f"Embedding cache enabled with max size: {self.cache_size}")
+
+    def _truncate(self, text: str) -> str:
+        """Cap a text at ``max_input_chars`` so it can't overrun the embed
+        model's context (0 disables). Warns once per oversized text."""
+        if self.max_input_chars and len(text) > self.max_input_chars:
+            logger.warning(
+                "Embed input %d chars > cap %d; truncating.",
+                len(text),
+                self.max_input_chars,
+            )
+            return text[: self.max_input_chars]
+        return text
 
     def _cache_key(self, text: str) -> str:
         """MD5 cache key for a text."""
@@ -80,6 +101,8 @@ class EmbeddingsController:
         if not texts:
             logger.warning("Empty text list provided to embed()")
             return np.array([], dtype=np.float32).reshape(0, self.dim or 768)
+
+        texts = [self._truncate(t) for t in texts]
 
         if not self.cache_enabled:
             return self._embed_uncached(texts)
@@ -138,24 +161,42 @@ class EmbeddingsController:
             )
 
     def _embed_ollama(self, texts: List[str]) -> np.ndarray:
-        """Embed using Ollama at the configured HOST/PORT."""
+        """Embed using Ollama at the configured HOST/PORT.
+
+        Retries a few times: the llama.cpp embedding runner can EOF transiently
+        (first call after a (re)load / under memory pressure) even for input it
+        handles fine on the next try — so a retry beats degrading to fallback.
+        """
         # Honor HOST/PORT instead of letting bare ollama.embed() fall back to
         # $OLLAMA_HOST (which could hijack the call to a different server).
         host = "http://{}:{}".format(
             self.embed_model_config.get("HOST", "localhost"),
             self.embed_model_config.get("PORT", 11434),
         )
-        try:
-            resp = ollama.Client(host=host).embed(
-                model=self.embed_model_name, input=texts
-            )
-            emb = self._extract_embeddings_from_response(resp)
-            return np.array(emb, dtype=np.float32)
-        except Exception:
-            logger.exception(
-                "Ollama embed failed, falling back to deterministic embeddings"
-            )
-            return self._embed_fallback(texts)
+        client = ollama.Client(host=host)
+        last_exc = None
+        for attempt in range(self._embed_retries):
+            try:
+                resp = client.embed(model=self.embed_model_name, input=texts)
+                emb = self._extract_embeddings_from_response(resp)
+                return np.array(emb, dtype=np.float32)
+            except Exception as e:
+                last_exc = e
+                if attempt < self._embed_retries - 1:
+                    logger.warning(
+                        "Ollama embed attempt %d/%d failed (%s); retrying",
+                        attempt + 1,
+                        self._embed_retries,
+                        type(e).__name__,
+                    )
+                    time.sleep(self._embed_retry_delay * (attempt + 1))
+        logger.error(
+            "Ollama embed failed after %d attempts, falling back to "
+            "deterministic embeddings: %s",
+            self._embed_retries,
+            last_exc,
+        )
+        return self._embed_fallback(texts)
 
     def _embed_bedrock(self, texts: List[str]) -> np.ndarray:
         """Embed using AWS Bedrock."""
