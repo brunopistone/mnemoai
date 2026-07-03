@@ -81,8 +81,11 @@ class LangChainLLMController(BaseModelController):
             kwargs["endpoint_url"] = self.endpoint_url
             logger.info(f"Using custom Bedrock endpoint: {self.endpoint_url}")
 
-        # Extended thinking for Claude models.
-        if self.reasoning_model:
+        # Extended thinking (REASONING or REASONING_EFFORT). Newer Claude rejects
+        # the old {"type":"enabled",…} form, so use the version-aware builder.
+        if self.reasoning_model or self.reasoning_effort:
+            from mnemoai.models.mantle_factory import _anthropic_thinking_kwargs
+
             effort_to_tokens = {
                 "low": 1024,
                 "medium": 8192,
@@ -94,13 +97,9 @@ class LangChainLLMController(BaseModelController):
                 if self.reasoning_effort
                 else self.thinking_tokens
             )
-
-            kwargs["additional_model_request_fields"] = {
-                "thinking": {
-                    "type": "enabled",
-                    "budget_tokens": budget,
-                }
-            }
+            kwargs["additional_model_request_fields"] = _anthropic_thinking_kwargs(
+                self.model_name, self.reasoning_effort, budget
+            )
             # Older Claude requires temperature=1 with thinking (newer rejects it).
             if self.temperature is not None:
                 kwargs["temperature"] = 1.0

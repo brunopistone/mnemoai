@@ -73,6 +73,41 @@ class TestResponsesReasoningSummary:
         assert a._extract_visible(content) == "public answer"
 
 
+class TestBedrockReasoningContentBlock:
+    """Bedrock Converse shape: {"type":"reasoning_content",
+    "reasoning_content":{"text":…,"signature":…}} (Sonnet 5, Opus 4.6+)."""
+
+    def test_extract_content_reads_nested_text(self):
+        a = _agent()
+        chunk = _Chunk([
+            {"type": "reasoning_content",
+             "reasoning_content": {"text": "step-by-step ", "signature": "sig"}},
+            {"type": "text", "text": "answer"},
+        ])
+        content, reasoning = a._extract_content(chunk)
+        assert content == "answer"
+        assert reasoning == "step-by-step "
+
+    def test_extract_thinking_from_final_message(self):
+        a = _agent()
+        msg = AIMessage(content=[
+            {"type": "reasoning_content", "reasoning_content": {"text": "reasoned"}},
+            {"type": "text", "text": "answer"},
+        ])
+        assert a._extract_thinking(msg) == "reasoned"
+
+    def test_signature_only_block_is_safe(self):
+        a = _agent()
+        # A signature-only delta (empty text) must not crash or leak.
+        chunk = _Chunk([
+            {"type": "reasoning_content", "reasoning_content": {"signature": "sig"}},
+            {"type": "text", "text": "x"},
+        ])
+        content, reasoning = a._extract_content(chunk)
+        assert content == "x"
+        assert reasoning == ""
+
+
 class TestOtherReasoningShapesStillWork:
     def test_bedrock_thinking_block(self):
         a = _agent()
