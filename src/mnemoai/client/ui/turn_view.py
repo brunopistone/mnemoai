@@ -98,3 +98,51 @@ def render_tool_call(name: str, args: dict) -> str:
         flat = str(value).replace("\n", " ")
         lines.append(f"  {_GRAY}{_CONNECTOR} {key}={flat}{_RESET}")
     return "\n".join(lines)
+
+
+_ANSWER_MARKER = "\033[36m●\033[0m "
+_USER_PROMPT = "\033[34m>\033[0m "
+
+
+def _visible_text(content) -> str:
+    """Answer text from a message's content (string or Bedrock/Responses blocks)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "".join(
+            b.get("text", "")
+            for b in content
+            if isinstance(b, dict) and (b.get("type") == "text" or "text" in b)
+        ).strip()
+    return ""
+
+
+def render_conversation(messages: list) -> str:
+    """Replay loaded messages to a scrollback transcript (like Claude Code's
+    --resume): user prompts, ``Thought for…`` blocks, tool calls, and answers.
+
+    Duck-types LangChain messages by attributes (no import) so this stays pure:
+    HumanMessage → ``> text``; AIMessage → reasoning block + tool blocks +
+    ``● answer``; ToolMessage results are omitted (their call is already shown).
+    """
+    out = []
+    for msg in messages:
+        cls = type(msg).__name__
+        content = getattr(msg, "content", "")
+        if cls == "HumanMessage":
+            text = _visible_text(content)
+            if text:
+                out.append(f"{_USER_PROMPT}{text}")
+        elif cls == "AIMessage":
+            reasoning = (getattr(msg, "additional_kwargs", {}) or {}).get(
+                "reasoning_content"
+            )
+            if reasoning and reasoning.strip():
+                # Duration isn't persisted; show the block without a time.
+                out.append(_bordered("Thought…", reasoning.strip()))
+            for tc in getattr(msg, "tool_calls", None) or []:
+                out.append(render_tool_call(tc.get("name", "tool"), tc.get("args") or {}))
+            answer = _visible_text(content)
+            if answer:
+                out.append(f"{_ANSWER_MARKER}{answer}")
+    return "\n\n".join(out)

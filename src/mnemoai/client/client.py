@@ -29,6 +29,7 @@ from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector
+from mnemoai.client.ui import turn_view
 from mnemoai.client.ui.spinner import Spinner
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
@@ -891,6 +892,10 @@ class LangGraphClient:
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"
                 )
+                # Replay the transcript to scrollback (like Claude Code --resume).
+                transcript = turn_view.render_conversation(langchain_messages)
+                if transcript:
+                    print("\n" + transcript)
                 print(
                     f"\n\033[90m[Context: {self._count_context_tokens()} tokens]\033[0m"
                 )
