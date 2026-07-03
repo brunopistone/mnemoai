@@ -9,6 +9,18 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.17.5] — 2026-07-03
+
+### Fixed
+
+- **Ollama embeddings no longer silently degrade to deterministic fallback on a
+  transient runner EOF.** The llama.cpp embedding runner can EOF intermittently
+  (first call after a (re)load / under memory pressure) even for input it embeds
+  fine on the next try — e.g. right after pasting a large document. `_embed_ollama`
+  now retries (default 3×, `RAG.EMBEDDINGS.RETRIES` / `RETRY_DELAY`) before falling
+  back, and caps per-text input as hygiene (`RAG.EMBEDDINGS.MAX_INPUT_CHARS`,
+  default 200000, 0 disables) so a genuinely huge text can't OOM the runner.
+
 ## [0.17.4] — 2026-07-03
 
 ### Fixed

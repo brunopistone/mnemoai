@@ -147,3 +147,56 @@ class TestOllamaHost:
         # OpenAI controller never grows an Ollama-specific attribute.
         c = EmbeddingsController({"NAME": "my-endpoint", "TYPE": "sagemaker"})
         assert not hasattr(c, "ollama_host")
+
+
+class TestOllamaRetryAndTruncation:
+    """The Ollama runner can EOF transiently; the embed path retries before
+    degrading to deterministic fallback, and caps oversized input as hygiene."""
+
+    def _patch_client(self, monkeypatch, fail_times):
+        # Fail the first `fail_times` calls (transient EOF), then succeed.
+        state = {"calls": 0}
+
+        class _FlakyClient:
+            def __init__(self, host=None):
+                pass
+
+            def embed(self, model, input):
+                state["calls"] += 1
+                if state["calls"] <= fail_times:
+                    raise ec.ollama.ResponseError("EOF", 400) if hasattr(
+                        ec.ollama, "ResponseError"
+                    ) else RuntimeError("EOF")
+                return {"embeddings": [[0.1, 0.2, 0.3]] * len(input)}
+
+        monkeypatch.setattr(ec.ollama, "Client", _FlakyClient)
+        monkeypatch.setattr(ec.time, "sleep", lambda *a: None)  # no real delay
+        return state
+
+    def test_retry_recovers_transient_eof(self, monkeypatch):
+        state = self._patch_client(monkeypatch, fail_times=2)  # fail twice, then OK
+        c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama"})
+        c.cache_enabled = False
+        c._embed_retries = 3
+        out = c._embed_ollama(["hello"])
+        assert state["calls"] == 3          # retried until success
+        assert out.shape == (1, 3)          # real embedding, not fallback
+
+    def test_falls_back_after_exhausting_retries(self, monkeypatch):
+        self._patch_client(monkeypatch, fail_times=99)  # always fail
+        c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "DIMENSION": 3})
+        c.cache_enabled = False
+        c._embed_retries = 3
+        out = c._embed_ollama(["hello"])
+        assert out.shape == (1, 3)          # deterministic fallback shape
+
+    def test_oversized_input_truncated(self):
+        c = EmbeddingsController({"NAME": "x", "TYPE": "ollama"})
+        c.max_input_chars = 100
+        assert len(c._truncate("a" * 500)) == 100
+        assert c._truncate("short") == "short"
+
+    def test_truncation_disabled_when_zero(self):
+        c = EmbeddingsController({"NAME": "x", "TYPE": "ollama"})
+        c.max_input_chars = 0
+        assert len(c._truncate("a" * 500)) == 500
