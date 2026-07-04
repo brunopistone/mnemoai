@@ -130,6 +130,7 @@ class PinnedPromptReader:
         self._queued_lines = []  # queued text, shown live in the pinned region
         self._worker_tid = None  # OS thread id of the running dispatch, for Esc
         self._cancelled = False  # guards a double Esc for the same turn
+        self._ctrl_c_while_busy = False  # first Ctrl+C armed force-quit this turn
         self._loop = None  # app event loop, set in _run_async (for UI bridging)
         # In-app confirmation state (worker requests, UI captures a keypress).
         self._confirm_pending = False
@@ -272,16 +273,23 @@ class PinnedPromptReader:
 
         @kb.add("c-c")
         def _(event) -> None:
-            """Ctrl+C: cancel an in-flight turn; a SECOND Ctrl+C while a cancel is
-            already pending force-quits (the worker may be wedged in a blocking
-            tool call the injected KeyboardInterrupt can't reach until it returns,
-            and a clean exit would hang joining that thread). Else clear a
-            non-empty input; else (empty) exit."""
+            """Ctrl+C: cancel an in-flight turn (first press), force-quit on a
+            SECOND press while still busy — the worker may be wedged in a blocking
+            tool call the injected KeyboardInterrupt can't reach, and a clean exit
+            would hang joining that thread. Else clear a non-empty input; else
+            (empty) exit."""
             if self._busy:
-                if self._cancelled:
+                if self._ctrl_c_while_busy:
                     self._force_quit()
                 else:
+                    # First Ctrl+C on this turn: request cancel and arm force-quit.
+                    self._ctrl_c_while_busy = True
                     self._request_cancel()
+                    run_in_terminal(
+                        lambda: print(
+                            "\033[90m(press Ctrl+C again to force-quit)\033[0m"
+                        )
+                    )
             elif event.current_buffer.text:
                 event.current_buffer.reset()  # clear the line, don't exit
             else:
@@ -459,6 +467,7 @@ class PinnedPromptReader:
                     pass
             self._busy = True
             self._cancelled = False
+            self._ctrl_c_while_busy = False
             # Echo NOW (at dispatch, not submit) so a queued line's `>` prints
             # directly above its own answer.
             await run_in_terminal(lambda line=line: print(f"\033[36m>\033[0m {line}"))
@@ -512,18 +521,37 @@ class PinnedPromptReader:
         A clean ``app.exit`` would hang: ``asyncio.run`` joins the
         ``asyncio.to_thread`` executor thread on shutdown, and that thread is
         blocked in native code the injected KeyboardInterrupt can't reach.
-        ``os._exit`` skips the join and terminates immediately. Restore the
-        terminal first so the shell isn't left in raw mode."""
+        ``os._exit`` skips the join and terminates immediately — but it also skips
+        prompt_toolkit's terminal teardown, so we must restore the tty to cooked
+        mode with echo ourselves, or the shell is left invisible/unresponsive."""
         import os
 
+        self._restore_terminal()
         print("\n\033[90mForce-quit (worker was unresponsive).\033[0m", flush=True)
-        try:
-            if self._app is not None:
-                self._app.output.reset_attributes()
-                self._app.renderer.reset()
-        except Exception:
-            pass
         os._exit(130)  # 128 + SIGINT
+
+    @staticmethod
+    def _restore_terminal() -> None:
+        """Put the tty back into a sane cooked+echo state after a hard exit.
+
+        prompt_toolkit's raw-mode teardown normally runs on a clean exit; ``os._exit``
+        bypasses it, leaving the terminal in cbreak/no-echo so typed input is
+        invisible. ``stty sane`` (or a termios ECHO|ICANON restore) fixes it."""
+        try:
+            import termios
+
+            fd = sys.stdin.fileno()
+            attrs = termios.tcgetattr(fd)
+            attrs[3] |= termios.ECHO | termios.ICANON | termios.ISIG  # lflags
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        except Exception:
+            # Fallback: shell out to `stty sane` (covers non-termios edge cases).
+            try:
+                import subprocess
+
+                subprocess.run(["stty", "sane"], check=False)
+            except Exception:
+                pass
 
     @property
     def busy(self) -> bool:

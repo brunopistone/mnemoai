@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.18.3] — 2026-07-04
+
+### Fixed
+
+- **Force-quit now takes two Ctrl+C presses (not one), and restores the
+  terminal.** The 0.18.2 escalation fired on the first Ctrl+C after an Esc
+  cancel (it keyed off `_cancelled`, which Esc had already set), and `os._exit`
+  left the tty in raw/no-echo mode so the shell looked frozen after exit. Now a
+  dedicated per-turn flag requires a genuine second Ctrl+C (with a
+  `(press Ctrl+C again to force-quit)` hint on the first), and `_force_quit`
+  restores cooked+echo mode via termios (with an `stty sane` fallback) before
+  exiting.
+
 ## [0.18.2] — 2026-07-04
 
 ### Fixed
