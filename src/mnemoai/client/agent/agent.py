@@ -1286,10 +1286,6 @@ class LangGraphAgent:
                 tool_args.get("command", ""),
             )
         elif tool_name in self._CONFIRM_WRITE_TOOLS:
-            # fs_write previews with dry_run=True (no actual write) before the
-            # real call — only gate the write itself, not the harmless preview.
-            if tool_args.get("dry_run") is True:
-                return True
             path = tool_args.get("path", "")
             op = tool_args.get("command", "edit")  # fs_write: create/str_replace/…
             category, toggle, toggle_default, header, detail = (

@@ -152,7 +152,7 @@ Destructive tools ask for explicit confirmation before they run — shell comman
   Proceed? (y/N):
 ```
 
-Only an explicit `y`/`yes` proceeds; anything else (including Enter) declines, and the model is told the user declined. This is a **hard gate enforced client-side** — the prompt always fires regardless of what the model does, because the client owns the terminal (the MCP server is a piped subprocess and can't prompt). For `fs_write` only the actual write is gated, not its `dry_run` preview.
+Only an explicit `y`/`yes` proceeds; anything else (including Enter) declines, and the model is told the user declined. This is a **hard gate enforced client-side** — the prompt always fires regardless of what the model does, because the client owns the terminal (the MCP server is a piped subprocess and can't prompt).
 
 - Toggles: `REQUIRE_BASH_CONFIRMATION` and `REQUIRE_WRITE_CONFIRMATION` (both default `true`). Set either to `false` for trusted/automation setups.
 - Non-interactive runs (no TTY — tests, pipes, CI) auto-proceed so they don't hang.

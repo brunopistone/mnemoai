@@ -84,7 +84,7 @@ MCP server that provides tools to the LLM.
 - **`tools/`**: Tool implementations
   - `tools_manager.py`: Centralized tool registration and utilities
   - `fs_read.py`: File reading (text, CSV, JSON, PDF, DOCX)
-  - `fs_write.py`: File writing (dry-run preview); writes are gated client-side by `REQUIRE_WRITE_CONFIRMATION` and blocked from system dirs by the server-side `safety/` floor
+  - `fs_write.py`: File writing; writes are gated client-side by `REQUIRE_WRITE_CONFIRMATION` and blocked from system dirs by the server-side `safety/` floor
   - `file_edit.py`: Precise string replacement with validation and uniqueness checking; same server-side write-path floor as `fs_write`
   - `execute_bash.py`: Shell command execution with intelligent error handling; catastrophic commands (`rm -rf /`, `mkfs`, `dd` to a device, `shutdown`, fork bomb) are hard-blocked by the server-side `safety/` floor
   - `file_search.py`: Fast file/content search (glob patterns + ripgrep)

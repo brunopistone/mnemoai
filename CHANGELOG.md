@@ -9,6 +9,17 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-07-04
+
+### Changed
+
+- **`fs_write` no longer takes `dry_run`/`confirmed` — it writes directly.** The
+  old two-step dance (preview with `dry_run=True`, then re-call with
+  `dry_run=False, confirmed=True`) is redundant now that the client-side
+  confirmation gate (`REQUIRE_WRITE_CONFIRMATION`) asks the user before every
+  write. Dropping it removes a whole extra round-trip (and the preview's tokens)
+  per file operation. The server-side system-path safety floor is unchanged.
+
 ## [0.18.0] — 2026-07-04
 
 ### Added
