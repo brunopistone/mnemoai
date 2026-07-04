@@ -86,11 +86,11 @@ def test_write_tool_no_declines(agent, monkeypatch, tool):
     assert _run(agent, monkeypatch, tool, {"path": "/tmp/x"}, "n") is False
 
 
-def test_fs_write_dry_run_preview_not_gated(agent, monkeypatch):
-    # The dry_run=True preview performs no write, so it is never gated even when
-    # the user would decline.
+def test_fs_write_always_gated(agent, monkeypatch):
+    # fs_write no longer has a dry_run/confirmed two-step; every write is gated by
+    # the client confirmation, so a decline blocks it.
     assert _run(agent, monkeypatch, "fs_write",
-                {"path": "/tmp/x", "command": "create", "dry_run": True}, "n") is True
+                {"path": "/tmp/x", "command": "create"}, "n") is False
 
 
 def test_write_toggle_off_proceeds(agent, monkeypatch):

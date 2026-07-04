@@ -94,19 +94,10 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
         new_str: str = "",
         insert_line: int = 0,
         summary: str = "",
-        dry_run: bool = True,
-        confirmed: bool = False,
     ) -> str:
         """Write or modify files on the filesystem.
 
-        IMPORTANT: This tool requires a two-step process with user confirmation:
-        1. Call with dry_run=True to preview changes (default)
-        2. Ask user for explicit confirmation
-        3. Call with dry_run=False AND confirmed=True to execute
-
-        User confirmation is MANDATORY - execution will be blocked without it.
-
-        This tool is for file operations only. Use it when the user explicitly asks to create, modify, or save a file with a specific path.
+        This tool is for file operations only. Use it when the user explicitly asks to create, modify, or save a file with a specific path. The client asks the user to confirm before the write runs, so just call it directly.
 
         Do not use this tool when:
         - User asks for code examples without mentioning a file path
@@ -138,25 +129,14 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
             new_str: New text to insert/replace with
             insert_line: Line number to insert after (for "insert" command)
             summary: Brief description of what the change does
-            dry_run: If True, preview the operation without executing (default: True)
-            confirmed: If True, user has confirmed the operation (default: False, REQUIRED for execution)
-
-        USAGE EXAMPLES:
-        - Step 1 Preview: fs_write(path="~/script.py", command="create", file_text="...", dry_run=True)
-        - Step 2 Ask user: "Should I proceed with creating this file?"
-        - Step 3 Execute: fs_write(path="~/script.py", command="create", file_text="...", dry_run=False, confirmed=True)
 
         IMPORTANT: When users ask you to rewrite, reorganize, or create files, you MUST use this tool to actually perform the file operations. Do not just describe what you would do. You must not write files under "/"
 
         Returns:
-            Preview of changes (dry_run=True) or success confirmation (dry_run=False with confirmed=True).
+            Success confirmation, or an error object.
         """
         logger.debug(
-            "Tool fs_write called with command: %s on path: %s (dry_run=%s, confirmed=%s)",
-            command,
-            path,
-            dry_run,
-            confirmed,
+            "Tool fs_write called with command: %s on path: %s", command, path
         )
 
         try:
@@ -164,8 +144,8 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
             resolved_path = _resolve_path(path)
 
             # Server-side hard floor: never write into a critical system
-            # directory, regardless of dry_run/confirmed. Enforced here (not just
-            # in the docstring) because the MCP server can be driven directly.
+            # directory. Enforced here (not just in the docstring) because the MCP
+            # server can be driven directly.
             path_verdict = classify_write_path(resolved_path)
             if path_verdict.blocked:
                 logger.warning("fs_write blocked path: %s", resolved_path)
@@ -177,56 +157,6 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
                         "path": resolved_path,
                     }
                 )
-
-            # CRITICAL: Block execution without user confirmation
-            if not dry_run and not confirmed:
-                return json.dumps(
-                    {
-                        "error": True,
-                        "requires_confirmation": True,
-                        "message": "User confirmation required before executing file operations. "
-                        "You must ask the user for permission and then call with confirmed=True.",
-                        "path": resolved_path,
-                        "command": command,
-                        "next_step": "Ask user: 'Should I proceed with this file operation?' "
-                        "If user approves, call again with dry_run=False and confirmed=True",
-                    }
-                )
-
-            # Preview mode - show what would happen without executing
-            if dry_run:
-                preview = {
-                    "preview": True,
-                    "path": resolved_path,
-                    "command": command,
-                    "summary": summary,
-                    "file_exists": os.path.exists(resolved_path),
-                }
-                if command == "create":
-                    preview["content_lines"] = len(file_text.splitlines())
-                    preview["content_preview"] = file_text[:500] + (
-                        "..." if len(file_text) > 500 else ""
-                    )
-                elif command == "str_replace":
-                    preview["old_str_preview"] = old_str[:200] + (
-                        "..." if len(old_str) > 200 else ""
-                    )
-                    preview["new_str_preview"] = new_str[:200] + (
-                        "..." if len(new_str) > 200 else ""
-                    )
-                elif command == "insert":
-                    preview["insert_line"] = insert_line
-                    preview["content_preview"] = new_str[:200] + (
-                        "..." if len(new_str) > 200 else ""
-                    )
-                elif command == "append":
-                    preview["content_preview"] = new_str[:200] + (
-                        "..." if len(new_str) > 200 else ""
-                    )
-                preview["message"] = (
-                    "Preview only. Ask user to confirm, then call with dry_run=False and confirmed=True to execute."
-                )
-                return json.dumps(preview, indent=2)
 
             if command == "create":
                 return await _create_file(resolved_path, file_text, summary)
