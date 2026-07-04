@@ -438,7 +438,37 @@ LLM:
   TOKEN_COUNTING:
     OLLAMA_APPROXIMATION: 1.3 # Chars-to-tokens multiplier for Ollama
     FALLBACK_MODEL: "gpt-4" # Tiktoken model for fallback counting
+  # --- Context management (compaction + overflow protection) ---
+  KEEP_RECENT_MESSAGES: 6 # Turns kept verbatim on auto-compaction
+  MANUAL_COMPACT_KEEP_RECENT: 2 # Smaller window for the manual /compact command
+  KEEP_RECENT_TOKEN_BUDGET: 16384 # Also bound the kept window by tokens
+  # COMPACT_HIGH_WATER_TOKENS  # Proactively compact before a turn when history
+  # exceeds this. Auto-derives to 80% of
+  # MAX_CONVERSATION_TOKENS when unset; 0 disables.
+  # MAX_TOOL_RESULT_CHARS      # Cap one tool result (~4 chars/token) so a
+  # runaway result can't overflow the window
+  # (head+tail kept with a note). Auto-derives to
+  # 10% of the window (in chars) when unset;
+  # 0 disables.
+  RECURSION_LIMIT: 200 # Max model<->tool steps per query (runaway guard)
+  MCP_CALL_TIMEOUT: 300 # Transport-layer timeout for one MCP tool call (s)
 ```
+
+**Context management.** The conversation is kept under `MAX_CONVERSATION_TOKENS`
+by summarizing older turns into the system prompt while keeping recent ones
+verbatim — automatically when over budget, or manually via `/compact`. Three
+layers prevent a single oversized turn from breaking the loop:
+
+1. **Tool-result cap** (`MAX_TOOL_RESULT_CHARS`) — one runaway result (e.g. a
+   `grep_search` with a huge `max_results`) is truncated head+tail with a note,
+   so it can never alone exceed the context window. Auto-derives to 10% of the
+   window (in chars) when unset, scaling with the model.
+2. **Pre-flight compaction** (`COMPACT_HIGH_WATER_TOKENS`) — before a turn, if
+   the accumulated history is over the high-water mark, it is compacted first.
+   Auto-derives to 80% of `MAX_CONVERSATION_TOKENS` when unset.
+3. **Overflow backstop** — if a request still exceeds the window, the turn ends
+   with a clear message and compacts for the next turn instead of retrying the
+   same oversized prompt in a loop.
 
 ### System Prompt
 

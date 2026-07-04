@@ -1,11 +1,10 @@
 """Pinned-input prompt_toolkit UI + dialogs for the chat loop.
 
-``PinnedPromptReader`` is the interactive TTY UI (Claude-Code / Kiro layout): a
-non-full-screen ``Application`` keeps the ``>`` input pinned at the bottom while
-queries run on a worker thread and output streams above it via ``patch_stdout``.
-Also provides the full-screen dialogs (``select_from_list``, ``confirm_inline``)
-used by ``/load`` and the configurator. Non-TTY sessions degrade to plain
-``input()`` and never use this.
+``PinnedPromptReader`` is the interactive TTY UI: a non-full-screen ``Application`` 
+keeps the ``>`` input pinned at the bottom while queries run on a worker thread and 
+output streams above it via ``patch_stdout``. Also provides the full-screen dialogs 
+(``select_from_list``, ``confirm_inline``) used by ``/load`` and the configurator. 
+Non-TTY sessions degrade to plain ``input()`` and never use this.
 """
 
 import sys
@@ -90,8 +89,7 @@ class PinnedPromptReader:
 
     A non-full-screen prompt_toolkit ``Application`` keeps a status line + ``>``
     input pinned at the bottom while ``patch_stdout(raw=True)`` routes output
-    above it into native scrollback (the Claude-Code / Kiro layout; wrapping and
-    copy/paste preserved). Submitting enqueues a line; a worker coroutine drains
+    above it into native scrollback. Submitting enqueues a line; a worker coroutine drains
     the queue one at a time via ``asyncio.to_thread`` — a worker thread is
     required because ``client.query()`` calls ``asyncio.run()``, which raises on a
     thread already owning a loop. A second Enter queues (FIFO), never running a

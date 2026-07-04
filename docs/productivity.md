@@ -140,7 +140,7 @@ All tools now provide intelligent error messages with troubleshooting guidance:
 
 ### 🔐 Action Confirmation (bash & file writes)
 
-Destructive tools ask for explicit confirmation before they run (Claude Code-style) — shell commands (`execute_bash`) and file modifications (`fs_write`, `file_edit`):
+Destructive tools ask for explicit confirmation before they run — shell commands (`execute_bash`) and file modifications (`fs_write`, `file_edit`):
 
 ```
 ▶ Run shell command?
@@ -234,7 +234,7 @@ Implementation planning workflow for complex tasks:
 
 **Enforced read-only plan mode (`/plan`).** The tools above are _bookkeeping_ the
 agent can use to record a structured plan, but they don't restrict it. For a hard
-guarantee — like Claude Code — toggle plan mode with the **`/plan`** command:
+guarantee — toggle plan mode with the **`/plan`** command:
 
 - While ON, the agent can only use **read-only** tools (file reads, glob/grep
   search, web search, document readers) and its own memory notebook. Any attempt to

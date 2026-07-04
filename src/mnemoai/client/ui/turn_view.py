@@ -118,8 +118,8 @@ def _visible_text(content) -> str:
 
 
 def render_conversation(messages: list) -> str:
-    """Replay loaded messages to a scrollback transcript (like Claude Code's
-    --resume): user prompts, ``Thought for…`` blocks, tool calls, and answers.
+    """Replay loaded messages to a scrollback transcript: user prompts, 
+    ``Thought for…`` blocks, tool calls, and answers.
 
     Duck-types LangChain messages by attributes (no import) so this stays pure:
     HumanMessage → ``> text``; AIMessage → reasoning block + tool blocks +

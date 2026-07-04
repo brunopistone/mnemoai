@@ -20,9 +20,9 @@ from mnemoai.utils.formatting.url_formatter import make_urls_clickable
 class CodeFormatter:
     """Highlight code and render lightweight Markdown during streaming."""
 
-    # Inline code / identifiers: bold cyan, matching Claude Code's look (and the
-    # Rich library default ``bold cyan``). Plain cyan was washed out next to the
-    # surrounding text; the bold weight gives the same crisp distinction.
+    # Inline code / identifiers: bold cyan (and the Rich library default ``bold cyan``). 
+    # Plain cyan was washed out next to the surrounding text; the bold weight gives 
+    # the same crisp distinction.
     _INLINE_CODE = "\033[1;36m"
     _BOLD = "\033[1m"
     _ITALIC = "\033[3m"

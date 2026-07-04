@@ -23,7 +23,7 @@ VISION_MODEL_ID:
   TEMPERATURE: 0.3
 # Model parameters
 MAX_CONVERSATION_TOKENS: 65536
-DOC_MAX_TOKENS: 16384 # Ask for confirmation before every execute_bash shell command (Claude Code-style).
+DOC_MAX_TOKENS: 16384 # Ask for confirmation before every execute_bash shell command.
 # Set to false to run shell commands without prompting (trusted/automation setups).
 REQUIRE_BASH_CONFIRMATION: true
 # Ask for confirmation before every fs_write / file_edit file modification.
@@ -149,10 +149,22 @@ LLM:
   # alone fills the context window) is summarized rather than kept verbatim.
   # Defaults to 25% of MAX_CONVERSATION_TOKENS when unset.
   KEEP_RECENT_TOKEN_BUDGET: 16384
+  # Proactive pre-turn compaction and the per-tool-result cap both auto-derive
+  # from MAX_CONVERSATION_TOKENS (the model's context window) when left unset, so
+  # they scale with the model rather than a fixed number:
+  #   COMPACT_HIGH_WATER_TOKENS -> 80% of the window (compact before a turn when
+  #                                history exceeds it; 0 disables the check)
+  #   MAX_TOOL_RESULT_CHARS     -> 10% of the window in chars (~4 chars/token);
+  #                                caps one tool result (head+tail kept with a
+  #                                truncation note) so a runaway result can't
+  #                                alone overflow the window; 0 disables
+  # Uncomment to override:
+  # COMPACT_HIGH_WATER_TOKENS: 52000
+  # MAX_TOOL_RESULT_CHARS: 26000
   # Max model<->tools steps per query before the agent loop is cut short and a
   # partial result is returned (LangGraph recursion_limit). Set high so
   # legitimate long tasks aren't capped — context compaction is the real
-  # limiter, as in Claude Code; this is just a runaway guard.
+  # limiter; this is just a runaway guard.
   RECURSION_LIMIT: 200
   # Upper bound (seconds) for a single MCP tool call at the transport layer.
   # Must exceed the longest tool-level timeout (execute_bash allows up to 120s).

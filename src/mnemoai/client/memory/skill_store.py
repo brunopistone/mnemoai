@@ -1,4 +1,4 @@
-"""Agent Skills: authored, on-demand instruction packs (Claude-Code-style).
+"""Agent Skills: authored, on-demand instruction packs.
 
 A *skill* is a directory under the skills root containing a ``SKILL.md`` file:
 YAML frontmatter (at least ``name`` + ``description``) followed by a markdown
@@ -37,12 +37,10 @@ from mnemoai.utils.logger import logger
 _MAX_DESC_CHARS = 200
 
 # `name`/`description` are the only required frontmatter keys. Other keys —
-# Claude Code's `license`/`allowed-tools`/`metadata`/`compatibility`, a `version`,
-# or anything else — are tolerated (so CC-authored skills parse cleanly) and
-# simply not acted on. We never reject a skill for extra keys; that would be more
-# friction than help on a local tool.
-# Sanity cap on description length (matches Claude Code's validator), so a
-# runaway description is reported rather than silently injected.
+# are tolerated (so CC-authored skills parse cleanly) and simply not acted on. 
+# We never reject a skill for extra keys; that would be more friction than help 
+# on a local tool. Sanity cap on description length, so a runaway description is 
+# reported rather than silently injected.
 _MAX_DESC_LEN = 1024
 
 
@@ -66,7 +64,7 @@ class SkillIssue(NamedTuple):
     """A skill directory that was found but rejected, and why.
 
     Surfaced by ``/skills`` so a malformed skill isn't silently invisible — the
-    authoring-feedback loop, mnemoai-style (cf. Claude Code's validator).
+    authoring-feedback loop, mnemoai-style.
 
     Attributes:
         name: The directory name.

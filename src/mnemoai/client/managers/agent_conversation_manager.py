@@ -195,8 +195,7 @@ class AgentConversationManager:
 
         The base template tells the model to honor "additional summarization
         instructions provided in the included context", under a
-        ``## Compact Instructions`` header — exactly how Claude Code injects a
-        ``/compact <focus>`` directive. We append the user's focus there.
+        ``## Compact Instructions`` header. We append the user's focus there.
         """
         prompt = self._SUMMARY_TASK_PROMPT
         if focus_instructions:
@@ -234,8 +233,7 @@ class AgentConversationManager:
                 from langchain_core.messages import HumanMessage, SystemMessage
 
                 # Build LangChain messages. The system role frames the task as
-                # summarization (mirrors Claude Code's compaction call); any
-                # prior summary is carried as additional context.
+                # summarization ; any prior summary is carried as additional context.
                 lc_messages = [SystemMessage(content=self._SUMMARY_SYSTEM_PROMPT)]
                 if self.previous_summary:
                     lc_messages.append(SystemMessage(content=self.previous_summary))
@@ -291,12 +289,9 @@ class AgentConversationManager:
     def _build_system_with_summary(self, clean_summary: str) -> str:
         """Embed a conversation summary into the configured system prompt.
 
-        The block carries a continuation instruction (mirrors Claude Code) so
-        the model resumes the work seamlessly instead of re-acknowledging the
-        summary or recapping.
+        The block carries a continuation instruction so the model resumes 
+        the work seamlessly instead of re-acknowledging the summary or recapping.
         """
-        # Continuation instruction is the verbatim Claude Code text, so the
-        # model resumes seamlessly instead of re-acknowledging the summary.
         summary_block = textwrap.dedent(
             f"""
             <conversation_summary>

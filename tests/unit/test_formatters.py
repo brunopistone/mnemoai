@@ -114,7 +114,7 @@ class TestCodeFormatter:
         assert "y" in captured.out
 
     def test_inline_code_is_bold_cyan(self, capsys):
-        # Matches Claude Code's look: inline code / identifiers in bold cyan.
+        # inline code / identifiers in bold cyan.
         cf = CodeFormatter()
         cf.process_chunk("use `foo.py` now")
         cf.flush()
