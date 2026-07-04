@@ -28,14 +28,20 @@ def _stub_run_in_terminal(monkeypatch):
     (the fire-and-forget call in _request_cancel), running the callable inline.
     """
 
+    class _DoneAwaitable:
+        """Awaitable that resolves immediately, with no event loop required —
+        awaitable by the _worker coroutine AND safe to drop un-awaited by the
+        fire-and-forget calls in the sync keybinding handlers."""
+
+        def __await__(self):
+            return iter(())
+
     def _fake(func, *a, **k):
         try:
             func()
         except Exception:
             pass
-        fut = asyncio.Future()
-        fut.set_result(None)
-        return fut
+        return _DoneAwaitable()
 
     monkeypatch.setattr("mnemoai.client.ui.tui.run_in_terminal", _fake)
 
@@ -358,25 +364,28 @@ class TestCtrlC:
         _ctrl_c_handler(r)(_FakeEvent(_FakeBuffer(""), app))
         assert app.exc is KeyboardInterrupt  # empty line → exit path
 
-    def test_busy_turn_cancels_not_clears(self, monkeypatch):
+    def test_first_ctrl_c_cancels_and_arms_no_quit(self, monkeypatch):
         r = _reader(lambda line: None)
         r._busy = True
-        r._cancelled = False
+        r._ctrl_c_while_busy = False
         r._worker_tid = 12345
-        # Stub the actual thread-interrupt injection (no real worker to signal).
-        monkeypatch.setattr(r, "_request_cancel", lambda: setattr(r, "_cancelled", True))
+        requested = {"n": 0}
+        monkeypatch.setattr(r, "_request_cancel", lambda: requested.__setitem__("n", 1))
+        monkeypatch.setattr(r, "_force_quit", lambda: pytest.fail("must not quit on 1st"))
         buf = _FakeBuffer("typed while running")
         _ctrl_c_handler(r)(_FakeEvent(buf, _FakeApp()))
-        # First Ctrl+C requests cancel; the input text is left intact.
+        # First Ctrl+C requests cancel, arms force-quit, keeps the input intact.
+        assert requested["n"] == 1
+        assert r._ctrl_c_while_busy is True
         assert buf.text == "typed while running"
-        assert r._cancelled is True
 
-    def test_second_ctrl_c_while_cancelling_force_quits(self, monkeypatch):
-        # A second Ctrl+C while a cancel is already pending (worker wedged in a
-        # blocking call) must force-quit instead of silently no-oping.
+    def test_second_ctrl_c_while_busy_force_quits(self, monkeypatch):
+        # A SECOND Ctrl+C while still busy (cancel not landing — worker wedged in a
+        # blocking call) must force-quit. Independent of how cancel was triggered
+        # (Esc or the first Ctrl+C), so gated on _ctrl_c_while_busy, not _cancelled.
         r = _reader(lambda line: None)
         r._busy = True
-        r._cancelled = True  # cancel already requested, turn not yet stopped
+        r._ctrl_c_while_busy = True  # first Ctrl+C already armed it
         called = {"force": False}
         monkeypatch.setattr(r, "_force_quit", lambda: called.__setitem__("force", True))
         _ctrl_c_handler(r)(_FakeEvent(_FakeBuffer(""), _FakeApp()))
