@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.18.2] — 2026-07-04
+
+### Fixed
+
+- **A second Ctrl+C now force-quits when a cancel is stuck.** Pressing Esc
+  cancels a turn by injecting `KeyboardInterrupt` into the worker thread, but
+  that only lands at the next Python bytecode boundary — a worker blocked inside
+  a long native tool call (e.g. a broad `glob_search`) stayed on `(cancelling…)`
+  and Ctrl+C was a no-op (it just re-requested the already-pending cancel). A
+  second Ctrl+C while cancelling now force-quits via `os._exit` (restoring the
+  terminal first), bypassing the `asyncio` executor join that would otherwise
+  hang on the wedged thread.
+
 ## [0.18.1] — 2026-07-04
 
 ### Changed
