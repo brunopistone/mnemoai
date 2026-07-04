@@ -358,14 +358,29 @@ class TestCtrlC:
         _ctrl_c_handler(r)(_FakeEvent(_FakeBuffer(""), app))
         assert app.exc is KeyboardInterrupt  # empty line → exit path
 
-    def test_busy_turn_cancels_not_clears(self):
+    def test_busy_turn_cancels_not_clears(self, monkeypatch):
         r = _reader(lambda line: None)
         r._busy = True
-        r._worker_tid = None  # _request_cancel no-ops safely
+        r._cancelled = False
+        r._worker_tid = 12345
+        # Stub the actual thread-interrupt injection (no real worker to signal).
+        monkeypatch.setattr(r, "_request_cancel", lambda: setattr(r, "_cancelled", True))
         buf = _FakeBuffer("typed while running")
         _ctrl_c_handler(r)(_FakeEvent(buf, _FakeApp()))
-        # A running turn is cancelled; the input text is left intact.
+        # First Ctrl+C requests cancel; the input text is left intact.
         assert buf.text == "typed while running"
+        assert r._cancelled is True
+
+    def test_second_ctrl_c_while_cancelling_force_quits(self, monkeypatch):
+        # A second Ctrl+C while a cancel is already pending (worker wedged in a
+        # blocking call) must force-quit instead of silently no-oping.
+        r = _reader(lambda line: None)
+        r._busy = True
+        r._cancelled = True  # cancel already requested, turn not yet stopped
+        called = {"force": False}
+        monkeypatch.setattr(r, "_force_quit", lambda: called.__setitem__("force", True))
+        _ctrl_c_handler(r)(_FakeEvent(_FakeBuffer(""), _FakeApp()))
+        assert called["force"] is True
 
 
 def _escape_binding(reader):

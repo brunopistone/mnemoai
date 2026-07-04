@@ -272,10 +272,16 @@ class PinnedPromptReader:
 
         @kb.add("c-c")
         def _(event) -> None:
-            """Ctrl+C: cancel an in-flight turn; else clear a non-empty input;
-            else (empty input) exit via the double-press path."""
+            """Ctrl+C: cancel an in-flight turn; a SECOND Ctrl+C while a cancel is
+            already pending force-quits (the worker may be wedged in a blocking
+            tool call the injected KeyboardInterrupt can't reach until it returns,
+            and a clean exit would hang joining that thread). Else clear a
+            non-empty input; else (empty) exit."""
             if self._busy:
-                self._request_cancel()
+                if self._cancelled:
+                    self._force_quit()
+                else:
+                    self._request_cancel()
             elif event.current_buffer.text:
                 event.current_buffer.reset()  # clear the line, don't exit
             else:
@@ -499,6 +505,25 @@ class PinnedPromptReader:
         ctypes.pythonapi.PyThreadState_SetAsyncExc(
             ctypes.c_long(tid), ctypes.py_object(KeyboardInterrupt)
         )
+
+    def _force_quit(self) -> None:
+        """Hard-exit when a cancel is stuck (worker wedged in a blocking call).
+
+        A clean ``app.exit`` would hang: ``asyncio.run`` joins the
+        ``asyncio.to_thread`` executor thread on shutdown, and that thread is
+        blocked in native code the injected KeyboardInterrupt can't reach.
+        ``os._exit`` skips the join and terminates immediately. Restore the
+        terminal first so the shell isn't left in raw mode."""
+        import os
+
+        print("\n\033[90mForce-quit (worker was unresponsive).\033[0m", flush=True)
+        try:
+            if self._app is not None:
+                self._app.output.reset_attributes()
+                self._app.renderer.reset()
+        except Exception:
+            pass
+        os._exit(130)  # 128 + SIGINT
 
     @property
     def busy(self) -> bool:
