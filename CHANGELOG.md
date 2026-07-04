@@ -9,6 +9,32 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-07-04
+
+### Added
+
+- **Context-overflow protection (3 layers) — a runaway tool result no longer
+  loops the agent on a "prompt is too long" 400.** A single oversized tool
+  result (e.g. `grep_search` with a huge `max_results`) used to enter context
+  whole, and every subsequent model call 400'd while the graph retried the same
+  oversized prompt to the recursion limit. Now:
+  1. **Tool results are capped at the source** (`tool_formatting.truncate_tool_result`)
+     — each result is bounded head+tail with a truncation note at both tool-exec
+     chokepoints, so one result can't alone overflow the window.
+  2. **Pre-flight compaction** — before a turn, history over the high-water mark
+     is compacted first (reusing the existing summarize-and-keep-recent manager).
+  3. **Overflow backstop** — a context-window 400 is caught, force-compacted, and
+     the turn ends with a clear message instead of re-sending the oversized prompt.
+  Both size knobs **auto-derive from `MAX_CONVERSATION_TOKENS`** (the model's
+  context window) so they scale per-model: `MAX_TOOL_RESULT_CHARS` → 10% of the
+  window in chars, `COMPACT_HIGH_WATER_TOKENS` → 80% of the window. Either can be
+  set explicitly (0 disables). Documented in the `config.yaml.*` examples and docs.
+
+### Changed
+
+- Removed "Claude Code" references from code comments/docstrings and config
+  example comments (retained only in `CLAUDE.md`/`ARCHITECTURE.md`).
+
 ## [0.17.5] — 2026-07-03
 
 ### Fixed
@@ -60,16 +86,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 - **The `/load` picker now labels each conversation with an auto-derived title**
   (the first real user message, skipping injected episodic-memory / plan-mode
-  context) instead of the raw `conversation_<timestamp>.json` filename — like
-  Claude Code's resume list. No LLM call: the title is read verbatim from the
-  saved file's first user message (filename shown as fallback when there's none).
+  context) instead of the raw `conversation_<timestamp>.json` filename.
+  No LLM call: the title is read verbatim from the saved file's first user message
+  (filename shown as fallback when there's none).
 
 ## [0.17.0] — 2026-07-03
 
 ### Added
 
-- **`/load` now replays the conversation to the screen (like Claude Code's
-  `--resume`).** Previously a loaded conversation was restored into context but
+- **`/load` now replays the conversation to the screen.**.
+  Previously a loaded conversation was restored into context but
   nothing was shown. It now prints the full transcript to scrollback in the
   styled view — user prompts, collapsed `Thought…` reasoning blocks,
   `ToolName ↳ arg=value` tool-call blocks, and `●`-marked answers — before the
@@ -169,7 +195,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Changed
 
-- **Pinned-input terminal UI (Claude-Code / Kiro style) is now the default on a
+- **Pinned-input terminal UI is now the default on a
   TTY.** The `>` input stays fixed at the bottom of the terminal while a query
   runs; the answer, a green-bordered **"Thought for Ns…"** reasoning block, and
   styled **`ToolName` + `↳ arg=value`** tool blocks stream _above_ it in native
@@ -586,8 +612,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Added
 
-- **Agent Skills** — authored, on-demand instruction packs (a faithful port of
-  Claude Code's Skills). A skill is a directory `~/.mnemoai/skills/<name>/SKILL.md`
+- **Agent Skills** — authored, on-demand instruction packs.
+  A skill is a directory `~/.mnemoai/skills/<name>/SKILL.md`
   with YAML frontmatter (`name` + `description`) and a markdown body, optionally
   bundling `reference.md` / `scripts/`. Skills fill the gap between always-on
   context (system prompt, `MEMORY.md`) and learned tactics (the ACE playbook):
@@ -610,9 +636,6 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   - Two skills are **seeded on first run**: a `commit-message` example, and a
     **`skill-creator`** meta-skill — ask the assistant to "create a skill for X"
     and it loads that guidance and authors a well-formed `SKILL.md` for you.
-  - Claude-Code frontmatter extras (`license`, `allowed-tools`, `metadata`,
-    `compatibility`) are tolerated so CC-authored skills parse; only
-    `name`+`description` are required.
   - New module `client/memory/skill_store.py` (`SkillStore`, shared by the
     server tool and the client like `MemoryStore`), `server/tools/skill_tool.py`,
     `utils/paths.py:skills_dir()` + seeding. Gated by `ENABLE_SKILLS` (default
@@ -777,10 +800,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Changed
 
-- Inline code / identifiers in streamed output are now **bold cyan** (matching
-  Claude Code's look and the Rich default) instead of plain cyan, for a crisper
-  distinction from surrounding prose. Fenced code blocks keep Pygments/monokai
-  highlighting.
+- Inline code / identifiers in streamed output are now **bold cyan**,
+  instead of plain cyan, for a crisper distinction from surrounding prose.
+  Fenced code blocks keep Pygments/monokai highlighting.
 
 ### Added
 
@@ -823,10 +845,10 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 ### Changed
 
 - The agent loop no longer hard-stops at 50 steps. That cap cut off legitimate
-  long tasks mid-work with "Agent hit recursion limit". Following Claude Code's
-  model — where context compaction, not a step count, is the real limiter — the
-  default `LLM.RECURSION_LIMIT` is now **200** (still configurable). It remains a
-  runaway guard (LangGraph requires a finite bound), so hitting it now signals a
+  long tasks mid-work with "Agent hit recursion limit". Where context compaction,
+  not a step count, is the real limiter — the default `LLM.RECURSION_LIMIT`
+  is now **200** (still configurable). It remains a runaway guard
+  (LangGraph requires a finite bound), so hitting it now signals a
   likely stuck loop and the message says so and points at the config knob.
 
 ### Fixed
@@ -853,13 +875,12 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Changed
 
-- Conversation compaction now uses Claude Code's compaction approach: a
-  "summarizing conversations" system framing plus the verbatim structured task
-  prompt (an `<analysis>` pass, then nine fixed sections — Primary Request,
-  Key Technical Concepts, Files and Code Sections, Errors and fixes, Problem
-  Solving, All user messages, Pending Tasks, Current Work, Optional Next Step).
-  `/compact <focus>` is injected under a `## Compact Instructions` header; the
-  `<analysis>` scratchpad is stripped from the result; and the injected summary
+- Conversation compaction: a "summarizing conversations" system framing plus
+  the verbatim structured task prompt (an `<analysis>` pass, then nine fixed
+  sections — Primary Request, Key Technical Concepts, Files and Code Sections,
+  Errors and fixes, Problem Solving, All user messages, Pending Tasks, Current Work,
+  Optional Next Step). `/compact <focus>` is injected under a `## Compact Instructions`
+  header; the `<analysis>` scratchpad is stripped from the result; and the injected summary
   block carries the verbatim continuation instruction so the model resumes the
   work seamlessly instead of recapping.
 
@@ -1104,8 +1125,8 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Added
 
-- **External MCP servers** via `~/.mnemoai/mcp/mcp.json` (Claude Code/kiro
-  `mcpServers` schema). Tools from external servers are merged with the built-in
+- **External MCP servers** via `~/.mnemoai/mcp/mcp.json`.
+  Tools from external servers are merged with the built-in
   server; colliding names are namespaced `servername__tool`. `/mcp` lists them.
 - Orchestrator awareness of external tools (routes subtasks needing them to the
   `full` category).

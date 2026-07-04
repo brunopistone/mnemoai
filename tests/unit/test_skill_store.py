@@ -63,7 +63,6 @@ class TestListSkills:
         assert names == ["good"]
 
     def test_tolerates_cc_optional_keys(self, tmp_path):
-        # Claude-Code frontmatter keys must not cause rejection.
         front = (
             "name: cc\ndescription: Use for CC stuff.\n"
             "license: MIT\nallowed-tools: Read Grep\ncompatibility: anything\n"

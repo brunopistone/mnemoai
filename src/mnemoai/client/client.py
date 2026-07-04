@@ -22,7 +22,11 @@ from mnemoai.client.agent.message_codec import (
     convert_strands_messages_to_langchain,
 )
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
-from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
+from mnemoai.client.managers.agent_conversation_manager import (
+    AgentConversationManager,
+    log_green,
+    messages_to_dict_list,
+)
 from mnemoai.client.managers.user_profile_manager import UserProfileManager
 from mnemoai.client.mcp_config import load_external_servers
 from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
@@ -345,6 +349,10 @@ class LangGraphClient:
                     orchestrator_enabled=orchestrator_enabled,
                     plan_mode_provider=lambda: self.plan_mode_active,
                 )
+                # Mid-loop compaction hook: the agent calls this (sync) before a
+                # model call when history exceeds its high-water mark, reusing the
+                # same manager as the post-turn /compact path.
+                self.agent._compact_provider = self._compact_now
 
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -429,6 +437,40 @@ class LangGraphClient:
                 self, self.model, self.agent, focus_instructions
             )
         )
+
+    def _compact_now(self, force: bool = False) -> bool:
+        """Mid-loop compaction hook the agent calls before each model call.
+
+        Compacts when history exceeds the high-water mark (default 80% of
+        ``MAX_CONVERSATION_TOKENS``; ``LLM.COMPACT_HIGH_WATER_TOKENS`` overrides,
+        0 disables the proactive check). ``force`` (the overflow backstop) skips
+        the budget check and keeps a smaller recent window. Safe to call from the
+        synchronous agent loop — no event loop runs on this thread during
+        ``agent(prompt)`` (MCP has its own daemon-thread loop). Returns True if it
+        summarized anything."""
+        if not self.agent:
+            return False
+        mgr = self.conversation_manager
+        if not force:
+            high_water = config.get("LLM", {}).get(
+                "COMPACT_HIGH_WATER_TOKENS", int(mgr.max_tokens * 0.8)
+            )
+            if high_water <= 0:
+                return False
+            msgs = messages_to_dict_list(self.agent.messages)
+            if mgr.count_tokens(msgs) <= high_water:
+                return False
+            log_green(
+                f"Context over {high_water} tokens; compacting mid-task."
+            )
+        keep = 2 if force else config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)
+        try:
+            return asyncio.run(
+                mgr._compact(self, self.model, self.agent, keep_recent=keep)
+            )
+        except Exception as e:
+            logger.error(f"Mid-loop compaction failed: {e}")
+            return False
 
     def reflect_and_learn(self, task: str) -> None:
         """Reflect on the last interaction and update the playbook."""
@@ -858,8 +900,8 @@ class LangGraphClient:
 
     @staticmethod
     def conversation_title(file_path, max_len: int = 60) -> str:
-        """A short title from a saved conversation's first real user message (like
-        Claude Code's session summary); "" if unreadable/empty.
+        """A short title from a saved conversation's first real user message;
+        "" if unreadable/empty.
 
         Skips injected context (episodic-memory block, plan-mode reminder) so the
         title is the user's actual words, not a prepended block.
@@ -926,7 +968,7 @@ class LangGraphClient:
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"
                 )
-                # Replay the transcript to scrollback (like Claude Code --resume).
+                # Replay the transcript to scrollback.
                 transcript = turn_view.render_conversation(langchain_messages)
                 if transcript:
                     print("\n" + transcript)

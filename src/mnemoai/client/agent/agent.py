@@ -110,6 +110,20 @@ class LangGraphAgent:
         self._empty_response_retries = max(
             0, int(config.get("LLM", {}).get("MAX_RETRIES", 2))
         )
+        # Cap one tool result so a runaway (e.g. grep_search max_results=4000)
+        # can't alone overflow the context window. Defaults to 10% of the context
+        # window (converted tokens->chars at ~4 chars/token), so it scales with
+        # the model instead of a fixed number; explicit config wins, 0 disables.
+        _max_conv = int(config.get("MAX_CONVERSATION_TOKENS", 1024 * 8))
+        self._max_tool_result_chars = int(
+            config.get("LLM", {}).get(
+                "MAX_TOOL_RESULT_CHARS", int(_max_conv * 0.10 * 4)
+            )
+        )
+        # Set by the client to a sync compaction callable `(force=False) -> bool`;
+        # the client owns the token-budget check. None on bare test objects
+        # (guarded at every call site).
+        self._compact_provider: Optional[Callable[..., bool]] = None
 
         self.model_with_tools = model.bind_tools(tools) if tools else model
 
@@ -476,7 +490,7 @@ class LangGraphAgent:
                         result = self._invoke_tool(tool, tool_name, tool_args)
                         worker_messages.append(
                             ToolMessage(
-                                content=str(result),
+                                content=self._truncate_tool_result(str(result)),
                                 tool_call_id=tool_id,
                                 name=tool_name,
                             )
@@ -764,6 +778,28 @@ class LangGraphAgent:
             self._start_spinner()
         return response, had_reasoning
 
+    # Provider phrasings for "the prompt exceeded the model's context window".
+    _CONTEXT_OVERFLOW_MARKERS = (
+        "prompt is too long",              # Anthropic / Bedrock Mantle
+        "context length",                  # OpenAI-compatible
+        "maximum context",
+        "context window",
+        "too many tokens",
+        "model_context_window_exceeded",   # Bedrock/Converse stop reason
+        "input is too long",
+        "exceeds the maximum",
+    )
+
+    @classmethod
+    def _is_context_overflow_error(cls, exc: Exception) -> bool:
+        """True if ``exc`` is a context-window-exceeded error (not a generic 400).
+
+        Matches the provider phrasings so the backstop can compact + terminate
+        instead of retrying the same oversized prompt in a loop.
+        """
+        text = str(exc).lower()
+        return any(m in text for m in cls._CONTEXT_OVERFLOW_MARKERS)
+
     def _is_empty_response(self, response) -> bool:
         """True if a response carries no content, no reasoning, no tool calls."""
         if response is None:
@@ -893,10 +929,30 @@ class LangGraphAgent:
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            # Don't lose the turn on a stream error: retry once non-streaming and
-            # prefer its complete result; keep the partial only if that yields none.
-            logger.warning(f"Streaming error: {e}; falling back to non-streaming")
             self._stop_spinner()
+            # Context-window overflow: retrying the same oversized prompt (stream
+            # OR non-streaming) just 400s again and the graph loops. Force a hard
+            # compaction for the NEXT turn and return a terminal message so this
+            # turn ends cleanly instead of retry-storming.
+            if self._is_context_overflow_error(e):
+                logger.warning(f"Context overflow: {e}; compacting and stopping")
+                compact = getattr(self, "_compact_provider", None)
+                if compact is not None:
+                    try:
+                        compact(force=True)
+                    except Exception as ce:
+                        logger.error(f"Forced compaction failed: {ce}")
+                msg = (
+                    "The conversation grew past the model's context window, so I "
+                    "stopped this turn. I've compacted the history — try again, or "
+                    "use /compact or /clear if it persists."
+                )
+                if sink is not None:
+                    sink.stop()
+                return AIMessage(content=msg), had_reasoning
+            # Other stream errors: retry once non-streaming and prefer its
+            # complete result; keep the partial only if that yields none.
+            logger.warning(f"Streaming error: {e}; falling back to non-streaming")
             try:
                 full = active_model.invoke(messages, config=config)
                 if full is not None:
@@ -1170,6 +1226,12 @@ class LangGraphAgent:
         """Delegates to :func:`tool_formatting.normalize_tool_args`."""
         return tool_formatting.normalize_tool_args(args)
 
+    def _truncate_tool_result(self, text: str) -> str:
+        """Cap a tool result to the configured char budget (0 disables)."""
+        return tool_formatting.truncate_tool_result(
+            text, getattr(self, "_max_tool_result_chars", 100_000)
+        )
+
     def _is_blocked_by_plan_mode(self, tool_name: str, tool_args: dict = None) -> bool:
         """True when plan mode is active and this tool/call would mutate.
 
@@ -1342,7 +1404,9 @@ class LangGraphAgent:
                     result = self._invoke_tool(tool, tool_name, tool_args)
                     tool_results.append(
                         ToolMessage(
-                            content=str(result), tool_call_id=tool_id, name=tool_name
+                            content=self._truncate_tool_result(str(result)),
+                            tool_call_id=tool_id,
+                            name=tool_name,
                         )
                     )
                 except Exception as e:
@@ -1396,6 +1460,15 @@ class LangGraphAgent:
         # Model sees the full prompt this turn; only the clean prompt is stored.
         stored_prompt = self._strip_ephemeral(prompt)
         self._messages.append(HumanMessage(content=stored_prompt))
+
+        # Pre-flight compaction: shrink the accumulated history before it seeds this 
+        # turn's graph run if it's over the high-water mark. The client provider owns 
+        # the token-budget check and summarizes older turns into the system prompt. 
+        # In-turn growth is bounded by the per-result cap (_truncate_tool_result) and 
+        # the overflow backstop.
+        compact = getattr(self, "_compact_provider", None)
+        if compact is not None:
+            compact()
 
         # The turn the model runs on: clean history + the full current prompt.
         model_messages = self._messages[:-1] + [HumanMessage(content=prompt)]

@@ -29,6 +29,26 @@ def elide_middle(text: str, limit: int = 72) -> str:
     return f"{text[:head]}…{text[-tail:]}"
 
 
+def truncate_tool_result(text: str, max_chars: int) -> str:
+    """Cap a tool result to ``max_chars`` (0 disables), keeping head+tail with a
+    middle note, so one runaway result can't overflow the context window.
+
+    Both ends are kept — the head (counts, first matches) and tail (summary
+    lines) of grep/read output are the useful parts; the note tells the model
+    output was trimmed so it can narrow the call rather than assume it saw all.
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    dropped = len(text) - max_chars
+    note = f"\n\n… [truncated {dropped} chars / ~{dropped // 4} tokens] …\n\n"
+    keep = max_chars - len(note)
+    if keep <= 0:
+        return text[:max_chars]
+    head = (keep + 1) // 2
+    tail = keep // 2
+    return f"{text[:head]}{note}{text[-tail:]}"
+
+
 def format_tool_call(tool_call: dict) -> str:
     """Compact one-line ``name(arg=value, …)`` rendering; values middle-elided."""
     name = tool_call.get("name", "tool")
