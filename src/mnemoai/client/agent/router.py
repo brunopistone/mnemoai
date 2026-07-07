@@ -67,8 +67,8 @@ def is_trivial_query(query: str) -> bool:
 ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
     "simple_qa": [],
     # code: everything for local development — filesystem writes/exec, git, and
-    # the COMPLETE task-support suites (todos, plan-mode bookkeeping, background
-    # tasks). fs_read / glob need not be listed: fs_read and describe_image are
+    # the COMPLETE task-support suites (todos, background tasks). fs_read / glob
+    # need not be listed: fs_read and describe_image are
     # always-available meta tools, and glob_search is bound here for code search.
     "code": [
         "fs_write",
@@ -83,15 +83,8 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
         "todo_write",
         "todo_read",
         "todo_clear",
-        # Plan-mode bookkeeping (complete suite)
-        "enter_plan_mode",
-        "add_plan_step",
-        "add_plan_file",
-        "add_plan_risk",
-        "present_plan",
-        "approve_plan",
-        "exit_plan_mode",
-        "get_plan_status",
+        # Plan mode: exit_plan_mode is an always-available meta tool (reaches
+        # every route), so it need not be listed here.
         # Background tasks (complete suite — start/inspect/list/cancel/clear)
         "start_background_task",
         "get_task_status",

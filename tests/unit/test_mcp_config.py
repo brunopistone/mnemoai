@@ -307,13 +307,12 @@ def test_route_table_has_no_orphans_or_stale_refs():
     # source of truth for the audit; update alongside ROUTE_TOOLS when tools
     # are added/removed.
     registered = {
-        "add_plan_file", "add_plan_risk", "add_plan_step", "approve_plan",
         "cancel_background_task", "clear_completed_tasks", "clear_documents",
-        "describe_image", "enter_plan_mode", "execute_bash", "exit_plan_mode",
-        "file_edit", "fs_read", "fs_write", "get_plan_status", "get_task_output",
+        "describe_image", "execute_bash", "exit_plan_mode",
+        "file_edit", "fs_read", "fs_write", "get_task_output",
         "get_task_status", "git_commit_safe", "git_safe", "git_status_safe",
         "glob_search", "grep_search", "list_background_tasks", "list_documents",
-        "memory", "present_plan", "search_in_documents", "start_background_task",
+        "memory", "search_in_documents", "start_background_task",
         "todo_clear", "todo_read", "todo_write", "use_skill", "wait_for_task",
         "web_crawler", "web_search",
     }

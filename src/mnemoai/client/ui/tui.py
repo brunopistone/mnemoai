@@ -7,6 +7,7 @@ output streams above it via ``patch_stdout``. Also provides the full-screen dial
 Non-TTY sessions degrade to plain ``input()`` and never use this.
 """
 
+import shutil
 import sys
 from typing import Any, Callable, Iterable, List, Optional
 
@@ -36,6 +37,8 @@ from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
 
+from mnemoai.client.ui import turn_view
+
 # Override the default reverse-video bottom-toolbar so the pinned status/queue
 # lines read as dim console text, not a highlighted bar.
 _TUI_STYLE = Style(
@@ -44,6 +47,7 @@ _TUI_STYLE = Style(
         ("bottom-toolbar.text", "noreverse bg:default fg:#888888"),
         ("pinned-status", "noreverse bg:default fg:#888888"),
         ("pinned-confirm", "noreverse bg:default fg:ansiyellow bold"),
+        ("pinned-confirm-keys", "noreverse bg:default fg:#888888"),
         ("pinned-queued", "noreverse bg:default fg:#888888"),
     ]
 )
@@ -136,6 +140,7 @@ class PinnedPromptReader:
         self._confirm_pending = False
         self._confirm_answer = None
         self._confirm_prompt = None
+        self._confirm_keys = None  # dimmed [y · n · a] segment of the pinned prompt
         # Set when a dialog command asks to exit-run-relaunch the app.
         self._pending_dialog = None
         # Keep constructor args so the app can be rebuilt after a dialog exit.
@@ -160,7 +165,12 @@ class PinnedPromptReader:
     def _status_text(self):
         """Formatted text for the status line: confirm prompt, else the spinner."""
         if self._confirm_prompt:
-            return [("class:pinned-confirm", self._confirm_prompt)]
+            # Question in the accent color, the [y · n · a] options dimmed — so the
+            # eye separates the prompt from the actionable keys.
+            segments = [("class:pinned-confirm", self._confirm_prompt)]
+            if self._confirm_keys:
+                segments.append(("class:pinned-confirm-keys", f"   {self._confirm_keys}"))
+            return segments
         text = self._toolbar_text() or ""
         return [("class:pinned-status", text)] if text else []
 
@@ -319,6 +329,14 @@ class PinnedPromptReader:
             if self._confirm_answer:
                 self._confirm_answer("no")
 
+        @kb.add("e", filter=confirming, eager=True)
+        @kb.add("E", filter=confirming, eager=True)
+        def _(event) -> None:
+            # Only the plan-approval prompt offers "edit"; the y/n/a confirm
+            # ignores it (its handler maps unknown answers itself).
+            if self._confirm_answer:
+                self._confirm_answer("edit")
+
         @kb.add("a", filter=confirming, eager=True)
         @kb.add("A", filter=confirming, eager=True)
         def _(event) -> None:
@@ -394,27 +412,23 @@ class PinnedPromptReader:
         done = threading.Event()
         result = {"value": "no"}
 
-        # Shown in the status region while we wait for the keypress.
-        self._confirm_prompt = (
-            f"{header}  {detail}   [y = yes · n = no · a = allow all]"
-        )
+        self._confirm_prompt = header
+        self._confirm_keys = "[y = yes · n = no · a = allow all]"
 
         def _answer(value: str) -> None:
             result["value"] = value
             self._confirm_prompt = None
+            self._confirm_keys = None
             done.set()
             self._app.invalidate()
 
         self._confirm_answer = _answer
         self._confirm_pending = True
-        # Echo the prompt into scrollback too.
+        # Echo only the header + detail (the command/content) to scrollback; the
+        # options hint lives in the pinned line, so don't duplicate it here.
         self._loop.call_soon_threadsafe(
             lambda: run_in_terminal(
-                lambda: print(
-                    f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m\n"
-                    "  \033[90m[y = yes · n = no · a = allow all this session]"
-                    "\033[0m"
-                )
+                lambda: print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
             )
         )
         self._loop.call_soon_threadsafe(self._app.invalidate)
@@ -423,6 +437,62 @@ class PinnedPromptReader:
         self._confirm_pending = False
         self._confirm_answer = None
         return result["value"]
+
+    def plan_approval_ui(self, plan: str) -> tuple:
+        """Present a finished plan and capture the user's decision (worker thread).
+
+        Renders the plan to scrollback, shows a pinned prompt, and blocks on an
+        ``Event`` until the user presses y (approve & run) / e (edit in $EDITOR) /
+        n (keep planning) — reusing the same confirm-key machinery as
+        :meth:`confirm_ui`. On 'e' it drops the app, opens the plan in $EDITOR
+        (via :meth:`run_dialog`), then re-prompts with the edited text. Returns
+        ``(verdict, plan)`` where verdict is ``"approve"|"keep_planning"`` and
+        plan is the (possibly edited) text to use."""
+        import threading
+
+        if self._app is None or self._loop is None:
+            return ("approve", plan)
+
+        while True:
+            done = threading.Event()
+            result = {"value": "approve"}
+
+            self._confirm_prompt = "▶ Approve this plan?"
+            self._confirm_keys = "[y = approve & run · e = edit · n = keep planning]"
+
+            def _answer(value: str) -> None:
+                result["value"] = value
+                self._confirm_prompt = None
+                self._confirm_keys = None
+                done.set()
+                self._app.invalidate()
+
+            self._confirm_answer = _answer
+            self._confirm_pending = True
+            try:
+                cols = max(40, min(100, shutil.get_terminal_size().columns - 4))
+            except Exception:
+                cols = 80
+            # Echo only the plan block to scrollback; the actionable prompt +
+            # options live in the pinned line (no duplicate hint).
+            block = turn_view.render_plan(plan, width=cols)
+            self._loop.call_soon_threadsafe(
+                lambda b=block: run_in_terminal(lambda: print(f"\n{b}\n"))
+            )
+            self._loop.call_soon_threadsafe(self._app.invalidate)
+
+            done.wait()
+            self._confirm_pending = False
+            self._confirm_answer = None
+            verdict = result["value"]
+
+            if verdict == "edit":
+                # Drop the app, edit the plan in $EDITOR, then re-prompt.
+                plan = self.run_dialog(lambda p=plan: _edit_plan_in_editor(p))
+                continue
+            # The shared "n"/Esc key maps to "no"; here that means keep planning.
+            decision = "keep_planning" if verdict in ("keep_planning", "no") else "approve"
+            return (decision, plan)
 
     def run_dialog(self, func):
         """Run a blocking full-screen dialog command by EXITING the app first.
@@ -561,6 +631,36 @@ class PinnedPromptReader:
     def pending(self) -> int:
         """Number of lines submitted but not yet started."""
         return self._pending
+
+
+def _edit_plan_in_editor(plan: str) -> str:
+    """Open ``plan`` in $EDITOR (fallback vi/nano) and return the edited text.
+
+    Run in cooked mode (via ``run_dialog``), so it can drive a full-screen
+    editor. On any failure the original plan is returned unchanged."""
+    import os
+    import subprocess
+    import tempfile
+
+    editor = os.environ.get("EDITOR") or os.environ.get("VISUAL") or "vi"
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".md", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(plan)
+            path = f.name
+        try:
+            subprocess.run([*editor.split(), path], check=False)
+            with open(path, encoding="utf-8") as f:
+                edited = f.read().strip()
+            return edited or plan
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    except Exception:
+        return plan
 
 
 def confirm_inline(message: str) -> bool:

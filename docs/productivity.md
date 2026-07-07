@@ -210,17 +210,9 @@ git_safe(command="reset --hard HEAD~1", allow_dangerous=True, reason="Discarding
 
 ### 📝 Plan Mode
 
-Implementation planning workflow for complex tasks:
-
-**Workflow:**
-
-1. `enter_plan_mode(task_description="Add user authentication")`
-2. Explore codebase with search tools
-3. `add_plan_step(step_number=1, title="Create user model", description="...")`
-4. `add_plan_file(file_path="models/user.py", action="create")`
-5. `add_plan_risk(risk="Migration needed", mitigation="Add migration script")`
-6. `present_plan()` - Show user for approval
-7. `approve_plan()` + `exit_plan_mode()` - Start implementing
+**Enforced read-only plan mode (`/plan`).** Toggle it with the **`/plan`** command
+before asking for a complex change — the agent investigates and drafts a plan
+without touching anything, then you approve and it executes.
 
 **When to Use:**
 
@@ -229,19 +221,23 @@ Implementation planning workflow for complex tasks:
 - Multi-step refactoring
 - Unclear requirements
 
-**Plan Storage:** `~/.mnemoai/plans/current_plan.json`
-**Task Output:** `~/.mnemoai/tasks/`
-
-**Enforced read-only plan mode (`/plan`).** The tools above are _bookkeeping_ the
-agent can use to record a structured plan, but they don't restrict it. For a hard
-guarantee — toggle plan mode with the **`/plan`** command:
+**How it works:**
 
 - While ON, the agent can only use **read-only** tools (file reads, glob/grep
-  search, web search, document readers) and its own memory notebook. Any attempt to
-  edit files (`fs_write`/`file_edit`), run shell commands (`execute_bash`), perform
-  git writes, or start background tasks is **hard-blocked client-side** and the agent
-  is told to present a plan instead — regardless of what the model tries to do.
-- Toggle it off by running `/plan` again, then tell the agent to proceed.
+  search, read-only shell like `ls`/`cat`/`git status`, web search, document
+  readers) and its own memory notebook. Any attempt to edit files
+  (`fs_write`/`file_edit`), run mutating shell commands (`execute_bash`), perform
+  git writes, or start background tasks is **hard-blocked client-side** — regardless
+  of what the model tries to do.
+- **Approve → execute in one step.** When the plan is ready the agent calls the
+  `exit_plan_mode` tool, which presents the plan and asks how to proceed:
+  - **y** — approve and run: plan mode turns off and the agent **executes the
+    approved plan immediately, in the same turn** (no need to `/plan` off and re-ask).
+  - **e** — open the plan in your `$EDITOR` to tweak it, then re-review.
+  - **n** — keep planning: stays read-only and refines the plan.
+- The approved plan is saved to `~/.mnemoai/plans/plan_<timestamp>.md` so it
+  survives compaction and can be re-read later.
+- You can still toggle plan mode off manually with `/plan` at any time.
 
 This is enforced at the same client-side chokepoint as the action-confirmation gate,
 so it holds across both the normal loop and the orchestrator workers, and even a

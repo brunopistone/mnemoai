@@ -11,6 +11,7 @@ from mnemoai.client.ui.turn_view import (
     format_duration,
     render_conversation,
     render_live_reasoning,
+    render_plan,
     render_reasoning_block,
     render_tool_call,
 )
@@ -72,6 +73,53 @@ class TestToolCall:
     def test_missing_name_falls_back(self):
         out = render_tool_call("", {"a": 1})
         assert "tool" in out
+
+
+class TestRenderPlan:
+    def test_empty_plan_shows_header(self):
+        out = render_plan("")
+        assert "Plan" in out
+
+    def test_line_structure_preserved_not_flattened(self):
+        # The bug: a plan rendered as one flattened ↳ plan=… line. render_plan
+        # must keep the plan's own line breaks (multiple output lines).
+        plan = "## Heading\n\n- item one\n- item two\nfinal line"
+        out = render_plan(plan, width=80)
+        assert out.count("\n") >= 5
+        # Heading marker stripped, list markers kept.
+        assert "Heading" in out and "#" not in out
+        assert "- item one" in out and "- item two" in out
+
+    def test_long_line_wraps_to_width(self):
+        long = "word " * 40  # ~200 chars on one logical line
+        out = render_plan(long.strip(), width=60)
+        # Wrapped into several bar-prefixed lines, none absurdly long.
+        body_lines = [ln for ln in out.split("\n") if "word" in ln]
+        assert len(body_lines) >= 3
+
+    def test_inline_markdown_markers_stripped(self):
+        out = render_plan("This is **bold** and `code` text", width=80)
+        assert "bold" in out and "code" in out
+        assert "**" not in out and "`" not in out
+
+    def test_list_continuation_hangs_under_marker(self):
+        plan = "- " + ("x " * 40).strip()
+        out = render_plan(plan, width=50)
+        lines = [ln for ln in out.split("\n") if "x x" in ln]
+        assert len(lines) >= 2  # wrapped list body
+
+
+class TestExitPlanModeInConversation:
+    def test_exit_plan_mode_rendered_as_plan_not_flattened(self):
+        msg = _ai(
+            tool_calls=[
+                {"name": "exit_plan_mode", "args": {"plan": "## P\n- step one\n- step two"}}
+            ]
+        )
+        out = render_conversation([msg])
+        # Rendered as a plan block (bulleted lines), not a flattened plan= arg.
+        assert "- step one" in out and "- step two" in out
+        assert "plan=" not in out
 
 
 class TestLiveReasoning:

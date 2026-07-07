@@ -47,7 +47,9 @@ class LangGraphAgent:
     # since a matching query can classify onto any route: memory ("remember
     # this"), describe_image (any query may reference an image), fs_read
     # (universal read), use_skill (a skill-matching query may be simple_qa).
-    _ALWAYS_AVAILABLE_TOOLS = {"memory", "describe_image", "fs_read", "use_skill"}
+    _ALWAYS_AVAILABLE_TOOLS = {
+        "memory", "describe_image", "fs_read", "use_skill", "exit_plan_mode"
+    }
 
     # Aliases keeping the historical class-attribute surface (used by unit tests
     # and the delegating methods) pointing at the single source in plan_policy.
@@ -85,6 +87,13 @@ class LangGraphAgent:
                 (gates the mutating tools client-side).
         """
         self._plan_mode_provider = plan_mode_provider or (lambda: False)
+        # Plan-mode approval hooks, set by the client (like _confirm_ui). None on
+        # bare test objects / non-TTY → exit_plan_mode auto-approves so scripted
+        # runs never block. `_plan_approval_ui(plan) -> "approve"|"edit"|
+        # "keep_planning"`; `_exit_plan_mode_provider(plan)` flips plan mode off +
+        # persists the plan.
+        self._plan_approval_ui: Optional[Callable[[str], str]] = None
+        self._exit_plan_mode_provider: Optional[Callable[[str], None]] = None
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
@@ -462,6 +471,19 @@ class LangGraphAgent:
                 tool_name = tc["name"]
                 tool_id = tc["id"]
                 tool_args = self._normalize_tool_args(tc["args"])
+
+                # exit_plan_mode is handled client-side (approval), not via MCP.
+                if tool_name == "exit_plan_mode":
+                    worker_messages.append(
+                        ToolMessage(
+                            content=self._handle_exit_plan_mode(
+                                str(tool_args.get("plan", ""))
+                            ),
+                            tool_call_id=tool_id,
+                            name=tool_name,
+                        )
+                    )
+                    continue
 
                 tool = next((t for t in worker_tools if t.name == tool_name), None)
                 # Fall back to all tools if not in the worker subset.
@@ -1205,6 +1227,10 @@ class LangGraphAgent:
         """Print one tool-call marker: the styled name + ↳arg block (pinned UI)
         or the plain ``[⚙ …]`` marker. Shared by both tool-exec chokepoints so
         the main loop and the worker loop render identically."""
+        # exit_plan_mode is a client-side meta tool — the approval UI renders the
+        # plan as a formatted block, so skip the flattened ↳ plan=… marker.
+        if tool_call.get("name") == "exit_plan_mode":
+            return
         if getattr(self, "styled_turn_view", False):
             print(
                 "\n"
@@ -1258,6 +1284,42 @@ class LangGraphAgent:
     def _plan_mode_block_message(tool_name: str) -> str:
         """Delegates to :func:`plan_policy.plan_mode_block_message`."""
         return plan_policy.plan_mode_block_message(tool_name)
+
+    def _handle_exit_plan_mode(self, plan: str) -> str:
+        """Drive the plan-approval flow for an ``exit_plan_mode`` call; returns
+        the ToolMessage content the model sees next.
+
+        Shows the plan + an inline approval prompt via ``_plan_approval_ui``
+        (approve|edit|keep_planning). On approve, ``_exit_plan_mode_provider``
+        flips plan mode off + persists the plan, and the model is told to execute
+        it now. Without a UI hook (non-TTY/tests) it auto-approves so scripted
+        runs never block. ``edit`` is resolved inside the UI (it re-prompts after
+        editing), so only approve/keep_planning reach here."""
+        plan = (plan or "").strip()
+        ui = getattr(self, "_plan_approval_ui", None)
+        if ui is not None:
+            verdict, plan = ui(plan)  # UI may return an edited plan
+        else:
+            verdict = "approve"  # non-TTY/tests: auto-approve
+
+        if verdict == "keep_planning":
+            return (
+                "The user wants to keep planning — plan mode is still ON "
+                "(read-only). Refine the plan based on their feedback and call "
+                "exit_plan_mode again when it's ready."
+            )
+        # approve (the default, incl. the no-UI auto-approve path).
+        provider = getattr(self, "_exit_plan_mode_provider", None)
+        if provider is not None:
+            try:
+                provider(plan)
+            except Exception as e:
+                logger.error(f"exit_plan_mode approval provider failed: {e}")
+        return (
+            "The user APPROVED the plan. Plan mode is now OFF — you may make "
+            "changes. Execute the approved plan now, following it step by step. "
+            "The approved plan:\n\n" + plan
+        )
 
     @staticmethod
     def _tool_error_message(tool_name: str, exc: Exception) -> str:
@@ -1368,6 +1430,20 @@ class LangGraphAgent:
             tool_name = tool_call["name"]
             tool_args = self._normalize_tool_args(tool_call["args"])
             tool_id = tool_call["id"]
+
+            # exit_plan_mode is handled entirely client-side (approval prompt +
+            # flip plan mode off), not invoked through MCP.
+            if tool_name == "exit_plan_mode":
+                tool_results.append(
+                    ToolMessage(
+                        content=self._handle_exit_plan_mode(
+                            str(tool_args.get("plan", ""))
+                        ),
+                        tool_call_id=tool_id,
+                        name=tool_name,
+                    )
+                )
+                continue
 
             # Route tools first, then fall back to all tools.
             tool = next((t for t in route_tools if t.name == tool_name), None)
