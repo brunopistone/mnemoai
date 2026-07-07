@@ -609,14 +609,37 @@ class LangGraphClient:
             "plan first.\n"
             "You MAY: read files, search the codebase and web, and run READ-ONLY "
             "shell commands (ls, cat, grep, git status/log/diff, etc.).\n"
-            "Investigate the task thoroughly with these read-only tools, then "
-            "PRESENT A PLAN for the user to review and approve. If anything is "
-            "ambiguous, ASK the user clarifying questions rather than guessing.\n"
-            f"If you want to draft the plan to disk, the ONLY writable path is a "
-            f"Markdown (.md) file under {plan_hint}; no other writes are allowed.\n"
-            "The user must exit plan mode (/plan) before any changes can be made.\n"
+            "Investigate the task thoroughly with these read-only tools. When "
+            "your plan is ready, call the exit_plan_mode tool with the full plan "
+            "(as markdown) in its `plan` argument — this presents it to the user "
+            "for approval. Do NOT just write the plan as a normal message. If "
+            "anything is ambiguous, ASK clarifying questions rather than "
+            "guessing.\n"
+            "On approval, plan mode turns off and you execute the approved plan. "
+            "If the user keeps planning, refine it and call exit_plan_mode "
+            "again.\n"
+            f"If you want to draft the plan to disk first, the ONLY writable path "
+            f"is a Markdown (.md) file under {plan_hint}; no other writes are "
+            "allowed.\n"
             "</plan-mode-active>\n\n"
         )
+
+    def _approve_plan(self, plan: str) -> None:
+        """Approve the current plan (the agent's _exit_plan_mode_provider): turn
+        plan mode OFF and persist the approved plan to the plans dir so it
+        survives compaction and is re-readable later. Execution follows the
+        in-context plan handed back by the exit_plan_mode tool result."""
+        self.plan_mode_active = False
+        try:
+            ts = self.session_id.split("_", 1)[1] if "_" in self.session_id else ""
+            fname = f"plan_{ts}.md" if ts else "plan.md"
+            path = plans_dir() / fname
+            path.write_text((plan or "").strip() + "\n")
+            logger.info("Approved plan saved to %s", path)
+            print(f"\n\033[92m🔓 Plan approved\033[0m — saved to {path}\n")
+        except Exception as e:
+            logger.error(f"Failed to persist approved plan: {e}")
+            print("\n\033[92m🔓 Plan approved\033[0m — executing now.\n")
 
     def _inject_episodic_context(self, prompt: str) -> str:
         """Prepend relevant, non-redundant episodic memory to the prompt.

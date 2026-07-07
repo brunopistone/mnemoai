@@ -9,6 +9,47 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-07-07
+
+### Added
+
+- **Plan mode style refactor → execute handoff.** When its
+  plan is ready the model calls a new `exit_plan_mode(plan)` tool
+  (`server/tools/plan_mode_exit.py`, a thin stub in `_ALWAYS_AVAILABLE_TOOLS`);
+  the agent intercepts it client-side (`_handle_exit_plan_mode`) at both tool
+  chokepoints and shows an in-app approval prompt (`reader.plan_approval_ui`,
+  modeled on the confirmation gate): **y** approves and runs, **e** opens the
+  plan in `$EDITOR` to tweak before re-review, **n** keeps planning (stays
+  read-only). Approving flips plan mode off, persists the approved plan to
+  `plans/plan_<ts>.md`, and hands it back so the model executes it **in the same
+  turn** — no more manual `/plan`-off + "now do it" re-prompt. Non-TTY/tests
+  auto-approve. The plan is shown as a **bordered, word-wrapped, markdown-aware
+  block** (`turn_view.render_plan` — bold headings, cyan code spans, hanging
+  list indents) above the approval prompt, instead of a flattened
+  `↳ plan=…` tool-arg line.
+
+### Fixed
+
+- **Confirmation & plan-approval prompts cleaned up.** The pinned
+  bottom-of-screen confirm line embedded the full (often multi-line) command
+  detail, which prompt_toolkit clipped to its first line — rendering a confusing
+  truncated `▶ Run shell command?  python3 -c "` under a duplicated options hint.
+  Now the pinned line is compact (`▶ <question>   [y = yes · n = no · a = allow
+  all]`), the full command/plan echoes to scrollback above it just once, and the
+  pinned line styles the question in the accent color with the `[y · n · a]`
+  keys dimmed — so the eye separates the prompt from the actionable keys. Applies
+  to both the shell/file/memory confirmation and the plan-approval prompt.
+
+### Removed
+
+- **Retired the legacy advisory plan-mode JSON-workflow tools**
+  (`enter_plan_mode`, `add_plan_step`, `add_plan_file`, `add_plan_risk`,
+  `present_plan`, `approve_plan`, `get_plan_status`, and the old
+  `exit_plan_mode(cancel)`). They were bookkeeping only — never wired to
+  enforcement — and the old `exit_plan_mode` collided with the new tool
+  (`Tool names must be unique` → a 400 loop). The enforced `/plan` path is now
+  the only plan mode.
+
 ## [0.18.3] — 2026-07-04
 
 ### Fixed
@@ -62,14 +103,14 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
      is compacted first (reusing the existing summarize-and-keep-recent manager).
   3. **Overflow backstop** — a context-window 400 is caught, force-compacted, and
      the turn ends with a clear message instead of re-sending the oversized prompt.
-  Both size knobs **auto-derive from `MAX_CONVERSATION_TOKENS`** (the model's
-  context window) so they scale per-model: `MAX_TOOL_RESULT_CHARS` → 10% of the
-  window in chars, `COMPACT_HIGH_WATER_TOKENS` → 80% of the window. Either can be
-  set explicitly (0 disables). Documented in the `config.yaml.*` examples and docs.
+     Both size knobs **auto-derive from `MAX_CONVERSATION_TOKENS`** (the model's
+     context window) so they scale per-model: `MAX_TOOL_RESULT_CHARS` → 10% of the
+     window in chars, `COMPACT_HIGH_WATER_TOKENS` → 80% of the window. Either can be
+     set explicitly (0 disables). Documented in the `config.yaml.*` examples and docs.
 
 ### Changed
 
-- Removed "Claude Code" references from code comments/docstrings and config
+- Removed references from code comments/docstrings and config
   example comments (retained only in `CLAUDE.md`/`ARCHITECTURE.md`).
 
 ## [0.17.5] — 2026-07-03

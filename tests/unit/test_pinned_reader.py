@@ -392,6 +392,54 @@ class TestCtrlC:
         assert called["force"] is True
 
 
+class TestPlanApprovalUI:
+    def test_no_app_auto_approves(self):
+        # Without a running app (non-TTY), plan approval must not block: it
+        # returns ("approve", plan) so scripted/piped runs proceed.
+        r = _reader(lambda line: None)
+        r._app = None
+        r._loop = None
+        verdict, plan = r.plan_approval_ui("# Plan\n1. x")
+        assert verdict == "approve"
+        assert plan == "# Plan\n1. x"
+
+    def test_edit_key_binding_present(self):
+        # The e/E key is armed (only meaningful during the plan-approval prompt).
+        r = _reader(lambda line: None)
+        keysets = [
+            tuple(getattr(k, "value", k) for k in b.keys)
+            for b in r._make_bindings().bindings
+        ]
+        assert ("e",) in keysets and ("E",) in keysets
+
+
+class TestConfirmPromptRendering:
+    def test_question_and_keys_styled_separately(self):
+        # The pinned confirm line splits into an accent question segment and a
+        # dimmed keys segment (so the eye separates prompt from actionable keys).
+        r = _reader(lambda line: None)
+        r._confirm_prompt = "▶ Write to file?"
+        r._confirm_keys = "[y = yes · n = no · a = allow all]"
+        segments = r._status_text()
+        styles = [s for s, _ in segments]
+        texts = [t for _, t in segments]
+        assert "class:pinned-confirm" in styles
+        assert "class:pinned-confirm-keys" in styles
+        assert any("Write to file?" in t for t in texts)
+        assert any("y = yes" in t for t in texts)
+        # The keys are in their OWN (dimmed) segment, not the accent question one.
+        q = next(t for s, t in segments if s == "class:pinned-confirm")
+        assert "y = yes" not in q
+
+    def test_no_keys_renders_single_segment(self):
+        r = _reader(lambda line: None)
+        r._confirm_prompt = "▶ Approve this plan?"
+        r._confirm_keys = None
+        segments = r._status_text()
+        assert len(segments) == 1
+        assert segments[0][0] == "class:pinned-confirm"
+
+
 def _escape_binding(reader):
     """The reader's own bare-Escape binding (its filter gates word-motion)."""
     for b in reader._make_bindings().bindings:

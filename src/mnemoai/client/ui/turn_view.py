@@ -4,10 +4,12 @@ Pure string builders (no I/O, no prompt_toolkit) written into native scrollback
 above the pinned input; colors degrade harmlessly where unsupported.
 """
 
+import re
 import threading
 
 _GREEN = "\033[32m"
 _GRAY = "\033[90m"
+_CYAN = "\033[36m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
 
@@ -87,6 +89,70 @@ class ReasoningStatus:
         return render_live_reasoning(text, elapsed)
 
 
+def _wrap(text: str, width: int) -> list:
+    """Word-wrap a single logical line to ``width`` cols; keeps at least one line."""
+    words = text.split()
+    if not words:
+        return [""]
+    lines, cur = [], ""
+    for w in words:
+        if cur and len(cur) + 1 + len(w) > width:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}" if cur else w
+    lines.append(cur)
+    return lines
+
+
+def _style_markdown_inline(text: str) -> str:
+    """Light inline markdown → ANSI: **bold** bold, `code` cyan. Strips markers."""
+    text = re.sub(r"\*\*(.+?)\*\*", rf"{_BOLD}\1{_RESET}", text)
+    text = re.sub(r"`([^`]+?)`", rf"{_CYAN}\1{_RESET}", text)
+    return text
+
+
+def render_plan(plan: str, width: int = 80) -> str:
+    """Render a plan as a bordered, word-wrapped, markdown-aware block.
+
+    Unlike a flattened ``↳ plan=…`` tool line, this preserves the plan's line
+    structure: headings are bold, list items keep their bullet + hanging indent,
+    long lines wrap to ``width``. Every line sits under the green bar.
+    """
+    text = (plan or "").strip()
+    if not text:
+        return f"{_BAR} {_BOLD}Plan{_RESET}"
+    out = [f"{_BAR} {_BOLD}Plan{_RESET}", _BAR]
+    for raw in text.split("\n"):
+        line = raw.rstrip()
+        if not line.strip():
+            out.append(_BAR)
+            continue
+        stripped = line.lstrip()
+        indent = line[: len(line) - len(stripped)]
+        # List item: keep the marker and hang-indent wrapped continuation lines.
+        m = re.match(r"([-*+]|\d+\.)\s+(.*)", stripped)
+        if m:
+            marker, body = m.group(1), m.group(2)
+            hang = " " * (len(marker) + 1)
+            wrapped = _wrap(body, max(20, width - len(indent) - len(hang)))
+            first = _style_markdown_inline(wrapped[0])
+            out.append(f"{_BAR}   {indent}{marker} {first}")
+            for cont in wrapped[1:]:
+                out.append(f"{_BAR}   {indent}{hang}{_style_markdown_inline(cont)}")
+            continue
+        # Heading (## ...) → bold, markers dropped.
+        h = re.match(r"#{1,6}\s+(.*)", stripped)
+        if h:
+            for i, cont in enumerate(_wrap(h.group(1), max(20, width - len(indent)))):
+                body = f"{_BOLD}{cont}{_RESET}"
+                out.append(f"{_BAR}   {indent}{body}")
+            continue
+        for cont in _wrap(stripped, max(20, width - len(indent))):
+            out.append(f"{_BAR}   {indent}{_style_markdown_inline(cont)}")
+    return "\n".join(out)
+
+
 def render_tool_call(name: str, args: dict) -> str:
     """Build one tool block: bold ``ToolName`` then dimmed ``↳ key=value`` lines.
 
@@ -141,7 +207,12 @@ def render_conversation(messages: list) -> str:
                 # Duration isn't persisted; show the block without a time.
                 out.append(_bordered("Thought…", reasoning.strip()))
             for tc in getattr(msg, "tool_calls", None) or []:
-                out.append(render_tool_call(tc.get("name", "tool"), tc.get("args") or {}))
+                if tc.get("name") == "exit_plan_mode":
+                    out.append(render_plan((tc.get("args") or {}).get("plan", "")))
+                else:
+                    out.append(
+                        render_tool_call(tc.get("name", "tool"), tc.get("args") or {})
+                    )
             answer = _visible_text(content)
             if answer:
                 out.append(f"{_ANSWER_MARKER}{answer}")

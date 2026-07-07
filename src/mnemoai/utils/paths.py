@@ -11,7 +11,7 @@ find, back up, or relocate:
     ├── mcp/                                # external MCP servers
     │   ├── mcp.json                        # optional, user-created
     │   └── mcp.json.example                # bundled example (copied here to read)
-    ├── plans/current_plan.json             # plan-mode state
+    ├── plans/plan_<ts>.md                  # approved plan-mode plans
     ├── skills                              # skills folder
     ├── tasks/                              # background-task output
     └── {profile}/                          # per-user-profile data

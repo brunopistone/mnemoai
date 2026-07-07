@@ -87,7 +87,7 @@ class ToolManager:
         from .fs_write import register_fs_write_tools
         from .git_safety import register_git_safety_tools
         from .memory_tool import register_memory_tools
-        from .plan_mode import register_plan_mode_tools
+        from .plan_mode_exit import register_plan_mode_exit_tools
         from .rag import register_rag_tools
         from .skill_tool import register_skill_tools
         from .todo_manager import register_todo_tools
@@ -101,7 +101,7 @@ class ToolManager:
         register_fs_read_tools(mcp)
         register_fs_write_tools(mcp)
         register_git_safety_tools(mcp)
-        register_plan_mode_tools(mcp)
+        register_plan_mode_exit_tools(mcp)
         register_search_tools(mcp)
         register_todo_tools(mcp)
 

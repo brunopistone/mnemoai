@@ -529,6 +529,10 @@ class ChatInterface:
         # input() would fight the live app for stdin).
         if getattr(self.client, "agent", None) is not None:
             self.client.agent._confirm_ui = reader.confirm_ui
+            # Plan-mode approval: the exit_plan_mode tool shows the plan in-app
+            # and, on approval, flips plan mode off + persists the plan.
+            self.client.agent._plan_approval_ui = reader.plan_approval_ui
+            self.client.agent._exit_plan_mode_provider = self.client._approve_plan
         # Exposed so _dispatch can route dialog commands through the reader.
         self._pinned_reader = reader
 
@@ -616,10 +620,10 @@ class ChatInterface:
             if self.client.plan_mode_active:
                 print(
                     "\n\033[93m🔒 Plan mode ON\033[0m — read-only. I'll research "
-                    "and present a plan. Read-only shell commands (ls, cat, "
-                    "grep, git status/log/diff) still run; file edits and "
-                    "mutating commands are blocked. Type /plan again to exit "
-                    "and allow changes.\n"
+                    "and present a plan for your approval; approving turns plan "
+                    "mode off and I execute it. Read-only shell commands (ls, "
+                    "cat, grep, git status/log/diff) still run; file edits and "
+                    "mutating commands are blocked. Type /plan again to exit.\n"
                 )
             else:
                 print(
