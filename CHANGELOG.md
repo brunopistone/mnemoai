@@ -9,6 +9,13 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-07-08
+
+### Changed
+
+- Recompressed the demo GIF (`images/assistant-demo.gif`, ~19 MB → ~10 MB) so the
+  README loads faster on PyPI and GitHub. No code changes.
+
 ## [0.19.0] — 2026-07-07
 
 ### Added
