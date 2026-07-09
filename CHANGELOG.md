@@ -9,6 +9,28 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-07-09
+
+### Fixed
+
+- **Mid-turn log warnings no longer corrupt the pinned prompt.** The log handler
+  captured the original `sys.stderr` at import, bypassing the pinned UI's
+  `patch_stdout` (which swaps `sys.stderr` for a proxy that renders above the
+  input). A warning fired during a turn (e.g. an embed retry) printed on top of
+  the `(esc to cancel)` status line. The handler now resolves `sys.stderr` at
+  emit time, so logs render cleanly in scrollback during a turn and to real
+  stderr otherwise.
+- **Embedding a very long input no longer spams retries or silently degrades.**
+  Oversized text (e.g. a large paste) could exceed the embed model's context and
+  fail. Fixes, all provider-agnostic (applied at the shared truncation point, so
+  Ollama/OpenAI/Bedrock/SageMaker/LiteLLM all benefit):
+  - a **token-aware input cap** resolved from `RAG.EMBED_MODEL_ID.MAX_INPUT_TOKENS`
+    (new, optional) → else the model's own context window (Ollama probe, with a
+    0.9 safety margin) → else a conservative default (8192);
+  - `truncate=True` on the Ollama embed call as a runner-side backstop;
+  - **deterministic context-overflow errors skip the retry loop** (retrying the
+    identical input can't help) while genuinely transient EOFs still retry.
+
 ## [1.0.0] — 2026-07-09
 
 First stable release. The public contract is now frozen under semver: breaking

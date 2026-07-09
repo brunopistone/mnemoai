@@ -106,7 +106,7 @@ class TestOllamaHost:
             def __init__(self, host=None):
                 captured["host"] = host
 
-            def embed(self, model, input):
+            def embed(self, model, input, truncate=None):
                 return {"embeddings": [[0.1, 0.2, 0.3]] * len(input)}
 
         monkeypatch.setattr(ec.ollama, "Client", _FakeOllamaClient)
@@ -161,7 +161,7 @@ class TestOllamaRetryAndTruncation:
             def __init__(self, host=None):
                 pass
 
-            def embed(self, model, input):
+            def embed(self, model, input, truncate=None):
                 state["calls"] += 1
                 if state["calls"] <= fail_times:
                     raise ec.ollama.ResponseError("EOF", 400) if hasattr(
@@ -193,10 +193,90 @@ class TestOllamaRetryAndTruncation:
     def test_oversized_input_truncated(self):
         c = EmbeddingsController({"NAME": "x", "TYPE": "ollama"})
         c.max_input_chars = 100
+        c._max_input_tokens = 0  # isolate the char-cap behavior
+        c._token_limit_resolved = True
         assert len(c._truncate("a" * 500)) == 100
         assert c._truncate("short") == "short"
 
-    def test_truncation_disabled_when_zero(self):
+    def test_char_truncation_disabled_when_zero(self):
+        # With both caps off, a short text passes through untouched.
         c = EmbeddingsController({"NAME": "x", "TYPE": "ollama"})
         c.max_input_chars = 0
+        c._max_input_tokens = 0
+        c._token_limit_resolved = True
         assert len(c._truncate("a" * 500)) == 500
+
+
+class TestTokenCapAndOverflow:
+    """The token cap is the real guard against overflowing the embed model's
+    context (provider-agnostic, applied in the shared _truncate); overflow
+    errors are classified so deterministic ones aren't retried."""
+
+    def test_explicit_max_input_tokens_config_wins(self):
+        c = EmbeddingsController(
+            {"NAME": "x", "TYPE": "ollama", "MAX_INPUT_TOKENS": 50}
+        )
+        assert c._resolve_token_limit() == 50  # no probe, no margin applied
+
+    def test_token_cap_truncates_long_input(self):
+        c = EmbeddingsController(
+            {"NAME": "x", "TYPE": "openai", "MAX_INPUT_TOKENS": 10}
+        )
+        c.max_input_chars = 0  # isolate the token cap
+        long_text = "word " * 500  # ~500+ tokens
+        from mnemoai.utils.tokenization import count_tokens
+
+        out = c._truncate(long_text)
+        assert count_tokens(out) <= 10
+
+    def test_default_limit_when_unresolved(self, monkeypatch):
+        # Non-Ollama with no config + no probe → conservative default.
+        c = EmbeddingsController({"NAME": "text-embedding-3-small", "TYPE": "openai"})
+        assert c._resolve_token_limit() == ec._DEFAULT_EMBED_TOKEN_LIMIT
+
+    def test_ollama_probe_applies_margin(self, monkeypatch):
+        # A probed context window is reduced by the 0.9 safety margin.
+        class _FakeClient:
+            def __init__(self, host=None):
+                pass
+
+            def show(self, name):
+                return {"model_info": {"qwen3.context_length": 1000}}
+
+        monkeypatch.setattr(ec.ollama, "Client", _FakeClient)
+        c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama"})
+        assert c._resolve_token_limit() == 900  # 1000 * 0.9
+
+    def test_eof_is_not_overflow_so_retry_preserved(self):
+        # A transient EOF must NOT be classified as overflow (we want to retry).
+        assert EmbeddingsController._is_overflow_error(Exception("... EOF (status code: 400)")) is False
+
+    def test_context_length_error_is_overflow(self):
+        # A deterministic context error IS overflow (don't retry the same input).
+        assert EmbeddingsController._is_overflow_error(
+            Exception("the input length exceeds the context length")
+        ) is True
+        assert EmbeddingsController._is_overflow_error(
+            Exception("maximum context length is 8192 tokens")
+        ) is True
+
+    def test_overflow_error_skips_retries(self, monkeypatch):
+        # An overflow error short-circuits the retry loop → one call, then fallback.
+        state = {"calls": 0}
+
+        class _OverflowClient:
+            def __init__(self, host=None):
+                pass
+
+            def embed(self, model, input, truncate=None):
+                state["calls"] += 1
+                raise RuntimeError("the input length exceeds the context length")
+
+        monkeypatch.setattr(ec.ollama, "Client", _OverflowClient)
+        monkeypatch.setattr(ec.time, "sleep", lambda *a: None)
+        c = EmbeddingsController({"NAME": "x", "TYPE": "ollama", "DIMENSION": 3})
+        c.cache_enabled = False
+        c._embed_retries = 3
+        out = c._embed_ollama(["hello"])
+        assert state["calls"] == 1       # did NOT retry the deterministic error
+        assert out.shape == (1, 3)       # fell back once
