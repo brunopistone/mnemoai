@@ -9,6 +9,29 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-09
+
+First stable release. The public contract is now frozen under semver: breaking
+changes to `config.yaml` keys, the `mcp.json` `mcpServers` schema, the CLI
+slash-commands + `mnemoai` console command, and the `mnemoai-assistant` dist /
+`mnemoai` import name will bump the major version.
+
+### Changed
+
+- **README demo is now a link instead of an inline GIF.** GitHub serves the
+  10.5 MB `.gif` as `application/octet-stream`, which PyPI's image proxy refuses,
+  so the demo rendered as a broken image on the PyPI project page. It now links
+  to the GIF (renders inline on GitHub, resolves cleanly on PyPI).
+
+### Fixed
+
+- **Integration-test config gate now mirrors the real loader.** The integration
+  tier keyed its skip guard off a single hardcoded `src/mnemoai/utils/config.yaml`
+  path, out of sync with the app's actual resolution (`$MNEMOAI_CONFIG` →
+  `~/.mnemoai/config/config.yaml` → legacy → package-relative). It now reuses
+  `Config._resolve_config_path()`, so `python -m pytest -m integration` runs
+  from the installed config with no env-var or file-copy workaround.
+
 ## [0.19.1] — 2026-07-08
 
 ### Changed

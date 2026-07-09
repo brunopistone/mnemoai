@@ -2,7 +2,8 @@
 
 These tests exercise the real agent against the configured chat model and the
 MCP subprocess. They are skipped automatically unless:
-  1. A real utils/config.yaml exists (the runtime config, gitignored); and
+  1. A runtime config resolves the same way the app loads it ($MNEMOAI_CONFIG →
+     ~/.mnemoai/config/config.yaml → legacy → package-relative); and
   2. The configured model looks usable — for a local Ollama model the server
      must be reachable; for cloud providers (bedrock/mantle/openai/anthropic/
      sagemaker/litellm) a present config is treated as sufficient.
@@ -11,20 +12,19 @@ Run only these with:   python -m pytest -m integration
 Skip them with:        python -m pytest -m "not integration"
 """
 
-import os
-
 import pytest
-
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _config_exists() -> bool:
-    # The repo-relative runtime config now lives inside the package.
-    return os.path.isfile(
-        os.path.join(
-            REPO_ROOT, "src", "mnemoai", "utils", "config.yaml"
-        )
-    )
+    # Mirror the loader exactly: reuse its own resolution ($MNEMOAI_CONFIG →
+    # ~/.mnemoai/config/config.yaml → legacy → package-relative), so the gate
+    # can't drift from where the app actually reads its config.
+    try:
+        from mnemoai.utils.config import Config
+
+        return Config._resolve_config_path() is not None
+    except Exception:
+        return False
 
 
 def _model_reason() -> str:
@@ -63,7 +63,7 @@ def _model_reason() -> str:
 # machines without a usable model, so the default `pytest` run stays fast/green.
 _SKIP_REASON = None
 if not _config_exists():
-    _SKIP_REASON = "no utils/config.yaml (runtime config) present"
+    _SKIP_REASON = "no runtime config resolves (set MNEMOAI_CONFIG or ~/.mnemoai/config/config.yaml)"
 else:
     _SKIP_REASON = _model_reason() or None
 
