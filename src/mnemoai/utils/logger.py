@@ -55,6 +55,7 @@ class _NewlineGuardHandler(logging.StreamHandler):
     """
 
     def emit(self, record: logging.LogRecord) -> None:
+        self.stream = sys.stderr
         out = sys.stdout
         try:
             mid_line = (

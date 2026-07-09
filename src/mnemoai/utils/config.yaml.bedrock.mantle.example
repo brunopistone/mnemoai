@@ -100,6 +100,8 @@ RAG:
     TYPE: ollama
     HOST: localhost
     PORT: 11434
+    # MAX_INPUT_TOKENS: 8192   # cap embed input to the model's context; omit to
+    #                          # auto-resolve (Ollama context probe, else a safe default)
   CHUNK_TOKENS: 1024
   SEARCH:
     SEMANTIC_WEIGHT: 0.5 # Semantic similarity weight (0-1)

@@ -1,7 +1,7 @@
 import hashlib
 import json
 import time
-from typing import Any, List
+from typing import Any, List, Optional
 
 import boto3
 import numpy as np
@@ -10,6 +10,23 @@ from openai import OpenAI
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+from mnemoai.utils.tokenization import count_tokens
+
+# Conservative token ceiling when the embed model's context can't be resolved.
+# Fits common embedding models (OpenAI text-embedding-3 ~8191, Bedrock Titan v2
+# 8192, nomic/qwen3 ≥ 8192); a smaller-context model just truncates a bit early.
+_DEFAULT_EMBED_TOKEN_LIMIT = 8192
+
+# Substrings that mark a DETERMINISTIC "input too big" embed failure — retrying
+# the identical input can't help, so we skip the retry loop and fall back once.
+_OVERFLOW_ERROR_MARKERS = (
+    "context length",
+    "context window",
+    "input length exceeds",
+    "maximum context",
+    "too large",
+    "too long",
+)
 
 
 class EmbeddingsController:
@@ -53,6 +70,16 @@ class EmbeddingsController:
         # disables). Generous — transient runner EOFs are handled by retry below,
         # not by truncation.
         self.max_input_chars = int(embeddings_config.get("MAX_INPUT_CHARS", 200000))
+        # Token cap: the real guard against overflowing the embed model's context
+        # (chars alone can't bound tokens). Provider-agnostic — applied in the
+        # shared truncate before dispatch. Explicit config wins; else resolved
+        # lazily from the model (Ollama context probe) with a safe fallback. A
+        # 0.9 margin absorbs tokenizer drift between our estimator and the model.
+        cfg_tokens = self.embed_model_config.get("MAX_INPUT_TOKENS")
+        self._max_input_tokens: Optional[int] = (
+            int(cfg_tokens) if cfg_tokens is not None else None
+        )
+        self._token_limit_resolved = self._max_input_tokens is not None
         # Retry a transient embed-runner failure before degrading to fallback.
         self._embed_retries = int(embeddings_config.get("RETRIES", 3))
         self._embed_retry_delay = float(embeddings_config.get("RETRY_DELAY", 0.5))
@@ -62,9 +89,72 @@ class EmbeddingsController:
         if self.cache_enabled:
             logger.debug(f"Embedding cache enabled with max size: {self.cache_size}")
 
+    def _resolve_token_limit(self) -> Optional[int]:
+        """The per-text token ceiling (with margin), resolved once and cached.
+
+        Order: explicit ``MAX_INPUT_TOKENS`` config → the model's own context
+        window (Ollama ``/api/show`` probe) → a safe default. Provider-agnostic:
+        non-Ollama providers that can't be probed cheaply use the default, which
+        fits common embedding models. Returns None only if a probe yields nothing
+        AND no default applies (never, in practice)."""
+        if self._token_limit_resolved:
+            return self._max_input_tokens
+
+        limit = None
+        if self.embed_model_type == "ollama":
+            limit = self._probe_ollama_context()
+        # Apply a 0.9 safety margin to whatever we resolved (tokenizer drift),
+        # then fall back to the conservative default.
+        if limit:
+            limit = int(limit * 0.9)
+        else:
+            limit = _DEFAULT_EMBED_TOKEN_LIMIT
+
+        self._max_input_tokens = limit
+        self._token_limit_resolved = True
+        logger.debug("Embed token limit resolved to %d", limit)
+        return limit
+
+    def _probe_ollama_context(self) -> Optional[int]:
+        """Best-effort read of the Ollama embed model's context length; None on any error."""
+        try:
+            host = "http://{}:{}".format(
+                self.embed_model_config.get("HOST", "localhost"),
+                self.embed_model_config.get("PORT", 11434),
+            )
+            info = ollama.Client(host=host).show(self.embed_model_name)
+            model_info = getattr(info, "modelinfo", None) or (
+                info.get("model_info") if isinstance(info, dict) else None
+            )
+            if model_info:
+                for key, val in model_info.items():
+                    if key.endswith("context_length") and val:
+                        return int(val)
+        except Exception as e:
+            logger.debug("Ollama context probe failed (%s); using default", type(e).__name__)
+        return None
+
     def _truncate(self, text: str) -> str:
-        """Cap a text at ``max_input_chars`` so it can't overrun the embed
-        model's context (0 disables). Warns once per oversized text."""
+        """Cap a text so it can't overrun the embed model's context (all providers).
+
+        Two guards: a token cap (the real limit — resolved from config/model/default)
+        and the coarse char cap (cheap hygiene, ``MAX_INPUT_CHARS``, 0 disables).
+        Warns once per oversized text."""
+        # Token cap first — it's the guard that actually matches the model.
+        limit = self._resolve_token_limit()
+        if limit and count_tokens(text) > limit:
+            # Trim by chars proportionally to the token overage, then verify.
+            approx_chars = max(1, int(len(text) * limit / max(1, count_tokens(text))))
+            trimmed = text[:approx_chars]
+            while count_tokens(trimmed) > limit and len(trimmed) > 1:
+                trimmed = trimmed[: int(len(trimmed) * 0.9)]
+            logger.warning(
+                "Embed input ~%d tokens > limit %d; truncating to fit the model context.",
+                count_tokens(text),
+                limit,
+            )
+            text = trimmed
+
         if self.max_input_chars and len(text) > self.max_input_chars:
             logger.warning(
                 "Embed input %d chars > cap %d; truncating.",
@@ -73,6 +163,13 @@ class EmbeddingsController:
             )
             return text[: self.max_input_chars]
         return text
+
+    @staticmethod
+    def _is_overflow_error(exc: Exception) -> bool:
+        """True if the error means the input was too big for the model context
+        (deterministic — not worth retrying the identical input)."""
+        msg = str(exc).lower()
+        return any(marker in msg for marker in _OVERFLOW_ERROR_MARKERS)
 
     def _cache_key(self, text: str) -> str:
         """MD5 cache key for a text."""
@@ -177,11 +274,24 @@ class EmbeddingsController:
         last_exc = None
         for attempt in range(self._embed_retries):
             try:
-                resp = client.embed(model=self.embed_model_name, input=texts)
+                # truncate=True asks the runner to clamp to context as a backstop
+                # (inputs are already token-capped in _truncate; some runners
+                # honor this, some don't — belt and suspenders).
+                resp = client.embed(
+                    model=self.embed_model_name, input=texts, truncate=True
+                )
                 emb = self._extract_embeddings_from_response(resp)
                 return np.array(emb, dtype=np.float32)
             except Exception as e:
                 last_exc = e
+                # A context-overflow error is deterministic: the identical input
+                # can't succeed on retry, so stop and fall back once (no spam).
+                if self._is_overflow_error(e):
+                    logger.warning(
+                        "Ollama embed input exceeds the model context even after "
+                        "truncation; falling back to deterministic embeddings."
+                    )
+                    break
                 if attempt < self._embed_retries - 1:
                     logger.warning(
                         "Ollama embed attempt %d/%d failed (%s); retrying",
