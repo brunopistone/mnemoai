@@ -370,3 +370,74 @@ class TestTokenAwareRetention:
         assert did is True
         # Token budget binds before the count of 6.
         assert len(agent.messages) < 6
+
+
+class _OverflowThenOKModel:
+    """ainvoke raises 'prompt is too long' if the summary call's message CONTENT
+    (excluding the fixed summary-prompt boilerplate) exceeds `limit_chars`, else
+    returns a summary. Models the real failure: one giant summary call 400s, but
+    small batches succeed. The fixed prompt is excluded so the limit reflects the
+    variable history size, which is what batching controls."""
+
+    # Chars contributed by the fixed summary prompt + system framing; excluded
+    # from the size check so `limit_chars` bounds the variable (history) part.
+    _PROMPT_OVERHEAD = 6000
+
+    def __init__(self, limit_chars=1000):
+        self.limit_chars = limit_chars
+        self.calls = 0
+
+    async def ainvoke(self, messages):
+        self.calls += 1
+        size = sum(len(str(getattr(m, "content", ""))) for m in messages)
+        if size - self._PROMPT_OVERHEAD > self.limit_chars:
+            raise RuntimeError("prompt is too long: too many tokens > maximum")
+        return AIMessage(content=f"BATCH SUMMARY {self.calls}")
+
+
+class TestBatchedSummarization:
+    """generate_summary must batch so the summary CALL never itself overflows;
+    a total failure keeps a bounded excerpt, never a content-free placeholder."""
+
+    def test_large_history_is_batched_not_single_call(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+        # max_tokens small so the per-batch budget (0.5 * max_tokens) is tiny,
+        # forcing multiple batches over these messages.
+        mgr = AgentConversationManager(max_tokens=400)
+        model = _OverflowThenOKModel(limit_chars=100000)  # never overflows here
+        msgs = [{"role": "user", "content": [{"text": "word " * 50}]} for _ in range(10)]
+        out = _run(mgr.generate_summary(msgs, model))
+        assert model.calls >= 2                 # split into batches
+        assert "BATCH SUMMARY" in out           # rolling summary returned
+
+    def test_batch_that_would_overflow_single_call_still_summarizes(self, monkeypatch):
+        # The whole history in one call would exceed the model; batching must
+        # keep each call under the limit and still produce a real summary.
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+        mgr = AgentConversationManager(max_tokens=400)  # per-batch budget ~256 tok
+        # ALL 12 messages' content (~3600 chars) in one call exceeds the limit and
+        # 400s; each ~256-token batch (3 msgs, ~900 chars) stays under it.
+        model = _OverflowThenOKModel(limit_chars=1500)
+        msgs = [{"role": "user", "content": [{"text": "word " * 60}]} for _ in range(12)]
+        out = _run(mgr.generate_summary(msgs, model))
+        assert "BATCH SUMMARY" in out           # succeeded via batching
+        assert "multiple topics" not in out     # NOT the content-free placeholder
+
+    def test_total_failure_keeps_excerpt_not_placeholder(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+
+        class _AlwaysFail:
+            async def ainvoke(self, messages):
+                raise RuntimeError("prompt is too long: too many tokens > maximum")
+
+        mgr = AgentConversationManager(max_tokens=4000)
+        msgs = [{"role": "user", "content": [{"text": "distinctive content here"}]}]
+        out = _run(mgr.generate_summary(msgs, _AlwaysFail()))
+        # Falls back to a bounded EXCERPT carrying real content, not a placeholder.
+        assert "distinctive content here" in out

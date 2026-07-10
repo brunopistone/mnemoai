@@ -9,6 +9,29 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-07-10
+
+### Fixed
+
+- **A context-window overflow no longer abandons the in-flight task.** When a
+  turn exceeded the model's context (e.g. after a large paste or file read), the
+  backstop compacted history but returned a terminal "I stopped this turn — try
+  again" message, dropping the work in progress (you had to re-ask). Now
+  `_stream_once` raises a typed overflow, and `_call_model` compacts and
+  **re-invokes on the shrunken prompt in the same turn**, so the task continues.
+  A terminal message is returned only if compaction can't shrink history further
+  or the prompt still overflows after compacting (no retry-storm). The worker
+  loop and aggregator degrade gracefully on the same signal.
+- **Summarization no longer silently loses history when it overflows.** The
+  compaction summary was generated in a single model call; if the older history
+  itself exceeded the context window the call 400'd and the summary degraded to
+  a content-free placeholder ("Previous conversation covered multiple topics"),
+  discarding hundreds of messages. Summarization is now **batched (map-reduce):**
+  older messages are split into window-sized batches folded into a rolling
+  summary, so the summary call never itself overflows. If every batch still
+  fails, it keeps a **bounded excerpt** of the real history rather than a
+  placeholder.
+
 ## [1.0.1] — 2026-07-09
 
 ### Fixed
