@@ -208,83 +208,144 @@ class AgentConversationManager:
     async def generate_summary(
         self, messages: List[Dict], model: Any, focus_instructions: str = ""
     ) -> str:
-        """Use the model to generate a natural language summary.
+        """Summarize older messages, batching so the summary CALL never itself
+        overflows the model's context window.
+
+        A single-shot summary of very long history 400s ("prompt is too long"),
+        which used to silently degrade to a content-free placeholder — losing all
+        that history. Instead we split the messages into batches that each fit a
+        safe fraction of the window and fold them into a rolling summary
+        (map-reduce): batch 1 → summary; (summary + batch 2) → summary; …
 
         Args:
             messages: List of conversation messages
             model: Model instance for generating summary (LangChain or Strands)
-            focus_instructions: Optional user guidance on what to emphasize
-                (used by the manual /compact command).
+            focus_instructions: Optional user guidance on what to emphasize.
 
         Returns:
-            Summary text
+            Summary text (never empty; falls back to a bounded excerpt on error).
         """
-        # Progress is shown via the spinner's phase label (set by the caller in
-        # _compact); no separate static line here so it doesn't clutter the
-        # spinner line.
-        summary_prompt = self._build_summary_prompt(focus_instructions)
+        # Budget per summary call: a fraction of the window, leaving headroom for
+        # the system prompt, the prior rolling summary, and the model's output.
+        # Relative to max_tokens (never an absolute floor that could itself exceed
+        # a small window).
+        budget = max(256, int(self.max_tokens * 0.5))
+        batches = self._batch_messages(messages, budget)
 
-        try:
-            summary_response = ""
+        rolling = self.previous_summary
+        last_error = None
+        for i, batch in enumerate(batches):
+            try:
+                rolling = await self._summarize_batch(
+                    batch, model, focus_instructions, prior_summary=rolling
+                )
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Summary batch %d/%d failed (%s)", i + 1, len(batches), e
+                )
 
-            # Check if this is a LangChain model
-            if LANGCHAIN_AVAILABLE and hasattr(model, 'ainvoke'):
-                # LangChain model - use ainvoke
-                from langchain_core.messages import HumanMessage, SystemMessage
+        if rolling and rolling != self.previous_summary:
+            return self._strip_analysis(rolling).strip()
 
-                # Build LangChain messages. The system role frames the task as
-                # summarization ; any prior summary is carried as additional context.
-                lc_messages = [SystemMessage(content=self._SUMMARY_SYSTEM_PROMPT)]
-                if self.previous_summary:
-                    lc_messages.append(SystemMessage(content=self.previous_summary))
+        # Every batch failed: keep a bounded excerpt of the raw history rather
+        # than a content-free placeholder, so nothing is silently lost.
+        if last_error:
+            log_green(f"Failed to generate model summary: {last_error}", "error")
+        return self._excerpt_fallback(messages, budget)
 
-                # Add conversation context. Tool calls and tool results are
-                # flattened into text so the summary captures what tools did,
-                # not just the user/assistant prose.
-                for msg in messages:
-                    role = msg.get("role")
-                    content = self._message_text_for_summary(msg)
-                    if not content:
-                        continue
-                    if role == "assistant":
-                        lc_messages.append(AIMessage(content=content))
-                    else:
-                        # user, tool results, and anything else become context
-                        lc_messages.append(HumanMessage(content=content))
+    def _batch_messages(self, messages: List[Dict], budget: int) -> List[List[Dict]]:
+        """Split messages into ordered batches each under ``budget`` tokens.
 
-                # Add summary prompt
-                lc_messages.append(HumanMessage(content=summary_prompt))
+        A single message larger than the budget becomes its own batch (the
+        per-call summarizer truncates it); this guarantees progress instead of an
+        infinite/oversized batch."""
+        batches: List[List[Dict]] = []
+        current: List[Dict] = []
+        used = 0
+        for msg in messages:
+            mt = self.count_tokens([msg])
+            if current and used + mt > budget:
+                batches.append(current)
+                current, used = [], 0
+            current.append(msg)
+            used += mt
+        if current:
+            batches.append(current)
+        return batches or [messages]
 
-                # Generate summary
-                response = await model.ainvoke(lc_messages)
-                summary_response = str(response.content)
-
-            else:
-                # Strands model - use stream
-                messages.append({"role": "user", "content": [{"text": summary_prompt}]})
-                think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
-                system_prompt = self._SUMMARY_SYSTEM_PROMPT
-                if self.previous_summary:
-                    system_prompt = f"{system_prompt}\n\n{self.previous_summary}"
-
-                async for event in model.stream(
-                    messages, system_prompt=system_prompt, think=think_param
-                ):
-                    if (
-                        "contentBlockDelta" in event
-                        and "delta" in event["contentBlockDelta"]
-                        and "text" in event["contentBlockDelta"]["delta"]
-                    ):
-                        summary_response += event["contentBlockDelta"]["delta"]["text"]
-
-            # Clean the response, dropping the model's <analysis> scratchpad if
-            # present (we keep only the structured summary that follows it).
-            clean_summary = self._strip_analysis(summary_response).strip()
-            return clean_summary
-
-        except Exception as e:
-            log_green(f"Failed to generate model summary: {e}", "error")
+    def _excerpt_fallback(self, messages: List[Dict], budget: int) -> str:
+        """Bounded plain-text excerpt of history when summarization fails outright
+        — lossy, but never a content-free placeholder."""
+        parts = []
+        used = 0
+        for msg in messages:
+            text = self._message_text_for_summary(msg)
+            if not text:
+                continue
+            t = self.count_tokens([{"content": text}])
+            if used + t > budget:
+                break
+            parts.append(text)
+            used += t
+        joined = "\n".join(parts).strip()
+        if not joined:
             return "Previous conversation covered multiple topics and requests."
+        return "Earlier conversation (excerpt, summarization unavailable):\n" + joined
+
+    async def _summarize_batch(
+        self,
+        messages: List[Dict],
+        model: Any,
+        focus_instructions: str,
+        prior_summary: str = None,
+    ) -> str:
+        """Summarize ONE batch of messages (folding in ``prior_summary``).
+
+        This is the single-call summarization; :meth:`generate_summary` chains it
+        across batches so no individual call exceeds the context window."""
+        summary_prompt = self._build_summary_prompt(focus_instructions)
+        summary_response = ""
+
+        if LANGCHAIN_AVAILABLE and hasattr(model, "ainvoke"):
+            from langchain_core.messages import HumanMessage, SystemMessage
+
+            lc_messages = [SystemMessage(content=self._SUMMARY_SYSTEM_PROMPT)]
+            if prior_summary:
+                lc_messages.append(SystemMessage(content=prior_summary))
+
+            for msg in messages:
+                role = msg.get("role")
+                content = self._message_text_for_summary(msg)
+                if not content:
+                    continue
+                if role == "assistant":
+                    lc_messages.append(AIMessage(content=content))
+                else:
+                    lc_messages.append(HumanMessage(content=content))
+
+            lc_messages.append(HumanMessage(content=summary_prompt))
+            response = await model.ainvoke(lc_messages)
+            summary_response = str(response.content)
+        else:
+            batch = list(messages)
+            batch.append({"role": "user", "content": [{"text": summary_prompt}]})
+            think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
+            system_prompt = self._SUMMARY_SYSTEM_PROMPT
+            if prior_summary:
+                system_prompt = f"{system_prompt}\n\n{prior_summary}"
+
+            async for event in model.stream(
+                batch, system_prompt=system_prompt, think=think_param
+            ):
+                if (
+                    "contentBlockDelta" in event
+                    and "delta" in event["contentBlockDelta"]
+                    and "text" in event["contentBlockDelta"]["delta"]
+                ):
+                    summary_response += event["contentBlockDelta"]["delta"]["text"]
+
+        return self._strip_analysis(summary_response).strip()
 
     def _build_system_with_summary(self, clean_summary: str) -> str:
         """Embed a conversation summary into the configured system prompt.

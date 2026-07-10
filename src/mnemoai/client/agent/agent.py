@@ -32,6 +32,12 @@ from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
 
 
+class _ContextOverflow(Exception):
+    """Raised when a model call exceeds the context window, so the caller can
+    compact history and re-invoke on the shrunken prompt (continue the task)
+    rather than retry the same oversized prompt in a loop."""
+
+
 class AgentState(TypedDict):
     """State schema for the LangGraph agent."""
 
@@ -439,9 +445,25 @@ class LangGraphAgent:
         for _ in range(max_iterations):
             self._start_spinner()
 
-            response, _ = self._stream_response(
-                worker_messages, config, model=worker_model
-            )
+            try:
+                response, _ = self._stream_response(
+                    worker_messages, config, model=worker_model
+                )
+            except _ContextOverflow as overflow:
+                # A worker's own history overflowed. Workers run on a local
+                # message list (not self._messages), so end this worker with
+                # what it has rather than crash the orchestration.
+                logger.warning(f"Worker context overflow: {overflow}; ending worker")
+                self._stop_spinner()
+                saveable = [
+                    m for m in worker_messages if not isinstance(m, SystemMessage)
+                ]
+                partial = self._last_visible_from(worker_messages)
+                return (
+                    partial
+                    or "This subtask exceeded the context window before completing.",
+                    saveable,
+                )
 
             if response is None:
                 response = worker_model.invoke(worker_messages, config=config)
@@ -574,6 +596,8 @@ class LangGraphAgent:
                 model=worker_model,
                 mark_answer=True,
             )
+        except _ContextOverflow:
+            retry_response = None  # fall through to the fallback message below
         finally:
             self._restore_reasoning(saved)
 
@@ -617,7 +641,19 @@ class LangGraphAgent:
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
         self._start_spinner()
-        response, _ = self._stream_response(messages, config, mark_answer=True)
+        try:
+            response, _ = self._stream_response(messages, config, mark_answer=True)
+        except _ContextOverflow:
+            # Aggregation prompt overflowed; force-compact and let the retry (or
+            # the None-fallback invoke below) run on the shrunken prompt.
+            rebuilt = self._compact_and_rebuild(messages)
+            response = None
+            if rebuilt is not None:
+                messages = rebuilt
+                try:
+                    response, _ = self._stream_response(messages, config, mark_answer=True)
+                except _ContextOverflow:
+                    response = None
 
         if response is None:
             response = self.model.invoke(messages, config=config)
@@ -665,9 +701,51 @@ class LangGraphAgent:
         self._start_spinner()
 
         active_model = self._get_route_model(state)
-        response, had_reasoning = self._stream_response(
-            messages, config, model=active_model, mark_answer=True
-        )
+        try:
+            response, had_reasoning = self._stream_response(
+                messages, config, model=active_model, mark_answer=True
+            )
+        except _ContextOverflow as overflow:
+            # The prompt exceeded the context window. Compact history and retry
+            # ONCE on the shrunken prompt so the in-flight task continues instead
+            # of dead-ending. If it still overflows (or nothing could be
+            # compacted), surface a terminal message rather than loop.
+            rebuilt = self._compact_and_rebuild(messages)
+            if rebuilt is None:
+                logger.warning(f"Context overflow: {overflow}; could not compact")
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "The conversation grew past the model's context "
+                                "window and I couldn't compact it further. Use "
+                                "/clear to start fresh, or /compact <focus>."
+                            )
+                        )
+                    ],
+                    "thinking": None,
+                }
+            logger.warning(f"Context overflow: {overflow}; compacted and retrying")
+            messages = rebuilt
+            self._start_spinner()
+            try:
+                response, had_reasoning = self._stream_response(
+                    messages, config, model=active_model, mark_answer=True
+                )
+            except _ContextOverflow as overflow2:
+                logger.error(f"Context overflow persists after compaction: {overflow2}")
+                self._stop_spinner()
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                "The conversation is still too large after "
+                                "compaction. Please use /clear to start fresh."
+                            )
+                        )
+                    ],
+                    "thinking": None,
+                }
 
         if response is None:
             response = active_model.invoke(messages, config=config)
@@ -743,6 +821,8 @@ class LangGraphAgent:
                     model=active_model,
                     mark_answer=True,
                 )
+            except _ContextOverflow:
+                retry_response = None  # degrade: keep the reasoning-only response
             finally:
                 self._restore_reasoning(saved)
 
@@ -767,6 +847,35 @@ class LangGraphAgent:
             return {"messages": [fallback], "thinking": thinking}
 
         return {"messages": [response], "thinking": thinking}
+
+    def _compact_and_rebuild(self, current_messages: list) -> Optional[list]:
+        """Force-compact history, then rebuild the model's message list from the
+        compacted state so the current turn can be retried on a smaller prompt.
+
+        Returns the new message list, or None if nothing could be compacted (so
+        the caller stops instead of looping on an unshrinkable prompt).
+        """
+        compact = getattr(self, "_compact_provider", None)
+        if compact is None:
+            return None
+        # Token count before/after tells us whether compaction actually helped;
+        # if it couldn't shrink anything, retrying is pointless.
+        before = len(self._messages)
+        try:
+            compact(force=True)
+        except Exception as ce:
+            logger.error(f"Forced compaction failed: {ce}")
+            return None
+        if len(self._messages) >= before:
+            return None  # nothing summarized away — don't loop
+
+        # Rebuild: fresh system prompt (now carrying the summary) + the compacted
+        # history. sanitize_tool_pairs repairs any tool call/result orphaned by
+        # the split so strict providers accept the retry.
+        rebuilt = self._sanitize_tool_pairs(list(self._messages))
+        if self.system_prompt:
+            rebuilt = [SystemMessage(content=self.system_prompt)] + rebuilt
+        return rebuilt
 
     def _stream_response(
         self,
@@ -952,26 +1061,14 @@ class LangGraphAgent:
             raise
         except Exception as e:
             self._stop_spinner()
-            # Context-window overflow: retrying the same oversized prompt (stream
-            # OR non-streaming) just 400s again and the graph loops. Force a hard
-            # compaction for the NEXT turn and return a terminal message so this
-            # turn ends cleanly instead of retry-storming.
+            # Context-window overflow: let the caller (_call_model) handle it — it
+            # can compact and re-invoke on the shrunken history so the in-flight
+            # task CONTINUES, instead of this turn dead-ending. Re-raise a typed
+            # marker so the caller distinguishes it from a generic stream error.
             if self._is_context_overflow_error(e):
-                logger.warning(f"Context overflow: {e}; compacting and stopping")
-                compact = getattr(self, "_compact_provider", None)
-                if compact is not None:
-                    try:
-                        compact(force=True)
-                    except Exception as ce:
-                        logger.error(f"Forced compaction failed: {ce}")
-                msg = (
-                    "The conversation grew past the model's context window, so I "
-                    "stopped this turn. I've compacted the history — try again, or "
-                    "use /compact or /clear if it persists."
-                )
                 if sink is not None:
                     sink.stop()
-                return AIMessage(content=msg), had_reasoning
+                raise _ContextOverflow(e) from e
             # Other stream errors: retry once non-streaming and prefer its
             # complete result; keep the partial only if that yields none.
             logger.warning(f"Streaming error: {e}; falling back to non-streaming")
