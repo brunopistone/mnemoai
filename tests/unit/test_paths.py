@@ -61,6 +61,33 @@ class TestSubdirs:
         paths.seed_example_files()
         assert edited.read_text() == "EDITED"
 
+    def test_seed_skills_are_bundled_examples(self, tmp_home):
+        # Bundled example skills land in skills/ out of the box.
+        paths.seed_example_files()
+        skills = tmp_home / "skills"
+        seeded = {p.name for p in skills.iterdir() if p.is_dir()}
+        assert "steering-creator" in seeded  # the new bundled skill
+        assert "skill-creator" in seeded
+
+    def test_seed_skills_per_skill_reaches_populated_dir(self, tmp_home):
+        # Regression: a NEW bundled skill must reach an EXISTING (non-empty)
+        # skills dir on upgrade — seeding is per-skill, not all-or-nothing.
+        skills = tmp_home / "skills"
+        skills.mkdir(parents=True, exist_ok=True)
+        (skills / "my-own-skill").mkdir()  # user already has a skill
+        paths.seed_example_files()
+        names = {p.name for p in skills.iterdir() if p.is_dir()}
+        assert "my-own-skill" in names          # user's skill untouched
+        assert "steering-creator" in names      # bundled skill still seeded
+
+    def test_seed_skills_never_clobbers_user_edit(self, tmp_home):
+        # A user's edit to a bundled skill survives re-seeding (dir exists → skip).
+        paths.seed_example_files()
+        sc = tmp_home / "skills" / "steering-creator" / "SKILL.md"
+        sc.write_text("USER EDITED")
+        paths.seed_example_files()
+        assert sc.read_text() == "USER EDITED"
+
     def test_plans_and_tasks_created(self, tmp_home):
         assert paths.plans_dir() == tmp_home / "plans"
         assert paths.tasks_dir() == tmp_home / "tasks"

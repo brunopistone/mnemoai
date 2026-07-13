@@ -9,6 +9,36 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-10
+
+### Added
+
+- **`STEERING.md` — user-authored always-on instructions.** The user's
+  counterpart to the agent-curated `MEMORY.md`: write build/test commands, code
+  conventions, and "always do X" rules that the assistant follows every turn.
+  Discovered hierarchically — a global `~/.mnemoai/STEERING.md` plus a project
+  `./STEERING.md` found by walking up to the repo root, combined broadest→most
+  specific. Injected as a leading instruction block **re-read from disk each
+  turn** (edits apply immediately) and **never summarized by compaction** (it's
+  re-injected verbatim, so long sessions never dilute it). No config toggle — the
+  file's presence is the switch; no file → nothing injected.
+- **`steering-creator` bundled skill.** Ask the assistant to "create a
+  STEERING.md for this project" (or "document how to work in this repo") and it
+  investigates the codebase and writes a well-formed file following best
+  practices; "improve my STEERING.md" refines an existing one.
+
+### Changed
+
+- **Bundled example skills now seed per-skill (reaches existing installs on
+  upgrade).** `seed_example_files()` previously seeded skills only when the
+  `skills/` dir was entirely empty, so a newly-bundled skill (like
+  `steering-creator`) never reached a user who already had skills. It now copies
+  each bundled skill whose own directory is absent — matching how the config
+  `*.example` files already seed — so new bundled content reaches existing
+  installs, without ever clobbering a user's own skills. Codified as a standing
+  convention in `CLAUDE.md` (new features must reach existing installs, not just
+  fresh ones).
+
 ## [1.0.2] — 2026-07-10
 
 ### Fixed

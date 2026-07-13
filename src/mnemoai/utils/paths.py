@@ -13,6 +13,7 @@ find, back up, or relocate:
     │   └── mcp.json.example                # bundled example (copied here to read)
     ├── plans/plan_<ts>.md                  # approved plan-mode plans
     ├── skills                              # skills folder
+    ├── STEERING.md                         # user-authored always-on instructions
     ├── tasks/                              # background-task output
     └── {profile}/                          # per-user-profile data
         ├── conversations/  todos/  rag_*  chunk_cache_*  profile JSON
@@ -125,17 +126,19 @@ def seed_example_files() -> None:
             if not dest.exists():
                 shutil.copyfile(mcp_example, dest)
         # Seed the bundled example skill(s) into the skills dir so the feature is
-        # discoverable out of the box. Only when the dir is empty (never clobber a
-        # user's skills); each skill is a directory copied whole.
+        # discoverable out of the box. Per-skill (like the config *.example files
+        # above): copy any bundled skill whose directory doesn't exist yet, so a
+        # NEW bundled skill also reaches an EXISTING install on upgrade. Never
+        # overwrites a user's own skills. Trade-off: a bundled skill the user
+        # deleted reappears on upgrade — acceptable for a refreshed example.
         skills_template_root = pkg_templates / "skills_example"
         if skills_template_root.is_dir():
             dest_root = skills_dir()
-            if not any(dest_root.iterdir()):
-                for skill_dir in skills_template_root.iterdir():
-                    if skill_dir.is_dir():
-                        dest = dest_root / skill_dir.name
-                        if not dest.exists():
-                            shutil.copytree(skill_dir, dest)
+            for skill_dir in skills_template_root.iterdir():
+                if skill_dir.is_dir():
+                    dest = dest_root / skill_dir.name
+                    if not dest.exists():
+                        shutil.copytree(skill_dir, dest)
     except OSError:
         # Seeding examples is a convenience; never let it block startup.
         pass
@@ -208,6 +211,51 @@ def memory_file_path(profile: str = None) -> Path:
     not model-specific learnings (those live under :func:`model_dir`).
     """
     return profile_dir(profile) / "MEMORY.md"
+
+
+def global_steering_path() -> Path:
+    """The user-level ``STEERING.md`` at the app-home root (not auto-created)."""
+    return app_home() / "STEERING.md"
+
+
+def steering_files(cwd: Path = None) -> list:
+    """Discover STEERING.md files in precedence order (low → high priority).
+
+    User-authored, always-on instructions. Resolution, broadest to most
+    specific:
+
+      1. ``<app_home>/STEERING.md`` — global/user (applies everywhere)
+      2. ``./STEERING.md`` walking from ``cwd`` UP to the project root (the first
+         ancestor containing ``.git``, else the filesystem root), collected
+         root-first so a deeper (more specific) file is applied last.
+
+    Returns only existing files, de-duplicated, in apply order. Tolerant: any
+    resolution error yields an empty list rather than raising.
+    """
+    found: list = []
+    try:
+        g = global_steering_path()
+        if g.is_file():
+            found.append(g)
+
+        start = Path(cwd).expanduser() if cwd else Path.cwd()
+        start = start.resolve()
+        # Walk up collecting dirs until a .git root (inclusive) or the fs root.
+        chain = [start] + list(start.parents)
+        project_root_idx = None
+        for i, d in enumerate(chain):
+            if (d / ".git").exists():
+                project_root_idx = i
+                break
+        ancestors = chain[: project_root_idx + 1] if project_root_idx is not None else chain
+        # Apply root-first (broadest) → cwd-last (most specific).
+        for d in reversed(ancestors):
+            f = d / "STEERING.md"
+            if f.is_file() and f not in found:
+                found.append(f)
+    except Exception:
+        return found
+    return found
 
 
 def sanitize_model_name(name: str) -> str:

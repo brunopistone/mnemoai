@@ -212,6 +212,31 @@ MEMORY:
 
 **Storage Location:** `~/.mnemoai/{profile}/MEMORY.md`
 
+### 🧭 Steering (STEERING.md)
+
+`STEERING.md` is where **you** write always-on instructions for the assistant — conventions, commands, and "always do X" rules it should follow every turn. It's the user-authored counterpart to `MEMORY.md`: the assistant maintains `MEMORY.md` itself, but never writes `STEERING.md` — that file is yours.
+
+**Where it lives (two levels, both optional):**
+
+- **Global:** `~/.mnemoai/STEERING.md` — applies in every session, everywhere.
+- **Project:** `./STEERING.md` — discovered by walking up from your working directory to the repository root (the first ancestor containing `.git`). Put project-specific conventions here and check it into the repo so your whole team shares them.
+
+When both exist they're **combined**, global first then project (so project instructions take precedence by appearing last). Nothing above the repo root is picked up.
+
+**How it's applied:**
+
+- The content is **prepended to every prompt** as an authoritative instruction block, framed so it overrides default behavior.
+- It's **re-read from disk on every turn**, so editing `STEERING.md` takes effect immediately — no restart needed.
+- It is **never summarized by compaction**: unlike the conversation, the steering block is re-injected verbatim each turn, so long sessions never dilute or lose your instructions.
+
+**What to put in it:** build/test commands, code-style rules, project layout notes, a commit-message format, "prefer X over Y" preferences — anything you'd tell a new collaborator. Keep it focused (a couple hundred lines at most); it's in context every turn, so brevity helps adherence.
+
+**Let the assistant write it for you.** You don't have to author `STEERING.md` by hand. A bundled **`steering-creator`** skill ships out of the box: ask the assistant to _"create a STEERING.md for this project"_ (or _"document how to work in this repo"_) and it investigates the codebase — README, build/test config, layout — and writes a well-formed file following best practices (specific rules, scannable structure, only durable always-on facts). Ask it to _"improve my STEERING.md"_ and it refines the existing one.
+
+There's no config toggle: the file's presence is the switch. If neither `STEERING.md` exists, nothing is injected. It's distinct from `MEMORY.md` (facts the agent learns), skills (on-demand procedures), and the base system prompt.
+
+**Storage Location:** `~/.mnemoai/STEERING.md` (global) and/or `./STEERING.md` (per project)
+
 ### Episodic Memory
 
 The episodic memory system learns from successful task completions and retrieves similar solutions for future queries.
