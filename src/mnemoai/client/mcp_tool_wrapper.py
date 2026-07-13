@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, create_model
 from mnemoai.utils.config import config
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger
+from mnemoai.utils.paths import mcp_log_path
 
 # Upper bound for any single MCP tool call, in seconds. Must comfortably exceed
 # the longest tool-level timeout (e.g. execute_bash allows up to 120s) so the
@@ -153,6 +154,7 @@ class MCPClientWrapper:
         self._thread: Optional[threading.Thread] = None
         self._session = None
         self._client_cm = None
+        self._errlog = None  # file handle for the subprocess's stderr
 
         atexit.register(self.shutdown)
 
@@ -207,7 +209,23 @@ class MCPClientWrapper:
         if self._connected:
             return
 
-        self._client_cm = stdio_client(self.server_params)
+        # Route the server subprocess's stderr to a log file instead of the
+        # terminal, so its noise (e.g. `npm notice` from an npx server) doesn't
+        # corrupt the pinned UI — but stays available for debugging a startup
+        # failure. Fall back to the default (inherited stderr) if the log can't
+        # be opened.
+        errlog = None
+        try:
+            self._errlog = open(mcp_log_path(), "a", buffering=1)
+            errlog = self._errlog
+        except OSError as e:
+            logger.debug(f"Could not open MCP stderr log ({e}); using default")
+
+        self._client_cm = (
+            stdio_client(self.server_params, errlog=errlog)
+            if errlog is not None
+            else stdio_client(self.server_params)
+        )
         read, write = await self._client_cm.__aenter__()
 
         self._session = ClientSession(read, write)
@@ -228,6 +246,12 @@ class MCPClientWrapper:
             self._connected = False
             self._session = None
             self._client_cm = None
+            if self._errlog is not None:
+                try:
+                    self._errlog.close()
+                except OSError:
+                    pass
+                self._errlog = None
 
     def list_tools_sync(self) -> List[MCPToolWrapper]:
         """Synchronously list available tools from the MCP server.
