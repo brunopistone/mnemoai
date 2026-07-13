@@ -99,6 +99,36 @@ class TestSubdirs:
         assert (tmp_home / "logs").is_dir()
         assert paths.mcp_log_path() == tmp_home / "logs" / "mcp.log"
 
+    def test_open_mcp_log_appends_when_small(self, tmp_home):
+        # Below the cap: keep appending to the same file, no rotation.
+        with paths.open_mcp_log() as f:
+            f.write("first\n")
+        with paths.open_mcp_log() as f:
+            f.write("second\n")
+        assert paths.mcp_log_path().read_text() == "first\nsecond\n"
+        assert not (tmp_home / "logs" / "mcp.log.1").exists()
+
+    def test_open_mcp_log_rotates_when_oversized(self, tmp_home, monkeypatch):
+        # At/over the cap: the current log becomes mcp.log.1 and a fresh log opens.
+        monkeypatch.setattr(paths, "MCP_LOG_MAX_BYTES", 50)
+        log = paths.mcp_log_path()
+        log.write_text("X" * 60)  # over the cap
+        with paths.open_mcp_log() as f:
+            f.write("new content\n")
+        assert (tmp_home / "logs" / "mcp.log.1").read_text() == "X" * 60
+        assert log.read_text() == "new content\n"
+
+    def test_open_mcp_log_single_backup_generation(self, tmp_home, monkeypatch):
+        # Rotating twice keeps only ONE backup (mcp.log.1 is replaced, not stacked).
+        monkeypatch.setattr(paths, "MCP_LOG_MAX_BYTES", 50)
+        paths.mcp_log_path().write_text("A" * 60)
+        with paths.open_mcp_log() as f:
+            f.write("B" * 60)
+        with paths.open_mcp_log() as f:
+            f.write("newest\n")
+        assert (tmp_home / "logs" / "mcp.log.1").read_text() == "B" * 60  # A gone
+        assert not (tmp_home / "logs" / "mcp.log.2").exists()
+
     def test_profile_dir_explicit(self, tmp_home):
         d = paths.profile_dir("alice")
         assert d == tmp_home / "alice"

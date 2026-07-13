@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field, create_model
 from mnemoai.utils.config import config
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger
-from mnemoai.utils.paths import mcp_log_path
+from mnemoai.utils.paths import open_mcp_log
 
 # Upper bound for any single MCP tool call, in seconds. Must comfortably exceed
 # the longest tool-level timeout (e.g. execute_bash allows up to 120s) so the
@@ -216,7 +216,7 @@ class MCPClientWrapper:
         # be opened.
         errlog = None
         try:
-            self._errlog = open(mcp_log_path(), "a", buffering=1)
+            self._errlog = open_mcp_log()  # size-rotated, line-buffered
             errlog = self._errlog
         except OSError as e:
             logger.debug(f"Could not open MCP stderr log ({e}); using default")
