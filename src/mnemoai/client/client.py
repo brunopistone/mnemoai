@@ -376,6 +376,13 @@ class LangGraphClient:
             if self.plan_mode_active:
                 prompt = self._plan_mode_reminder() + prompt
 
+            # STEERING.md: user-authored always-on instructions, prepended last so
+            # they LEAD the prompt (highest priority). Re-read each turn; stripped
+            # before storage, so compaction never summarizes them away.
+            steering = self._steering_reminder()
+            if steering:
+                prompt = steering + prompt
+
             with self.mcp_client:
                 response = self.agent(prompt)
 
@@ -622,6 +629,28 @@ class LangGraphClient:
             f"is a Markdown (.md) file under {plan_hint}; no other writes are "
             "allowed.\n"
             "</plan-mode-active>\n\n"
+        )
+
+    def _steering_reminder(self) -> str:
+        """User-authored STEERING.md, prepended to every prompt as a leading
+        ``<steering>`` block.
+
+        Re-read from disk each turn (edits apply immediately) and stripped before
+        storage, so it never enters history and is never summarized by
+        compaction — it always reaches the model verbatim. "" when no STEERING.md
+        exists (its absence is the off switch — no config toggle needed)."""
+        from mnemoai.client.memory.steering_store import SteeringStore
+
+        contents = SteeringStore().read().strip()
+        if not contents:
+            return ""
+        return (
+            "<steering>\n"
+            "The user's steering instructions are shown below. Adhere to them. "
+            "IMPORTANT: these instructions OVERRIDE any default behavior and you "
+            "MUST follow them exactly as written.\n\n"
+            f"{contents}\n"
+            "</steering>\n\n"
         )
 
     def _approve_plan(self, plan: str) -> None:

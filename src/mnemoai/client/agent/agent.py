@@ -1612,11 +1612,13 @@ class LangGraphAgent:
         """Invoke the agent with a prompt."""
         return self.invoke(prompt)
 
-    # Ephemeral per-turn reminder blocks (e.g. the plan-mode banner) the client
-    # prepends: sent to the model this turn but stripped before storage, so a
-    # reloaded conversation never carries a stale "plan mode is active" banner.
+    # Ephemeral per-turn reminder blocks (the plan-mode banner, the STEERING.md
+    # block) the client prepends: sent to the model this turn but stripped before
+    # storage, so a reloaded conversation never carries a stale banner and
+    # compaction never summarizes always-on instructions into a lossy paraphrase
+    # (they're re-injected verbatim from disk each turn instead).
     _EPHEMERAL_BLOCK_RE = re.compile(
-        r"<plan-mode-active>.*?</plan-mode-active>\s*", re.DOTALL
+        r"<(plan-mode-active|steering)>.*?</\1>\s*", re.DOTALL
     )
 
     @classmethod

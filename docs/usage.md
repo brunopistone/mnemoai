@@ -138,9 +138,12 @@ Step-by-step instructions the model follows once this skill is loaded...
 - Write the **description "pushy"** — start with _"Use when the user…"_ and include
   the phrases a user would actually say. The model decides whether to trigger a
   skill from this description, and tends to under-trigger if it's vague.
-- Two skills are seeded on first run: a `commit-message` example to copy, and a
-  **`skill-creator`** skill — just ask the assistant to "create a skill for X" and
-  it loads that guidance and writes a well-formed `SKILL.md` for you.
+- Skills are seeded on first run: a `commit-message` example to copy, a
+  **`skill-creator`** skill (just ask the assistant to "create a skill for X" and
+  it writes a well-formed `SKILL.md` for you), and a **`steering-creator`** skill
+  (ask it to "create a STEERING.md" or "document how to work in this project" and
+  it investigates the repo and writes a well-formed `STEERING.md` following best
+  practices).
 
 ### Using and managing skills
 
