@@ -94,6 +94,11 @@ class TestSubdirs:
         assert (tmp_home / "plans").is_dir()
         assert (tmp_home / "tasks").is_dir()
 
+    def test_mcp_log_path_under_logs_dir(self, tmp_home):
+        assert paths.logs_dir() == tmp_home / "logs"
+        assert (tmp_home / "logs").is_dir()
+        assert paths.mcp_log_path() == tmp_home / "logs" / "mcp.log"
+
     def test_profile_dir_explicit(self, tmp_home):
         d = paths.profile_dir("alice")
         assert d == tmp_home / "alice"

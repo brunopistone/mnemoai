@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-07-13
+
+### Fixed
+
+- **MCP server subprocess stderr no longer leaks into the terminal.** External
+  MCP servers (and the built-in one) are spawned via `stdio_client`, whose
+  `errlog` defaulted to the parent's stderr — so a noisy server (e.g. the
+  `npm notice` lines from an `npx`-launched server) wrote straight to the
+  terminal, bypassing the pinned UI. Their stderr is now routed to
+  `~/.mnemoai/logs/mcp.log`: the terminal stays clean while the output remains
+  available for debugging a server that fails to start. New `paths.logs_dir()`
+  and `paths.mcp_log_path()` helpers.
+
 ## [1.1.1] — 2026-07-13
 
 ### Fixed

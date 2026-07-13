@@ -168,6 +168,20 @@ def tasks_dir() -> Path:
     return d
 
 
+def logs_dir() -> Path:
+    """Directory for app log files (created)."""
+    d = app_home() / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def mcp_log_path() -> Path:
+    """Log file capturing MCP server subprocess stderr, so their noise (e.g.
+    ``npm notice`` from an ``npx`` server) stays out of the terminal but remains
+    available for debugging a server that fails to start."""
+    return logs_dir() / "mcp.log"
+
+
 def _profile_name() -> str:
     """Resolve the active profile name from config (lazy import to avoid cycles)."""
     from mnemoai.utils.config import config
