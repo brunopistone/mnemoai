@@ -9,6 +9,22 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-07-13
+
+### Fixed
+
+- **Malformed extended-thinking blocks no longer 400 the whole request.** An
+  Anthropic (Claude) request rejects wholesale with
+  `messages.N.content.M.thinking.thinking: Field required` when a `thinking`
+  content block reaches the API with empty/missing inner text — which can enter
+  history via a cut-short stream or a mid-session model switch. The message
+  sanitizer (already run before every model call) now drops **only** such
+  provably-invalid thinking blocks, leaving healthy content and tool pairs
+  intact. Scoped precisely to the malformed-Anthropic shape: non-Anthropic
+  histories (Bedrock `reasoning_content`, OpenAI Responses `reasoning`, Ollama /
+  LiteLLM string reasoning, plain text) pass through as the same object,
+  untouched.
+
 ## [1.1.0] — 2026-07-10
 
 ### Added
