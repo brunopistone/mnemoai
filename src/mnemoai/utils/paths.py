@@ -182,6 +182,32 @@ def mcp_log_path() -> Path:
     return logs_dir() / "mcp.log"
 
 
+# Size cap for the MCP stderr log before it's rotated (bytes). One backup
+# generation is kept (``mcp.log.1``), so on-disk use is bounded to ~2x this.
+MCP_LOG_MAX_BYTES = 1_000_000
+
+
+def open_mcp_log():
+    """Open the MCP stderr log for appending, rotating it first if it's grown
+    past ``MCP_LOG_MAX_BYTES``.
+
+    Simple single-backup rotation (``mcp.log`` -> ``mcp.log.1``, replacing any
+    previous backup) keeps the log from growing without bound while preserving
+    recent history for debugging. Returns a line-buffered text handle the caller
+    owns (must close it). Rotation errors are non-fatal — worst case the log
+    keeps appending.
+    """
+    path = mcp_log_path()
+    try:
+        if path.exists() and path.stat().st_size >= MCP_LOG_MAX_BYTES:
+            backup = path.with_suffix(path.suffix + ".1")
+            backup.unlink(missing_ok=True)
+            path.rename(backup)
+    except OSError:
+        pass  # rotation is best-effort; fall through to appending
+    return open(path, "a", buffering=1)
+
+
 def _profile_name() -> str:
     """Resolve the active profile name from config (lazy import to avoid cycles)."""
     from mnemoai.utils.config import config

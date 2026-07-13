@@ -9,6 +9,17 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-07-13
+
+### Fixed
+
+- **The MCP stderr log (`~/.mnemoai/logs/mcp.log`, added in 1.1.2) no longer
+  grows without bound.** It's now size-rotated: when it reaches ~1 MB
+  (`MCP_LOG_MAX_BYTES`) it's rotated to `mcp.log.1` (one backup generation,
+  replaced not stacked) and a fresh log starts, bounding on-disk use to ~2 MB.
+  Rotation is best-effort (never blocks startup). New `paths.open_mcp_log()`
+  helper owns the rotation policy.
+
 ## [1.1.2] — 2026-07-13
 
 ### Fixed
