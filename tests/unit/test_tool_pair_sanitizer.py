@@ -99,3 +99,57 @@ def test_multiple_orphans_mixed_with_valid():
     # good pair + the two bracketing messages survive; both orphans gone.
     assert _types(out) == ["HumanMessage", "AIMessage", "ToolMessage", "AIMessage"]
     assert out[1].tool_calls[0]["id"] == "good"
+
+
+# --- malformed thinking-block stripping (Anthropic extended thinking) --------
+# A thinking block missing its inner `thinking` text makes Anthropic reject the
+# whole request ("messages.N.content.M.thinking.thinking: Field required"). Such
+# a block can enter history via a cut-short stream or a mid-session model switch;
+# the sanitizer drops only the invalid block, leaving healthy content intact.
+
+def test_malformed_thinking_block_dropped():
+    bad = AIMessage(content=[
+        {"type": "thinking", "thinking": "", "signature": "sig"},  # empty inner
+        {"type": "text", "text": "the answer"},
+    ])
+    out = S([bad])
+    blocks = out[0].content
+    assert {"type": "text", "text": "the answer"} in blocks
+    assert not any(b.get("type") == "thinking" for b in blocks)  # dropped
+
+
+def test_valid_thinking_block_preserved():
+    good = AIMessage(content=[
+        {"type": "thinking", "thinking": "let me reason", "signature": "sig"},
+        {"type": "text", "text": "answer"},
+    ])
+    out = S([good])
+    assert out[0] is good  # unchanged object (no rebuild when nothing dropped)
+
+
+def test_missing_inner_thinking_key_dropped():
+    bad = AIMessage(content=[
+        {"type": "thinking", "signature": "sig"},  # no `thinking` key at all
+        {"type": "text", "text": "answer"},
+    ])
+    out = S([bad])
+    assert not any(b.get("type") == "thinking" for b in out[0].content)
+
+
+def test_plain_string_content_untouched():
+    m = AIMessage(content="just text")
+    out = S([m])
+    assert out[0] is m and out[0].content == "just text"
+
+
+def test_malformed_thinking_with_tool_call_still_pairs():
+    # A reasoning turn that made a tool call: strip the bad thinking block but
+    # keep the tool pair intact.
+    ai = AIMessage(content=[{"type": "thinking", "thinking": "  "}])
+    ai.tool_calls = [{"name": "x", "args": {}, "id": "c0", "type": "tool_call"}]
+    out = S([ai, _result("c0")])
+    assert _types(out) == ["AIMessage", "ToolMessage"]
+    assert not any(
+        isinstance(b, dict) and b.get("type") == "thinking" for b in out[0].content
+    )
+    assert out[0].tool_calls[0]["id"] == "c0"  # tool pair preserved
