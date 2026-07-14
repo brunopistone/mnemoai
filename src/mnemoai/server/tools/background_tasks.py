@@ -35,6 +35,38 @@ def ensure_task_dir():
     os.makedirs(TASK_OUTPUT_DIR, exist_ok=True)
 
 
+# Age after which a task's .log file is swept at startup. The in-memory task
+# registry is cleared on each restart, so files from prior sessions can never be
+# removed by clear_completed_tasks — without this sweep they accumulate forever.
+TASK_LOG_MAX_AGE_DAYS = 7
+
+
+def sweep_old_task_logs(max_age_days: int = TASK_LOG_MAX_AGE_DAYS) -> int:
+    """Delete task ``.log`` files older than ``max_age_days``; return the count.
+
+    Best-effort startup housekeeping (0 disables). Only touches ``*.log`` files
+    in the task dir, so unrelated files are never removed.
+    """
+    if max_age_days <= 0:
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    try:
+        for name in os.listdir(TASK_OUTPUT_DIR):
+            if not name.endswith(".log"):
+                continue
+            path = os.path.join(TASK_OUTPUT_DIR, name)
+            try:
+                if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue  # a file vanished / perms — skip it
+    except OSError:
+        pass  # dir missing or unreadable — nothing to sweep
+    return removed
+
+
 def get_task_output_file(task_id: str) -> str:
     """Get the output file path for a task."""
     return os.path.join(TASK_OUTPUT_DIR, f"{task_id}.log")
@@ -91,6 +123,11 @@ def run_background_command(task_id: str, command: str, cwd: str):
 
 def register_background_tasks_tools(mcp: FastMCP) -> None:
     """Register background task tools."""
+
+    # Startup housekeeping: prune stale task logs left by prior sessions (whose
+    # in-memory registry is gone), so the task dir doesn't grow without bound.
+    ensure_task_dir()
+    sweep_old_task_logs()
 
     @mcp.tool()
     async def start_background_task(

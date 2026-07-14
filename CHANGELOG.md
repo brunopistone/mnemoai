@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.1.4] — 2026-07-13
+
+### Fixed
+
+- **Background-task log files no longer accumulate forever.** Each background
+  task writes a `~/.mnemoai/tasks/{id}.log`; the only cleanup
+  (`clear_completed_tasks`) iterated the in-memory task registry, which is empty
+  on every restart — so `.log` files from prior sessions were unreachable and
+  piled up indefinitely. A startup sweep (`sweep_old_task_logs`) now prunes task
+  `.log` files older than 7 days (`TASK_LOG_MAX_AGE_DAYS`, 0 disables). It only
+  touches `*.log` files and is best-effort (never blocks startup); recent logs
+  are kept so `get_task_output` still works for active tasks.
+
 ## [1.1.3] — 2026-07-13
 
 ### Fixed
