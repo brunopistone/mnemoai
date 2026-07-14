@@ -9,6 +9,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.1.5] — 2026-07-14
+
+### Fixed
+
+- **Launch-banner tagline is centered under the wordmark again.** The
+  "local agentic AI assistant · learns & remembers" line was centered to the
+  command-box width (which widens to fit the longest command row), so it drifted
+  right of the ASCII wordmark whenever the box was wider than the banner. It now
+  centers to the banner's own width.
+
 ## [1.1.4] — 2026-07-13
 
 ### Fixed

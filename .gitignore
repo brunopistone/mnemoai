@@ -163,3 +163,6 @@ claude
 ./**/claude
 .claude
 ./**/.claude
+
+# MCP server runtime artifacts (e.g. the playwright MCP server's browser profile)
+.playwright-mcp/

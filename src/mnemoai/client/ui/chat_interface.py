@@ -148,10 +148,15 @@ class ChatInterface:
         bot = f"{C['border']}╰{'─' * (W + 2)}╯{C['reset']}"
 
         # --- Wordmark banner (indigo ≈ #5f5fff via 256-color 63) ---
+        # Center the tagline under the BANNER (its own width), not the command
+        # box (which widens to the longest row) — otherwise it drifts right of
+        # the wordmark when the box is wider than the banner.
+        banner_w = max(vlen(line) for line in self._BANNER)
         print()
         for line in self._BANNER:
             print(f"\033[38;5;63m{line}\033[0m")
-        print(f"{C['dim']}" + "local agentic AI assistant · learns & remembers".center(W + 4) + C["reset"])
+        tagline = "local agentic AI assistant · learns & remembers"
+        print(f"{C['dim']}" + tagline.center(banner_w) + C["reset"])
         print()
 
         # --- Framed command list ---
