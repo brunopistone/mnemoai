@@ -129,6 +129,48 @@ class TestSubdirs:
         assert (tmp_home / "logs" / "mcp.log.1").read_text() == "B" * 60  # A gone
         assert not (tmp_home / "logs" / "mcp.log.2").exists()
 
+    def test_sweep_old_plans_removes_stale_only(self, tmp_home):
+        import os
+        import time
+
+        d = paths.plans_dir()
+        old = d / "plan_20260101_000000.md"
+        old.write_text("old plan")
+        recent = d / "plan_20260714_000000.md"
+        recent.write_text("recent plan")
+        stale = time.time() - 10 * 86400
+        os.utime(old, (stale, stale))
+
+        removed = paths.sweep_old_plans(max_age_days=7)
+
+        assert removed == 1
+        assert not old.exists()
+        assert recent.exists()  # within window, kept
+
+    def test_sweep_old_plans_ignores_non_plan_files(self, tmp_home):
+        import os
+        import time
+
+        d = paths.plans_dir()
+        (d / "notes.md").write_text("keep")          # not plan_*.md
+        keep_json = d / "custom.json"
+        keep_json.write_text("keep")
+        stale = time.time() - 30 * 86400
+        for f in (d / "notes.md", keep_json):
+            os.utime(f, (stale, stale))
+
+        paths.sweep_old_plans(max_age_days=7)
+
+        assert (d / "notes.md").exists()
+        assert keep_json.exists()
+
+    def test_sweep_old_plans_removes_legacy_current_plan_json(self, tmp_home):
+        d = paths.plans_dir()
+        legacy = d / "current_plan.json"
+        legacy.write_text("{}")  # retired plan_mode.py artifact
+        paths.sweep_old_plans(max_age_days=7)
+        assert not legacy.exists()
+
     def test_profile_dir_explicit(self, tmp_home):
         d = paths.profile_dir("alice")
         assert d == tmp_home / "alice"

@@ -44,6 +44,7 @@ from mnemoai.utils.paths import (
     plans_dir,
     profile_dir,
     sanitize_model_name,
+    sweep_old_plans,
 )
 from mnemoai.utils.tokenization import count_tokens
 
@@ -296,6 +297,13 @@ class LangGraphClient:
         """Start the client and initialize the agent."""
         try:
             self.verbose_mode = verbose
+
+            # Startup housekeeping: prune stale approved-plan files so the plans
+            # dir doesn't grow without bound (best-effort, never blocks startup).
+            try:
+                sweep_old_plans()
+            except Exception as e:
+                logger.debug(f"Plan sweep skipped: {e}")
 
             # Fail fast if prompts.yaml is missing a required prompt (a feature's
             # prompt is required when that feature is enabled).

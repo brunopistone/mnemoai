@@ -139,8 +139,17 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                                 {
                                     "success": True,
                                     "url": result.url,
-                                    "message": "Content ingested into RAG store",
+                                    "message": (
+                                        f"The page was large ({tokens} tokens), so "
+                                        f"it was indexed into the document store "
+                                        f"({num_chunks} chunks) instead of returned "
+                                        f"inline. Retrieve the parts you need with "
+                                        f"search_in_documents(query=...) — do NOT "
+                                        f"answer from memory; the page content is "
+                                        f"only available via that search."
+                                    ),
                                     "chunks_indexed": num_chunks,
+                                    "next_step": "search_in_documents",
                                     "metadata": result.metadata,
                                 },
                                 indent=2,

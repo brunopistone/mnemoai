@@ -9,6 +9,24 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.1.6] — 2026-07-15
+
+### Fixed
+
+- **A large crawled page is now retrievable on the research route.** When
+  `web_crawler` fetches a page over `RAG.MAX_TOKENS`, it ingests the content into
+  the document store instead of returning it inline — but the `research` route
+  bound no RAG retrieval tool, so the model got a "content ingested" pointer it
+  couldn't follow and fell back to answering from memory. The route now also
+  binds `search_in_documents` + `list_documents`, and the crawler's ingest result
+  explicitly instructs the model to retrieve via `search_in_documents(query=...)`
+  rather than answer from memory.
+- **Approved plan files no longer accumulate.** `plans/plan_<ts>.md` (written on
+  each plan approval) were never cleaned up. A startup sweep (`sweep_old_plans`)
+  now prunes `plan_*.md` older than 7 days (`PLAN_MAX_AGE_DAYS`, 0 disables) and
+  removes the stale `current_plan.json` left by the retired legacy plan tools.
+  Recent plans are kept (they survive compaction and stay re-readable).
+
 ## [1.1.5] — 2026-07-14
 
 ### Fixed
