@@ -9,6 +9,19 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-15
+
+### Added
+
+- **File edits and writes render as styled diff/content blocks** (pinned UI),
+  instead of a flattened `↳ file_path=… ↳ old_string=…` line:
+  - `file_edit` and `fs_write` `str_replace` show an `Update(path)` header with a
+    red `-` / green `+` diff of the change.
+  - `fs_write` `create` shows a `Create file` header with the new content as
+    numbered lines; `insert`/`append` show the added text as green `+` lines.
+  - Home paths are shortened to `~/…`. Both the live turn and the `/load` replay
+    use the same renderer, so restored conversations look identical.
+
 ## [1.1.6] — 2026-07-15
 
 ### Fixed
