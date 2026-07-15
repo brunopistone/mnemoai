@@ -403,8 +403,8 @@ class TestBatchedSummarization:
         import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(mod.config, "get", _llm_config())
-        # max_tokens small so the per-batch budget (0.5 * max_tokens) is tiny,
-        # forcing multiple batches over these messages.
+        # Small max_tokens so the per-batch budget (a fraction of it) forces
+        # multiple batches over these messages.
         mgr = AgentConversationManager(max_tokens=400)
         model = _OverflowThenOKModel(limit_chars=100000)  # never overflows here
         msgs = [{"role": "user", "content": [{"text": "word " * 50}]} for _ in range(10)]
@@ -441,3 +441,32 @@ class TestBatchedSummarization:
         out = _run(mgr.generate_summary(msgs, _AlwaysFail()))
         # Falls back to a bounded EXCERPT carrying real content, not a placeholder.
         assert "distinctive content here" in out
+
+    def test_large_window_batches_stay_a_safe_fraction(self):
+        # Regression (the real bug): on a large window (1M), a near-full history
+        # must NOT produce a single ~500k batch — each batch must stay a small
+        # fraction of the window so the summary CALL itself can't overflow.
+        from mnemoai.client.managers.agent_conversation_manager import (
+            _SUMMARY_CALL_FRACTION,
+        )
+
+        mgr = AgentConversationManager(max_tokens=1_000_000)
+        budget = max(256, int(mgr.max_tokens * _SUMMARY_CALL_FRACTION))
+        # ~576k tokens of history (like the reported conversation).
+        msgs = [{"role": "user", "content": [{"text": "word " * 3000}]} for _ in range(150)]
+        batches = mgr._batch_messages(msgs, budget)
+        sizes = [mgr.count_tokens(b) for b in batches]
+        assert len(batches) >= 4                       # actually split
+        assert max(sizes) <= budget + 5000             # each batch near the budget
+        assert max(sizes) < mgr.max_tokens * 0.25      # far below the window
+
+    def test_oversized_single_message_is_truncated(self):
+        # A single message larger than the per-call budget can't overflow its own
+        # batch — _truncate_msg_text caps it (head+tail with an elision note).
+        mgr = AgentConversationManager(max_tokens=1_000_000)
+        giant = "x" * 5_000_000  # ~1.25M tokens alone
+        capped = mgr._truncate_msg_text(giant)
+        assert len(capped) < len(giant)
+        assert "elided" in capped
+        # Small text is returned unchanged.
+        assert mgr._truncate_msg_text("short") == "short"
