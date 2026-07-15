@@ -9,6 +9,21 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.2.1] — 2026-07-15
+
+### Fixed
+
+- **Compaction no longer overflows the summarization call on a near-full, large
+  context window.** The batched summarizer (added in 1.0.2) set the per-call
+  budget to 50% of the window — on a 1M-token model that meant a ~500k-token
+  batch, which together with the rolling summary + prompt + reasoning output
+  exceeded the window and 400'd ("could not compact"), so a full history couldn't
+  be shrunk. The per-call budget is now a conservative fraction of the window
+  (`_SUMMARY_CALL_FRACTION`, 0.15), the rolling summary carried between batches is
+  capped, and a single message larger than the budget is truncated (head+tail) so
+  it can't overflow its own batch. Verified against a real 539-message / ~750k-token
+  conversation: batches drop from one 498k-token call to five ≤150k-token calls.
+
 ## [1.2.0] — 2026-07-15
 
 ### Added

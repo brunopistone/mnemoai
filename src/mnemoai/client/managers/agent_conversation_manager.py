@@ -87,6 +87,18 @@ def messages_to_dict_list(messages: List[Any]) -> List[Dict]:
     return result
 
 
+# Fraction of the context window one summarization CALL may consume (batch of
+# older messages + the rolling summary + the summary prompt + the model's own
+# reasoning/output). Kept conservative (0.15) so the call itself never overflows
+# — a larger fraction, e.g. 0.5, produced a ~500k-token call on a 1M window that
+# 400'd ("prompt is too long"). The older history is folded into ONE final
+# summary via map-reduce across these batches.
+_SUMMARY_CALL_FRACTION = 0.15
+# The rolling summary carried between batches is capped so late batches (prior
+# summary + next batch) can't themselves overflow. In chars (~4 chars/token).
+_ROLLING_SUMMARY_MAX_CHARS_FRACTION = 0.10
+
+
 class AgentConversationManager:
     def __init__(self, max_tokens: int = 5000) -> None:
         """Initialize conversation manager.
@@ -225,19 +237,27 @@ class AgentConversationManager:
         Returns:
             Summary text (never empty; falls back to a bounded excerpt on error).
         """
-        # Budget per summary call: a fraction of the window, leaving headroom for
-        # the system prompt, the prior rolling summary, and the model's output.
-        # Relative to max_tokens (never an absolute floor that could itself exceed
-        # a small window).
-        budget = max(256, int(self.max_tokens * 0.5))
+        # Budget per summary call: a small fraction of the window so the CALL
+        # (batch + rolling summary + prompt + reasoning output) fits with wide
+        # margin. Relative to max_tokens (never an absolute floor that could
+        # itself exceed a small window).
+        budget = max(256, int(self.max_tokens * _SUMMARY_CALL_FRACTION))
         batches = self._batch_messages(messages, budget)
+
+        # Cap the rolling summary carried between batches so a late call (prior
+        # summary + next batch) can't overflow. ~4 chars/token.
+        rolling_cap = max(1000, int(self.max_tokens * _ROLLING_SUMMARY_MAX_CHARS_FRACTION * 4))
 
         rolling = self.previous_summary
         last_error = None
         for i, batch in enumerate(batches):
             try:
+                capped_prior = (
+                    rolling[:rolling_cap] if rolling and len(rolling) > rolling_cap
+                    else rolling
+                )
                 rolling = await self._summarize_batch(
-                    batch, model, focus_instructions, prior_summary=rolling
+                    batch, model, focus_instructions, prior_summary=capped_prior
                 )
             except Exception as e:
                 last_error = e
@@ -293,6 +313,16 @@ class AgentConversationManager:
             return "Previous conversation covered multiple topics and requests."
         return "Earlier conversation (excerpt, summarization unavailable):\n" + joined
 
+    def _truncate_msg_text(self, text: str) -> str:
+        """Cap one message's text so a single oversized message can't overflow its
+        own summary batch (head+tail kept with an elision note). ~4 chars/token."""
+        cap = max(2000, int(self.max_tokens * _SUMMARY_CALL_FRACTION * 4))
+        if len(text) <= cap:
+            return text
+        head = text[: cap // 2]
+        tail = text[-cap // 2:]
+        return f"{head}\n…[{len(text) - cap} chars elided]…\n{tail}"
+
     async def _summarize_batch(
         self,
         messages: List[Dict],
@@ -303,7 +333,9 @@ class AgentConversationManager:
         """Summarize ONE batch of messages (folding in ``prior_summary``).
 
         This is the single-call summarization; :meth:`generate_summary` chains it
-        across batches so no individual call exceeds the context window."""
+        across batches so no individual call exceeds the context window. A single
+        message larger than the per-call budget is truncated (head+tail) so it
+        can't overflow on its own."""
         summary_prompt = self._build_summary_prompt(focus_instructions)
         summary_response = ""
 
@@ -319,6 +351,7 @@ class AgentConversationManager:
                 content = self._message_text_for_summary(msg)
                 if not content:
                     continue
+                content = self._truncate_msg_text(content)
                 if role == "assistant":
                     lc_messages.append(AIMessage(content=content))
                 else:
@@ -328,7 +361,13 @@ class AgentConversationManager:
             response = await model.ainvoke(lc_messages)
             summary_response = str(response.content)
         else:
-            batch = list(messages)
+            # Truncate oversized message text so one giant message can't overflow.
+            batch = []
+            for msg in messages:
+                text = self._truncate_msg_text(self._message_text_for_summary(msg))
+                if text:
+                    batch.append({"role": msg.get("role", "user"),
+                                  "content": [{"text": text}]})
             batch.append({"role": "user", "content": [{"text": summary_prompt}]})
             think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
             system_prompt = self._SUMMARY_SYSTEM_PROMPT
