@@ -472,11 +472,17 @@ class LangGraphClient:
             )
             if high_water <= 0:
                 return False
+            # Use the LARGER of our estimate and the provider's exact input_tokens
+            # from the last turn (ground truth). The estimate alone undercounts
+            # non-OpenAI models, so trusting only it lets the prompt overflow.
             msgs = messages_to_dict_list(self.agent.messages)
-            if mgr.count_tokens(msgs) <= high_water:
+            estimated = mgr.count_tokens(msgs)
+            actual = getattr(self.agent, "_last_input_tokens", None) or 0
+            current = max(estimated, actual)
+            if current <= high_water:
                 return False
             log_green(
-                f"Context over {high_water} tokens; compacting mid-task."
+                f"Context over {high_water} tokens (~{current}); compacting mid-task."
             )
         keep = 2 if force else config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)
         try:
@@ -764,7 +770,13 @@ class LangGraphClient:
         return f"{context}\n\n{prompt}"
 
     def _count_context_tokens(self) -> int:
-        """Total tokens in the current context (system prompt + messages)."""
+        """Total tokens in the current context. Prefers the provider's exact
+        ``input_tokens`` from the last turn (ground truth — includes system
+        prompt, tool calls, everything the API saw); falls back to the
+        conservative estimate when no turn has run yet."""
+        actual = getattr(self.agent, "_last_input_tokens", None) if self.agent else None
+        if actual:
+            return int(actual)
         total_tokens = 0
         if self.system_prompt:
             total_tokens += count_tokens(self.system_prompt)

@@ -437,7 +437,7 @@ LLM:
   SUMMARIZATION_THINK: false # Include thinking in summarization
   TOKEN_COUNTING:
     OLLAMA_APPROXIMATION: 1.3 # Chars-to-tokens multiplier for Ollama
-    FALLBACK_MODEL: "gpt-4" # Tiktoken model for fallback counting
+    FALLBACK_MODEL: "o200k_base" # Tiktoken model for fallback counting
   # --- Context management (compaction + overflow protection) ---
   KEEP_RECENT_MESSAGES: 6 # Turns kept verbatim on auto-compaction
   MANUAL_COMPACT_KEEP_RECENT: 2 # Smaller window for the manual /compact command
