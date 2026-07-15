@@ -9,6 +9,31 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.2.2] — 2026-07-16
+
+### Fixed
+
+- **Context-window overflow root cause: the token counter undercounted non-OpenAI
+  models.** A single tiktoken (OpenAI) encoder was used for every provider, which
+  undercounts Claude ~1.5x on code/JSON history — so the compaction high-water
+  mark never fired (the agent believed it was under the window when it was ~15%
+  over) and the prompt overflowed the API. Two fixes:
+  - **Provider-aware, never-undercount estimate** (`utils.tokenization`): an
+    o200k_base basis scaled by a conservative per-provider multiplier
+    (anthropic/mantle ×1.5, bedrock/litellm/sagemaker ×1.35, openai exact ×1.0;
+    overridable via `LLM.TOKEN_COUNTING.<TYPE>_MULTIPLIER`). Ollama uses a
+    chars/ratio (`OLLAMA_CHARS_PER_TOKEN`, default 3.0).
+  - **Provider's exact count as ground truth**: the agent now captures
+    `usage_metadata.input_tokens` from each response and the compaction high-water
+    check + the `[Context: N]` display use `max(estimate, actual)`, so the real
+    context size drives the decision (reset on `/clear` and after compaction).
+
+### Changed
+
+- Consolidated token counting onto the single shared `utils.tokenization.count_tokens`
+  (removed the conversation manager's duplicate tiktoken encoder) and added a
+  small per-message overhead for role/formatting wrappers.
+
 ## [1.2.1] — 2026-07-15
 
 ### Fixed

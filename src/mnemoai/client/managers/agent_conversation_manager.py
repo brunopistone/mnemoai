@@ -5,10 +5,9 @@ import textwrap
 from datetime import date
 from typing import Any, Dict, List, Union
 
-import tiktoken
-
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+from mnemoai.utils.tokenization import count_tokens as _count_text_tokens
 
 # Try to import LangChain message types for compatibility
 try:
@@ -16,8 +15,6 @@ try:
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False
-
-MODEL_ID = "gpt-4"  # Default model for token counting
 
 # ANSI color codes for green text
 GREEN = "\033[92m"
@@ -89,10 +86,7 @@ def messages_to_dict_list(messages: List[Any]) -> List[Dict]:
 
 # Fraction of the context window one summarization CALL may consume (batch of
 # older messages + the rolling summary + the summary prompt + the model's own
-# reasoning/output). Kept conservative (0.15) so the call itself never overflows
-# — a larger fraction, e.g. 0.5, produced a ~500k-token call on a 1M window that
-# 400'd ("prompt is too long"). The older history is folded into ONE final
-# summary via map-reduce across these batches.
+# reasoning/output).
 _SUMMARY_CALL_FRACTION = 0.15
 # The rolling summary carried between batches is capped so late batches (prior
 # summary + next batch) can't themselves overflow. In chars (~4 chars/token).
@@ -107,37 +101,17 @@ class AgentConversationManager:
             max_tokens: Maximum tokens before summarization
         """
         self.max_tokens = max_tokens
-        self.encoder = tiktoken.encoding_for_model(MODEL_ID)
         self.previous_summary = None
         logger.info(f"Initialized conversation manager with max_tokens={max_tokens}")
 
     def count_tokens(self, messages: List[Dict]) -> int:
-        """Count tokens with model-specific approximation.
-
-        For Ollama models, uses character-based approximation.
-        For OpenAI/Bedrock models, uses tiktoken encoder.
-
-        Args:
-            messages: List of message dictionaries
-
-        Returns:
-            Estimated token count
-        """
+        """Estimate tokens for a list of messages via the shared, provider-aware,
+        never-undercount counter (``utils.tokenization``). Adds a small per-message
+        overhead for role/formatting wrappers the raw JSON dump misses."""
         text = json.dumps(messages, default=str)
-        model_type = config.get("MODEL_ID", {}).get("TYPE", "ollama")
-
-        if model_type == "ollama":
-            # Ollama approximation: ~1.3 chars per token (configurable)
-            multiplier = (
-                config.get("LLM", {})
-                .get("TOKEN_COUNTING", {})
-                .get("OLLAMA_APPROXIMATION", 1.3)
-            )
-            return int(len(text) / multiplier)
-        else:
-            # Use tiktoken for OpenAI/Bedrock/SageMaker. disallowed_special=()
-            # so special-token text (e.g. "<|endoftext|>") is counted, not raised.
-            return len(self.encoder.encode(text, disallowed_special=()))
+        # ~4 tokens/message for the role + structural wrappers each message costs.
+        overhead = 4 * len(messages) if isinstance(messages, list) else 0
+        return _count_text_tokens(text) + overhead
 
     @staticmethod
     def _message_text_for_summary(msg: Dict) -> str:
@@ -621,6 +595,9 @@ class AgentConversationManager:
             agent.messages = kept
             client.system_prompt = new_system_content
             agent.system_prompt = new_system_content
+
+            if hasattr(agent, "_last_input_tokens"):
+                agent._last_input_tokens = None
             client.spinner.stop()
             log_green(
                 f"Compacted: summarized {len(older)} older messages, "

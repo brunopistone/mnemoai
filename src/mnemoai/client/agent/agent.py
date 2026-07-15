@@ -111,6 +111,9 @@ class LangGraphAgent:
         self.styled_turn_view = False
         self._messages: List[BaseMessage] = []
         self._thinking: Optional[str] = None
+        # Exact prompt-token count from the provider's own usage_metadata on the
+        # last model turn — ground truth for "how big is my context"
+        self._last_input_tokens: Optional[int] = None
         self._code_formatter = CodeFormatter()
         # Categories the user chose to trust this session (the "a = allow" option),
         # skipping re-prompts until restart.
@@ -680,6 +683,19 @@ class LangGraphAgent:
         """Delegates to :func:`message_sanitizer.sanitize_tool_pairs`."""
         return message_sanitizer.sanitize_tool_pairs(messages)
 
+    def _capture_input_tokens(self, response: Any) -> None:
+        """Record the provider's exact prompt-token count from a response's
+        ``usage_metadata`` (LangChain normalizes it across Anthropic/OpenAI/
+        Bedrock). This is ground truth for the current context size — far more
+        accurate than re-estimating — and drives the compaction decision."""
+        try:
+            um = getattr(response, "usage_metadata", None) or {}
+            it = um.get("input_tokens")
+            if it:
+                self._last_input_tokens = int(it)
+        except Exception:
+            pass
+
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with the current state, streaming the response."""
         messages = list(state["messages"])
@@ -750,6 +766,7 @@ class LangGraphAgent:
         if response is None:
             response = active_model.invoke(messages, config=config)
 
+        self._capture_input_tokens(response)
         thinking = self._extract_thinking(response)
         visible = self._extract_visible(response.content)
 
@@ -1732,4 +1749,5 @@ class LangGraphAgent:
         """Clear the message history."""
         self._messages.clear()
         self._thinking = None
+        self._last_input_tokens = None  # context is small again
 
