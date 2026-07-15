@@ -79,13 +79,9 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
         "git_safe",
         "git_status_safe",
         "git_commit_safe",
-        # Todos (complete suite)
         "todo_write",
         "todo_read",
         "todo_clear",
-        # Plan mode: exit_plan_mode is an always-available meta tool (reaches
-        # every route), so it need not be listed here.
-        # Background tasks (complete suite — start/inspect/list/cancel/clear)
         "start_background_task",
         "get_task_status",
         "get_task_output",
@@ -97,6 +93,8 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
     "research": [
         "web_search",
         "web_crawler",
+        "search_in_documents",
+        "list_documents",
     ],
     # knowledge: querying user-provided documents via the RAG index. Reading a
     # specific file by path is fs_read (a meta tool, always available) — and

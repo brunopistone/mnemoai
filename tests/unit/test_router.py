@@ -148,3 +148,18 @@ class TestFastRoute:
         r = _router(["code"])
         assert r.classify("Read main.py", conversation_context="prior turn") == "code"
         assert r.model.calls == 1
+
+
+class TestResearchRouteHasRetrieval:
+    """web_crawler ingests a large page into RAG rather than returning it inline,
+    so the research route MUST also bind the RAG retrieval tools — otherwise the
+    model gets a "content ingested" pointer it can't follow (regression guard)."""
+
+    def test_research_route_binds_rag_retrieval(self):
+        from mnemoai.client.agent.router import ROUTE_TOOLS
+
+        research = set(ROUTE_TOOLS["research"])
+        assert "web_crawler" in research
+        # The crawler's ingest path is only useful if retrieval is reachable here.
+        assert "search_in_documents" in research
+        assert "list_documents" in research

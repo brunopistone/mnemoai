@@ -28,6 +28,7 @@ can additionally be overridden with ``$MNEMOAI_CONFIG``.
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 DEFAULT_HOME_DIRNAME = ".mnemoai"
@@ -149,6 +150,44 @@ def plans_dir() -> Path:
     d = app_home() / "plans"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# Age after which an approved-plan file is swept at startup. Approved plans are
+# persisted so they survive compaction and can be re-read shortly after; they're
+# not durable artifacts, so old ones are pruned to keep the dir from growing.
+PLAN_MAX_AGE_DAYS = 7
+
+
+def sweep_old_plans(max_age_days: int = PLAN_MAX_AGE_DAYS) -> int:
+    """Delete ``plan_*.md`` files older than ``max_age_days``; return the count.
+
+    Best-effort startup housekeeping (0 disables). Only touches ``plan_*.md``
+    files in the plans dir, so anything else there is left alone. Also removes a
+    stale ``current_plan.json`` left by the retired legacy plan-mode tools.
+    """
+    d = plans_dir()
+    removed = 0
+    # Drop the dead legacy state file if present (retired plan_mode.py).
+    try:
+        legacy = d / "current_plan.json"
+        if legacy.is_file():
+            legacy.unlink()
+    except OSError:
+        pass
+    if max_age_days <= 0:
+        return removed
+    cutoff = time.time() - max_age_days * 86400
+    try:
+        for f in d.glob("plan_*.md"):
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
 
 
 def skills_dir() -> Path:
