@@ -12,6 +12,10 @@ _GRAY = "\033[90m"
 _CYAN = "\033[36m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
+# Diff colors for file edits (added / removed lines), like a git diff.
+_ADD = "\033[32m"   # green
+_DEL = "\033[31m"   # red
+_HEADER = "\033[38;5;63m"  # indigo, matches the launch banner
 
 _BAR = f"{_GREEN}▌{_RESET}"
 _CONNECTOR = "↳"
@@ -153,12 +157,92 @@ def render_plan(plan: str, width: int = 80) -> str:
     return "\n".join(out)
 
 
+def _short_path(path: str) -> str:
+    """Home-relative, compact path for a file-op header (``~/…`` when under home)."""
+    import os
+
+    p = str(path or "")
+    home = os.path.expanduser("~")
+    if p.startswith(home):
+        p = "~" + p[len(home):]
+    return p
+
+
+def _diff_lines(old: str, new: str) -> list:
+    """Render an old→new change as colored ``-``/``+`` diff lines (whole-block).
+
+    Not a line-level LCS diff (we don't have the file); we show the removed text
+    in red and the added text in green, which is what a str-replace edit is."""
+    out = []
+    for line in (old or "").split("\n"):
+        out.append(f"  {_DEL}- {line}{_RESET}")
+    for line in (new or "").split("\n"):
+        out.append(f"  {_ADD}+ {line}{_RESET}")
+    return out
+
+
+def render_file_edit(args: dict) -> str:
+    """``Update(path)`` block with a red/green old→new diff."""
+    path = _short_path(args.get("file_path", ""))
+    header = f"{_HEADER}{_BOLD}Update{_RESET}{_HEADER}({path}){_RESET}"
+    old = str(args.get("old_string", ""))
+    new = str(args.get("new_string", ""))
+    if not old and new:
+        summary = "inserted text"
+    elif old and not new:
+        summary = "deleted text"
+    else:
+        summary = "replaced text"
+    lines = [header, f"  {_GRAY}{summary}{_RESET}"]
+    lines.extend(_diff_lines(old, new))
+    return "\n".join(lines)
+
+
+def render_fs_write(args: dict) -> str:
+    """Style block for fs_write: ``Create file`` with numbered content, or an
+    ``Update(path)`` diff for str_replace/insert/append."""
+    path = _short_path(args.get("path", ""))
+    command = str(args.get("command", "create")).lower()
+
+    if command == "create":
+        header = f"{_HEADER}{_BOLD}Create file{_RESET}"
+        text = str(args.get("file_text", ""))
+        body = text.split("\n")
+        # Trim a trailing empty line from a final newline so the count is clean.
+        if body and body[-1] == "":
+            body = body[:-1]
+        width = len(str(len(body))) if body else 1
+        lines = [header, f"  {_GRAY}{path}{_RESET}"]
+        for i, line in enumerate(body, 1):
+            lines.append(f"  {_GRAY}{str(i).rjust(width)}{_RESET} {line}")
+        return "\n".join(lines)
+
+    if command == "str_replace":
+        header = f"{_HEADER}{_BOLD}Update{_RESET}{_HEADER}({path}){_RESET}"
+        lines = [header, f"  {_GRAY}replaced text{_RESET}"]
+        lines.extend(_diff_lines(str(args.get("old_str", "")), str(args.get("new_str", ""))))
+        return "\n".join(lines)
+
+    # insert / append: show the added text as green lines.
+    verb = "Insert" if command == "insert" else "Append"
+    header = f"{_HEADER}{_BOLD}{verb}{_RESET}{_HEADER}({path}){_RESET}"
+    added = str(args.get("new_str", "") or args.get("file_text", ""))
+    lines = [header]
+    for line in added.split("\n"):
+        lines.append(f"  {_ADD}+ {line}{_RESET}")
+    return "\n".join(lines)
+
+
 def render_tool_call(name: str, args: dict) -> str:
     """Build one tool block: bold ``ToolName`` then dimmed ``↳ key=value`` lines.
 
     Values are shown in full (unlike the elided ``[⚙ …]`` marker); newlines are
-    flattened to one arg per line.
+    flattened to one arg per line. File-op tools use their own richer renderers.
     """
+    if name == "file_edit":
+        return render_file_edit(args or {})
+    if name == "fs_write":
+        return render_fs_write(args or {})
     lines = [f"{_BOLD}{name or 'tool'}{_RESET}"]
     for key, value in (args or {}).items():
         flat = str(value).replace("\n", " ")

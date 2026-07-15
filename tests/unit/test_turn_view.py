@@ -63,16 +63,71 @@ class TestToolCall:
         assert "↳" not in out  # no arg connectors when there are no args
 
     def test_newlines_in_value_flattened(self):
-        out = render_tool_call("fs_write", {"file_text": "line1\nline2"})
-        # The value is flattened to keep one arg per line.
+        # A generic tool (not a file-op) flattens a multi-line arg to one line.
+        out = render_tool_call("web_crawler", {"content": "line1\nline2"})
         assert "line1 line2" in out
-        # The arg line itself is single-line (no raw newline inside the value).
-        arg_lines = [ln for ln in out.split("\n") if "file_text=" in ln]
+        arg_lines = [ln for ln in out.split("\n") if "content=" in ln]
         assert len(arg_lines) == 1
 
     def test_missing_name_falls_back(self):
         out = render_tool_call("", {"a": 1})
         assert "tool" in out
+
+
+class TestFileOpRendering:
+    """file_edit / fs_write get a Claude-Code-style block (Update/Create header +
+    a red/green diff or numbered content) instead of a flattened ↳ arg line."""
+
+    def test_file_edit_shows_update_header_and_diff(self):
+        out = render_tool_call("file_edit", {
+            "file_path": "/tmp/x/requirements.txt",
+            "old_string": "pkg>=1.0",
+            "new_string": "pkg==1.2\nother==2.0",
+        })
+        assert "Update" in out and "requirements.txt" in out
+        assert "- pkg>=1.0" in out           # removed line
+        assert "+ pkg==1.2" in out           # added lines
+        assert "+ other==2.0" in out
+        # NOT flattened onto an ↳ old_string=… line
+        assert "old_string=" not in out
+
+    def test_file_edit_delete_and_insert_summaries(self):
+        deleted = render_tool_call("file_edit", {
+            "file_path": "a.txt", "old_string": "x", "new_string": ""})
+        assert "deleted text" in deleted
+        inserted = render_tool_call("file_edit", {
+            "file_path": "a.txt", "old_string": "", "new_string": "x"})
+        assert "inserted text" in inserted
+
+    def test_fs_write_create_numbers_lines(self):
+        out = render_tool_call("fs_write", {
+            "path": "Desktop/note.md", "command": "create",
+            "file_text": "# Title\n\nbody\n",
+        })
+        assert "Create file" in out and "Desktop/note.md" in out
+        # numbered content lines (trailing newline trimmed -> 3 lines). The line
+        # number and text are separated by an ANSI reset, so check them loosely.
+        import re
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        assert "1 # Title" in plain
+        assert "3 body" in plain
+        assert "file_text=" not in out
+
+    def test_fs_write_str_replace_is_a_diff(self):
+        out = render_tool_call("fs_write", {
+            "path": "c.yaml", "command": "str_replace",
+            "old_str": "a: 1", "new_str": "a: 2",
+        })
+        assert "Update" in out and "c.yaml" in out
+        assert "- a: 1" in out and "+ a: 2" in out
+
+    def test_home_path_shortened(self):
+        import os
+        home = os.path.expanduser("~")
+        out = render_tool_call("file_edit", {
+            "file_path": f"{home}/proj/file.py", "old_string": "a", "new_string": "b"})
+        assert "~/proj/file.py" in out
+        assert home not in out.replace("~/proj/file.py", "")  # no full home path
 
 
 class TestRenderPlan:
