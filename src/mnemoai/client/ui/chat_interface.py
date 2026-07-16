@@ -623,6 +623,11 @@ class ChatInterface:
         if query.lower() == "/plan":
             self.client.plan_mode_active = not self.client.plan_mode_active
             if self.client.plan_mode_active:
+                # Re-entering plan mode drops any bash pre-approvals from a prior
+                # approved plan — a fresh plan re-declares what it needs.
+                agent = getattr(self.client, "agent", None)
+                if agent is not None:
+                    agent._preapproved_bash = []
                 print(
                     "\n\033[93m🔒 Plan mode ON\033[0m — read-only. I'll research "
                     "and present a plan for your approval; approving turns plan "

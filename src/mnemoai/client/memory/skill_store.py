@@ -36,6 +36,12 @@ from mnemoai.utils.logger import logger
 # description can't bloat the system prompt.
 _MAX_DESC_CHARS = 200
 
+# Aggregate cap on the whole <available_skills> listing (it is injected every
+# turn). With many skills installed, the per-description cap alone is unbounded —
+# N skills produce N lines — so we also bound the total: once the accumulated
+# lines exceed this many chars, the rest are summarized as a "+N more" line.
+_MAX_LISTING_CHARS = 4000
+
 # `name`/`description` are the only required frontmatter keys. Other keys —
 # are tolerated (so CC-authored skills parse cleanly) and simply not acted on. 
 # We never reject a skill for extra keys; that would be more friction than help 
@@ -52,12 +58,16 @@ class Skill(NamedTuple):
         description: One-line trigger description from the frontmatter.
         body: The markdown body after the frontmatter.
         path: The skill's directory (where bundled resources live).
+        argument_hint: Optional short hint (from frontmatter ``argument_hint``)
+            describing what the skill expects, shown in the tier-1 listing so the
+            model knows what to gather before invoking. "" when absent.
     """
 
     name: str
     description: str
     body: str
     path: Path
+    argument_hint: str = ""
 
 
 class SkillIssue(NamedTuple):
@@ -153,12 +163,14 @@ class SkillStore:
                     SkillIssue(entry.name, f"description too long ({len(description)} > {_MAX_DESC_LEN} chars)")
                 )
                 continue
+            argument_hint = str(front.get("argument_hint", "")).strip().replace("\n", " ")
             skills.append(
                 Skill(
                     name=entry.name,
                     description=description,
                     body=body.strip(),
                     path=entry,
+                    argument_hint=argument_hint,
                 )
             )
         if skills:
@@ -190,22 +202,53 @@ class SkillStore:
         return None
 
 
-def format_available_skills(meta: List[Tuple[str, str]]) -> str:
+def _skill_line(entry) -> str:
+    """Render one listing line from either a ``Skill`` or a legacy ``(name, desc)``.
+
+    Accepts both so callers that only have name+description (the historical
+    ``list_metadata`` shape) keep working, while injection callers can pass full
+    ``Skill`` objects to surface ``argument_hint``.
+    """
+    if isinstance(entry, Skill):
+        name, desc, hint = entry.name, entry.description, entry.argument_hint
+    else:
+        name, desc = entry[0], entry[1]
+        hint = ""
+    d = desc.strip().replace("\n", " ")
+    if len(d) > _MAX_DESC_CHARS:
+        d = d[: _MAX_DESC_CHARS - 1].rstrip() + "…"
+    line = f"  - {name}: {d}"
+    if hint:
+        line += f" (expects: {hint})"
+    return line
+
+
+def format_available_skills(meta) -> str:
     """Build the always-on ``<available_skills>`` system-prompt block.
 
-    Returns "" when there are no skills. Each description is truncated so the
-    block stays small (it is injected on every turn). Used by both the client's
+    ``meta`` is a list of ``Skill`` objects or legacy ``(name, description)``
+    tuples. Returns "" when there are no skills. Each description is truncated
+    and the whole listing is bounded by ``_MAX_LISTING_CHARS`` (it is injected on
+    every turn); skills beyond the budget are collapsed into a "+N more" line so
+    a large skills library can't dominate the prompt. Used by both the client's
     session-start injection and the compaction re-injection so the format is
     defined once.
     """
     if not meta:
         return ""
     lines = []
-    for name, desc in meta:
-        d = desc.strip().replace("\n", " ")
-        if len(d) > _MAX_DESC_CHARS:
-            d = d[: _MAX_DESC_CHARS - 1].rstrip() + "…"
-        lines.append(f"  - {name}: {d}")
+    used = 0
+    remaining = 0
+    for i, entry in enumerate(meta):
+        line = _skill_line(entry)
+        # Always keep the first line; otherwise stop once over the aggregate cap.
+        if lines and used + len(line) > _MAX_LISTING_CHARS:
+            remaining = len(meta) - i
+            break
+        lines.append(line)
+        used += len(line) + 1  # +1 for the newline
+    if remaining:
+        lines.append(f"  … (+{remaining} more — see /skills)")
     body = "\n".join(lines)
     return (
         "<available_skills>\n"

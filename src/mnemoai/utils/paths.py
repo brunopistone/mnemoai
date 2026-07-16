@@ -98,22 +98,93 @@ def legacy_mcp_config_path() -> Path:
     return app_home() / "mcp.json"
 
 
+def _refresh_example(src: Path, dest: Path) -> None:
+    """Copy a bundled ``*.example`` to ``dest``, refreshing it when it differs.
+
+    ``*.example`` files are read-only reference (the app never loads them — the
+    configurator reads the canonical templates from the package), so unlike the
+    live files we keep them in sync with the bundle: a new install gets them, and
+    an EXISTING install gets an updated example (e.g. new config keys) on upgrade.
+    Only writes when content differs, so it's cheap and idempotent.
+    """
+    try:
+        if dest.exists() and dest.read_text() == src.read_text():
+            return
+    except OSError:
+        pass  # unreadable dest → fall through and overwrite
+    shutil.copyfile(src, dest)
+
+
+# sha256 of every ``SKILL.md`` a PRIOR release shipped for each bundled skill
+# (the current bundle is compared at runtime, so it needn't be listed). An
+# installed ``SKILL.md`` whose hash is here — meaning a version WE shipped, left
+# unmodified by the user — is "pristine", so it is safe to refresh in place on
+# upgrade (e.g. to document a new frontmatter key). Any other hash means the user
+# edited it, and we never touch it. **Maintenance:** when a bundled skill's
+# ``SKILL.md`` changes, append its PREVIOUS shipped hash here so the prior version
+# is still recognized as pristine on the next upgrade.
+_PRISTINE_BUNDLED_SKILL_HASHES = {
+    "skill-creator": {
+        "f01fe2c1e1450d4e814041a94806c1d26dd2ac9ca67aa28260a8ee90a29d7338",  # ≤1.2.2
+    },
+    "steering-creator": {
+        "78b29bffef4368f5e065ed833e62b6a0a9e9b2aac9958235078ef5c26d1f5301",  # ≤1.2.2
+    },
+    "commit-message": {
+        "8c5addd5dfc7fab5adbd9af28b92cc0ce1544af1730185c9196d674afd783409",  # ≤1.2.2
+    },
+}
+
+
+def _sha256(path: Path) -> str:
+    """Hex sha256 of a file's bytes (matches ``shasum -a 256``)."""
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _refresh_pristine_skill(src_dir: Path, dest_dir: Path) -> None:
+    """Refresh a bundled skill's ``SKILL.md`` in place IF the installed copy is
+    pristine (a version we shipped, unmodified by the user); otherwise leave it.
+
+    Complements the copy-if-absent seeding: an already-installed bundled skill
+    still gets doc/frontmatter updates on upgrade, but a user's own edits are
+    never overwritten. Only ``SKILL.md`` is touched, so any extra files the user
+    added alongside it are preserved.
+    """
+    src_md = src_dir / "SKILL.md"
+    dest_md = dest_dir / "SKILL.md"
+    if not src_md.is_file() or not dest_md.is_file():
+        return
+    try:
+        installed = _sha256(dest_md)
+        if installed == _sha256(src_md):
+            return  # already current — nothing to do
+        if installed in _PRISTINE_BUNDLED_SKILL_HASHES.get(dest_dir.name, set()):
+            shutil.copyfile(src_md, dest_md)  # pristine → safe to refresh
+        # else: user-edited → leave untouched
+    except OSError:
+        pass
+
+
 def seed_example_files() -> None:
     """Copy the package's bundled ``*.example`` templates into the app home.
 
     Gives users browsable examples right next to their live files:
     ``config/`` gets the ``config.yaml*.example`` templates and ``mcp/`` gets
-    ``mcp.json.example``. Idempotent and non-destructive — only copies an
-    example that isn't already present, and never touches ``config.yaml`` /
-    ``mcp.json``. The configurator still reads the canonical templates from the
-    package, so these copies are purely for the user to read.
+    ``mcp.json.example``. The ``*.example`` reference files are **refreshed from
+    the bundle when they differ** so a new bundled key reaches an EXISTING install
+    on upgrade (they're read-only reference, not loaded as config). Bundled example
+    skills are copied when absent, and an already-installed one whose ``SKILL.md``
+    is still **pristine** (a version we shipped, unmodified) is refreshed in place
+    so doc/frontmatter updates also reach existing installs. The live files
+    (``config.yaml`` / ``mcp.json`` / ``prompts.yaml`` / user-edited skills) are
+    only ever created when absent and are NEVER overwritten.
     """
     pkg_templates = Path(__file__).resolve().parent  # mnemoai/utils/
     try:
         for example in pkg_templates.glob("config.yaml*.example"):
-            dest = config_dir() / example.name
-            if not dest.exists():
-                shutil.copyfile(example, dest)
+            _refresh_example(example, config_dir() / example.name)
         # prompts.yaml is the live prompts file (not a *.example): seed the
         # actual file so the app has prompts out of the box. Never overwrite.
         prompts_template = pkg_templates / "prompts.yaml"
@@ -123,15 +194,16 @@ def seed_example_files() -> None:
                 shutil.copyfile(prompts_template, dest)
         mcp_example = pkg_templates / "mcp.json.example"
         if mcp_example.is_file():
-            dest = mcp_dir() / mcp_example.name
-            if not dest.exists():
-                shutil.copyfile(mcp_example, dest)
+            _refresh_example(mcp_example, mcp_dir() / mcp_example.name)
         # Seed the bundled example skill(s) into the skills dir so the feature is
         # discoverable out of the box. Per-skill (like the config *.example files
         # above): copy any bundled skill whose directory doesn't exist yet, so a
         # NEW bundled skill also reaches an EXISTING install on upgrade. Never
         # overwrites a user's own skills. Trade-off: a bundled skill the user
         # deleted reappears on upgrade — acceptable for a refreshed example.
+        # If the skill already exists AND its SKILL.md is still pristine (a version
+        # we shipped, unmodified), refresh just that SKILL.md so doc/frontmatter
+        # updates reach existing installs; a user-edited skill is left untouched.
         skills_template_root = pkg_templates / "skills_example"
         if skills_template_root.is_dir():
             dest_root = skills_dir()
@@ -140,6 +212,8 @@ def seed_example_files() -> None:
                     dest = dest_root / skill_dir.name
                     if not dest.exists():
                         shutil.copytree(skill_dir, dest)
+                    else:
+                        _refresh_pristine_skill(skill_dir, dest)
     except OSError:
         # Seeding examples is a convenience; never let it block startup.
         pass

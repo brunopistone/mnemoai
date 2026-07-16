@@ -224,6 +224,16 @@ LLM:
   # Uncomment to override:
   # COMPACT_HIGH_WATER_TOKENS: 800000
   # MAX_TOOL_RESULT_CHARS: 400000
+  # Cheapest compaction layer, tried BEFORE any summary when over the high-water
+  # mark: old tool-result bodies (grep/read/web dumps outside the recent window)
+  # are shrunk in place to a short head + a marker, with no model call. If that
+  # alone gets back under budget the summary is skipped. Recent turns stay
+  # verbatim; no message is dropped (tool-call/result pairing is preserved).
+  #   TOOL_EVICTION_KEEP_RECENT -> messages kept fully verbatim (default 8)
+  #   EVICTED_TOOL_RESULT_CHARS -> char cap an evicted result is shrunk to
+  #                                (default 500; 0 disables the layer)
+  # TOOL_EVICTION_KEEP_RECENT: 8
+  # EVICTED_TOOL_RESULT_CHARS: 500
   # Max model<->tools steps per query before the agent loop is cut short and a
   # partial result is returned (LangGraph recursion_limit). Set high so
   # legitimate long tasks aren't capped — context compaction is the real

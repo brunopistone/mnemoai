@@ -165,3 +165,50 @@ class TestFormatAvailableSkills:
         # The full 500-char description must not appear verbatim; it's capped.
         assert long not in block
         assert block.count("x") < 250  # truncated near the ~200-char cap
+
+
+class TestArgumentHint:
+    def test_argument_hint_parsed(self, tmp_path):
+        _write_skill(
+            tmp_path,
+            "alpha",
+            _valid() + "\nargument_hint: a PR number and repo",
+        )
+        skill = SkillStore(tmp_path).list_skills()[0]
+        assert skill.argument_hint == "a PR number and repo"
+
+    def test_argument_hint_defaults_empty(self, tmp_path):
+        _write_skill(tmp_path, "alpha", _valid())
+        assert SkillStore(tmp_path).list_skills()[0].argument_hint == ""
+
+    def test_hint_rendered_in_listing_for_skill_objects(self, tmp_path):
+        _write_skill(tmp_path, "alpha", _valid() + "\nargument_hint: a filename")
+        block = format_available_skills(SkillStore(tmp_path).list_skills())
+        assert "expects: a filename" in block
+
+    def test_tuple_input_still_supported(self):
+        # Legacy (name, description) tuples must keep working (no hint shown).
+        block = format_available_skills([("alpha", "do alpha")])
+        assert "alpha: do alpha" in block
+        assert "expects:" not in block
+
+
+class TestListingBudget:
+    def test_large_library_collapses_to_plus_more(self):
+        # Many skills with long descriptions must not blow the aggregate budget;
+        # the overflow is summarized as a "+N more" line.
+        from mnemoai.client.memory.skill_store import _MAX_LISTING_CHARS
+
+        meta = [(f"skill{i}", "d" * 180) for i in range(100)]
+        block = format_available_skills(meta)
+        assert "more — see /skills" in block
+        assert len(block) < _MAX_LISTING_CHARS + 500  # bounded
+
+    def test_small_library_no_more_line(self):
+        block = format_available_skills([("alpha", "a"), ("beta", "b")])
+        assert "more — see /skills" not in block
+
+    def test_first_skill_always_listed_even_if_huge(self):
+        # A single oversized description still yields a line (never an empty list).
+        block = format_available_skills([("alpha", "x" * 5000)])
+        assert "alpha:" in block

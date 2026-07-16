@@ -34,6 +34,14 @@ def register_memory_tools(mcp: FastMCP) -> None:
         high-signal. Save PROACTIVELY — the moment you learn something durable,
         call this tool; the user does not have to ask you to remember.
 
+        FOUR KINDS OF MEMORY (tag each entry with its kind, e.g. "[user] …"):
+        - [user]      — who the user is: role, expertise, stable preferences.
+        - [feedback]  — how you should work: corrections and confirmed approaches
+                        the user gave you. Include the WHY, so it's actionable.
+        - [project]   — ongoing work, goals, or constraints not derivable from the
+                        code or git history. Convert relative dates to absolute.
+        - [reference] — pointers to external resources (URLs, dashboards, tickets).
+
         WHEN TO SAVE (call this as soon as one of these appears in a turn):
         - User preferences ("prefers pytest over unittest", "wants concise replies")
         - Environment / setup facts (OS, key tool versions, paths, services)
@@ -41,16 +49,17 @@ def register_memory_tools(mcp: FastMCP) -> None:
         - Corrections the user makes to you (so you don't repeat the mistake)
         - Hard-won lessons or tool quirks discovered while working
         - Notable completed work worth recalling later
-        WHEN TO SKIP:
+        WHEN TO SKIP (don't save what the repo already records):
         - Trivia or one-off details that won't matter next session
-        - Anything easily re-discovered (file contents, command output)
+        - Anything easily re-discovered (file contents, command output, git log)
+        - Code structure, past fixes, or conventions already in the codebase/CLAUDE.md
         - Raw data dumps; long narratives — store the conclusion, not the log
         - Facts already visible in the current context
 
-        WRITE DENSE ENTRIES. Pack related facts into ONE entry rather than many
-        thin ones; prefer a compact statement over a dated story.
-          GOOD: "Env: macOS, Python 3.13 via conda 'mnemoai', zsh, VS Code."
-          GOOD: "User prefers pytest over unittest and concise answers."
+        WRITE DENSE ENTRIES. Tag the kind, then pack related facts into ONE entry
+        rather than many thin ones; prefer a compact statement over a dated story.
+          GOOD: "[user] Env: macOS, Python 3.13 via conda 'mnemoai', zsh, VS Code."
+          GOOD: "[feedback] Prefers pytest over unittest and concise answers."
           BAD:  "User has a project."            (vague, low-signal)
           BAD:  "On 2026-06-19 I discovered after several tries that the repo
                  uses Go 1.21 ..."               (verbose; just store "Repo uses Go 1.21")

@@ -450,22 +450,34 @@ LLM:
   # (head+tail kept with a note). Auto-derives to
   # 10% of the window (in chars) when unset;
   # 0 disables.
+  # TOOL_EVICTION_KEEP_RECENT: 8  # Messages kept verbatim by the tool-result
+  # eviction layer (below).
+  # EVICTED_TOOL_RESULT_CHARS: 500 # Char cap an OLD tool result is shrunk to
+  # before any LLM summary. 0 disables the layer.
   RECURSION_LIMIT: 200 # Max model<->tool steps per query (runaway guard)
   MCP_CALL_TIMEOUT: 300 # Transport-layer timeout for one MCP tool call (s)
 ```
 
 **Context management.** The conversation is kept under `MAX_CONVERSATION_TOKENS`
 by summarizing older turns into the system prompt while keeping recent ones
-verbatim — automatically when over budget, or manually via `/compact`. Three
+verbatim — automatically when over budget, or manually via `/compact`. Several
 layers prevent a single oversized turn from breaking the loop:
 
 1. **Tool-result cap** (`MAX_TOOL_RESULT_CHARS`) — one runaway result (e.g. a
    `grep_search` with a huge `max_results`) is truncated head+tail with a note,
    so it can never alone exceed the context window. Auto-derives to 10% of the
    window (in chars) when unset, scaling with the model.
-2. **Pre-flight compaction** (`COMPACT_HIGH_WATER_TOKENS`) — before a turn, if
-   the accumulated history is over the high-water mark, it is compacted first.
-   Auto-derives to 80% of `MAX_CONVERSATION_TOKENS` when unset.
+2. **Pre-flight compaction, layered** (`COMPACT_HIGH_WATER_TOKENS`) — before a
+   turn, if the accumulated history is over the high-water mark, it is compacted.
+   The mark auto-derives to 80% of `MAX_CONVERSATION_TOKENS` when unset. The
+   cheapest layer runs first: **tool-result eviction** shrinks the bodies of
+   _old_ tool results (grep/read/web dumps outside the recent window, which carry
+   most of the context but are rarely needed verbatim once acted on) to a short
+   head plus a marker, with **no model call** — recent turns stay verbatim and no
+   message is dropped. If that alone gets back under budget, the expensive
+   summary is skipped; otherwise it falls through to the full LLM summary. Tune
+   with `TOOL_EVICTION_KEEP_RECENT` (messages kept verbatim, default 8) and
+   `EVICTED_TOOL_RESULT_CHARS` (shrink target, default 500; 0 disables the layer).
 3. **Overflow backstop** — if a request still exceeds the window, the turn ends
    with a clear message and compacts for the next turn instead of retrying the
    same oversized prompt in a loop.

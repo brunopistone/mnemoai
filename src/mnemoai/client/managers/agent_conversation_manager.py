@@ -92,6 +92,17 @@ _SUMMARY_CALL_FRACTION = 0.15
 # summary + next batch) can't themselves overflow. In chars (~4 chars/token).
 _ROLLING_SUMMARY_MAX_CHARS_FRACTION = 0.10
 
+# Tool-result eviction (the cheapest compaction layer, runs before any LLM
+# summary): how many trailing messages to keep verbatim, and the char cap an
+# evicted (old) tool-result body is shrunk to. Both config-overridable via
+# LLM.TOOL_EVICTION_KEEP_RECENT / LLM.EVICTED_TOOL_RESULT_CHARS.
+_TOOL_EVICTION_KEEP_RECENT = 8
+_EVICTED_TOOL_RESULT_CHARS = 500
+_EVICTION_MARKER = (
+    "… [earlier tool output evicted to save context; "
+    "re-run the tool if you need the full result] …"
+)
+
 
 class AgentConversationManager:
     def __init__(self, max_tokens: int = 5000) -> None:
@@ -415,7 +426,7 @@ class AgentConversationManager:
             format_available_skills,
         )
 
-        return format_available_skills(SkillStore().list_metadata())
+        return format_available_skills(SkillStore().list_skills())
 
     async def manage_messages(self, client: Any, model: Any, agent: Any) -> None:
         """Auto-compact: summarize if the conversation exceeds the token limit.
@@ -542,6 +553,88 @@ class AgentConversationManager:
                 continue
             break
         return split
+
+    @staticmethod
+    def _tool_result_text(msg: Any) -> str:
+        """Return a tool result's textual content (LangChain ToolMessage or dict)."""
+        if isinstance(msg, dict):
+            content = msg.get("content")
+            if isinstance(content, list):
+                return "".join(
+                    item.get("text", "")
+                    for item in content
+                    if isinstance(item, dict)
+                )
+            return str(content) if content is not None else ""
+        return str(getattr(msg, "content", ""))
+
+    def _shrink_tool_message(self, msg: Any, cap: int) -> Any:
+        """Return a copy of ``msg`` with its tool-result body shrunk to ``cap`` chars.
+
+        Only the content is trimmed (head kept + eviction marker); the message,
+        its ``tool_call_id`` and ``name`` stay intact, so tool-call/result pairing
+        is preserved. Returns ``msg`` unchanged when already short enough.
+        """
+        text = self._tool_result_text(msg)
+        if len(text) <= cap:
+            return msg
+        shrunk = f"{text[:cap].rstrip()}\n\n{_EVICTION_MARKER}"
+        if isinstance(msg, dict):
+            new = dict(msg)
+            new["content"] = [{"text": shrunk}]
+            return new
+        # LangChain messages are immutable; model_copy is the sanctioned update
+        # path (same pattern the message sanitizer uses).
+        if hasattr(msg, "model_copy"):
+            return msg.model_copy(update={"content": shrunk})
+        return msg
+
+    def evict_old_tool_results(self, agent: Any) -> bool:
+        """Cheapest compaction layer: shrink OLD tool-result bodies in place.
+
+        Runs before any LLM summary. Tool results outside the recent window carry
+        the bulk of the context (grep/read/web dumps) yet are rarely needed
+        verbatim once the model has acted on them. We shrink each old tool result
+        to a short head + an eviction marker — keeping recent turns fully verbatim
+        and never dropping a message (so tool-call/result pairing is untouched, no
+        provider rejects the next turn). No LLM call, so this is near-free.
+
+        Returns True if any tool result was actually shrunk.
+        """
+        raw_messages = agent.messages if hasattr(agent, "messages") else []
+        if not raw_messages:
+            return False
+
+        llm_cfg = config.get("LLM", {})
+        keep_recent = llm_cfg.get(
+            "TOOL_EVICTION_KEEP_RECENT", _TOOL_EVICTION_KEEP_RECENT
+        )
+        cap = llm_cfg.get(
+            "EVICTED_TOOL_RESULT_CHARS", _EVICTED_TOOL_RESULT_CHARS
+        )
+        if cap <= 0:
+            return False
+
+        n = len(raw_messages)
+        cutoff = max(0, n - keep_recent)  # messages[:cutoff] are "old"
+        changed = False
+        new_messages = list(raw_messages)
+        for i in range(cutoff):
+            msg = new_messages[i]
+            if not self._is_tool_message(msg):
+                continue
+            shrunk = self._shrink_tool_message(msg, cap)
+            if shrunk is not msg:
+                new_messages[i] = shrunk
+                changed = True
+
+        if changed:
+            agent.messages = new_messages
+            # History shrank: the provider's last exact count is now stale-high
+            # and would defeat the high-water check on the next turn.
+            if hasattr(agent, "_last_input_tokens"):
+                agent._last_input_tokens = None
+        return changed
 
     async def _compact(
         self,

@@ -65,6 +65,20 @@ def test_no_declines(monkeypatch):
     assert a._confirm_tool("execute_bash", {"command": "ls"}) is False
 
 
+def test_preapproved_bash_skips_prompt(monkeypatch):
+    # A command pre-approved via a plan's allowed_bash auto-confirms with no input.
+    a = _agent(monkeypatch, [])  # no queued input — a prompt would IndexError
+    a._preapproved_bash = ["pytest"]
+    assert a._confirm_tool("execute_bash", {"command": "pytest tests/unit"}) is True
+
+
+def test_non_preapproved_bash_still_prompts(monkeypatch):
+    a = _agent(monkeypatch, ["n"])
+    a._preapproved_bash = ["pytest"]
+    # A different command is not pre-approved → still prompts (answered 'n').
+    assert a._confirm_tool("execute_bash", {"command": "rm x"}) is False
+
+
 class TestToolMarkerElision:
     """Tool-call markers middle-elide long values, keeping both ends."""
 

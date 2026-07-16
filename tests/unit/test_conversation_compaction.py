@@ -470,3 +470,93 @@ class TestBatchedSummarization:
         assert "elided" in capped
         # Small text is returned unchanged.
         assert mgr._truncate_msg_text("short") == "short"
+
+
+class TestToolResultEviction:
+    """The cheapest compaction layer: shrink OLD tool-result bodies in place,
+    with no LLM call, keeping recent turns verbatim and never dropping a
+    message (so tool-call/result pairing is preserved)."""
+
+    def _llm(self, monkeypatch, **overrides):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config(**overrides))
+
+    def test_shrinks_only_old_tool_results(self, monkeypatch):
+        self._llm(monkeypatch, TOOL_EVICTION_KEEP_RECENT=2, EVICTED_TOOL_RESULT_CHARS=50)
+        big = "R" * 5000
+        msgs = [
+            ToolMessage(content=big, tool_call_id="t0", name="grep_search"),   # old
+            HumanMessage("m1"),
+            ToolMessage(content=big, tool_call_id="t1", name="grep_search"),   # recent
+        ]
+        agent = _FakeAgent(list(msgs))
+        mgr = AgentConversationManager(max_tokens=100)
+
+        changed = mgr.evict_old_tool_results(agent)
+        assert changed is True
+        # Old tool result shrunk + marked; recent one untouched.
+        assert len(agent.messages[0].content) < len(big)
+        assert "evicted" in agent.messages[0].content
+        assert agent.messages[2].content == big
+
+    def test_preserves_message_count_and_ids(self, monkeypatch):
+        self._llm(monkeypatch, TOOL_EVICTION_KEEP_RECENT=0, EVICTED_TOOL_RESULT_CHARS=20)
+        msgs = [
+            ToolMessage(content="X" * 500, tool_call_id="abc", name="fs_read"),
+        ]
+        agent = _FakeAgent(list(msgs))
+        mgr = AgentConversationManager(max_tokens=100)
+
+        mgr.evict_old_tool_results(agent)
+        # Never drops a message — pairing stays intact — and keeps tool_call_id.
+        assert len(agent.messages) == 1
+        assert agent.messages[0].tool_call_id == "abc"
+        assert agent.messages[0].name == "fs_read"
+
+    def test_noop_when_already_short(self, monkeypatch):
+        self._llm(monkeypatch, TOOL_EVICTION_KEEP_RECENT=0, EVICTED_TOOL_RESULT_CHARS=500)
+        msgs = [ToolMessage(content="tiny", tool_call_id="t", name="glob_search")]
+        agent = _FakeAgent(list(msgs))
+        mgr = AgentConversationManager(max_tokens=100)
+        assert mgr.evict_old_tool_results(agent) is False
+        assert agent.messages[0].content == "tiny"
+
+    def test_disabled_when_cap_zero(self, monkeypatch):
+        self._llm(monkeypatch, EVICTED_TOOL_RESULT_CHARS=0)
+        msgs = [ToolMessage(content="X" * 999, tool_call_id="t", name="grep_search")]
+        agent = _FakeAgent(list(msgs))
+        mgr = AgentConversationManager(max_tokens=100)
+        assert mgr.evict_old_tool_results(agent) is False
+
+    def test_ignores_non_tool_messages(self, monkeypatch):
+        self._llm(monkeypatch, TOOL_EVICTION_KEEP_RECENT=0, EVICTED_TOOL_RESULT_CHARS=10)
+        msgs = [HumanMessage("H" * 500), AIMessage("A" * 500)]
+        agent = _FakeAgent(list(msgs))
+        mgr = AgentConversationManager(max_tokens=100)
+        assert mgr.evict_old_tool_results(agent) is False
+        assert agent.messages[0].content == "H" * 500
+
+    def test_resets_last_input_tokens_after_shrink(self, monkeypatch):
+        self._llm(monkeypatch, TOOL_EVICTION_KEEP_RECENT=0, EVICTED_TOOL_RESULT_CHARS=20)
+
+        class _AgentTok(_FakeAgent):
+            def __init__(self, messages):
+                super().__init__(messages)
+                self._last_input_tokens = 999_999
+
+        agent = _AgentTok([ToolMessage(content="X" * 500, tool_call_id="t", name="grep_search")])
+        mgr = AgentConversationManager(max_tokens=100)
+        mgr.evict_old_tool_results(agent)
+        # Ground-truth count is now stale — must be cleared so the high-water
+        # check re-estimates against the shrunk history.
+        assert agent._last_input_tokens is None
+
+    def test_dict_tool_result_shrunk(self, monkeypatch):
+        self._llm(monkeypatch, TOOL_EVICTION_KEEP_RECENT=0, EVICTED_TOOL_RESULT_CHARS=30)
+        msgs = [{"role": "tool", "tool_name": "grep_search",
+                 "content": [{"text": "Y" * 500}]}]
+        agent = _FakeAgent(list(msgs))
+        mgr = AgentConversationManager(max_tokens=100)
+        assert mgr.evict_old_tool_results(agent) is True
+        assert "evicted" in agent.messages[0]["content"][0]["text"]

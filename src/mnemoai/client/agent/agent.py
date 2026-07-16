@@ -100,6 +100,9 @@ class LangGraphAgent:
         # persists the plan.
         self._plan_approval_ui: Optional[Callable[[str], str]] = None
         self._exit_plan_mode_provider: Optional[Callable[[str], None]] = None
+        # Commands pre-approved by an approved plan (exit_plan_mode allowed_bash):
+        # they skip the per-command confirmation prompt during execution.
+        self._preapproved_bash: List[str] = []
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
@@ -502,7 +505,8 @@ class LangGraphAgent:
                     worker_messages.append(
                         ToolMessage(
                             content=self._handle_exit_plan_mode(
-                                str(tool_args.get("plan", ""))
+                                str(tool_args.get("plan", "")),
+                                tool_args.get("allowed_bash"),
                             ),
                             tool_call_id=tool_id,
                             name=tool_name,
@@ -1399,7 +1403,7 @@ class LangGraphAgent:
         """Delegates to :func:`plan_policy.plan_mode_block_message`."""
         return plan_policy.plan_mode_block_message(tool_name)
 
-    def _handle_exit_plan_mode(self, plan: str) -> str:
+    def _handle_exit_plan_mode(self, plan: str, allowed_bash: list = None) -> str:
         """Drive the plan-approval flow for an ``exit_plan_mode`` call; returns
         the ToolMessage content the model sees next.
 
@@ -1408,8 +1412,13 @@ class LangGraphAgent:
         flips plan mode off + persists the plan, and the model is told to execute
         it now. Without a UI hook (non-TTY/tests) it auto-approves so scripted
         runs never block. ``edit`` is resolved inside the UI (it re-prompts after
-        editing), so only approve/keep_planning reach here."""
+        editing), so only approve/keep_planning reach here.
+
+        ``allowed_bash`` (from the tool call) is the list of commands the plan
+        pre-declared; on approval they are registered so they auto-confirm during
+        execution instead of re-prompting per command."""
         plan = (plan or "").strip()
+        allowed_bash = [str(c).strip() for c in (allowed_bash or []) if str(c).strip()]
         ui = getattr(self, "_plan_approval_ui", None)
         if ui is not None:
             verdict, plan = ui(plan)  # UI may return an edited plan
@@ -1429,10 +1438,20 @@ class LangGraphAgent:
                 provider(plan)
             except Exception as e:
                 logger.error(f"exit_plan_mode approval provider failed: {e}")
+        # Pre-approved commands auto-confirm during execution (plan mode is now
+        # off, so they'd otherwise hit the per-command Proceed? gate).
+        if allowed_bash:
+            self._preapproved_bash = list(allowed_bash)
+        note = ""
+        if allowed_bash:
+            note = (
+                "\n\nThese commands were pre-approved and will run without a "
+                "confirmation prompt: " + ", ".join(allowed_bash)
+            )
         return (
             "The user APPROVED the plan. Plan mode is now OFF — you may make "
             "changes. Execute the approved plan now, following it step by step. "
-            "The approved plan:\n\n" + plan
+            "The approved plan:\n\n" + plan + note
         )
 
     @staticmethod
@@ -1445,6 +1464,21 @@ class LangGraphAgent:
     _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
     _CONFIRM_MEMORY_TOOLS = {"memory"}
 
+    def _is_preapproved_bash(self, command: str) -> bool:
+        """True if ``command`` was pre-approved via a plan's ``allowed_bash``.
+
+        A command matches when it equals, or begins with, one of the pre-approved
+        entries (so ``pytest`` pre-approves ``pytest tests/unit``). Set only after
+        the user approves a plan that declared commands; empty otherwise.
+        """
+        approved = getattr(self, "_preapproved_bash", None)
+        if not approved:
+            return False
+        cmd = (command or "").strip()
+        if not cmd:
+            return False
+        return any(cmd == a or cmd.startswith(a + " ") for a in approved)
+
     def _confirm_tool(self, tool_name: str, tool_args: dict) -> bool:
         """Ask the user to approve a destructive tool before it runs.
 
@@ -1454,6 +1488,10 @@ class LangGraphAgent:
         MCP subprocess can't prompt); non-TTY runs auto-proceed.
         """
         if tool_name in self._CONFIRM_BASH_TOOLS:
+            # A command the plan pre-declared (via exit_plan_mode allowed_bash)
+            # runs without a prompt — approving the plan approved these.
+            if self._is_preapproved_bash(tool_args.get("command", "")):
+                return True
             category, toggle, toggle_default, header, detail = (
                 "bash",
                 "REQUIRE_BASH_CONFIRMATION",
@@ -1551,7 +1589,8 @@ class LangGraphAgent:
                 tool_results.append(
                     ToolMessage(
                         content=self._handle_exit_plan_mode(
-                            str(tool_args.get("plan", ""))
+                            str(tool_args.get("plan", "")),
+                            tool_args.get("allowed_bash"),
                         ),
                         tool_call_id=tool_id,
                         name=tool_name,
@@ -1750,4 +1789,5 @@ class LangGraphAgent:
         self._messages.clear()
         self._thinking = None
         self._last_input_tokens = None  # context is small again
+        self._preapproved_bash = []  # plan-scoped approvals don't outlive a clear
 
