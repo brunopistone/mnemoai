@@ -135,3 +135,65 @@ class TestApprovePlan:
         with patch.object(client_mod, "plans_dir", lambda: _BadDir()):
             c._approve_plan("plan")
         assert c.plan_mode_active is False
+
+
+class TestExecutePlanRoutePin:
+    """After a plan is approved, per-turn routing must not narrow the toolset —
+    execution may call any tool. Regression: an approved implementation plan
+    re-classified as a read-only route (e.g. a docs question) found its
+    file_edit/fs_write/execute_bash tools unbound, so it couldn't apply them."""
+
+    def test_approve_sets_route_pin(self):
+        a = _agent()
+        a._handle_exit_plan_mode("# Plan\n- edit files")
+        assert a._execute_plan_route is True
+
+    def test_keep_planning_does_not_pin(self):
+        a = _agent()
+        a._plan_approval_ui = lambda plan: ("keep_planning", plan)
+        a._handle_exit_plan_mode("draft")
+        assert getattr(a, "_execute_plan_route", False) is False
+
+    def test_effective_route_forces_full_when_pinned(self):
+        a = _agent()
+        a._execute_plan_route = True
+        # Even though the classifier chose a read-only route, binding is 'full'.
+        assert a._effective_route({"route": "knowledge"}) == "full"
+
+    def test_effective_route_uses_state_when_not_pinned(self):
+        a = _agent()
+        a._execute_plan_route = False
+        assert a._effective_route({"route": "knowledge"}) == "knowledge"
+
+    def test_route_model_full_binding_when_pinned(self):
+        a = _agent()
+        a._execute_plan_route = True
+        a.models_by_route = {"knowledge": "KNOWLEDGE_MODEL", "full": "FULL_MODEL"}
+        a.model_with_tools = "ALL"
+        # A read-only classification must still bind the full-route model.
+        assert a._get_route_model({"route": "knowledge"}) == "FULL_MODEL"
+
+    def test_route_tools_full_binding_when_pinned(self):
+        a = _agent()
+        a._execute_plan_route = True
+        a.tools_by_route = {"knowledge": ["fs_read"], "full": ["fs_read", "file_edit"]}
+        a.tools = ["fs_read", "file_edit"]
+        assert a._get_route_tools({"route": "knowledge"}) == ["fs_read", "file_edit"]
+
+    def test_route_after_classify_skips_orchestrator_when_pinned(self):
+        # During plan execution, a 'full' route must go straight to the agent
+        # (not re-decompose into read-only workers).
+        a = _agent()
+        a._execute_plan_route = True
+        assert a._route_after_classify({"route": "full", "messages": []}) == "agent"
+
+    def test_clear_messages_resets_pin(self):
+        a = _agent()
+        a._messages = []
+        a._thinking = None
+        a._last_input_tokens = None
+        a._preapproved_bash = ["pytest"]
+        a._execute_plan_route = True
+        a.clear_messages()
+        assert a._execute_plan_route is False
+        assert a._preapproved_bash == []

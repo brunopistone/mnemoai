@@ -103,6 +103,11 @@ class LangGraphAgent:
         # Commands pre-approved by an approved plan (exit_plan_mode allowed_bash):
         # they skip the per-command confirmation prompt during execution.
         self._preapproved_bash: List[str] = []
+        # Set when a plan is approved: execution may need any tool, so per-turn
+        # routing must not narrow the toolset (an approved implementation plan
+        # re-classified as a read-only route would find its write/exec tools
+        # unbound). Forces the full toolset until /clear or plan re-entry.
+        self._execute_plan_route: bool = False
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
@@ -233,8 +238,12 @@ class LangGraphAgent:
 
         A trivial 'full' query (short/signal-free) still goes to ``agent`` —
         decomposing it adds overhead for no gain. Only substantive 'full' tasks
-        are decomposed.
+        are decomposed. During plan execution we skip the orchestrator entirely
+        (the approved plan IS the decomposition — re-decomposing it would spawn
+        read-only workers that can't apply the plan's edits).
         """
+        if getattr(self, "_execute_plan_route", False):
+            return "agent"
         if state.get("route") == "full":
             query = ""
             for msg in reversed(state.get("messages", [])):
@@ -668,16 +677,28 @@ class LangGraphAgent:
         self._stop_spinner()
         return self._extract_visible(response.content) or str(response.content)
 
+    def _effective_route(self, state: AgentState) -> Optional[str]:
+        """The route to bind tools for, honoring plan-execution override.
+
+        After a plan is approved, execution may call any tool, so we ignore the
+        per-turn classifier and bind the full toolset — otherwise an approved
+        implementation plan re-classified as a read-only route (e.g. a docs
+        question) would find `file_edit`/`fs_write`/`execute_bash` unbound.
+        """
+        if getattr(self, "_execute_plan_route", False):
+            return "full"
+        return state.get("route")
+
     def _get_route_model(self, state: AgentState):
         """The model binding for the current route (falls back to all tools)."""
-        route = state.get("route")
+        route = self._effective_route(state)
         if route and self.models_by_route:
             return self.models_by_route.get(route, self.model_with_tools)
         return self.model_with_tools
 
     def _get_route_tools(self, state: AgentState) -> List[BaseTool]:
         """The tool list for the current route (falls back to all tools)."""
-        route = state.get("route")
+        route = self._effective_route(state)
         if route and self.tools_by_route:
             return self.tools_by_route.get(route, self.tools)
         return self.tools
@@ -1438,6 +1459,9 @@ class LangGraphAgent:
                 provider(plan)
             except Exception as e:
                 logger.error(f"exit_plan_mode approval provider failed: {e}")
+        # Pin the full toolset for the execution turns: routing must not narrow
+        # tools now that the model may edit/run anything to carry out the plan.
+        self._execute_plan_route = True
         # Pre-approved commands auto-confirm during execution (plan mode is now
         # off, so they'd otherwise hit the per-command Proceed? gate).
         if allowed_bash:
@@ -1790,4 +1814,5 @@ class LangGraphAgent:
         self._thinking = None
         self._last_input_tokens = None  # context is small again
         self._preapproved_bash = []  # plan-scoped approvals don't outlive a clear
+        self._execute_plan_route = False  # plan-execution route pin is plan-scoped
 
