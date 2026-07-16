@@ -462,3 +462,110 @@ def test_worker_salvage_falls_back_when_retry_still_empty():
     assert out
     assert "wasn't able to produce" in out
     assert "wasn't able to produce" in buf.getvalue()
+
+
+# --- Auto-continue on output-token truncation --------------------------------
+# A turn cut off by MAX_TOKENS (reasoning + partial answer/tool call) must
+# auto-continue — feed the partial back and resume — instead of dead-ending and
+# forcing the user to type "continue". Mirrors Claude Code's output-token recovery.
+
+
+def _truncated(content=""):
+    m = AIMessage(content=content)
+    m.response_metadata = {"stop_reason": "max_tokens"}
+    return m
+
+
+def _complete(content="", tool_calls=None):
+    m = AIMessage(content=content)
+    m.response_metadata = {"stop_reason": "end_turn"}
+    if tool_calls:
+        m.tool_calls = tool_calls
+    return m
+
+
+def _continue_agent(retries=3):
+    a = _agent()
+    a._start_spinner = lambda label="Thinking": None
+    a._stop_spinner = lambda: None
+    a._max_continue_retries = retries
+    a._capture_input_tokens = lambda r: None
+    a._extract_thinking = lambda r: None
+    return a
+
+
+def test_continue_resumes_and_returns_assembled_answer():
+    # Partial visible text, then one continuation that finishes cleanly. Parts are
+    # glued directly (each is _extract_visible-stripped): a truncated stream
+    # resumes at the exact character, so a space would corrupt a split word.
+    a = _continue_agent()
+    a._stream_response = lambda *args, **kw: (_complete(content="world."), False)
+    out = a._continue_truncated_turn(
+        ["m"], _truncated("Hello "), "Hello", None, object(), {}
+    )
+    assert out is not None
+    assert out["messages"][0].content == "Helloworld."
+
+
+def test_continue_stops_early_on_tool_call():
+    # A continuation that emits a tool call is returned so the graph runs it.
+    a = _continue_agent()
+    tc = [{"name": "fs_read", "args": {"path": "x"}, "id": "1"}]
+    a._stream_response = lambda *args, **kw: (_complete(tool_calls=tc), False)
+    out = a._continue_truncated_turn(
+        ["m"], _truncated("partial"), "partial", None, object(), {}
+    )
+    assert out is not None
+    assert out["messages"][0].tool_calls == tc
+    # The partial text gathered so far is preserved on the tool-call turn.
+    assert out["messages"][0].content == "partial"
+
+
+def test_continue_loops_until_not_truncated():
+    # Two truncated continuations, then a clean finish — assembled across all.
+    a = _continue_agent(retries=5)
+    seq = [_truncated("B"), _truncated("C"), _complete(content="D")]
+    calls = {"n": 0}
+
+    def _stream(*args, **kw):
+        r = seq[calls["n"]]
+        calls["n"] += 1
+        return (r, False)
+
+    a._stream_response = _stream
+    out = a._continue_truncated_turn(["m"], _truncated("A"), "A", None, object(), {})
+    assert out["messages"][0].content == "ABCD"
+    assert calls["n"] == 3
+
+
+def test_continue_gives_up_after_cap_keeps_partial():
+    # Always truncated: after the cap, whatever was assembled is still returned
+    # (never a dead-end), so the user sees partial progress, not a blank stop.
+    a = _continue_agent(retries=2)
+    a._stream_response = lambda *args, **kw: (_truncated("more"), False)
+    out = a._continue_truncated_turn(["m"], _truncated("start"), "start", None, object(), {})
+    assert out is not None
+    assert out["messages"][0].content.startswith("startmore")
+
+
+def test_continue_returns_none_when_nothing_usable():
+    # No partial text and continuations yield nothing → None (caller falls back).
+    a = _continue_agent(retries=2)
+    a._stream_response = lambda *args, **kw: (_truncated(""), False)
+    out = a._continue_truncated_turn(["m"], _truncated(""), "", None, object(), {})
+    assert out is None
+
+
+def test_continue_handles_context_overflow_gracefully():
+    from mnemoai.client.agent.agent import _ContextOverflow
+
+    a = _continue_agent(retries=3)
+
+    def _boom(*args, **kw):
+        raise _ContextOverflow("too big")
+
+    a._stream_response = _boom
+    # Partial text exists → returned despite the overflow on continuation.
+    out = a._continue_truncated_turn(["m"], _truncated("kept"), "kept", None, object(), {})
+    assert out is not None
+    assert out["messages"][0].content == "kept"

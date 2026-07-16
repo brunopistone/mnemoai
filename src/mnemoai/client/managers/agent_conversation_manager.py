@@ -439,10 +439,6 @@ class AgentConversationManager:
         if self.count_tokens(messages) <= self.max_tokens:
             return
 
-        log_green(
-            f"Token limit exceeded ({self.count_tokens(messages)} > "
-            f"{self.max_tokens}); compacting conversation"
-        )
         keep_recent = config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)
         await self._compact(client, model, agent, keep_recent=keep_recent)
 
