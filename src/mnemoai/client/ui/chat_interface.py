@@ -688,6 +688,13 @@ class ChatInterface:
             if self.client.reflector:
                 self.client.reflect_and_learn(query)
 
+            # Auto-distill durable facts into MEMORY.md (opt-in; runs in the
+            # background so it never blocks the turn). getattr-guarded so a
+            # minimal/stub client without the method still works.
+            extract = getattr(self.client, "auto_extract_memory", None)
+            if callable(extract):
+                extract(query, response)
+
             if response == "Operation was cancelled.":
                 # Resolve the transient "(cancelling…)" line to a final state.
                 print("\033[90m⊘ Stopped\033[0m")

@@ -110,7 +110,7 @@ If you enable RAG, episodic memory, or ACE playbook refinement, also pull an emb
 ollama pull qwen3-embedding:0.6b
 ```
 
-A minimal Ollama config looks like this:
+Here is a **deliberately minimal, everything-off** Ollama config — the smallest thing that runs. This is _not_ what the first-run wizard writes: the bundled template (and the shipped [`config.yaml.example`](configuration.md#complete-example-config)) enable RAG, episodic memory, the playbook, web search, and web crawling by default. Start minimal and switch features on as you need them:
 
 ```yaml
 MODEL_ID:
@@ -130,7 +130,7 @@ ENABLE_WEB_SEARCH: false
 ENABLE_WEB_CRAWL: false
 ```
 
-For normal installs, save manual configs at `~/.mnemoai/config/config.yaml`.
+To see the full, annotated defaults instead, see the [complete example config](configuration.md#complete-example-config). For normal installs, save manual configs at `~/.mnemoai/config/config.yaml`.
 
 ## 6. Where config files live
 

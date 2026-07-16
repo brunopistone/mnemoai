@@ -9,6 +9,34 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-07-16
+
+### Added
+
+- **Background memory auto-extraction (opt-in).** After each turn, if
+  `ENABLE_MEMORY_AUTO_EXTRACTION` is on (default **off**), a background pass
+  distills durable facts from the exchange and writes them to `MEMORY.md`
+  automatically — the auto-learning counterpart to the model calling the `memory`
+  tool itself. It runs on a daemon thread (never blocks the turn), makes one
+  isolated model call that doesn't touch the conversation state
+  (`client._invoke_model_once`), and applies the returned JSON `add`/`replace`
+  ops through `MemoryStore` (so the char cap + dedup still apply). It's gated
+  behind its own toggle because, unlike the tool path, it writes **without** a
+  confirmation prompt — though it can only add/consolidate entries in `MEMORY.md`.
+  New `MEMORY_EXTRACTION_PROMPT` (four-kind taxonomy + "what not to save"), and
+  `client.auto_extract_memory` wired at turn end. Storage is unchanged (still one
+  bounded flat file).
+
+### Changed
+
+- **New prompts reach existing installs.** `Config._load_prompts` now layers the
+  bundled package `prompts.yaml` underneath the user's file (user keys win,
+  missing keys fall back to the bundle). A user's `prompts.yaml` is seeded once
+  and never overwritten, so previously a prompt added in a release wouldn't
+  resolve on an existing install; now it does, while any prompt the user
+  customized still takes precedence. (This is what lets the new
+  `MEMORY_EXTRACTION_PROMPT` work on upgrade without re-copying the file.)
+
 ## [1.3.0] — 2026-07-16
 
 ### Added

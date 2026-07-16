@@ -165,16 +165,38 @@ class Config:
         Prompts are kept separate from configuration: ``config.yaml`` holds
         settings, ``prompts.yaml`` holds every model-facing prompt. If a legacy
         ``config.yaml`` still carries prompt keys, warn once — they're ignored.
+
+        The bundled package ``prompts.yaml`` is loaded first as a **fallback
+        layer**, then the user's file is merged on top (user keys win). So a NEW
+        prompt shipped in a release resolves on an EXISTING install — whose
+        ``prompts.yaml`` was seeded once and is never overwritten — without the
+        user having to re-copy the file, while any prompt they DID customize still
+        takes precedence.
         """
+        merged: dict = {}
+
+        # Layer 1: bundled defaults (so new keys reach existing installs).
+        pkg_prompts = Path(os.path.dirname(__file__)) / "prompts.yaml"
+        if pkg_prompts.is_file():
+            try:
+                with open(pkg_prompts, "r") as f:
+                    merged = yaml.safe_load(f) or {}
+            except (OSError, yaml.YAMLError) as e:
+                logger.debug(f"Could not load bundled prompts fallback: {e}")
+
+        # Layer 2: the user's resolved prompts.yaml (overrides the defaults). When
+        # it resolves to the bundled copy itself (fresh checkout), this is a no-op.
         prompts_path = self._resolve_prompts_path()
         if prompts_path is not None:
             try:
                 with open(prompts_path, "r") as f:
-                    self._prompts_data = yaml.safe_load(f) or {}
+                    user_prompts = yaml.safe_load(f) or {}
+                merged.update(user_prompts)
                 logger.debug(f"Loaded prompts from {prompts_path}")
             except (FileNotFoundError, yaml.YAMLError) as e:
                 print(f"Error loading prompts file ({prompts_path}): {e}")
-                self._prompts_data = {}
+
+        self._prompts_data = merged
 
         # One-time migration nudge: prompt keys in config.yaml are now ignored.
         stale = [k for k in self._PROMPT_KEYS if k in self._config_data]

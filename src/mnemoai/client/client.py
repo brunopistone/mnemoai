@@ -527,6 +527,134 @@ class LangGraphClient:
         except Exception as e:
             logger.error(f"Reflection failed: {e}")
 
+    def auto_extract_memory(self, query: str, response: str) -> None:
+        """Distill durable facts from the last exchange into MEMORY.md, in the
+        background (the auto-learning counterpart to the model calling the
+        ``memory`` tool itself).
+
+        Opt-in via ``ENABLE_MEMORY_AUTO_EXTRACTION`` (default off): unlike the
+        ``memory`` tool, this writes WITHOUT a confirmation prompt, so it's gated
+        behind its own toggle and confined to ``MEMORY.md`` (it can only add /
+        consolidate curated facts, never touch anything else). Runs on a daemon
+        thread so the turn-end path doesn't block the UI on an extra model call.
+        No-op when memory or the toggle is disabled, or the model isn't ready.
+        """
+        if not config.get("ENABLE_MEMORY", True):
+            return
+        if not config.get("ENABLE_MEMORY_AUTO_EXTRACTION", False):
+            return
+        if not self.model or not query or not response:
+            return
+
+        t = threading.Thread(
+            target=self._auto_extract_memory_worker,
+            args=(query, response),
+            daemon=True,
+        )
+        t.start()
+
+    def _auto_extract_memory_worker(self, query: str, response: str) -> None:
+        """Background worker for :meth:`auto_extract_memory` (see its docstring)."""
+        from mnemoai.client.memory.memory_store import MemoryError, MemoryStore
+
+        try:
+            prompt_template = config.prompt("MEMORY_EXTRACTION_PROMPT")
+            if not prompt_template:
+                return  # prompt unavailable → silently skip
+
+            store = MemoryStore()
+            existing = store.read().strip() or "(empty)"
+            exchange = f"User: {query}\n\nAssistant: {response}"
+            prompt = prompt_template.format(
+                existing_memory=existing, exchange=exchange
+            )
+
+            raw = self._invoke_model_once(prompt)
+            ops = self._parse_memory_ops(raw)
+            if not ops:
+                return
+
+            applied = 0
+            for op in ops:
+                action = str(op.get("action", "")).strip().lower()
+                try:
+                    if action == "add" and op.get("text"):
+                        store.add(str(op["text"]).strip())
+                        applied += 1
+                    elif action == "replace" and op.get("old_text") and op.get("text"):
+                        store.replace(str(op["old_text"]), str(op["text"]).strip())
+                        applied += 1
+                except MemoryError as e:
+                    # Cap reached or ambiguous match — skip this op, keep the rest.
+                    logger.debug(f"Auto-memory op skipped: {e}")
+            if applied:
+                logger.debug(f"Auto-memory: applied {applied} operation(s)")
+        except Exception as e:
+            logger.error(f"Auto memory extraction failed: {e}")
+
+    def _invoke_model_once(self, prompt: str) -> str:
+        """Run a single, isolated model call for ``prompt`` and return its text.
+
+        Used for background side-tasks (memory extraction) — deliberately does NOT
+        touch the agent's conversation state. Supports both the LangChain
+        (``invoke``) and Strands (``stream``) model shapes.
+        """
+        try:
+            from langchain_core.messages import HumanMessage
+
+            if hasattr(self.model, "invoke"):
+                result = self.model.invoke([HumanMessage(content=prompt)])
+                return str(getattr(result, "content", result))
+        except Exception as e:
+            logger.debug(f"LangChain single-invoke failed ({e}); trying stream")
+
+        # Strands fallback: drain the stream into text.
+        try:
+            text = ""
+
+            async def _run() -> str:
+                nonlocal text
+                async for event in self.model.stream(
+                    [{"role": "user", "content": [{"text": prompt}]}]
+                ):
+                    delta = (
+                        event.get("contentBlockDelta", {})
+                        .get("delta", {})
+                        .get("text")
+                    )
+                    if delta:
+                        text += delta
+                return text
+
+            return asyncio.run(_run())
+        except Exception as e:
+            logger.debug(f"Single model invoke failed: {e}")
+            return ""
+
+    @staticmethod
+    def _parse_memory_ops(raw: str) -> list:
+        """Parse the extractor's reply into a list of memory-op dicts.
+
+        Tolerant: strips code fences, extracts the outermost JSON array, and
+        returns [] on anything malformed (a background task must never raise).
+        """
+        if not raw:
+            return []
+        text = raw.strip()
+        # Strip ```json … ``` fences if the model added them despite instructions.
+        if text.startswith("```"):
+            text = text.split("```", 2)[1] if text.count("```") >= 2 else text
+            if text.lstrip().startswith("json"):
+                text = text.lstrip()[4:]
+        start, end = text.find("["), text.rfind("]")
+        if start == -1 or end == -1 or end <= start:
+            return []
+        try:
+            ops = json.loads(text[start : end + 1])
+        except (json.JSONDecodeError, ValueError):
+            return []
+        return [op for op in ops if isinstance(op, dict)] if isinstance(ops, list) else []
+
     def _inject_memory_context(self) -> str:
         """Curated MEMORY.md contents wrapped for the system prompt (a frozen
         snapshot injected once at session start); "" when disabled or empty."""
