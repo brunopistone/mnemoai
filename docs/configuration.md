@@ -2,6 +2,22 @@
 
 ## 🔧 Configuration
 
+### Complete example config
+
+The fragments below show one section at a time. For a full, coherent file you can copy and trim, use the annotated examples that ship in the repo (and are seeded to `~/.mnemoai/config/` on first run):
+
+- **[`config.yaml.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.example)** — local Ollama setup (chat + vision + embeddings + RAG + memory), the default the wizard is modeled on.
+- **[`config.yaml.bedrock.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.bedrock.example)** — Amazon Bedrock setup.
+- **[`config.yaml.bedrock.mantle.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.bedrock.mantle.example)** — Bedrock Mantle setup.
+
+Copy one and edit it:
+
+```bash
+cp ~/.mnemoai/config/config.yaml.example ~/.mnemoai/config/config.yaml
+```
+
+The rest of this page is the per-section reference for tuning that file.
+
 ### Model Configuration
 
 The assistant supports multiple model types:
@@ -412,6 +428,30 @@ PROFILE:
   USE_PROFILING: true # Enable automatic user profiling
 ```
 
+### Environment variables
+
+Mnemo AI reads a handful of environment variables. Provider API keys can be set either in your shell or, more conveniently, under the config `ENV:` block — every key there is exported as an environment variable at startup.
+
+| Variable                     | Purpose                                                    | Notes                                                                         |
+| ---------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `MNEMOAI_CONFIG`             | Explicit path to `config.yaml`                             | Highest-priority config location; overrides the normal resolution order       |
+| `MNEMOAI_HOME`               | Override the app home (default `~/.mnemoai`)               | Moves config, prompts, plans, tasks, and per-profile/per-model state together |
+| `MNEMOAI_PROMPTS`            | Explicit path to `prompts.yaml`                            | Overrides the normal prompts resolution order                                 |
+| `LOG_LEVEL`                  | Log verbosity: `DEBUG` / `INFO` / `WARNING`                | Default `WARNING`; logs go to stderr                                          |
+| `OPENAI_API_KEY`             | OpenAI auth (`TYPE: openai`)                               | Or set `MODEL_ID.API_KEY`                                                     |
+| `ANTHROPIC_API_KEY`          | Anthropic auth (`TYPE: anthropic`)                         | Or set `MODEL_ID.API_KEY`                                                     |
+| `AWS_PROFILE` / `AWS_REGION` | AWS profile / region (Bedrock, Mantle, SageMaker)          | Standard boto3 chain; often set via the `ENV:` block                          |
+| `AWS_BEARER_TOKEN_BEDROCK`   | Bedrock API key for **standard** Bedrock (`TYPE: bedrock`) | Read automatically by `langchain-aws`                                         |
+| `BEDROCK_API_KEY`            | Bedrock API key for **Mantle** (`TYPE: mantle`)            | Or `MODEL_ID.API_KEY`; else a token is minted from AWS creds                  |
+| `BRAVE_API_KEY`              | Brave Search API key for web search                        | Can also be the top-level `BRAVE_API_KEY` config key                          |
+
+```yaml
+# Set provider keys/vars without touching your shell:
+ENV:
+  AWS_PROFILE: my-bedrock-profile
+  BEDROCK_API_KEY: bedrock-api-key-XXXXXXXX
+```
+
 ### Embeddings Configuration
 
 Embeddings settings are nested under the `RAG` section:
@@ -482,9 +522,22 @@ layers prevent a single oversized turn from breaking the loop:
    with a clear message and compacts for the next turn instead of retrying the
    same oversized prompt in a loop.
 
-### System Prompt
+### Prompts (`prompts.yaml`)
 
-The system prompt lives in **`prompts.yaml`** (a sibling of `config.yaml`, in the same `config/` directory — all model-facing prompts live there, separate from configuration). Customize the `SYSTEM_PROMPT` field to change the assistant's personality, instructions, and tool usage patterns. Key sections in the default prompt:
+All model-facing prompts live in **`prompts.yaml`** — a sibling of `config.yaml` in the same `config/` directory, kept separate from settings. `config.yaml` is never consulted for prompts (as of 0.8.16, prompt keys left there are ignored with a migration warning).
+
+Resolution order (first match wins): `$MNEMOAI_PROMPTS` → `~/.mnemoai/config/prompts.yaml` → the bundled package defaults.
+
+| Prompt key              | Purpose                                      | Required?                            |
+| ----------------------- | -------------------------------------------- | ------------------------------------ |
+| `SYSTEM_PROMPT`         | Core identity, tool-usage rules, behavior    | Always                               |
+| `SUMMARY_SYSTEM_PROMPT` | System prompt used during context compaction | Always                               |
+| `SUMMARY_TASK_PROMPT`   | Task instructions for summarization          | Always                               |
+| `ROUTING_PROMPT`        | Query classifier prompt                      | Only if `ENABLE_ROUTING: true`       |
+| `ORCHESTRATOR_PROMPT`   | Task-decomposition prompt                    | Only if `ENABLE_ORCHESTRATION: true` |
+| `AGGREGATOR_PROMPT`     | Worker-result synthesis prompt               | Only if `ENABLE_ORCHESTRATION: true` |
+
+A missing _required_ prompt is a hard startup error (there are no in-code fallbacks) — copy the default from the bundled `prompts.yaml`. Customize `SYSTEM_PROMPT` to change the assistant's personality, instructions, and tool-usage patterns. Key sections in the default prompt:
 
 - `<identity>`: Basic identity and core principles
 - `<reasoning_discipline>`: Thinking rules and loop detection

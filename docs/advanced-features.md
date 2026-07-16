@@ -8,13 +8,13 @@ When enabled, the assistant classifies each query before processing it and route
 
 **Categories:**
 
-| Route       | Description                                 | Tools Available                                      |
-| ----------- | ------------------------------------------- | ---------------------------------------------------- |
-| `simple_qa` | Greetings, explanations, general knowledge  | None (direct LLM answer)                             |
-| `code`      | File ops, code editing, git, shell commands | fs_read, fs_write, file_edit, bash, git, search, etc |
-| `research`  | Web search, URL fetching                    | web_search, web_crawler                              |
-| `knowledge` | Document reading, indexing, RAG queries     | pdf/csv/docx/json readers, RAG tools, fs_read        |
-| `full`      | Multi-category or ambiguous tasks           | All tools (fallback)                                 |
+| Route       | Description                                 | Tools Available                                              |
+| ----------- | ------------------------------------------- | ------------------------------------------------------------ |
+| `simple_qa` | Greetings, explanations, general knowledge  | None (direct LLM answer)                                     |
+| `code`      | File ops, code editing, git, shell commands | fs_read, fs_write, file_edit, execute_bash, git, search, etc |
+| `research`  | Web search, URL fetching                    | web_search, web_crawler                                      |
+| `knowledge` | Document reading, indexing, RAG queries     | pdf/csv/docx/json readers, RAG tools, fs_read                |
+| `full`      | Multi-category or ambiguous tasks           | All tools (fallback)                                         |
 
 **How it works:**
 
@@ -198,18 +198,21 @@ A small, agent-curated markdown file the assistant maintains itself to remember 
 
 **How it differs from Episodic Memory:** persistent memory is a curated set of facts that is **always** in context, whereas episodic memory is a store of past task completions **retrieved by similarity** per query. The two complement each other (and the ACE Playbook, which stores tool strategies).
 
+**Auto-extraction (optional).** By default the assistant only writes to `MEMORY.md` when it decides to call the `memory` tool mid-turn. Enable `ENABLE_MEMORY_AUTO_EXTRACTION` to also run a **background pass after every turn** that distills durable facts from the exchange and writes them automatically — the auto-learning counterpart to the tool. It's **off by default** because, unlike the tool, it writes **without** a confirmation prompt (it can only add/consolidate entries in `MEMORY.md`, nothing else), and it costs one extra background model call per turn. The extraction runs on a daemon thread, so it never blocks your turn.
+
 **Command:** Run `/memory` to view the current memory, or `/memory clear` to wipe it (with a y/N confirm).
 
 **Configuration:**
 
 ```yaml
 ENABLE_MEMORY: true # Master toggle for the memory tool + injection
-REQUIRE_MEMORY_CONFIRMATION: false # Auto-saves like Hermes; set true to require y/N before each memory write
+REQUIRE_MEMORY_CONFIRMATION: false # Auto-saves; set true to require y/N before each memory write
+ENABLE_MEMORY_AUTO_EXTRACTION: false # Background turn-end auto-save (writes without a prompt); off by default
 MEMORY:
   MAX_CHARS: 2200 # Hard cap — forces consolidation when exceeded
 ```
 
-`REQUIRE_MEMORY_CONFIRMATION` defaults to `false` (the agent auto-saves). Set it to `true` to gate each memory write behind a y/N prompt, reusing the same client-side confirmation gate as bash/file writes.
+`REQUIRE_MEMORY_CONFIRMATION` defaults to `false` (the agent auto-saves when it calls the tool). Set it to `true` to gate each tool-driven memory write behind a y/N prompt, reusing the same client-side confirmation gate as bash/file writes. `ENABLE_MEMORY_AUTO_EXTRACTION` is independent: it governs the background turn-end distiller, which writes directly (no prompt) and only into `MEMORY.md`.
 
 **Storage Location:** `~/.mnemoai/{profile}/MEMORY.md`
 

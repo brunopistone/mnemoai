@@ -43,6 +43,7 @@ nav:
   - Productivity Tools: productivity.md
   - Architecture: architecture-overview.md
   - Development: development.md
+  - Troubleshooting: development.md#troubleshooting
 
 markdown_extensions:
   - admonition

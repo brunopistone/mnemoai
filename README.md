@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
+A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
 
 ▶️ **[Watch the demo](https://github.com/brunopistone/mnemoai/blob/main/images/assistant-demo.gif)**
 
@@ -38,7 +38,7 @@ On first run, if no config is found, an interactive configurator launches and wa
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, OpenAI, Anthropic (Claude), Amazon SageMaker AI, LiteLLM (100+ providers)
+- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), Amazon SageMaker AI, LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG**: Automatic document indexing and semantic (hybrid) search
 - **🧠 User Profile Learning**: Personalized responses learned from interactions

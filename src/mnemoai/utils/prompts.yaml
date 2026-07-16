@@ -291,3 +291,40 @@ SUMMARY_TASK_PROMPT: |
   When summarizing the conversation focus on typescript code changes and also remember the mistakes you made and how you fixed them.
   # Summary instructions
   When you are using compact - please focus on test output and code changes. Include file reads verbatim.
+
+MEMORY_EXTRACTION_PROMPT: |
+  You are maintaining a durable, cross-session memory for an AI coding assistant.
+  Review the latest exchange (the user's message, the assistant's reply, and any
+  tool activity) and decide whether it revealed anything worth remembering for
+  FUTURE sessions. Then emit the memory operations to apply — nothing else.
+
+  Save only durable, high-signal facts, tagged with one of four kinds:
+  - [user]      — who the user is: role, expertise, stable preferences.
+  - [feedback]  — how to work: corrections and confirmed approaches, with the WHY.
+  - [project]   — ongoing work, goals, or constraints not derivable from the code
+                  or git history. Convert relative dates to absolute.
+  - [reference] — pointers to external resources (URLs, dashboards, tickets).
+
+  Do NOT save:
+  - Trivia or one-off details that won't matter next session.
+  - Anything easily re-discovered (file contents, command output, git log).
+  - Code structure, past fixes, or conventions already in the codebase / CLAUDE.md.
+  - Raw data dumps or long narratives — store the conclusion, not the log.
+  - Anything already present in EXISTING MEMORY below (no duplicates or restatements).
+
+  Prefer consolidating into an existing entry (replace) over adding a near-duplicate.
+  Be conservative: most turns warrant NO change. When in doubt, save nothing.
+
+  EXISTING MEMORY (entries are separated by a --- rule; may be empty):
+  ---
+  {existing_memory}
+  ---
+
+  LATEST EXCHANGE:
+  {exchange}
+
+  Respond with ONLY a JSON array of operations (no prose, no code fences). Each
+  operation is one of:
+    {{"action": "add", "text": "[kind] the fact"}}
+    {{"action": "replace", "old_text": "unique substring of the entry to update", "text": "[kind] the updated fact"}}
+  Return [] if nothing is worth saving. Keep each entry a single dense line.

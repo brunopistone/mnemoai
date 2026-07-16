@@ -141,7 +141,7 @@ Shared utilities and configuration.
 
 1. **User Input** → `ChatInterface` → `LangGraphClient`
 2. **Client** → Invokes LangGraph agent with MCP tools
-3. **Classifier** → Routes query to a category (simple*qa, code, research, knowledge, full) (\_if routing enabled*)
+3. **Classifier** → Routes query to a category (`simple_qa`, `code`, `research`, `knowledge`, `full`) (_if routing enabled_)
 4. **Orchestrator** → For `full` tasks: decomposes into subtasks, spawns workers, aggregates results (_if orchestration enabled_)
 5. **LangGraph** → Executes agent node with route-specific tools, decides to use tools
 6. **MCP Server** → Executes tool (e.g., fs_read, web_search, RAG)
