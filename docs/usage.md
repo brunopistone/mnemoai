@@ -126,6 +126,7 @@ Add a directory under `~/.mnemoai/skills/`, with a `SKILL.md` inside:
 ---
 name: Conventional Commit Message
 description: Use when the user asks to write or improve a git commit message...
+argument_hint: the staged changes to describe
 ---
 
 # Conventional Commit Message
@@ -138,6 +139,12 @@ Step-by-step instructions the model follows once this skill is loaded...
 - Write the **description "pushy"** — start with _"Use when the user…"_ and include
   the phrases a user would actually say. The model decides whether to trigger a
   skill from this description, and tends to under-trigger if it's vague.
+- **`argument_hint`** (optional) is a short phrase naming what the skill expects
+  the model to gather before invoking it; it shows in the always-on skill listing
+  as `(expects: …)`. Omit it for skills that need no specific input. Other
+  frontmatter keys are tolerated but ignored. The whole listing is size-bounded, so
+  with many skills installed the overflow collapses into a `+N more` line (all
+  skills remain loadable — the listing is discovery only).
 - Skills are seeded on first run: a `commit-message` example to copy, a
   **`skill-creator`** skill (just ask the assistant to "create a skill for X" and
   it writes a well-formed `SKILL.md` for you), and a **`steering-creator`** skill

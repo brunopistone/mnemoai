@@ -481,6 +481,20 @@ class LangGraphClient:
             current = max(estimated, actual)
             if current <= high_water:
                 return False
+            # Cheapest layer first: evict OLD tool-result bodies (no LLM call). If
+            # that alone brings the estimate back under the high-water mark, skip
+            # the expensive full summary entirely.
+            if mgr.evict_old_tool_results(self.agent):
+                estimated = mgr.count_tokens(
+                    messages_to_dict_list(self.agent.messages)
+                )
+                if estimated <= high_water:
+                    log_green(
+                        f"Context over {high_water} tokens (~{current}); "
+                        f"evicted old tool output (~{estimated} now)."
+                    )
+                    return True
+                current = estimated
             log_green(
                 f"Context over {high_water} tokens (~{current}); compacting mid-task."
             )
@@ -535,7 +549,7 @@ class LangGraphClient:
             format_available_skills,
         )
 
-        return format_available_skills(SkillStore().list_metadata())
+        return format_available_skills(SkillStore().list_skills())
 
     def _get_playbook_context(self) -> str:
         """Formatted general playbook strategies for the system prompt, or ""."""
@@ -633,7 +647,10 @@ class LangGraphClient:
             "Investigate the task thoroughly with these read-only tools. When "
             "your plan is ready, call the exit_plan_mode tool with the full plan "
             "(as markdown) in its `plan` argument — this presents it to the user "
-            "for approval. Do NOT just write the plan as a normal message. If "
+            "for approval. Do NOT just write the plan as a normal message. If the "
+            "plan will run specific shell commands during execution (tests, "
+            "builds, installs), list them in the `allowed_bash` argument so the "
+            "user pre-approves them and they don't prompt one-by-one. If "
             "anything is ambiguous, ASK clarifying questions rather than "
             "guessing.\n"
             "On approval, plan mode turns off and you execute the approved plan. "

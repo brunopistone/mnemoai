@@ -28,7 +28,7 @@ def register_plan_mode_exit_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def exit_plan_mode(plan: str) -> str:
+    async def exit_plan_mode(plan: str, allowed_bash: list[str] = None) -> str:
         """Present your finished plan for approval and exit read-only plan mode.
 
         Call this the MOMENT your plan is ready while plan mode is active — pass
@@ -44,6 +44,12 @@ def register_plan_mode_exit_tools(mcp: FastMCP) -> None:
 
         Args:
             plan: The complete implementation plan, as markdown.
+            allowed_bash: Optional list of shell commands the plan will run during
+                execution (e.g. ``["pytest", "npm run build"]``). When the user
+                approves the plan they also pre-approve these, so they run without
+                a per-command confirmation prompt. A command auto-confirms when it
+                starts with one of these entries; anything else still prompts. Omit
+                for plans that only edit files or run nothing notable.
 
         Returns:
             The user's decision (approved → proceed, or keep planning). Handled

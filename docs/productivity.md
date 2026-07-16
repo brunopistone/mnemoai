@@ -237,6 +237,11 @@ without touching anything, then you approve and it executes.
   - **n** — keep planning: stays read-only and refines the plan.
 - The approved plan is saved to `~/.mnemoai/plans/plan_<timestamp>.md` so it
   survives compaction and can be re-read later.
+- **Pre-approved commands.** A plan can declare the shell commands it will run
+  during execution (tests, builds, installs). Approving the plan pre-approves
+  them, so they run **without** a per-command `Proceed?` prompt while the plan
+  executes; anything not on the list still prompts. These pre-approvals are scoped
+  to that plan — they're cleared when you `/clear` or re-enter plan mode.
 - You can still toggle plan mode off manually with `/plan` at any time.
 
 This is enforced at the same client-side chokepoint as the action-confirmation gate,

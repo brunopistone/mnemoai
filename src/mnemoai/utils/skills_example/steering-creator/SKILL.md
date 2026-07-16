@@ -44,10 +44,10 @@ Write it as direct instructions to the assistant. Favor these principles:
   beats "format code properly." Concrete rules are followable; platitudes aren't.
 - **Structure for scanning.** Group with short headers and bullets (Commands,
   Code style, Conventions, Do / Don't). Dense prose is harder to follow.
-- **Explain the *why* for non-obvious rules** — a rule the assistant understands
+- **Explain the _why_ for non-obvious rules** — a rule the assistant understands
   is followed more reliably than a bare "ALWAYS/NEVER."
 - **Only durable, always-true facts.** One-off task details belong in the
-  conversation; multi-step procedures belong in a *skill*; learned facts the
+  conversation; multi-step procedures belong in a _skill_; learned facts the
   agent should track itself belong in MEMORY.md. Don't duplicate those here.
 - **Keep it lean.** If a section grows large (full API docs, long style guides),
   summarize the rule here and point to the file that has the detail.
@@ -60,17 +60,21 @@ Adapt to the project; drop sections that don't apply.
 # Project: <name>
 
 ## Commands
+
 - Build: <cmd>
 - Test: <cmd>
 - Lint/format: <cmd>
 
 ## Code style
+
 - <language/version, indentation, naming, imports, typing…>
 
 ## Conventions
+
 - <branch/commit rules, PR process, where things go>
 
 ## Do / Don't
+
 - Do: <the few rules that matter most>
 - Don't: <common mistakes to avoid here>
 ```

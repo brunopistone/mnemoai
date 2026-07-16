@@ -9,6 +9,63 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-07-16
+
+### Added
+
+- **Tool-result eviction — a cheaper compaction layer that runs before the LLM
+  summary.** When history crosses the high-water mark, the agent now first shrinks
+  the bodies of **old** tool results (the grep/read/web dumps outside the recent
+  window that carry most of the context but are rarely needed verbatim after the
+  model has acted on them) to a short head plus an eviction marker — with **no
+  model call**. If that alone brings the estimate back under budget, the expensive
+  full summarization is skipped entirely. Recent turns stay verbatim and **no
+  message is dropped** (only content is trimmed), so tool-call/result pairing is
+  preserved and no provider rejects the next turn. New method
+  `AgentConversationManager.evict_old_tool_results`, wired as the first pass in
+  `client._compact_now`. Config: `LLM.TOOL_EVICTION_KEEP_RECENT` (default 8) and
+  `LLM.EVICTED_TOOL_RESULT_CHARS` (default 500; 0 disables the layer). This makes
+  compaction layered — cheap eviction first, full summary only when eviction isn't
+  enough — the biggest structural improvement to the context handling reworked
+  across 1.2.x.
+- **Skills: optional `argument_hint` frontmatter + a bounded tier-1 listing.** A
+  skill's `SKILL.md` frontmatter may now carry an `argument_hint` (a short phrase
+  naming what the skill expects, e.g. "a PR number"); it renders in the always-on
+  `<available_skills>` listing as `(expects: …)` so the model knows what to gather
+  before calling `use_skill`. The whole listing is also now bounded in total size
+  (`_MAX_LISTING_CHARS`, ~4000 chars): with a large skills library the overflow
+  collapses into a `… (+N more — see /skills)` line, so many installed skills can't
+  dominate the system prompt injected every turn. The bundled skill-creator skill
+  documents the new key.
+- **Plan mode: pre-approved shell commands.** `exit_plan_mode` now takes an
+  optional `allowed_bash` list — the commands the plan will run during execution
+  (tests, builds, installs). Approving the plan pre-approves them, so during
+  execution they run **without** the per-command `Proceed?` confirmation (a command
+  auto-confirms when it equals or prefix-matches an entry, e.g. `pytest` pre-approves
+  `pytest tests/unit`); anything else still prompts. The pre-approvals are scoped to
+  the approved plan — cleared on `/clear` and whenever plan mode is re-entered. The
+  plan-mode reminder now tells the model to declare these commands.
+
+### Changed
+
+- **Bundled examples reach existing installs on upgrade.** The `*.example`
+  reference files (`config.yaml*.example`, `mcp.json.example`) are now refreshed
+  from the package when they differ (they're read-only reference, never loaded as
+  config), so a newly-documented key — e.g. the eviction knobs above — appears in
+  an already-installed user's examples. Bundled example skills additionally get an
+  in-place `SKILL.md` refresh when the installed copy is **pristine** (byte-identical
+  to a version we shipped, tracked by hash), so doc/frontmatter updates (e.g. the
+  new `argument_hint`) reach existing installs — while a user-edited skill is never
+  touched. The live `config.yaml` / `mcp.json` / `prompts.yaml` and user-authored
+  skills are still only created when absent and never overwritten.
+- **Curated memory: a four-kind tagging convention.** The `memory` tool now guides
+  the model to tag each entry with its kind — `[user]` (who the user is),
+  `[feedback]` (how to work, with the why), `[project]` (ongoing work/constraints,
+  absolute dates), `[reference]` (external pointers) — and sharpens the "what not to
+  save" rule to exclude anything the repo/git/CLAUDE.md already records. Storage is
+  unchanged (still one bounded `MEMORY.md`); this is prompt guidance that yields
+  more structured, higher-signal, less redundant entries.
+
 ## [1.2.2] — 2026-07-16
 
 ### Fixed
@@ -274,7 +331,7 @@ slash-commands + `mnemoai` console command, and the `mnemoai-assistant` dist /
   detail, which prompt_toolkit clipped to its first line — rendering a confusing
   truncated `▶ Run shell command?  python3 -c "` under a duplicated options hint.
   Now the pinned line is compact (`▶ <question>   [y = yes · n = no · a = allow
-  all]`), the full command/plan echoes to scrollback above it just once, and the
+all]`), the full command/plan echoes to scrollback above it just once, and the
   pinned line styles the question in the accent color with the `[y · n · a]`
   keys dimmed — so the eye separates the prompt from the actionable keys. Applies
   to both the shell/file/memory confirmation and the plan-approval prompt.

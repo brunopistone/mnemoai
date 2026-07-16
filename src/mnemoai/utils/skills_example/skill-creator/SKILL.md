@@ -33,33 +33,40 @@ Skills use **three-tier progressive disclosure**, so keep each tier lean:
 ## Steps to create a skill
 
 1. **Capture intent.** Confirm with the user: what should the skill let the
-   assistant do, *when* should it trigger (the phrases a user would actually
+   assistant do, _when_ should it trigger (the phrases a user would actually
    say), and what's the expected output? If a workflow already happened in this
    conversation, extract the steps, tools, and corrections from it.
 
 2. **Choose a directory name** — lowercase kebab-case (`commit-message`,
    `release-checklist`). This is the canonical id the assistant loads it by.
 
-3. **Write the frontmatter.** Required keys: `name` and `description`.
+3. **Write the frontmatter.** Required keys: `name` and `description`. One
+   optional key is used: `argument_hint`.
 
    ```
    ---
    name: Release Checklist
    description: Use when the user asks to cut a release, publish a version, or
      tag a build. Runs the project's release steps in order.
+   argument_hint: the version to release
    ---
    ```
 
    - **The `description` is the entire trigger** — the model decides whether to
      load the skill from this alone. Write it in the **third person** and make it
      **pushy**: start with "Use when the user…" and include concrete phrases and
-     synonyms they'd actually type. Models tend to *under*-trigger skills, so err
+     synonyms they'd actually type. Models tend to _under_-trigger skills, so err
      toward broad, explicit triggers. Keep it under ~1024 characters and avoid
      `<`/`>` angle brackets.
+   - **`argument_hint`** (optional) is a short phrase naming what the skill
+     expects the model to gather before invoking it (e.g. "a PR number", "the
+     target file"). It is shown next to the skill in the always-on listing as
+     `(expects: …)`. Omit it for skills that need no specific input. Any other
+     frontmatter keys are tolerated but ignored.
    - Avoid putting "when to use" guidance in the body — it belongs in the
      description, the only part always in context.
 
-4. **Write the body** as instructions for *another assistant instance* to follow:
+4. **Write the body** as instructions for _another assistant instance_ to follow:
    - Use **imperative/infinitive** form ("Run the tests", not "You should run").
    - Explain the **why** behind steps rather than piling on rigid "ALWAYS/NEVER"
      rules — a model that understands the intent follows it better.

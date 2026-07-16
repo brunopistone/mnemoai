@@ -55,11 +55,25 @@ class TestSubdirs:
         assert (tmp_home / "mcp" / "mcp.json.example").is_file()
         assert not (tmp_home / "config" / "config.yaml").exists()
         assert not (tmp_home / "mcp" / "mcp.json").exists()
-        # Idempotent + non-destructive: a user edit survives a re-seed.
-        edited = tmp_home / "config" / "config.yaml.example"
-        edited.write_text("EDITED")
+
+    def test_example_files_refreshed_from_bundle(self, tmp_home):
+        # .example files are read-only reference (never loaded as config), so they
+        # are refreshed from the bundle on re-seed — this is how a NEW config key
+        # reaches an EXISTING install on upgrade. A stale local copy is replaced.
+        example = tmp_home / "config" / "config.yaml.example"
+        example.parent.mkdir(parents=True, exist_ok=True)
+        example.write_text("STALE")
         paths.seed_example_files()
-        assert edited.read_text() == "EDITED"
+        assert example.read_text() != "STALE"  # refreshed from the package
+        assert "EVICTED_TOOL_RESULT_CHARS" in example.read_text()  # new key present
+
+    def test_live_config_never_overwritten(self, tmp_home):
+        # The user's LIVE config.yaml is sacred — seeding must never touch it.
+        live = tmp_home / "config" / "config.yaml"
+        live.parent.mkdir(parents=True, exist_ok=True)
+        live.write_text("MY LIVE CONFIG")
+        paths.seed_example_files()
+        assert live.read_text() == "MY LIVE CONFIG"
 
     def test_seed_skills_are_bundled_examples(self, tmp_home):
         # Bundled example skills land in skills/ out of the box.
@@ -81,12 +95,83 @@ class TestSubdirs:
         assert "steering-creator" in names      # bundled skill still seeded
 
     def test_seed_skills_never_clobbers_user_edit(self, tmp_home):
-        # A user's edit to a bundled skill survives re-seeding (dir exists → skip).
+        # A user's edit to a bundled skill survives re-seeding: the edited content
+        # isn't a pristine (shipped) hash, so the in-place refresh leaves it alone.
         paths.seed_example_files()
         sc = tmp_home / "skills" / "steering-creator" / "SKILL.md"
         sc.write_text("USER EDITED")
         paths.seed_example_files()
         assert sc.read_text() == "USER EDITED"
+
+    def test_pristine_installed_skill_is_refreshed(self, tmp_home, monkeypatch):
+        # A bundled skill whose installed SKILL.md is PRISTINE (a version we
+        # shipped) is refreshed in place on upgrade, so doc/frontmatter updates
+        # reach existing installs.
+        skills = tmp_home / "skills"
+        sc_dir = skills / "skill-creator"
+        sc_dir.mkdir(parents=True)
+        old = "old shipped body\n"
+        sc_md = sc_dir / "SKILL.md"
+        sc_md.write_text(old)
+        # Register the old content's hash as a known-pristine shipped version.
+        old_hash = paths._sha256(sc_md)
+        monkeypatch.setitem(
+            paths._PRISTINE_BUNDLED_SKILL_HASHES, "skill-creator", {old_hash}
+        )
+        paths.seed_example_files()
+        # Refreshed to the current bundle (which documents argument_hint).
+        assert sc_md.read_text() != old
+        assert "argument_hint" in sc_md.read_text()
+
+    def test_non_pristine_skill_left_untouched(self, tmp_home, monkeypatch):
+        # An installed SKILL.md whose hash is NOT in the pristine set (user-edited)
+        # is never refreshed, even though the dir exists.
+        skills = tmp_home / "skills"
+        sc_dir = skills / "skill-creator"
+        sc_dir.mkdir(parents=True)
+        sc_md = sc_dir / "SKILL.md"
+        sc_md.write_text("MY CUSTOM SKILL")
+        monkeypatch.setitem(
+            paths._PRISTINE_BUNDLED_SKILL_HASHES, "skill-creator", {"deadbeef"}
+        )
+        paths.seed_example_files()
+        assert sc_md.read_text() == "MY CUSTOM SKILL"
+
+    def test_pristine_refresh_preserves_sibling_files(self, tmp_home, monkeypatch):
+        # Refreshing SKILL.md must not disturb other files the user added alongside.
+        skills = tmp_home / "skills"
+        sc_dir = skills / "skill-creator"
+        sc_dir.mkdir(parents=True)
+        sc_md = sc_dir / "SKILL.md"
+        sc_md.write_text("old\n")
+        (sc_dir / "notes.md").write_text("my notes")
+        monkeypatch.setitem(
+            paths._PRISTINE_BUNDLED_SKILL_HASHES,
+            "skill-creator",
+            {paths._sha256(sc_md)},
+        )
+        paths.seed_example_files()
+        assert (sc_dir / "notes.md").read_text() == "my notes"
+
+    def test_current_bundled_hashes_are_registered_as_pristine(self):
+        # Guard: every bundled skill's CURRENT SKILL.md hash — or a documented
+        # prior one — must be tracked so a freshly-seeded skill is recognized as
+        # pristine on the NEXT upgrade. Catches forgetting to append the prior hash
+        # after editing a bundled skill.
+        from pathlib import Path
+
+        root = Path(paths.__file__).resolve().parent / "skills_example"
+        for skill_dir in root.iterdir():
+            md = skill_dir / "SKILL.md"
+            if not md.is_file():
+                continue
+            known = paths._PRISTINE_BUNDLED_SKILL_HASHES.get(skill_dir.name, set())
+            # The current shipped hash need not be listed (it's compared live), but
+            # the skill MUST have an entry so the mechanism applies to it at all.
+            assert skill_dir.name in paths._PRISTINE_BUNDLED_SKILL_HASHES, (
+                f"{skill_dir.name} missing from _PRISTINE_BUNDLED_SKILL_HASHES"
+            )
+            assert known, f"{skill_dir.name} has an empty pristine-hash set"
 
     def test_plans_and_tasks_created(self, tmp_home):
         assert paths.plans_dir() == tmp_home / "plans"

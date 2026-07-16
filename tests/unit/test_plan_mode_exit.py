@@ -56,6 +56,58 @@ class TestExitPlanModeVerdict:
         assert "EDITED plan" in out
 
 
+class TestPreApprovedBash:
+    def test_allowed_bash_registered_on_approve(self):
+        a = _agent()
+        out = a._handle_exit_plan_mode("plan", ["pytest", "npm run build"])
+        assert a._preapproved_bash == ["pytest", "npm run build"]
+        # The go-ahead message tells the model these won't prompt.
+        assert "pre-approved" in out and "pytest" in out
+
+    def test_keep_planning_does_not_register(self):
+        a = _agent()
+        a._plan_approval_ui = lambda plan: ("keep_planning", plan)
+        a._handle_exit_plan_mode("plan", ["pytest"])
+        assert getattr(a, "_preapproved_bash", []) == []
+
+    def test_blank_and_none_entries_dropped(self):
+        a = _agent()
+        a._handle_exit_plan_mode("plan", ["  ", "", "make test"])
+        assert a._preapproved_bash == ["make test"]
+
+    def test_no_allowed_bash_leaves_list_empty(self):
+        a = _agent()
+        out = a._handle_exit_plan_mode("plan")
+        assert getattr(a, "_preapproved_bash", []) == []
+        assert "pre-approved" not in out
+
+
+class TestIsPreApprovedBash:
+    def test_exact_and_prefix_match(self):
+        a = _agent()
+        a._preapproved_bash = ["pytest", "npm run build"]
+        assert a._is_preapproved_bash("pytest") is True
+        assert a._is_preapproved_bash("pytest tests/unit") is True  # prefix + space
+        assert a._is_preapproved_bash("npm run build") is True
+
+    def test_non_match_and_partial_word_rejected(self):
+        a = _agent()
+        a._preapproved_bash = ["pytest"]
+        assert a._is_preapproved_bash("rm -rf /") is False
+        # Must not match a different command that merely starts with the letters.
+        assert a._is_preapproved_bash("pytest-cov") is False
+
+    def test_empty_approvals_never_match(self):
+        a = _agent()
+        a._preapproved_bash = []
+        assert a._is_preapproved_bash("pytest") is False
+
+    def test_blank_command_never_matches(self):
+        a = _agent()
+        a._preapproved_bash = ["pytest"]
+        assert a._is_preapproved_bash("") is False
+
+
 class TestApprovePlan:
     def test_flips_flag_and_persists(self):
         c = LangGraphClient.__new__(LangGraphClient)
