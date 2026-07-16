@@ -9,6 +9,25 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.4.1] — 2026-07-16
+
+### Fixed
+
+- **An approved plan could not edit files when its execution turns re-classified
+  as a read-only route.** Query routing re-classifies **every** turn, and each
+  route binds only its tool subset — `code`/`full` bind `file_edit`/`fs_write`/
+  `execute_bash`, but `knowledge`/`research`/`simple_qa` do not. So after
+  approving a plan (e.g. from a docs-review question that classified as
+  `knowledge`), the execution turns could land on a read-only route with the
+  mutating tools unbound — the model would truthfully report it "had no write
+  tools," then find them again on a turn that happened to classify as `code`,
+  flip-flopping mid-task. Plan approval now sets `agent._execute_plan_route`,
+  which forces the **full** toolset (via `_effective_route`, consulted by
+  `_get_route_model`/`_get_route_tools`) and routes straight to the agent (not the
+  orchestrator) for the rest of the task — so an approved plan can always apply
+  itself. Same plan-scoped lifetime as the pre-approved bash (cleared on `/clear`
+  and when plan mode is re-entered).
+
 ## [1.4.0] — 2026-07-16
 
 ### Added
