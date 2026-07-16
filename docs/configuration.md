@@ -106,7 +106,7 @@ MODEL_ID:
 - The Mantle catalog (Qwen, Mistral, DeepSeek, GLM, Gemma, Claude, GPT-5.4, …) differs from standard Bedrock and varies by account/region.
 - `TYPE: mantle` works for both `MODEL_ID` (chat) and `VISION_MODEL_ID` (image description) — vision-capable models like `qwen.qwen3-vl-235b-a22b-instruct` are supported.
 - **Caveats:** Pick the right `API_PROTOCOL` per model (using the wrong one returns a 400 "does not support the '/v1/…' API" error). `anthropic` requires the `langchain-anthropic` package (in `requirements.txt`). Models like `anthropic.claude-fable-5` also require the account's data-retention mode to be `provider_data_share`, otherwise they report `unavailable`.
-- **Reasoning models need a generous `MAX_TOKENS`.** Reasoning models (e.g. Grok, GPT-5) on the `responses` protocol spend output tokens _reasoning_ before they answer. A small `MAX_TOKENS` can be consumed entirely by reasoning, leaving no answer — the agent detects this and tells you to raise `MAX_TOKENS` rather than returning an empty reply. Set it to a few thousand (e.g. `8192`) for these models.
+- **Reasoning models need a generous `MAX_TOKENS`.** Reasoning models (e.g. Grok, GPT-5, Claude with `REASONING_EFFORT`) spend output tokens _reasoning_ before they answer. If a turn is cut off by `MAX_TOKENS` mid-response, the agent **auto-continues** — it feeds the partial turn back and resumes, up to `LLM.MAX_OUTPUT_CONTINUE_RETRIES` times (default 3), so you never have to type "continue" (see [Context management](#context-management)). Still, give reasoning models real headroom — set `MAX_TOKENS` to a few thousand (e.g. `8192`), or higher for `REASONING_EFFORT: high`/`max` on a large context — so a turn can reason _and_ answer without repeatedly hitting the limit.
 
 > For **standard** Bedrock (Converse API), `ENDPOINT_URL` is also accepted on `MODEL_ID`/`VISION_MODEL_ID` with `TYPE: bedrock` to override the default endpoint.
 
@@ -474,6 +474,9 @@ LLM:
   MAX_RETRIES: 3 # Maximum retry attempts
   RETRY_DELAY: 1.0 # Seconds between retries
   RETRY_BACKOFF: 2.0 # Exponential backoff multiplier
+  MAX_OUTPUT_CONTINUE_RETRIES: 3 # Auto-continue a turn cut off by MAX_TOKENS
+  # (reasoning + answer exceeded the output
+  # budget); 0 disables. See below.
   SUMMARIZATION_THINK: false # Include thinking in summarization
   TOKEN_COUNTING:
     OLLAMA_APPROXIMATION: 1.3 # Chars-to-tokens multiplier for Ollama
@@ -521,6 +524,19 @@ layers prevent a single oversized turn from breaking the loop:
 3. **Overflow backstop** — if a request still exceeds the window, the turn ends
    with a clear message and compacts for the next turn instead of retrying the
    same oversized prompt in a loop.
+
+Those three guard the _input_ side (prompt too large). The _output_ side has its
+own recovery:
+
+4. **Output-token auto-continue** (`MAX_OUTPUT_CONTINUE_RETRIES`) — when the
+   model's response is cut off by `MODEL_ID.MAX_TOKENS` mid-turn (common with
+   `REASONING_EFFORT: high`/`max` on a large context — reasoning plus a partial
+   answer or tool call exhaust the output budget), the agent feeds the partial
+   turn back and resumes ("continue where you left off"), accumulating the answer,
+   up to this many attempts (default 3; 0 disables). It stops early when a
+   continuation finishes cleanly or emits a tool call. You never have to type
+   "continue"; if the retries are exhausted it surfaces a message to raise
+   `MAX_TOKENS`.
 
 ### Prompts (`prompts.yaml`)
 

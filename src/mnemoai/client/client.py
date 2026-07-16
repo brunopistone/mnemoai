@@ -24,7 +24,6 @@ from mnemoai.client.agent.message_codec import (
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
 from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
-    log_green,
     messages_to_dict_list,
 )
 from mnemoai.client.managers.user_profile_manager import UserProfileManager
@@ -489,15 +488,8 @@ class LangGraphClient:
                     messages_to_dict_list(self.agent.messages)
                 )
                 if estimated <= high_water:
-                    log_green(
-                        f"Context over {high_water} tokens (~{current}); "
-                        f"evicted old tool output (~{estimated} now)."
-                    )
                     return True
                 current = estimated
-            log_green(
-                f"Context over {high_water} tokens (~{current}); compacting mid-task."
-            )
         keep = 2 if force else config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)
         try:
             return asyncio.run(

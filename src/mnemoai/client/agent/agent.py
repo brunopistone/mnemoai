@@ -136,6 +136,13 @@ class LangGraphAgent:
         self._empty_response_retries = max(
             0, int(config.get("LLM", {}).get("MAX_RETRIES", 2))
         )
+        # A turn cut off by the output-token limit (reasoning + answer exceeded
+        # MAX_TOKENS) is auto-continued: the partial turn is fed back and the model
+        # resumes, so the user never has to type "continue". Capped like Claude
+        # Code's max_output_tokens recovery.
+        self._max_continue_retries = max(
+            0, int(config.get("LLM", {}).get("MAX_OUTPUT_CONTINUE_RETRIES", 3))
+        )
         # Cap one tool result so a runaway (e.g. grep_search max_results=4000)
         # can't alone overflow the context window. Defaults to 10% of the context
         # window (converted tokens->chars at ~4 chars/token), so it scales with
@@ -805,33 +812,43 @@ class LangGraphAgent:
                 thinking = self._extract_thinking(response)
                 visible = self._extract_visible(response.content)
 
-        # Turn cut short by the output-token limit before any answer (reasoning
-        # ate the whole budget). Checked BEFORE the reasoning-retry — retrying
-        # can't help when the budget is the limit. Surface an actionable message.
-        if (
-            not visible
-            and not response.tool_calls
-            and self._was_truncated_by_tokens(response)
-        ):
-            logger.warning(
-                "Model response truncated by the output-token limit before any "
-                "answer was produced — increase MODEL_ID.MAX_TOKENS (reasoning "
-                "models need headroom to reason and answer)."
-            )
-            truncated = AIMessage(
-                content=(
-                    "My response was cut off by the output-token limit before I "
-                    "could answer. This model reasons before replying, so it "
-                    "needs more room — increase `MAX_TOKENS` (e.g. via /params or "
-                    "in config.yaml) and try again."
+        # Turn cut short by the output-token limit (reasoning + a partial answer
+        # or tool call exceeded MAX_TOKENS), leaving no completed tool call. Checked
+        # BEFORE the reasoning-retry. Instead of dead-ending (which forced the user
+        # to type "continue"), AUTO-CONTINUE: feed the partial turn back and let the
+        # model resume until it finishes or we hit the retry cap. Only when the turn
+        # didn't already produce a tool call — a truncated-but-valid tool call flows
+        # to the graph, which just executes it.
+        if not response.tool_calls and self._was_truncated_by_tokens(response):
+            if self._max_continue_retries > 0:
+                continued = self._continue_truncated_turn(
+                    messages, response, visible, thinking, active_model, config
                 )
-            )
-            if thinking:
-                truncated.additional_kwargs["reasoning_content"] = thinking
-            print("\n", end="", flush=True)
-            self._stop_spinner()
-            print(truncated.content, flush=True)
-            return {"messages": [truncated], "thinking": thinking}
+                if continued is not None:
+                    return continued
+            # Continuation disabled or it produced nothing usable. If we at least
+            # have partial visible text, keep it; else surface an actionable hint.
+            if not visible:
+                logger.warning(
+                    "Model response truncated by the output-token limit and could "
+                    "not be auto-continued — increase MODEL_ID.MAX_TOKENS (reasoning "
+                    "models need headroom to reason and answer)."
+                )
+                truncated = AIMessage(
+                    content=(
+                        "My response was cut off by the output-token limit before I "
+                        "could finish, and I couldn't auto-continue. This model "
+                        "reasons before replying, so it needs more room — increase "
+                        "`MAX_TOKENS` (e.g. via /params or in config.yaml) and try "
+                        "again."
+                    )
+                )
+                if thinking:
+                    truncated.additional_kwargs["reasoning_content"] = thinking
+                print("\n", end="", flush=True)
+                self._stop_spinner()
+                print(truncated.content, flush=True)
+                return {"messages": [truncated], "thinking": thinking}
 
         # Only reasoning, no visible content: retry once with reasoning disabled.
         if thinking and not visible and not response.tool_calls:
@@ -889,6 +906,89 @@ class LangGraphAgent:
             return {"messages": [fallback], "thinking": thinking}
 
         return {"messages": [response], "thinking": thinking}
+
+    def _continue_truncated_turn(
+        self, messages, response, visible, thinking, active_model, config
+    ) -> Optional[Dict[str, Any]]:
+        """Auto-continue a turn cut off by the output-token limit.
+
+        The model ran out of output budget mid-turn (typically reasoning + a
+        partial answer). Feed the partial turn back with a short continuation
+        instruction and re-stream, accumulating visible text, up to
+        ``_max_continue_retries`` times — so the user never has to type
+        "continue". Stops early when a turn finishes cleanly (not truncated) or
+        emits a tool call (returned so the graph executes it).
+
+        Returns the state dict to return from ``_call_model``, or None if nothing
+        usable was produced (the caller then falls back to its message).
+        """
+        accumulated = visible or ""
+        convo = list(messages)
+        last_thinking = thinking
+
+        for attempt in range(self._max_continue_retries):
+            logger.debug(
+                "Output-token truncation: auto-continuing (attempt %d/%d)",
+                attempt + 1,
+                self._max_continue_retries,
+            )
+            # Hand the partial assistant turn back, then ask it to keep going. The
+            # nudge is phrased so the model resumes rather than restarts.
+            convo = convo + [
+                response,
+                HumanMessage(
+                    content=(
+                        "Your previous response was cut off by the output length "
+                        "limit. Continue exactly where you left off — do not repeat "
+                        "what you already wrote."
+                    )
+                ),
+            ]
+            self._start_spinner()
+            try:
+                response, _ = self._stream_response(
+                    convo, config, model=active_model, mark_answer=True
+                )
+            except _ContextOverflow:
+                break  # the continuation prompt overflowed; give up gracefully
+
+            if response is None:
+                break
+
+            self._capture_input_tokens(response)
+            last_thinking = self._extract_thinking(response) or last_thinking
+            part = self._extract_visible(response.content)
+            if part:
+                accumulated = (accumulated + part) if accumulated else part
+
+            # A tool call means the model is ready to act — let the graph run it.
+            if response.tool_calls:
+                if accumulated and not self._extract_visible(response.content):
+                    # Preserve the text gathered so far alongside the tool call.
+                    response.content = accumulated
+                if last_thinking and not response.additional_kwargs.get(
+                    "reasoning_content"
+                ):
+                    response.additional_kwargs["reasoning_content"] = last_thinking
+                return {"messages": [response], "thinking": last_thinking}
+
+            # Finished cleanly (not truncated again): return the assembled answer.
+            if not self._was_truncated_by_tokens(response):
+                if accumulated:
+                    final = AIMessage(content=accumulated)
+                    if last_thinking:
+                        final.additional_kwargs["reasoning_content"] = last_thinking
+                    return {"messages": [final], "thinking": last_thinking}
+                return None
+            # Still truncated → loop and continue again (budget permitting).
+
+        # Retries exhausted while still truncated. Keep whatever we assembled.
+        if accumulated:
+            final = AIMessage(content=accumulated)
+            if last_thinking:
+                final.additional_kwargs["reasoning_content"] = last_thinking
+            return {"messages": [final], "thinking": last_thinking}
+        return None
 
     def _compact_and_rebuild(self, current_messages: list) -> Optional[list]:
         """Force-compact history, then rebuild the model's message list from the

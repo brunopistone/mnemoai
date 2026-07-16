@@ -200,6 +200,11 @@ LLM:
   MAX_RETRIES: 5 # Also caps retries of a transient *empty* model response
   RETRY_DELAY: 1.0 # Seconds between retries
   RETRY_BACKOFF: 2.0 # Exponential backoff multiplier
+  # When a turn is cut off by MODEL_ID.MAX_TOKENS mid-response (reasoning + answer
+  # exceeded the output budget), auto-continue: feed the partial back and resume,
+  # so you never have to type "continue". This many continuation attempts (0
+  # disables — then a cut-off turn surfaces an "increase MAX_TOKENS" message).
+  MAX_OUTPUT_CONTINUE_RETRIES: 3
   # Token Counting (Model-specific)
   TOKEN_COUNTING:
     OLLAMA_APPROXIMATION: 1.3 # Multiplier for Ollama (chars to tokens)

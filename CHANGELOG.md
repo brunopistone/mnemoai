@@ -9,6 +9,32 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.4.2] — 2026-07-16
+
+### Fixed
+
+- **A turn cut off by the output-token limit now auto-continues instead of
+  dead-ending.** With `REASONING_EFFORT: max` on a large context, the model can
+  spend its whole `MODEL_ID.MAX_TOKENS` output budget on reasoning plus a partial
+  answer/tool call and stop mid-turn (`stop_reason: max_tokens`) with no completed
+  tool call — the turn just ended and the user had to type "continue". `_call_model`
+  now detects this (`_was_truncated_by_tokens`) and **auto-continues** via
+  `_continue_truncated_turn`: it feeds the partial turn back with a "continue where
+  you left off" nudge and re-streams, accumulating text, up to
+  `LLM.MAX_OUTPUT_CONTINUE_RETRIES` (default 3). It stops early when a continuation
+  finishes cleanly (returns the assembled answer) or emits a tool call (returned so
+  the graph runs it, partial text preserved); resumed parts glue directly so a
+  split word isn't corrupted by a spurious space. Only if retries exhaust with
+  nothing usable does it surface the "increase MAX_TOKENS" message. This replaces
+  the earlier behavior that ended the turn with a warning. Diagnosed from a real
+  session (Claude Opus via Mantle, `REASONING_EFFORT: max`, ~666k-token context).
+
+### Changed
+
+- Quieter compaction: dropped the green "Token limit exceeded… compacting" and
+  "evicted old tool output" status lines that printed mid-task — compaction now
+  runs without narrating itself.
+
 ## [1.4.1] — 2026-07-16
 
 ### Fixed
