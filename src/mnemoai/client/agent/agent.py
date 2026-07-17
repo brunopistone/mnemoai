@@ -81,11 +81,12 @@ class LangGraphAgent:
     _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
     _CONFIRM_MEMORY_TOOLS = {"memory"}
 
-    # Tools that print their OWN live progress to the terminal (e.g. crawl4ai's
-    # [INIT]/[FETCH]/[SCRAPE] lines, emitted on stderr by the web_crawler
-    # subprocess). Animating our spinner over them collides on the same lines —
-    # so for these we keep the spinner stopped and let the tool's output show.
-    _SELF_REPORTING_TOOLS = {"web_crawler"}
+    # Tools that print their OWN live progress to the terminal, so animating our
+    # spinner over them would collide on the same lines — for these we keep the
+    # spinner stopped. Empty now: the web_crawler subprocess runs its browser
+    # quietly (verbose=False) and any stderr goes to the MCP log (since 1.1.2), not
+    # the terminal — so it shows a spinner like any other slow tool.
+    _SELF_REPORTING_TOOLS: set = set()
 
     # --- Streaming error classification (used by _stream_response's retry) ---
     # Provider phrasings for "the prompt exceeded the model's context window".
@@ -1478,6 +1479,7 @@ class LangGraphAgent:
             path = str(tool_args.get("path", "")).strip()
             return f"Writing {path}" if path else "Writing file"
         labels = {
+            "web_crawler": "Crawling the page",
             "web_search": "Searching the web",
             "describe_image": "Analyzing image",
             "start_background_task": "Starting background task",
