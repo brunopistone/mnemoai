@@ -477,6 +477,10 @@ LLM:
   MAX_OUTPUT_CONTINUE_RETRIES: 3 # Auto-continue a turn cut off by MAX_TOKENS
   # (reasoning + answer exceeded the output
   # budget); 0 disables. See below.
+  STREAM_IDLE_TIMEOUT: 120 # Abandon a streaming read that goes silent this
+  # long (dead socket, e.g. laptop sleep) and
+  # re-run the turn on a fresh connection;
+  # 0 disables. See below.
   SUMMARIZATION_THINK: false # Include thinking in summarization
   TOKEN_COUNTING:
     OLLAMA_APPROXIMATION: 1.3 # Chars-to-tokens multiplier for Ollama
@@ -537,6 +541,16 @@ own recovery:
    continuation finishes cleanly or emits a tool call. You never have to type
    "continue"; if the retries are exhausted it surfaces a message to raise
    `MAX_TOKENS`.
+5. **Stalled-stream recovery** (`STREAM_IDLE_TIMEOUT`) — a streaming read is a
+   blocking socket read; if the connection dies silently (e.g. the laptop sleeps),
+   it would otherwise park the worker thread forever and freeze the whole UI. A
+   per-chunk idle-timeout watchdog abandons a stream that goes quiet for this long
+   (default 120s; 0 disables) and the turn is **re-run on a fresh connection with
+   exponential backoff** — the same recovery path used for a transient network
+   drop (reset/timeout/5xx). The partial response is discarded (a dropped stream
+   can't resume mid-generation), but the conversation continues; if reconnection
+   keeps failing it ends with a "lost the connection — send your message again"
+   message rather than hanging.
 
 ### Prompts (`prompts.yaml`)
 

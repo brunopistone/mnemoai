@@ -6,7 +6,9 @@ from typing import Optional
 
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.ui.chat_interface import ChatInterface
+from mnemoai.utils.configurator import config_exists, run_first_run_setup
 from mnemoai.utils.console import print_error
+from mnemoai.utils.paths import seed_example_files
 
 # Global client reference for cleanup
 _client: Optional[LangGraphClient] = None
@@ -55,16 +57,7 @@ def cli() -> None:
     )
     args = parser.parse_args()
 
-    # Seed the app home with browsable copies of the bundled config/mcp
-    # examples (idempotent, non-destructive — never touches live files).
-    from mnemoai.utils.paths import seed_example_files
-
     seed_example_files()
-
-    # First-run setup: if no config can be resolved, walk the user through
-    # creating one. Interactive only — non-TTY runs fall through to the
-    # existing "no config found" message so scripted/CI use isn't blocked.
-    from mnemoai.utils.configurator import config_exists, run_first_run_setup
 
     if not config_exists() and sys.stdin.isatty():
         if run_first_run_setup() is not None:

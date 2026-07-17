@@ -467,7 +467,7 @@ def test_worker_salvage_falls_back_when_retry_still_empty():
 # --- Auto-continue on output-token truncation --------------------------------
 # A turn cut off by MAX_TOKENS (reasoning + partial answer/tool call) must
 # auto-continue — feed the partial back and resume — instead of dead-ending and
-# forcing the user to type "continue". Mirrors Claude Code's output-token recovery.
+# forcing the user to type "continue".
 
 
 def _truncated(content=""):
