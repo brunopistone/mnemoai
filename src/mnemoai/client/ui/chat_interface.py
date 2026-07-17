@@ -24,6 +24,7 @@ from mnemoai.client.ui.tui import (
 )
 from mnemoai.utils.config import config
 from mnemoai.utils.configurator import (
+    run_features_override,
     run_model_override,
     run_params_override,
     run_reconfigure,
@@ -69,6 +70,7 @@ class ChatInterface:
             ("/config", "Reconfigure config.yaml (overwrites it)"),
             ("/model", "Override one model (LLM/vision/embeddings)"),
             ("/params", "Tune model inference params (temp, top_p, …)"),
+            ("/features", "Enable/disable features (RAG, memory, web, …)"),
             ("/mcp", "List configured MCP servers & tools"),
             ("/skills [name]", "List installed skills (or preview one)"),
         ]),
@@ -91,6 +93,7 @@ class ChatInterface:
         ("/config", "Reconfigure config.yaml (overwrites it)"),
         ("/model", "Override one model (LLM/vision/embeddings)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
+        ("/features", "Enable/disable features (RAG, memory, web search, …)"),
         ("/mcp", "List configured MCP servers & their tools"),
         ("/skills", "List installed skills (/skills <name> to preview)"),
         ("/clear", "Clear conversation context"),
@@ -510,7 +513,7 @@ class ChatInterface:
         # Commands that open a full-screen dialog (or execv): a nested full-screen
         # app can't run inside the pinned app, so they go through
         # reader.run_dialog (exit → run → relaunch). Others run inline.
-        dialog_cmds = ("/load", "/config", "/model", "/params", "/memory")
+        dialog_cmds = ("/load", "/config", "/model", "/params", "/features", "/memory")
 
         def _dispatch(line: str):
             first = line.strip().split(maxsplit=1)[0].lower() if line.strip() else ""
@@ -604,6 +607,11 @@ class ChatInterface:
 
         if query.lower() == "/params":
             if run_params_override() is not None:
+                self._restart_in_place()
+            return None
+
+        if query.lower() == "/features":
+            if run_features_override() is not None:
                 self._restart_in_place()
             return None
 

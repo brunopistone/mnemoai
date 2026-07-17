@@ -781,23 +781,29 @@ def test_config_openai_transforms_base_template():
     d = _run_build(
         "openai", "gpt-5-mini",
         # chat name, [blank base URL, blank key], MAX_TOKENS none, context,
-        # vision? y, vision name, vision MAX_TOKENS none, profile, then toggles.
-        ["gpt-5-mini", "", "", "none", "65536", "y", "gpt-5-mini", "none",
-         "alice", "", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+        # vision? y, "same as chat?" y (copies chat), embeddings? n, profile, brave,
+        # then toggles: RAG, EPISODIC, PLAYBOOK, MEMORY, AUTO_EXTRACT, SKILLS,
+        # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH_CONFIRM, WRITE_CONFIRM, MEM_CONFIRM.
+        ["gpt-5-mini", "", "", "none", "65536", "y", "y", "n", "alice", "",
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "openai" and m["NAME"] == "gpt-5-mini"
     # Ollama-only keys pruned; OpenAI-valid TEMPERATURE/PRESENCE_PENALTY kept.
     for bad in ("HOST", "PORT", "TOP_K", "FREQUENCY_PENALTY"):
         assert bad not in m
+    # Vision copied from chat via the "same as chat?" shortcut.
     assert d["VISION_MODEL_ID"]["TYPE"] == "openai"
+    assert d["VISION_MODEL_ID"]["NAME"] == "gpt-5-mini"
 
 
 def test_config_sagemaker_sets_region_and_input_format():
     d = _run_build(
         "sagemaker", "my-endpoint",
-        ["my-endpoint", "eu-west-1", "huggingface", "none", "65536", "n", "bob", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+        # chat name, region, input_format, MAX_TOKENS none, ctx,
+        # vision? n, embeddings? n, profile, brave, then 13 toggles (see openai test).
+        ["my-endpoint", "eu-west-1", "huggingface", "none", "65536", "n", "n",
+         "bob", "", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "sagemaker"
@@ -808,8 +814,11 @@ def test_config_sagemaker_sets_region_and_input_format():
 def test_config_litellm_sets_api_base_and_key():
     d = _run_build(
         "litellm", "openai/gpt-4o",
-        ["openai/gpt-4o", "http://localhost:8000/v1", "sk-xyz", "none", "65536", "n",
-         "carol", "", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+        # chat name, api_base, api_key, MAX_TOKENS none, ctx,
+        # vision? n, embeddings? n, profile, brave, then 13 toggles (see openai test).
+        ["openai/gpt-4o", "http://localhost:8000/v1", "sk-xyz", "none", "65536",
+         "n", "n", "carol", "",
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "litellm"
@@ -819,13 +828,15 @@ def test_config_litellm_sets_api_base_and_key():
 
 def test_config_anthropic_transforms_base_template():
     # answers: chat name, API_KEY, base URL (blank), MAX_TOKENS, ctx, configure
-    # vision? (y), vision name, vision MAX_TOKENS, profile, brave (blank), toggles*9
-    # (last two toggles: REQUIRE_BASH_CONFIRMATION, REQUIRE_WRITE_CONFIRMATION).
+    # vision? (y), "same as chat?" (y → copies chat), embeddings? (n), profile,
+    # brave (blank), then 13 toggles: RAG, EPISODIC, PLAYBOOK, MEMORY,
+    # AUTO_EXTRACT, SKILLS, WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH_CONFIRM,
+    # WRITE_CONFIRM, MEM_CONFIRM.
     d = _run_build(
         "anthropic", "claude-opus-4-8",
         ["claude-opus-4-8", "fake-anthropic-key", "", "none", "65536",
-         "y", "claude-opus-4-8", "none", "dave", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "n", "dave", "",
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "anthropic" and m["NAME"] == "claude-opus-4-8"
@@ -840,6 +851,25 @@ def test_config_anthropic_transforms_base_template():
     assert d["REQUIRE_WRITE_CONFIRMATION"] is True
     # The persistent-memory toggle is prompted and written.
     assert d["ENABLE_MEMORY"] is True
+    # The newer toggles are now in the /config flow too (all answered 'y').
+    assert d["ENABLE_MEMORY_AUTO_EXTRACTION"] is True  # asked because memory=y
+    assert d["ENABLE_SKILLS"] is True
+    assert d["REQUIRE_MEMORY_CONFIRMATION"] is True
+
+
+def test_config_skips_auto_extract_when_memory_off():
+    # When persistent memory is declined, the auto-extraction sub-prompt is not
+    # asked (one fewer answer). Memory=n here; sequence stays aligned.
+    d = _run_build(
+        "anthropic", "claude-opus-4-8",
+        ["claude-opus-4-8", "fake-key", "", "none", "65536",
+         "n", "n", "dave", "",   # vision? n, embeddings? n
+         # RAG, EPISODIC, PLAYBOOK, MEMORY(n → no auto-extract prompt), SKILLS,
+         # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH, WRITE, MEM_CONFIRM.
+         "y", "y", "y", "n", "y", "y", "y", "y", "y", "y", "y", "y"],
+    )
+    assert d["ENABLE_MEMORY"] is False
+    # Not prompted → key stays at its template value (not forced by this run).
 
 
 def test_config_providers_menu_has_all_seven():
@@ -1056,3 +1086,266 @@ class TestRunStepsBackNavigation:
 
         with pytest.raises(C._Cancelled):
             C._run_steps("", [boom])
+
+
+class TestCopyChatToVision:
+    """The /model vision shortcut: point VISION_MODEL_ID at the same model as the
+    chat LLM (same provider, name, connection keys, max_tokens)."""
+
+    MANTLE = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: anthropic.claude-opus-4-8
+          TYPE: mantle
+          REGION: us-east-1
+          API_PROTOCOL: anthropic
+          MAX_TOKENS: 128000
+          REASONING_EFFORT: max
+        VISION_MODEL_ID:
+          NAME: qwen2.5vl:3b
+          TYPE: ollama
+          HOST: localhost
+          PORT: 11434
+          TEMPERATURE: 0.3
+        """
+    )
+
+    def test_copies_provider_name_and_connection(self):
+        from mnemoai.utils.configurator import _copy_chat_to_vision
+
+        out = _copy_chat_to_vision(self.MANTLE)
+        d = yaml.safe_load(out)
+        v = d["VISION_MODEL_ID"]
+        assert v["TYPE"] == "mantle"
+        assert v["NAME"] == "anthropic.claude-opus-4-8"
+        assert v["REGION"] == "us-east-1"
+        assert v["API_PROTOCOL"] == "anthropic"
+        assert str(v["MAX_TOKENS"]) == "128000"
+
+    def test_prunes_old_provider_keys_on_switch(self):
+        # Vision was ollama (HOST/PORT); after copying a mantle chat model those
+        # ollama-only keys must be gone, and the ollama TEMPERATURE cleared.
+        from mnemoai.utils.configurator import _copy_chat_to_vision
+
+        out = _copy_chat_to_vision(self.MANTLE)
+        d = yaml.safe_load(out)
+        v = d["VISION_MODEL_ID"]
+        assert "HOST" not in v
+        assert "PORT" not in v
+
+    def test_does_not_copy_chat_only_inference_params(self):
+        # REASONING_EFFORT is a chat knob; vision shouldn't inherit chat's
+        # generation params wholesale (only NAME/TYPE/connection + max_tokens).
+        from mnemoai.utils.configurator import _copy_chat_to_vision
+
+        out = _copy_chat_to_vision(self.MANTLE)
+        d = yaml.safe_load(out)
+        assert "REASONING_EFFORT" not in d["VISION_MODEL_ID"]
+
+    def test_chat_section_untouched(self):
+        from mnemoai.utils.configurator import _copy_chat_to_vision
+
+        out = _copy_chat_to_vision(self.MANTLE)
+        d = yaml.safe_load(out)
+        assert d["MODEL_ID"]["NAME"] == "anthropic.claude-opus-4-8"
+        assert d["MODEL_ID"]["REASONING_EFFORT"] == "max"
+
+    def test_ollama_to_ollama_copies_host_port(self):
+        base = textwrap.dedent(
+            """\
+            MODEL_ID:
+              NAME: llama3.1:8b
+              TYPE: ollama
+              HOST: localhost
+              PORT: 11434
+              MAX_TOKENS: 8192
+            VISION_MODEL_ID:
+              NAME: old-vision
+              TYPE: ollama
+            """
+        )
+        from mnemoai.utils.configurator import _copy_chat_to_vision
+
+        out = _copy_chat_to_vision(base)
+        d = yaml.safe_load(out)
+        v = d["VISION_MODEL_ID"]
+        assert v["NAME"] == "llama3.1:8b"
+        assert v["HOST"] == "localhost"
+        assert str(v["PORT"]) == "11434"
+
+
+class TestEmbeddingsSetupWithRagOff:
+    """/model must let you set embeddings even when RAG is off (its block may be
+    absent), then offer to enable the features that consume embeddings."""
+
+    RAG_OFF = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: anthropic.claude-opus-4-8
+          TYPE: mantle
+        ENABLE_RAG: false
+        RAG:
+          MAX_TOKENS: 8192
+          VECTOR_STORE:
+            TYPE: chromadb
+        ENABLE_EPISODIC_MEMORY: false
+        """
+    )
+
+    def test_ensure_embed_section_inserts_block_under_rag(self):
+        from mnemoai.utils.configurator import _ensure_embed_section, _get_field
+
+        out = _ensure_embed_section(self.RAG_OFF)
+        d = yaml.safe_load(out)
+        assert "EMBED_MODEL_ID" in d["RAG"]
+        # And it's addressable by the section helpers (nested lookup).
+        assert _get_field(out, "EMBED_MODEL_ID", "TYPE") == "ollama"
+
+    def test_ensure_embed_section_noop_when_present(self):
+        from mnemoai.utils.configurator import _ensure_embed_section
+
+        base = self.RAG_OFF.replace(
+            "  VECTOR_STORE:",
+            "  EMBED_MODEL_ID:\n    NAME: existing\n    TYPE: ollama\n  VECTOR_STORE:",
+        )
+        assert _ensure_embed_section(base) == base
+
+    def test_ensure_embed_section_creates_rag_when_absent(self):
+        from mnemoai.utils.configurator import _ensure_embed_section
+
+        base = "MODEL_ID:\n  NAME: x\n  TYPE: ollama\n"
+        out = _ensure_embed_section(base)
+        d = yaml.safe_load(out)
+        assert "EMBED_MODEL_ID" in d["RAG"]
+
+    def test_embeddings_can_be_set_after_scaffold(self):
+        # The whole point: after scaffolding, _set_field writes into the new block.
+        from mnemoai.utils.configurator import (
+            _ensure_embed_section,
+            _get_field,
+            _set_field,
+        )
+
+        out = _ensure_embed_section(self.RAG_OFF)
+        out = _set_field(out, "EMBED_MODEL_ID", "NAME", "qwen3-embedding:0.6b")
+        assert _get_field(out, "EMBED_MODEL_ID", "NAME") == "qwen3-embedding:0.6b"
+
+    def test_enable_features_prompts_when_off(self, monkeypatch):
+        # Both toggles off → both prompts asked; answering yes flips both on.
+        from mnemoai.utils import configurator as C
+
+        asked = []
+        monkeypatch.setattr(C, "_ask_bool", lambda p, default=True: asked.append(p) or True)
+        out = C._prompt_enable_embedding_features(self.RAG_OFF)
+        d = yaml.safe_load(out)
+        assert d["ENABLE_RAG"] is True
+        assert d["ENABLE_EPISODIC_MEMORY"] is True
+        assert len(asked) == 2
+
+    def test_enable_features_respects_no(self, monkeypatch):
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(C, "_ask_bool", lambda p, default=True: False)
+        out = C._prompt_enable_embedding_features(self.RAG_OFF)
+        d = yaml.safe_load(out)
+        assert d["ENABLE_RAG"] is False
+        assert d["ENABLE_EPISODIC_MEMORY"] is False
+
+    def test_enable_features_skips_already_on(self, monkeypatch):
+        # RAG already on → only episodic is asked.
+        from mnemoai.utils import configurator as C
+
+        base = self.RAG_OFF.replace("ENABLE_RAG: false", "ENABLE_RAG: true")
+        asked = []
+        monkeypatch.setattr(C, "_ask_bool", lambda p, default=True: asked.append(p) or True)
+        C._prompt_enable_embedding_features(base)
+        assert len(asked) == 1
+        assert "episodic" in asked[0].lower()
+
+    def test_enable_features_asks_when_key_absent(self, monkeypatch):
+        # An absent toggle is treated as OFF (still asked), not defaulted to on.
+        from mnemoai.utils import configurator as C
+
+        base = "MODEL_ID:\n  NAME: x\n  TYPE: ollama\n"  # no ENABLE_* keys
+        asked = []
+        monkeypatch.setattr(C, "_ask_bool", lambda p, default=True: asked.append(p) or True)
+        out = C._prompt_enable_embedding_features(base)
+        d = yaml.safe_load(out)
+        assert len(asked) == 2
+        assert d["ENABLE_RAG"] is True
+        assert d["ENABLE_EPISODIC_MEMORY"] is True
+
+
+class TestFeaturesToggles:
+    """/features: flip ENABLE_* toggles and gather info a newly-on feature needs."""
+
+    CFG = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: x
+          TYPE: ollama
+        ENABLE_RAG: false
+        RAG:
+          MAX_TOKENS: 8192
+        ENABLE_EPISODIC_MEMORY: false
+        ENABLE_WEB_SEARCH: false
+        BRAVE_API_KEY: your_brave_api_key
+        """
+    )
+
+    def test_placeholder_brave_key_detection(self):
+        from mnemoai.utils.configurator import _is_placeholder_brave_key
+        assert _is_placeholder_brave_key(None)
+        assert _is_placeholder_brave_key("")
+        assert _is_placeholder_brave_key("your_brave_api_key")
+        assert not _is_placeholder_brave_key("BSA-realkey123")
+
+    def test_web_search_prompts_for_brave_key(self, monkeypatch):
+        from mnemoai.utils import configurator as C
+        monkeypatch.setattr(C, "_ask", lambda *a, **k: "BSA-realkey")
+        out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_WEB_SEARCH"})
+        d = yaml.safe_load(out)
+        assert d["BRAVE_API_KEY"] == "BSA-realkey"
+
+    def test_web_search_skips_key_when_already_set(self, monkeypatch):
+        from mnemoai.utils import configurator as C
+        base = self.CFG.replace("BRAVE_API_KEY: your_brave_api_key",
+                                "BRAVE_API_KEY: BSA-existing")
+        called = {"n": 0}
+        monkeypatch.setattr(C, "_ask", lambda *a, **k: called.__setitem__("n", 1))
+        C._prompt_feature_dependencies(base, {"ENABLE_WEB_SEARCH"})
+        assert called["n"] == 0  # already set — not asked
+
+    def test_rag_prompts_for_embeddings_when_missing(self, monkeypatch):
+        from mnemoai.utils import configurator as C
+        seen = {"section": None}
+
+        def _fake_section(text, section, is_llm):
+            seen["section"] = section
+            return C._set_field(C._ensure_embed_section(text), section, "NAME", "embed-x")
+
+        monkeypatch.setattr(C, "_prompt_model_section", _fake_section)
+        out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_RAG"})
+        assert seen["section"] == "EMBED_MODEL_ID"
+        assert C._get_field(out, "EMBED_MODEL_ID", "NAME") == "embed-x"
+
+    def test_no_embeddings_prompt_when_already_configured(self, monkeypatch):
+        from mnemoai.utils import configurator as C
+        base = self.CFG.replace(
+            "  MAX_TOKENS: 8192",
+            "  MAX_TOKENS: 8192\n  EMBED_MODEL_ID:\n    NAME: existing\n    TYPE: ollama",
+        )
+        called = {"n": 0}
+        monkeypatch.setattr(
+            C, "_prompt_model_section",
+            lambda *a, **k: called.__setitem__("n", 1) or a[0],
+        )
+        C._prompt_feature_dependencies(base, {"ENABLE_RAG"})
+        assert called["n"] == 0  # embeddings already configured — not asked
+
+    def test_dependencies_noop_for_features_without_extra_info(self, monkeypatch):
+        from mnemoai.utils import configurator as C
+        # Turning on the playbook needs nothing extra.
+        monkeypatch.setattr(C, "_ask", lambda *a, **k: pytest.fail("should not ask"))
+        out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_PLAYBOOK"})
+        assert out == self.CFG
