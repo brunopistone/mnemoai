@@ -16,7 +16,14 @@ from prompt_toolkit.application.current import get_app
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import HSplit
-from prompt_toolkit.widgets import Button, Dialog, Label, RadioList, TextArea
+from prompt_toolkit.widgets import (
+    Button,
+    CheckboxList,
+    Dialog,
+    Label,
+    RadioList,
+    TextArea,
+)
 
 from mnemoai.models.provider_params import (
     providers,
@@ -308,6 +315,26 @@ def _remove_top_section(text: str, section: str) -> str:
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
+def _ensure_embed_section(text: str) -> str:
+    """Ensure a ``RAG.EMBED_MODEL_ID`` block exists so embeddings can be
+    configured even when RAG was disabled (its block may be absent entirely).
+
+    Inserts a minimal ``EMBED_MODEL_ID`` (with a placeholder NAME/TYPE the prompts
+    then overwrite) under an existing ``RAG:`` block, creating ``RAG:`` if needed.
+    No-op when the block already exists."""
+    lines = text.splitlines()
+    if _find_section(lines, "EMBED_MODEL_ID") >= 0:
+        return text
+
+    block = ["  EMBED_MODEL_ID:", "    NAME: ", "    TYPE: ollama"]
+    rag_idx = _find_section(lines, "RAG")
+    if rag_idx >= 0:
+        lines[rag_idx + 1:rag_idx + 1] = block  # first children of RAG:
+    else:
+        lines = ["RAG:", *block, *lines]  # no RAG block yet — prepend one
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
 def _set_top_level(text: str, key: str, value: str) -> str:
     """Replace the first top-level ``key: ...`` line (column 0)."""
     out = []
@@ -541,6 +568,53 @@ def _dialog_radio(
         @kb.add("c-b")
         def _(event) -> None:
             _back()
+
+    app = Application(
+        layout=Layout(dialog),
+        key_bindings=kb,
+        mouse_support=False,
+        full_screen=True,
+    )
+    return app.run()
+
+
+def _dialog_checkbox(title: str, options: list, checked: list, info: str = ""):
+    """Centered multi-select checklist (↑/↓ move, Space toggle, Enter save, Esc
+    cancels); returns the list of checked values, or ``_DIALOG_CANCEL``.
+
+    ``options`` is ``[(value, label), …]``; ``checked`` is the initially-ticked
+    values. Used by /features to flip the ENABLE_* toggles in one screen."""
+    cb = CheckboxList(values=options)
+    cb.current_values = list(checked)
+
+    def _ok() -> None:
+        get_app().exit(result=list(cb.current_values))
+
+    def _cancel() -> None:
+        get_app().exit(result=_DIALOG_CANCEL)
+
+    # CheckboxList binds Enter to toggle; rebind it to save (Space still toggles).
+    cb.control.key_bindings.add("enter")(lambda event: _ok())
+
+    body_items = []
+    if info:
+        body_items.append(Label(text=info))
+    body_items.append(Label(text="  ↑/↓ move · Space toggle · Enter save · Esc cancel"))
+    body_items.append(cb)
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit(body_items, padding=1),
+        buttons=_dialog_buttons(_ok, _cancel),
+        with_background=True,
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:
+        _cancel()
 
     app = Application(
         layout=Layout(dialog),
@@ -815,6 +889,13 @@ def _truthy(value: Optional[str]) -> bool:
     return (value or "true").strip().lower() in ("true", "yes", "on", "1")
 
 
+def _explicit_bool(value: Optional[str]) -> bool:
+    """Like :func:`_truthy` but an ABSENT key is False (default off), for toggles
+    whose default is off (memory auto-extraction, memory-write confirmation) —
+    so a missing key prompts "No", not "Yes"."""
+    return value is not None and value.strip().lower() in ("true", "yes", "on", "1")
+
+
 def _prompt_provider_type(section: str, current: str) -> str:
     """Prompt for a provider TYPE (from the registry), returning the chosen
     canonical key; ``current`` is the default."""
@@ -1015,23 +1096,19 @@ def _build_config(
         lambda t, b: _prompt_max_tokens(t, "MODEL_ID", allow_back=b),
         _ctx_step,
     ])
-    # HOST/PORT/REGION to mirror into the vision section.
-    conn = _conn_from_text(text, "MODEL_ID")
 
     # --- Vision model (optional) ---
+    # Full section flow (provider choice + connection + Back), same as /model — so
+    # vision isn't locked to the chat provider and each step is Back-able. The
+    # template always carries a VISION_MODEL_ID block for the prompts to write into.
     if _ask_bool("Configure a vision model (for image description)?", True):
-        vision = _ask("Vision model name", _get_in_section(text, "VISION_MODEL_ID", "NAME"))
-        if vision:
-            text = _set_in_section(text, "VISION_MODEL_ID", "NAME", vision)
-        # Mirror the chat model's connection (same host/region, usually).
-        for k, v in conn.items():
-            if _get_in_section(text, "VISION_MODEL_ID", k) is not None:
-                text = _set_in_section(text, "VISION_MODEL_ID", k, v)
-        if (_get_in_section(text, "VISION_MODEL_ID", "TYPE") or "").lower() == "mantle":
-            text = _prompt_mantle_protocol(text, "VISION_MODEL_ID")
-        text = _prompt_max_tokens(text, "VISION_MODEL_ID")
+        text = _prompt_model_section(text, "VISION_MODEL_ID", is_llm=False)
     else:
         text = _remove_top_section(text, "VISION_MODEL_ID")
+
+    # --- Embeddings model (optional; powers RAG + episodic memory) ---
+    if _ask_bool("Configure an embeddings model (for RAG / episodic memory)?", True):
+        text = _prompt_model_section(text, "EMBED_MODEL_ID", is_llm=False)
 
     # --- Profile ---
     profile = _ask("Profile name (isolates your data)", getpass.getuser() or "default")
@@ -1050,7 +1127,16 @@ def _build_config(
     text = _set_bool(text, "ENABLE_RAG", _ask_bool("Enable RAG (document indexing & search)?", _truthy(_get_top_level(text, "ENABLE_RAG"))))
     text = _set_bool(text, "ENABLE_EPISODIC_MEMORY", _ask_bool("Enable episodic memory (learn from past tasks)?", _truthy(_get_top_level(text, "ENABLE_EPISODIC_MEMORY"))))
     text = _set_bool(text, "ENABLE_PLAYBOOK", _ask_bool("Enable ACE playbook (learn strategies)?", _truthy(_get_top_level(text, "ENABLE_PLAYBOOK"))))
-    text = _set_bool(text, "ENABLE_MEMORY", _ask_bool("Enable persistent memory (agent curates MEMORY.md)?", _truthy(_get_top_level(text, "ENABLE_MEMORY"))))
+    memory = _ask_bool("Enable persistent memory (agent curates MEMORY.md)?", _truthy(_get_top_level(text, "ENABLE_MEMORY")))
+    text = _set_bool(text, "ENABLE_MEMORY", memory)
+    if memory:
+        # Auto-extraction defaults OFF (writes without a confirmation prompt), so
+        # an absent key means "not yet chosen" -> default the prompt to No.
+        text = _set_bool(text, "ENABLE_MEMORY_AUTO_EXTRACTION", _ask_bool(
+            "Auto-extract durable facts to MEMORY.md after each turn (no prompt)?",
+            _explicit_bool(_get_top_level(text, "ENABLE_MEMORY_AUTO_EXTRACTION")),
+        ))
+    text = _set_bool(text, "ENABLE_SKILLS", _ask_bool("Enable agent skills (SKILL.md instruction packs)?", _truthy(_get_top_level(text, "ENABLE_SKILLS"))))
     text = _set_bool(text, "ENABLE_WEB_CRAWL", _ask_bool("Enable web crawler (fetch URLs)?", _truthy(_get_top_level(text, "ENABLE_WEB_CRAWL"))))
 
     routing = _ask_bool("Enable query routing (route queries to tool subsets)?", _truthy(_get_top_level(text, "ENABLE_ROUTING")))
@@ -1065,6 +1151,9 @@ def _build_config(
 
     text = _set_bool(text, "REQUIRE_BASH_CONFIRMATION", _ask_bool("Ask for confirmation before each shell command (execute_bash)?", _truthy(_get_top_level(text, "REQUIRE_BASH_CONFIRMATION"))))
     text = _set_bool(text, "REQUIRE_WRITE_CONFIRMATION", _ask_bool("Ask for confirmation before each file write (fs_write/file_edit)?", _truthy(_get_top_level(text, "REQUIRE_WRITE_CONFIRMATION"))))
+    # Memory-write confirmation defaults OFF (the agent auto-saves), so an absent
+    # key means "not chosen" -> default the prompt to No.
+    text = _set_bool(text, "REQUIRE_MEMORY_CONFIRMATION", _ask_bool("Ask for confirmation before each memory write?", _explicit_bool(_get_top_level(text, "REQUIRE_MEMORY_CONFIRMATION"))))
 
     return text
 
@@ -1240,6 +1329,32 @@ def _print_current_setup(text: str) -> None:
         print(f"  {line}")
 
 
+def _copy_chat_to_vision(text: str) -> str:
+    """Point VISION_MODEL_ID at the SAME model as the chat LLM (a /model shortcut).
+
+    Copies the chat section's provider (TYPE), NAME, and every other chat field
+    the vision section supports for that provider (region, Mantle protocol,
+    max_tokens, host/port, keys, …) — provider-agnostic, so it works for any
+    chat provider that's also vision-capable. Vision keys not supported by the
+    new provider are pruned, and stale vision inference params are cleared first.
+    """
+    chat_type = (_get_field(text, "MODEL_ID", "TYPE") or "ollama").lower()
+
+    # Reset the vision section to the chat provider, then copy the fields the
+    # vision section accepts for that provider (plus NAME/TYPE always).
+    text = _set_field(text, "VISION_MODEL_ID", "TYPE", chat_type)
+    text = _prune_unsupported_params(text, "VISION_MODEL_ID", chat_type)
+    text = _clear_inference_params(text, "VISION_MODEL_ID")
+
+    allowed = supported_keys("VISION_MODEL_ID", chat_type) or set()
+    # NAME + the connection/param keys vision honors; TYPE already set above.
+    for key in ({"NAME"} | allowed):
+        val = _get_field(text, "MODEL_ID", key)
+        if val is not None:
+            text = _set_field(text, "VISION_MODEL_ID", key, val)
+    return text
+
+
 def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     """Prompt for one model section (provider type included, so it can switch
     providers) and patch ``text``; context window only for the chat LLM.
@@ -1247,6 +1362,23 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
     The provider type is the anchor (chosen first, no Back into it — switching it
     invalidates the provider-dependent steps that follow); every step after it
     supports Back (Ctrl+B)."""
+    # Vision shortcut: offer to reuse the chat model wholesale (same provider,
+    # name, connection + max_tokens) instead of re-entering everything — the
+    # common case when the chat model is already multimodal (Claude, GPT, …).
+    if section == "VISION_MODEL_ID":
+        chat_type = (_get_field(text, "MODEL_ID", "TYPE") or "").lower()
+        chat_name = _get_field(text, "MODEL_ID", "NAME") or ""
+        if chat_name and _ask_bool(
+            f"Use the same model as Chat?  ({chat_type} / {chat_name})",
+            default=True,
+        ):
+            return _copy_chat_to_vision(text)
+
+    # Embeddings can be (re)configured even with RAG off, when its block may not
+    # exist yet — scaffold it so the prompts below have somewhere to write.
+    if section == "EMBED_MODEL_ID":
+        text = _ensure_embed_section(text)
+
     cur_type = (_get_field(text, section, "TYPE") or "ollama").lower()
     new_type = _prompt_provider_type(section, cur_type)
     text = _set_field(text, section, "TYPE", new_type)
@@ -1476,6 +1608,34 @@ def run_params_override() -> Optional[Path]:
     return dest
 
 
+def _prompt_enable_embedding_features(text: str) -> str:
+    """After the embeddings model is set, offer to turn on the features that
+    consume it — RAG, then episodic memory — when they're currently off.
+
+    An embeddings model on its own does nothing; RAG (document search) and
+    episodic memory (similar-past-task recall) are what use it. A prompt is
+    skipped only when the feature is EXPLICITLY on (an absent key is treated as
+    off, so we still ask). ``_Cancelled`` (Esc) propagates to the caller, which
+    leaves the whole change untouched."""
+    def _explicitly_on(key: str) -> bool:
+        val = _get_top_level(text, key)
+        return val is not None and val.strip().lower() in ("true", "yes", "on", "1")
+
+    if not _explicitly_on("ENABLE_RAG"):
+        if _ask_bool(
+            "Enable RAG (document indexing + search) with this embeddings model?",
+            default=True,
+        ):
+            text = _set_top_level_or_add(text, "ENABLE_RAG", "true")
+    if not _explicitly_on("ENABLE_EPISODIC_MEMORY"):
+        if _ask_bool(
+            "Enable episodic memory (recall of similar past tasks)?",
+            default=True,
+        ):
+            text = _set_top_level_or_add(text, "ENABLE_EPISODIC_MEMORY", "true")
+    return text
+
+
 def run_model_override() -> Optional[Path]:
     """Override one model section in place (``/model``), preserving the rest;
     returns the written Path, or None if cancelled or there's no config."""
@@ -1486,10 +1646,11 @@ def run_model_override() -> Optional[Path]:
 
     text = dest.read_text()
 
-    # Vision/embeddings are optional; only offer them when present (LLM always is).
-    available = {"1": True}
+    # Chat + embeddings are always offered (embeddings can be set even with RAG
+    # off — its block may not exist yet; we scaffold it). Vision is offered only
+    # when configured (it's genuinely optional and has no downstream toggle).
+    available = {"1": True, "3": True}
     available["2"] = _get_field(text, "VISION_MODEL_ID", "NAME") is not None
-    available["3"] = _get_field(text, "EMBED_MODEL_ID", "NAME") is not None
 
     labels = {
         k: label for k, (_, label, _) in _MODEL_SECTIONS.items() if available.get(k)
@@ -1518,6 +1679,10 @@ def run_model_override() -> Optional[Path]:
         )
         section, label, is_llm = _MODEL_SECTIONS[choice]
         new_text = _prompt_model_section(text, section, is_llm)
+        # After configuring embeddings, offer to turn on the features that use
+        # them if they're currently off (embeddings alone do nothing otherwise).
+        if section == "EMBED_MODEL_ID":
+            new_text = _prompt_enable_embedding_features(new_text)
     except (KeyboardInterrupt, _Cancelled):
         print("\n  Cancelled. Config left untouched.")
         return None
@@ -1531,5 +1696,116 @@ def run_model_override() -> Optional[Path]:
     print("  Inference parameters were reset to model defaults for this change;")
     print("  use /params to tune them. For the full per-provider parameter list,")
     print("  see the README's 'Model Parameters' section.")
+    print("=" * 64 + "\n")
+    return dest
+
+
+# --- /features: enable/disable app subsystems (the ENABLE_* toggles) ---------
+# (config key, label) in display order. These are app capabilities, distinct from
+# /model (which models) and /params (how a model generates).
+_FEATURE_TOGGLES = [
+    ("ENABLE_RAG", "RAG — index & search your documents"),
+    ("ENABLE_EPISODIC_MEMORY", "Episodic memory — recall similar past tasks"),
+    ("ENABLE_PLAYBOOK", "ACE playbook — learn tool strategies"),
+    ("ENABLE_WEB_SEARCH", "Web search (needs a Brave API key)"),
+    ("ENABLE_WEB_CRAWL", "Web crawler — fetch & read pages"),
+    ("ENABLE_ROUTING", "Query routing — per-query tool subsets"),
+    ("ENABLE_ORCHESTRATION", "Orchestrator — decompose complex tasks"),
+    ("ENABLE_MEMORY", "Curated memory (MEMORY.md)"),
+    ("ENABLE_MEMORY_AUTO_EXTRACTION", "Memory auto-extraction (background)"),
+    ("ENABLE_SKILLS", "Agent skills (SKILL.md packs)"),
+]
+
+
+def _is_placeholder_brave_key(val: Optional[str]) -> bool:
+    """True if the Brave key is missing or still the template placeholder."""
+    return not val or val.strip().lower() in ("", "your_brave_api_key", "none")
+
+
+def _prompt_feature_dependencies(text: str, newly_on: set) -> str:
+    """For each feature just turned ON that needs extra info, gather it inline.
+
+    - Web search → a Brave API key (top-level ``BRAVE_API_KEY``) if not already set.
+    - RAG / episodic memory → an embeddings model (``RAG.EMBED_MODEL_ID``) if none
+      is configured; reuses the normal embeddings section flow.
+    ``_Cancelled`` (Esc) propagates so the whole change is left untouched.
+    """
+    if "ENABLE_WEB_SEARCH" in newly_on and _is_placeholder_brave_key(
+        _get_top_level(text, "BRAVE_API_KEY")
+    ):
+        key = _ask(
+            "Brave Search API key (from brave.com/search/api; blank to skip)"
+        )
+        if key:
+            text = _set_top_level_or_add(text, "BRAVE_API_KEY", key)
+        else:
+            print("  No key set — web search stays off until BRAVE_API_KEY is set.")
+
+    needs_embed = {"ENABLE_RAG", "ENABLE_EPISODIC_MEMORY"} & newly_on
+    if needs_embed and not _get_field(text, "EMBED_MODEL_ID", "NAME"):
+        print(
+            "  "
+            + " and ".join(sorted(needs_embed))
+            + " need an embeddings model — let's set one."
+        )
+        text = _prompt_model_section(text, "EMBED_MODEL_ID", is_llm=False)
+    return text
+
+
+def run_features_override() -> Optional[Path]:
+    """Enable/disable app features (``/features``): a checklist of the ENABLE_*
+    toggles, writing just those keys back. Prompts for any info a newly-enabled
+    feature needs (Brave key, embeddings model). Returns the written Path, or
+    None if cancelled or unchanged."""
+    dest = config_path()
+    if not dest.is_file():
+        print_error("No config.yaml found. Run /config to create one first.")
+        return None
+
+    text = dest.read_text()
+    # Current state: a toggle counts as ON only when explicitly true (absent → off).
+    def _on(key: str) -> bool:
+        val = _get_top_level(text, key)
+        return val is not None and val.strip().lower() in ("true", "yes", "on", "1")
+
+    options = [(key, label) for key, label in _FEATURE_TOGGLES]
+    checked = [key for key, _ in _FEATURE_TOGGLES if _on(key)]
+
+    if not _is_tty():
+        # Non-TTY: no interactive checklist — report and bail (scripts edit YAML).
+        print("  /features needs an interactive terminal; edit config.yaml directly.")
+        return None
+
+    try:
+        result = _dialog_checkbox(
+            "Features — enable/disable", options, checked,
+            info="  Space toggles a feature; Enter saves.",
+        )
+        if result is _DIALOG_CANCEL:
+            print("\n  Cancelled. Config left untouched.")
+            return None
+        selected = set(result)
+
+        new_text = text
+        for key, _ in _FEATURE_TOGGLES:
+            want = key in selected
+            if want != (key in set(checked)):
+                new_text = _set_top_level_or_add(
+                    new_text, key, "true" if want else "false"
+                )
+
+        # Gather info for features that were just turned ON.
+        newly_on = selected - set(checked)
+        new_text = _prompt_feature_dependencies(new_text, newly_on)
+    except (KeyboardInterrupt, _Cancelled):
+        print("\n  Cancelled. Config left untouched.")
+        return None
+
+    if new_text == text:
+        print("  No changes made.")
+        return None
+
+    dest.write_text(new_text)
+    print(f"\n  Updated features in:\n    {dest}")
     print("=" * 64 + "\n")
     return dest

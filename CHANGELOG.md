@@ -9,6 +9,56 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.4.5] — 2026-07-17
+
+### Added
+
+- **`/model` → Vision: "Use the same model as Chat?" shortcut.** When overriding
+  the vision model, the first step now offers to reuse the chat model wholesale —
+  choosing yes copies the chat model's provider (`TYPE`), `NAME`, connection keys
+  (region, Mantle `API_PROTOCOL`, host/port, …), and `MAX_TOKENS` straight into
+  `VISION_MODEL_ID`, skipping the provider/model/connection prompts. The common
+  case when the chat model is already multimodal (Claude, GPT-4o/5, Qwen-VL, …).
+  It's provider-agnostic (copies only the keys the vision section supports for
+  that provider, so chat-only inference params like `REASONING_EFFORT` aren't
+  dragged along) and prunes any stale keys from the previous vision provider.
+  Choosing no falls through to the normal per-field flow.
+- **New `/features` command — enable/disable app subsystems.** A checklist of the
+  `ENABLE_*` toggles (RAG, episodic memory, playbook, web search, web crawl,
+  routing, orchestration, curated memory, memory auto-extraction, skills) that
+  reads the current config, lets you flip them (Space toggle, Enter save), and
+  writes just those keys back — then restarts in place. When a feature you just
+  turned **on** needs extra info, it's gathered inline: web search prompts for a
+  `BRAVE_API_KEY` (if not already set), and RAG / episodic memory prompt for an
+  embeddings model (reusing the `/model` embeddings flow) when none is configured.
+  This is the natural sibling to `/model` (which models) and `/params` (how a
+  model generates): `/features` is which subsystems are on.
+- **`/model` → Embeddings is always selectable, and offers to enable RAG /
+  episodic memory afterward.** Embeddings could only be picked when an
+  `EMBED_MODEL_ID` block already existed — but with RAG disabled that block is
+  often absent, so there was no way to set the embeddings model at all. It's now
+  always offered; if its block is missing it's scaffolded under `RAG:` first.
+  After configuring it, `/model` asks to turn on the features that consume it when
+  they're off — first `ENABLE_RAG`, then `ENABLE_EPISODIC_MEMORY` (a prompt is
+  skipped only when the toggle is explicitly on; an absent toggle counts as off).
+
+### Fixed
+
+- **`/model` no longer hides the embeddings option when RAG is disabled** — see
+  the embeddings item above (the picker gated it on a present `EMBED_MODEL_ID`).
+- **`/config` now configures the embeddings model, lets vision pick its own
+  provider, and supports Back within each model section.** The reconfigure flow
+  used an ad-hoc vision step (name only — no provider choice, no Back) and never
+  prompted for embeddings at all. Vision and embeddings now go through the same
+  composable section flow as `/model` (`_prompt_model_section`): a provider
+  choice, the provider's connection steps, and `Ctrl+B` Back on each — and vision
+  offers the "use the same model as Chat?" shortcut here too. (The trailing
+  feature-toggle yes/no questions remain a linear sequence; Esc cancels.) The
+  toggle prompts also now include the ones added since this flow was written —
+  `ENABLE_MEMORY_AUTO_EXTRACTION` (asked only when persistent memory is on),
+  `ENABLE_SKILLS`, and `REQUIRE_MEMORY_CONFIRMATION` — so `/config` covers the
+  full set again.
+
 ## [1.4.4] — 2026-07-17
 
 ### Fixed

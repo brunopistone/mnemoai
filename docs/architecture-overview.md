@@ -127,7 +127,7 @@ Model controllers and custom implementations.
 Shared utilities and configuration.
 
 - `config.py`: Configuration loader
-- `configurator.py`: First-run interactive setup (when no config resolves) and the `/config` (full reconfigure) and `/model` (override one model section) chat commands
+- `configurator.py`: First-run interactive setup (when no config resolves) and the `/config` (full reconfigure), `/model` (override one model section), `/params` (tune inference params), and `/features` (toggle `ENABLE_*` subsystems) chat commands
 - `paths.py`: Central path helper — single source of truth for the app home (`~/.mnemoai`, override with `$MNEMOAI_HOME`) and all runtime subdirectories (config, plans, tasks, per-profile, per-model)
 - `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings; `.bedrock` and `.bedrock.mantle` variants also provided)
 - `bm25.py`: Lightweight BM25 implementation for hybrid (semantic + keyword) search

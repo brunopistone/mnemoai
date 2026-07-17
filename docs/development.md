@@ -76,7 +76,7 @@ Mnemo AI follows [Semantic Versioning](https://semver.org/). The **public surfac
 - **Config keys** in `config.yaml` (the `MODEL_ID` / `VISION_MODEL_ID` / `RAG.EMBED_MODEL_ID` fields, the `ENABLE_*` / `REQUIRE_*` toggles, and the documented section keys).
 - **Prompt keys** in `prompts.yaml` (`SYSTEM_PROMPT`, `ROUTING_PROMPT`, `ORCHESTRATOR_PROMPT`, `AGGREGATOR_PROMPT`, `SUMMARY_SYSTEM_PROMPT`, `SUMMARY_TASK_PROMPT`). As of 0.8.16 these live in `prompts.yaml`, not `config.yaml` (keys left in `config.yaml` are ignored with a migration warning).
 - **The `mcp.json` schema** for external MCP servers (`mcpServers` with `command` / `args` / `env` / `disabled`).
-- **CLI commands** (`/config`, `/model`, `/params`, `/mcp`, `/memory`, `/plan`, `/compact`, `/clear`, `/save`, `/load`) and the `mnemoai` console command + `--no-verbose` flag.
+- **CLI commands** (`/config`, `/model`, `/params`, `/features`, `/mcp`, `/memory`, `/plan`, `/compact`, `/clear`, `/save`, `/load`) and the `mnemoai` console command + `--no-verbose` flag.
 - **The distribution/import name** (`pip install mnemoai-assistant` → `import mnemoai`).
 
 Pre-1.0.0, minor releases may add features and occasionally adjust these. From **1.0.0** onward, a breaking change to any of the above bumps the **major** version; new backward-compatible features bump the minor; fixes bump the patch. Internal modules (anything under `client/`, `server/`, `models/`, `utils/` not listed above) are **not** part of the public contract and may change between any releases. All changes are recorded in [`CHANGELOG.md`](https://github.com/brunopistone/mnemoai/blob/main/CHANGELOG.md).
