@@ -40,6 +40,10 @@ class TestToolProgressLabel:
         a = _agent()
         assert a._tool_progress_label("web_search", {}) == "Searching the web"
         assert a._tool_progress_label("describe_image", {}) == "Analyzing image"
+        # web_crawler shows a generic label (no URL — it can be very long).
+        assert a._tool_progress_label("web_crawler", {"url": "http://x"}) == (
+            "Crawling the page"
+        )
 
     def test_unknown_tool_falls_back_to_name(self):
         a = _agent()
@@ -93,17 +97,19 @@ class TestInvokeToolSpinner:
         # The finally clause must still have stopped the spinner.
         assert ("stop", None) in events
 
-    def test_self_reporting_tool_does_not_animate_spinner(self):
-        # web_crawler prints its own live progress; the spinner must stay
-        # stopped (not start) so the two don't collide on the terminal.
+    def test_web_crawler_animates_spinner(self):
+        # web_crawler no longer prints its own terminal progress (its stderr goes
+        # to the MCP log), so it must animate the spinner like any slow tool —
+        # started with the crawl label, then stopped.
         a, events = self._spy_agent()
         out = a._invoke_tool(_FakeTool(result="page"), "web_crawler", {"url": "http://x"})
         assert out == "page"
-        assert ("stop", None) in events
-        assert not any(e[0] == "start" for e in events)
+        assert events[0] == ("start", "Crawling the page")
+        assert events[-1] == ("stop", None)
 
-    def test_web_crawler_is_self_reporting(self):
-        assert "web_crawler" in LangGraphAgent._SELF_REPORTING_TOOLS
+    def test_no_self_reporting_tools(self):
+        # The self-reporting carve-out is empty now (web_crawler was removed).
+        assert LangGraphAgent._SELF_REPORTING_TOOLS == set()
 
 
 class _AnswerResponse:

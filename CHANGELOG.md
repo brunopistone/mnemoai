@@ -9,6 +9,18 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.4.4] — 2026-07-17
+
+### Fixed
+
+- **`web_crawler` now shows a "Crawling the page…" spinner instead of a dead
+  gap.** It was in `_SELF_REPORTING_TOOLS` — the spinner was suppressed on the
+  assumption the crawler printed its own `[INIT]/[FETCH]/[SCRAPE]` progress to the
+  terminal. But the crawler runs its browser quietly (`verbose=False`) and any
+  subprocess stderr is routed to the MCP log (since 1.1.2), so nothing showed
+  during a crawl — the UI looked frozen. `web_crawler` now animates the spinner
+  like any other slow tool (the `_SELF_REPORTING_TOOLS` carve-out is now empty).
+
 ## [1.4.3] — 2026-07-16
 
 ### Fixed
