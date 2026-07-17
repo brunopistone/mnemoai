@@ -1,8 +1,10 @@
 """LangGraph-based agent implementation."""
 
 import operator
+import queue
 import re
 import sys
+import threading
 import time
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
 
@@ -38,6 +40,14 @@ class _ContextOverflow(Exception):
     rather than retry the same oversized prompt in a loop."""
 
 
+class _StreamIdleTimeout(Exception):
+    """Raised when a streaming response goes silent for longer than the idle
+    timeout — no chunk arrived within the window. The socket is (or looks) dead
+    (e.g. the laptop slept and the TCP connection died); the streaming read would
+    otherwise block the worker thread forever. The retry wrapper discards the
+    partial and re-runs the turn on a fresh connection."""
+
+
 class AgentState(TypedDict):
     """State schema for the LangGraph agent."""
 
@@ -65,6 +75,70 @@ class LangGraphAgent:
     _BASH_MUTATION_OPS = plan_policy.BASH_MUTATION_OPS
     _READONLY_GIT_SUBCMDS = plan_policy.READONLY_GIT_SUBCMDS
     _BASH_MUTATING_FLAGS = plan_policy.BASH_MUTATING_FLAGS
+
+    # --- Destructive-tool confirmation categories (gated by _confirm_tool) ---
+    _CONFIRM_BASH_TOOLS = {"execute_bash"}
+    _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
+    _CONFIRM_MEMORY_TOOLS = {"memory"}
+
+    # Tools that print their OWN live progress to the terminal (e.g. crawl4ai's
+    # [INIT]/[FETCH]/[SCRAPE] lines, emitted on stderr by the web_crawler
+    # subprocess). Animating our spinner over them collides on the same lines —
+    # so for these we keep the spinner stopped and let the tool's output show.
+    _SELF_REPORTING_TOOLS = {"web_crawler"}
+
+    # --- Streaming error classification (used by _stream_response's retry) ---
+    # Provider phrasings for "the prompt exceeded the model's context window".
+    _CONTEXT_OVERFLOW_MARKERS = (
+        "prompt is too long",              # Anthropic / Bedrock Mantle
+        "context length",                  # OpenAI-compatible
+        "maximum context",
+        "context window",
+        "too many tokens",
+        "model_context_window_exceeded",   # Bedrock/Converse stop reason
+        "input is too long",
+        "exceeds the maximum",
+    )
+    # Substrings marking a transient connection failure — a dropped/dead socket
+    # (laptop sleep), a reset, or a server-side 5xx/overload — that a fresh retry
+    # can recover, as opposed to a deterministic 4xx the same request would repeat.
+    _TRANSIENT_NETWORK_MARKERS = (
+        "connection reset",
+        "connection aborted",
+        "connection error",
+        "econnreset",
+        "epipe",
+        "broken pipe",
+        "etimedout",
+        "timed out",
+        "timeout",
+        "read timed out",
+        "server disconnected",
+        "connection closed",
+        "peer closed connection",
+        "remotedisconnected",
+        "incomplete read",
+        "temporarily unavailable",
+        "service unavailable",
+        "bad gateway",
+        "gateway timeout",
+        "overloaded",
+        "502",
+        "503",
+        "504",
+        "529",
+    )
+    # Sentinel the stream reader thread enqueues to signal a clean end of stream.
+    _STREAM_DONE = object()
+
+    # Ephemeral per-turn reminder blocks (the plan-mode banner, the STEERING.md
+    # block) the client prepends: sent to the model this turn but stripped before
+    # storage, so a reloaded conversation never carries a stale banner and
+    # compaction never summarizes always-on instructions into a lossy paraphrase
+    # (they're re-injected verbatim from disk each turn instead).
+    _EPHEMERAL_BLOCK_RE = re.compile(
+        r"<(plan-mode-active|steering)>.*?</\1>\s*", re.DOTALL
+    )
 
     def __init__(
         self,
@@ -142,6 +216,15 @@ class LangGraphAgent:
         # Code's max_output_tokens recovery.
         self._max_continue_retries = max(
             0, int(config.get("LLM", {}).get("MAX_OUTPUT_CONTINUE_RETRIES", 3))
+        )
+        # Per-chunk idle timeout on a streaming read (seconds; 0 disables). A
+        # streaming body that goes silent this long — e.g. the socket died when
+        # the laptop slept — is abandoned so it can't block the worker thread
+        # forever; the retry wrapper then re-runs the turn on a fresh connection.
+        # The provider's own request timeout only covers getting response HEADERS,
+        # not a stalled body, so this watchdog is what unwedges a dead stream.
+        self._stream_idle_timeout = float(
+            config.get("LLM", {}).get("STREAM_IDLE_TIMEOUT", 120)
         )
         # Cap one tool result so a runaway (e.g. grep_search max_results=4000)
         # can't alone overflow the context window. Defaults to 10% of the context
@@ -794,6 +877,31 @@ class LangGraphAgent:
                     ],
                     "thinking": None,
                 }
+        except (_StreamIdleTimeout, Exception) as e:
+            # A dead/stalled connection that survived all stream retries (e.g. the
+            # network is still down after a long sleep). End the turn with a clear,
+            # non-crashing message the user can act on — the history is intact, so
+            # simply asking again re-runs the turn on a fresh connection.
+            if isinstance(e, _ContextOverflow) or not (
+                isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e)
+            ):
+                raise
+            logger.error(f"Stream failed after retries (connection issue): {e}")
+            self._stop_spinner()
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            "I lost the connection to the model and couldn't "
+                            "reconnect after several retries (this can happen after "
+                            "the machine sleeps or the network drops). Your "
+                            "conversation is intact — just send your message again "
+                            "and I'll continue."
+                        )
+                    )
+                ],
+                "thinking": None,
+            }
 
         if response is None:
             response = active_model.invoke(messages, config=config)
@@ -1030,15 +1138,38 @@ class LangGraphAgent:
         """Stream a model response, handling spinner and output.
 
         Retries a completely empty turn (transient endpoint hiccup) up to
-        ``_empty_response_retries`` times. ``mark_answer`` prints a marker before
-        the answer on user-facing turns. Returns ``(response, had_reasoning)``.
+        ``_empty_response_retries`` times, AND re-runs the turn on a dead/stalled
+        stream — an idle-timeout or transient network error (e.g. the socket died
+        when the laptop slept) — with exponential backoff, so a wedged connection
+        recovers on wake instead of hanging the worker. ``mark_answer`` prints a
+        marker before the answer on user-facing turns. Returns
+        ``(response, had_reasoning)``.
         """
         active_model = model or self.model_with_tools
         attempts = getattr(self, "_empty_response_retries", 0) + 1
         for attempt in range(attempts):
-            response, had_reasoning = self._stream_once(
-                active_model, messages, config, print_reasoning, mark_answer
-            )
+            try:
+                response, had_reasoning = self._stream_once(
+                    active_model, messages, config, print_reasoning, mark_answer
+                )
+            except Exception as e:
+                # Context overflow is the caller's to handle — never retry it here.
+                if isinstance(e, _ContextOverflow):
+                    raise
+                retriable = isinstance(e, _StreamIdleTimeout) or (
+                    self._is_transient_network_error(e)
+                )
+                if not retriable or attempt == attempts - 1:
+                    raise
+                delay = self._network_retry_delay(attempt)
+                logger.warning(
+                    "Stream connection failed (%s); retrying turn on a fresh "
+                    "connection in %.1fs (attempt %d/%d)",
+                    e, delay, attempt + 1, attempts,
+                )
+                time.sleep(delay)
+                self._start_spinner()
+                continue
             # Retry only a completely empty turn; the reasoning-only case is the
             # caller's responsibility.
             if not self._is_empty_response(response) or attempt == attempts - 1:
@@ -1051,17 +1182,14 @@ class LangGraphAgent:
             self._start_spinner()
         return response, had_reasoning
 
-    # Provider phrasings for "the prompt exceeded the model's context window".
-    _CONTEXT_OVERFLOW_MARKERS = (
-        "prompt is too long",              # Anthropic / Bedrock Mantle
-        "context length",                  # OpenAI-compatible
-        "maximum context",
-        "context window",
-        "too many tokens",
-        "model_context_window_exceeded",   # Bedrock/Converse stop reason
-        "input is too long",
-        "exceeds the maximum",
-    )
+    def _network_retry_delay(self, attempt: int) -> float:
+        """Exponential backoff (seconds) for a network-error stream retry, using
+        the same LLM.RETRY_DELAY / RETRY_BACKOFF knobs as the rest of the app,
+        capped so a sleep-recovery retry never waits absurdly long."""
+        llm = config.get("LLM", {})
+        base = float(llm.get("RETRY_DELAY", 1.0))
+        factor = float(llm.get("RETRY_BACKOFF", 2.0))
+        return min(base * (factor ** attempt), 30.0)
 
     @classmethod
     def _is_context_overflow_error(cls, exc: Exception) -> bool:
@@ -1072,6 +1200,17 @@ class LangGraphAgent:
         """
         text = str(exc).lower()
         return any(m in text for m in cls._CONTEXT_OVERFLOW_MARKERS)
+
+    @classmethod
+    def _is_transient_network_error(cls, exc: Exception) -> bool:
+        """True if ``exc`` looks like a transient connection/network failure worth
+        retrying on a fresh connection (dead socket, reset, timeout, 5xx/overload).
+
+        Kept provider-agnostic (matches the exception text) so it works for every
+        LangChain provider — a dead socket surfaces differently per httpx/requests/
+        boto3 stack but the phrasings above cover them."""
+        text = str(exc).lower()
+        return any(m in text for m in cls._TRANSIENT_NETWORK_MARKERS)
 
     def _is_empty_response(self, response) -> bool:
         """True if a response carries no content, no reasoning, no tool calls."""
@@ -1084,6 +1223,50 @@ class LangGraphAgent:
         if self._extract_thinking(response):
             return False
         return True
+
+    def _iter_stream_with_idle_timeout(self, active_model, messages, config):
+        """Yield stream chunks, but raise :class:`_StreamIdleTimeout` if no chunk
+        arrives within ``self._stream_idle_timeout`` seconds.
+
+        ``model.stream()`` is a blocking C-level socket read; if the connection
+        dies silently (laptop sleep), it can park the worker thread forever — which
+        also freezes the (FIFO, single-worker) UI. We run the stream on a daemon
+        reader thread feeding a queue and time each ``get``. On timeout we raise and
+        ABANDON the reader thread (it's a daemon; it unwinds when its socket finally
+        errors) rather than blocking on it — the whole point is not to wait. When
+        the timeout is 0/disabled, we iterate directly with no extra thread."""
+        idle = getattr(self, "_stream_idle_timeout", 0) or 0
+        if idle <= 0:
+            yield from active_model.stream(messages, config=config)
+            return
+
+        q: "queue.Queue" = queue.Queue()
+
+        def _reader():
+            try:
+                for chunk in active_model.stream(messages, config=config):
+                    q.put((None, chunk))
+            except BaseException as e:  # propagate the stream's own error verbatim
+                q.put((e, None))
+            else:
+                q.put((self._STREAM_DONE, None))
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        while True:
+            try:
+                item, chunk = q.get(timeout=idle)
+            except queue.Empty:
+                # No chunk for `idle` seconds — the stream is wedged (likely a
+                # dead socket after sleep). Abandon the reader; let retry re-run.
+                raise _StreamIdleTimeout(
+                    f"No stream data for {idle:.0f}s (connection likely dropped)"
+                )
+            if item is self._STREAM_DONE:
+                return
+            if item is not None:  # the reader captured an exception — re-raise it
+                raise item
+            yield chunk
 
     def _stream_once(
         self,
@@ -1108,7 +1291,9 @@ class LangGraphAgent:
         reasoning_started = None
 
         try:
-            for chunk in active_model.stream(messages, config=config):
+            for chunk in self._iter_stream_with_idle_timeout(
+                active_model, messages, config
+            ):
                 chunk_content, reasoning_content = self._extract_content(chunk)
 
                 # Stop the spinner only for what's displayed NOW. Styled mode
@@ -1211,6 +1396,14 @@ class LangGraphAgent:
                 if sink is not None:
                     sink.stop()
                 raise _ContextOverflow(e) from e
+            # A wedged/dead stream (idle timeout) or a transient network drop:
+            # re-raise so _stream_response re-runs the turn on a fresh connection
+            # with backoff. Any partial output is discarded — a mid-stream drop
+            # can't be resumed, and partial reasoning would be invalid anyway.
+            if isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e):
+                if sink is not None:
+                    sink.stop()
+                raise
             # Other stream errors: retry once non-streaming and prefer its
             # complete result; keep the partial only if that yields none.
             logger.warning(f"Streaming error: {e}; falling back to non-streaming")
@@ -1290,12 +1483,6 @@ class LangGraphAgent:
             "start_background_task": "Starting background task",
         }
         return labels.get(tool_name, f"Running {tool_name}")
-
-    # Tools that print their OWN live progress to the terminal (e.g. crawl4ai's
-    # [INIT]/[FETCH]/[SCRAPE] lines, emitted on stderr by the web_crawler
-    # subprocess). Animating our spinner over them collides on the same lines —
-    # so for these we keep the spinner stopped and let the tool's output show.
-    _SELF_REPORTING_TOOLS = {"web_crawler"}
 
     def _invoke_tool(self, tool, tool_name: str, tool_args: dict):
         """Invoke a tool with a progress spinner, unless it's self-reporting
@@ -1583,11 +1770,6 @@ class LangGraphAgent:
         """Delegates to :func:`tool_formatting.tool_error_message`."""
         return tool_formatting.tool_error_message(tool_name, exc)
 
-    # Tools gated by a hard confirmation prompt, keyed by category.
-    _CONFIRM_BASH_TOOLS = {"execute_bash"}
-    _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
-    _CONFIRM_MEMORY_TOOLS = {"memory"}
-
     def _is_preapproved_bash(self, command: str) -> bool:
         """True if ``command`` was pre-approved via a plan's ``allowed_bash``.
 
@@ -1791,15 +1973,6 @@ class LangGraphAgent:
     def __call__(self, prompt: str) -> str:
         """Invoke the agent with a prompt."""
         return self.invoke(prompt)
-
-    # Ephemeral per-turn reminder blocks (the plan-mode banner, the STEERING.md
-    # block) the client prepends: sent to the model this turn but stripped before
-    # storage, so a reloaded conversation never carries a stale banner and
-    # compaction never summarizes always-on instructions into a lossy paraphrase
-    # (they're re-injected verbatim from disk each turn instead).
-    _EPHEMERAL_BLOCK_RE = re.compile(
-        r"<(plan-mode-active|steering)>.*?</\1>\s*", re.DOTALL
-    )
 
     @classmethod
     def _strip_ephemeral(cls, text: str) -> str:

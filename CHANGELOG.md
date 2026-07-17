@@ -9,6 +9,35 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.4.3] — 2026-07-16
+
+### Fixed
+
+- **A dropped/stalled stream connection no longer hangs the app.** When the
+  laptop sleeps (or the network drops) mid-response, the TCP socket to the model
+  dies silently; the streaming read had no idle bound, so on resume it blocked the
+  single worker thread forever — the conversation looked stopped AND new messages
+  froze behind it. The stream is now consumed through a **per-chunk idle-timeout
+  watchdog** (`_iter_stream_with_idle_timeout`, `LLM.STREAM_IDLE_TIMEOUT`, default
+  120s; 0 disables): if no chunk arrives within the window the wedged read is
+  abandoned so the worker is never parked. The retry wrapper (`_stream_response`)
+  then classifies idle-timeout + transient network errors (reset/broken-pipe/
+  timeout/5xx/overload — `_is_transient_network_error`, provider-agnostic) as
+  retryable and **re-runs the turn on a fresh connection with exponential
+  backoff**; if all retries fail it ends with a clear "lost the connection — send
+  your message again" message instead of crashing. The partial (including partial
+  reasoning) is discarded — a dropped stream can't be resumed mid-generation — but
+  the conversation continues, matching how Claude Code recovers. This lives in the
+  agent stream layer, so it applies to **every** provider, not one client.
+
+### Changed
+
+- **`agent.py` housekeeping:** the class-level constants that were interleaved
+  between methods (streaming error/network markers, self-reporting tools,
+  confirmation categories, the ephemeral-block regex) are consolidated into one
+  labeled block at the top of `LangGraphAgent`. Pure reorganization — no behavior
+  change.
+
 ## [1.4.2] — 2026-07-16
 
 ### Fixed
