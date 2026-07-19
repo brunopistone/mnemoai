@@ -1,15 +1,25 @@
-"""Utility for formatting code blocks, inline code, and lightweight Markdown
-in streamed terminal output.
+"""Streamed terminal rendering of Markdown + code, using a real parser.
 
-Fenced code blocks (```lang) are syntax-highlighted with Pygments. Everything
-else is rendered with a small, dependency-free Markdown pass (no ``rich``):
-headers, bullet/numbered lists, **bold**, *italic*, inline ``code``, and
-clickable URLs. Non-code text is buffered by LINE so block- and span-level
-Markdown can be applied to whole lines as they stream in.
+Robustness is architectural, not hand-rolled: instead of a ``split("```")``
+state machine fed streaming deltas (which desyncs on adjacent fences, a bare
+language label, half-finished spans, etc.), this **buffers the full response and
+re-tokenizes it with a real Markdown parser** (``markdown-it-py``) as it streams.
+
+Streaming model: keep a "stable prefix" of the text whose top-level blocks are
+complete. On each chunk, re-parse the whole buffer, render any newly-completed
+blocks exactly once, and hold back the trailing (still-growing) block — it gets
+re-parsed cleanly on the next chunk. Because the parser always re-reads the whole
+tail, an unterminated code fence or an open ``**bold`` simply resolves on the
+next delta; there is no fence bookkeeping to get out of sync. Fenced code becomes
+a single token whose language is consumed by the parser, so a language label can
+never leak as visible text.
+
+Fenced code blocks are syntax-highlighted with Pygments; everything else is
+rendered with a small token→ANSI pass (headers, lists, blockquotes, rules,
+**bold**, *italic*, inline ``code``, links). No ``rich`` dependency.
 """
 
-import re
-
+from markdown_it import MarkdownIt
 from pygments import highlight
 from pygments.formatters import Terminal256Formatter
 from pygments.lexers import TextLexer, get_lexer_by_name, guess_lexer
@@ -18,184 +28,194 @@ from mnemoai.utils.formatting.url_formatter import make_urls_clickable
 
 
 class CodeFormatter:
-    """Highlight code and render lightweight Markdown during streaming."""
+    """Render Markdown + highlighted code from a streaming text buffer."""
 
-    # Inline code / identifiers: bold cyan (and the Rich library default ``bold cyan``). 
-    # Plain cyan was washed out next to the surrounding text; the bold weight gives 
-    # the same crisp distinction.
+    # Inline code / identifiers: bold cyan (crisp against surrounding text).
     _INLINE_CODE = "\033[1;36m"
     _BOLD = "\033[1m"
     _ITALIC = "\033[3m"
     _DIM = "\033[90m"
     _RESET = "\033[0m"
 
-    # --- Markdown line patterns (block level) --------------------------------
-    _HEADER_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-    _BULLET_RE = re.compile(r"^(\s*)[-*+]\s+(.*)$")
-    _NUMBER_RE = re.compile(r"^(\s*)(\d+)[.)]\s+(.*)$")
-    _QUOTE_RE = re.compile(r"^>\s?(.*)$")
-    _HR_RE = re.compile(r"^\s*([-*_])(?:\s*\1){2,}\s*$")
-    # --- Markdown span patterns (inline; both ends must hug non-space so a
-    # spaced ``a * b`` math expression is never italicized) ------------------
-    _BOLD_RE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*")
-    _ITALIC_RE = re.compile(r"\*(?=\S)(.+?)(?<=\S)\*")
-    _CODE_SPAN_RE = re.compile(r"`([^`]+)`")
+    # A shared parser: CommonMark + tables/strikethrough off (the model uses ~
+    # for "approximately", so leave it literal). block+inline tokens, no HTML.
+    _md = MarkdownIt("commonmark").enable("table")
 
     def __init__(self) -> None:
-        """Initialize code formatter."""
+        """Initialize the formatter."""
+        # Full accumulated response text.
+        self._buffer = ""
+        # Number of source LINES already finalized+rendered (their blocks are
+        # complete). We re-parse the whole buffer each chunk but only render
+        # blocks that start at/after this line, and only finalize a block once a
+        # later block exists after it (so a growing tail is never emitted early).
+        self._rendered_lines = 0
+        # Back-compat flag some callers/tests read: is the tail an open fence?
         self._in_code_block = False
-        self._code_buffer = ""
-        self._code_lang = ""
-        # Non-code text accumulates here until a newline completes a line.
-        self._text_buffer = ""
-        self._backtick_buffer = ""
 
-    # --- code-fence handling (unchanged behavior) ----------------------------
+    # --- streaming entry points ---------------------------------------------
 
-    def _process_code_blocks(self, data: str) -> None:
-        """Process data containing ``` delimiters.
-
-        Args:
-            data: Text containing code block delimiters
-        """
-        parts = data.split("```")
-        # Track if we're in a code block at the start of this chunk
-        in_code = self._in_code_block
-
-        for i, part in enumerate(parts):
-            if i % 2 == 0:
-                # Even index - depends on initial state
-                if in_code:
-                    # We're in a code block, accumulate this part
-                    self._code_buffer += part
-                else:
-                    # We're outside, render as Markdown text
-                    if part:
-                        self._emit_markdown(part)
-            else:
-                # Odd index - toggle state
-                if in_code:
-                    # End of code block
-                    self._print_highlighted_code()
-                    self._in_code_block = False
-                    self._code_buffer = ""
-                    self._code_lang = ""
-                    in_code = False
-                else:
-                    # Start of code block — flush any partial text line first so
-                    # it isn't stranded behind the (about-to-print) code block.
-                    self._flush_text_line()
-                    self._in_code_block = True
-                    # Extract language from the part after ```
-                    # The part could be: "python\ncode", "\npython\ncode", "python", or ""
-                    if part:
-                        lines = part.split("\n", 1)
-                        self._code_lang = lines[0].strip()
-                        self._code_buffer = lines[1] if len(lines) > 1 else ""
-                    else:
-                        # Empty part, language will come in next chunk
-                        self._code_lang = ""
-                        self._code_buffer = ""
-                    in_code = True
-
-    def _process_in_code_blocks(self, data: str) -> None:
-        """Process data while inside a code block (accumulate, don't print yet).
-
-        Args:
-            data: Text chunk arriving while inside a fenced block
-        """
-        # If language not set yet, try to extract from first line
-        if not self._code_lang and data:
-            lines = data.split("\n", 1)
-            first_line = lines[0].strip()
-            # Check if first line looks like a language identifier (short, alphanumeric)
-            if first_line and len(first_line) < 20 and first_line.isalnum():
-                self._code_lang = first_line
-                self._code_buffer += lines[1] if len(lines) > 1 else ""
-            else:
-                self._code_buffer += data
-        else:
-            self._code_buffer += data
-
-    def _print_highlighted_code(self) -> None:
-        """Print code with syntax highlighting."""
-        if not self._code_buffer:
+    def process_chunk(self, data: str) -> None:
+        """Append a streamed chunk and render any newly-completed blocks."""
+        if not data:
             return
+        self._buffer += data
+        self._render_pending(final=False)
+
+    def flush(self) -> None:
+        """Render everything still buffered at end-of-stream, then reset color.
+
+        The trailing (possibly unterminated) block is rendered now — an unclosed
+        code fence is emitted as a code block rather than dropped. Always resets
+        terminal styling so the prompt is never left mid-color.
+        """
+        self._render_pending(final=True)
+        print(self._RESET, end="", flush=True)
+
+    # --- core: re-parse the buffer, render newly-finalized blocks ------------
+
+    def _render_pending(self, final: bool) -> None:
+        """Render top-level blocks that are complete (or, on ``final``, all).
+
+        Re-tokenizes the WHOLE buffer every call (the parser handles unterminated
+        fences / half-finished spans by re-reading them each time — no state
+        machine to desync). Renders each top-level token whose block starts at a
+        line ``>= self._rendered_lines``. While streaming, the LAST top-level
+        block is held back (it may still be growing) and re-rendered next chunk;
+        on ``final`` it's rendered too.
+        """
+        text = self._buffer
+        lines = text.split("\n")
 
         try:
+            tokens = [t for t in self._md.parse(text) if t.level == 0 and t.map]
+        except Exception:
+            tokens = []
+
+        if not tokens:
+            # Parser produced nothing mappable (e.g. only whitespace so far, or a
+            # partial line). Nothing to finalize yet; render the tail on final.
+            if final and self._rendered_lines < len(lines):
+                tail = "\n".join(lines[self._rendered_lines:])
+                if tail.strip():
+                    self._render_text_block(tail)
+                self._rendered_lines = len(lines)
+            return
+
+        # The tail token is "unstable" while streaming — don't finalize it.
+        stop = len(tokens) if final else len(tokens) - 1
+        self._in_code_block = (
+            not final and tokens[-1].type == "fence"
+            and not self._token_fence_closed(tokens[-1], lines)
+        )
+
+        for idx in range(stop):
+            tok = tokens[idx]
+            l0, l1 = tok.map
+            if l0 < self._rendered_lines:
+                continue  # already rendered in a prior chunk
+            # Emit blank lines between this block and the previously rendered one
+            # (preserves paragraph spacing) then render the block.
+            if l0 > self._rendered_lines:
+                for _ in range(l0 - self._rendered_lines):
+                    print(flush=True)
+            self._render_token(tok, lines)
+            self._rendered_lines = l1
+
+    def _token_fence_closed(self, tok, lines) -> bool:
+        """True if a fence token's source includes its closing ``` line."""
+        l0, l1 = tok.map
+        src = "\n".join(lines[l0:l1])
+        return src.rstrip().endswith("```") and src.count("```") >= 2
+
+    def _render_token(self, tok, lines) -> None:
+        """Render one top-level markdown-it block token to the terminal.
+
+        Code fences use the parser's separated ``.content``/``.info`` (so a
+        language label can never render as text). Every other top-level block
+        (heading, paragraph, list, blockquote, rule) is rendered from its SOURCE
+        lines through the lightweight line renderer, which handles ``#``/``-``/
+        ``>`` prefixes and inline spans."""
+        if tok.type == "fence":
+            self._print_code(tok.info.strip(), tok.content)
+            return
+        if tok.type == "code_block":
+            self._print_code("", tok.content)
+            return
+        if tok.type == "hr":
+            print(f"{self._DIM}────────────────────{self._RESET}", flush=True)
+            return
+        # Heading / paragraph / list / blockquote / table → render source lines.
+        l0, l1 = tok.map
+        for line in lines[l0:l1]:
+            print(self._render_line(line), flush=True)
+
+    def _print_code(self, lang: str, body: str) -> None:
+        """Print a code body syntax-highlighted (language already separated out by
+        the parser, so it's never rendered as text)."""
+        body = body.rstrip("\n")
+        if not body:
+            return
+        try:
             lexer = None
-            if self._code_lang:
+            if lang:
                 try:
-                    lexer = get_lexer_by_name(self._code_lang, stripall=True)
+                    lexer = get_lexer_by_name(lang, stripall=True)
                 except Exception:
                     lexer = None
-
-            if not lexer:
+            if lexer is None:
                 try:
-                    lexer = guess_lexer(self._code_buffer)
+                    lexer = guess_lexer(body)
                 except Exception:
                     lexer = TextLexer()
-
-            # Use Terminal256Formatter for better colors
             highlighted = highlight(
-                self._code_buffer, lexer, Terminal256Formatter(style="monokai")
+                body, lexer, Terminal256Formatter(style="monokai")
             )
             print(highlighted, end="", flush=True)
         except Exception:
-            # Fallback: plain cyan, so a highlighter failure still shows the code.
-            print(f"\033[36m{self._code_buffer}\033[0m", end="", flush=True)
+            # Highlighter failure: plain cyan so the code still shows.
+            print(f"\033[36m{body}\033[0m", end="", flush=True)
 
-    # --- Markdown text rendering (line-buffered) -----------------------------
-
-    def _emit_markdown(self, text: str) -> None:
-        """Buffer non-code text and render each completed line as Markdown."""
-        self._text_buffer += text
-        while "\n" in self._text_buffer:
-            line, self._text_buffer = self._text_buffer.split("\n", 1)
-            print(self._render_line(line), flush=True)
-
-    def _flush_text_line(self) -> None:
-        """Render whatever partial (newline-less) text line is buffered."""
-        if self._text_buffer:
-            print(self._render_line(self._text_buffer), end="", flush=True)
-            self._text_buffer = ""
+    # --- Markdown line rendering (block prefix + inline spans) ---------------
 
     def _render_line(self, line: str) -> str:
         """Render one Markdown line (block prefix + inline spans) to ANSI text."""
+        import re
+
         line = line.rstrip("\r")
 
-        m = self._HEADER_RE.match(line)
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
         if m:
             return f"{self._BOLD}{self._render_spans(m.group(2))}{self._RESET}"
 
-        if self._HR_RE.match(line):
+        if re.match(r"^\s*([-*_])(?:\s*\1){2,}\s*$", line):
             return f"{self._DIM}────────────────────{self._RESET}"
 
-        m = self._BULLET_RE.match(line)
+        m = re.match(r"^(\s*)[-*+]\s+(.*)$", line)
         if m:
             indent, content = m.group(1), m.group(2)
             return f"{indent}  • {self._render_spans(content)}"
 
-        m = self._NUMBER_RE.match(line)
+        m = re.match(r"^(\s*)(\d+)[.)]\s+(.*)$", line)
         if m:
             indent, num, content = m.group(1), m.group(2), m.group(3)
             return f"{indent}  {num}. {self._render_spans(content)}"
 
-        m = self._QUOTE_RE.match(line)
+        m = re.match(r"^>\s?(.*)$", line)
         if m:
             return f"{self._DIM}│ {self._render_spans(m.group(1))}{self._RESET}"
 
         return self._render_spans(line)
 
     def _render_spans(self, text: str) -> str:
-        """Render inline Markdown spans: code, bold, italic, and URLs.
+        """Render inline spans: code (untouched by other passes), bold, italic,
+        links. Inline code is rendered first so ``**x**`` inside backticks stays
+        literal."""
+        import re
 
-        Inline code is rendered first and its content is left untouched by the
-        emphasis/URL passes (so ``**x**`` inside backticks stays literal).
-        """
         rendered = []
         pos = 0
-        for m in self._CODE_SPAN_RE.finditer(text):
+        for m in re.finditer(r"`([^`]+)`", text):
             if m.start() > pos:
                 rendered.append(self._render_text_span(text[pos:m.start()]))
             rendered.append(f"{self._INLINE_CODE}{m.group(1)}{self._RESET}")
@@ -205,92 +225,21 @@ class CodeFormatter:
         return "".join(rendered)
 
     def _render_text_span(self, text: str) -> str:
-        """Apply bold/italic emphasis and clickable URLs to a plain text span."""
-        text = self._BOLD_RE.sub(lambda m: f"{self._BOLD}{m.group(1)}{self._RESET}", text)
-        text = self._ITALIC_RE.sub(
-            lambda m: f"{self._ITALIC}{m.group(1)}{self._RESET}", text
+        """Apply bold/italic emphasis and clickable URLs to a plain span.
+
+        Emphasis markers must hug non-space on both ends, so a spaced ``a * b``
+        math expression is never italicized.
+        """
+        import re
+
+        text = re.sub(
+            r"\*\*(?=\S)(.+?)(?<=\S)\*\*",
+            lambda m: f"{self._BOLD}{m.group(1)}{self._RESET}",
+            text,
+        )
+        text = re.sub(
+            r"\*(?=\S)(.+?)(?<=\S)\*",
+            lambda m: f"{self._ITALIC}{m.group(1)}{self._RESET}",
+            text,
         )
         return make_urls_clickable(text)
-
-    # --- streaming entry points ---------------------------------------------
-
-    def flush(self) -> None:
-        """Emit anything still buffered at end-of-stream.
-
-        Must be called once the stream ends. Without it:
-        * a trailing backtick held back for a possible ``\\`\\`\\``` is dropped;
-        * a response that ends INSIDE an unclosed code fence loses its entire
-          code body (it sits unprinted in ``_code_buffer``);
-        * a partial last line sits unrendered in ``_text_buffer``.
-
-        Always resets terminal styling at the very end so the prompt is never
-        left mid-color.
-        """
-        # Any backticks we were holding back never became a fence — literal text.
-        pending_backticks = self._backtick_buffer
-        self._backtick_buffer = ""
-
-        if self._in_code_block:
-            # Stream ended mid-code-block (no closing fence). Emit the code we
-            # accumulated so it isn't lost.
-            if self._code_buffer or pending_backticks:
-                self._code_buffer += pending_backticks
-                self._print_highlighted_code()
-            self._in_code_block = False
-            self._code_buffer = ""
-            self._code_lang = ""
-        else:
-            # Pending backticks were a possible ``` fence that never arrived —
-            # they're literal text; render the final partial line including them.
-            if pending_backticks:
-                self._text_buffer += pending_backticks
-            self._flush_text_line()
-
-        # Never leave the terminal styled at end of a response.
-        print(self._RESET, end="", flush=True)
-
-    def process_chunk(self, data: str) -> None:
-        """Process a streaming chunk with code highlighting + Markdown.
-
-        Args:
-            data: Text chunk to process
-        """
-        # Handle buffered backticks from previous chunk
-        data = self._backtick_buffer + data
-        self._backtick_buffer = ""
-
-        if not data:
-            return
-
-        # Buffer trailing backticks only if they might form ``` in next chunk
-        if "```" not in data:
-            # Count trailing backticks
-            trailing_backticks = 0
-            for i in range(len(data) - 1, -1, -1):
-                if data[i] == "`":
-                    trailing_backticks += 1
-                else:
-                    break
-
-            # Buffer 1 or 2 trailing backticks only if preceded by whitespace/newline or at start
-            # This prevents buffering inline code backticks like "text``"
-            if trailing_backticks in [1, 2]:
-                char_before = (
-                    data[-(trailing_backticks + 1)]
-                    if len(data) > trailing_backticks
-                    else None
-                )
-                if char_before is None or char_before in [" ", "\n", "\t", "\r"]:
-                    self._backtick_buffer = data[-trailing_backticks:]
-                    data = data[:-trailing_backticks]
-
-        if not data:
-            return
-
-        if "```" in data:
-            self._process_code_blocks(data)
-        elif self._in_code_block:
-            self._process_in_code_blocks(data)
-        else:
-            # Normal text - render as Markdown (line-buffered)
-            self._emit_markdown(data)

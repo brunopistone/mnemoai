@@ -274,6 +274,15 @@ def skills_dir() -> Path:
     return d
 
 
+def agents_dir() -> Path:
+    """Directory holding custom sub-agent types, one ``<name>.md`` per agent
+    (created). Each file is frontmatter (name, description, tools?, model?) + a
+    markdown body used as the sub-agent's system prompt."""
+    d = app_home() / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def tasks_dir() -> Path:
     """Directory for background-task output (created)."""
     d = app_home() / "tasks"

@@ -9,6 +9,118 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-19
+
+### Changed
+
+- **Streamed answer rendering rewritten on a real Markdown parser.** The terminal
+  formatter (`CodeFormatter`) no longer scans streamed deltas with a hand-rolled
+  ` ``` ` state machine — it now buffers the response and **re-parses it with
+  `markdown-it-py`** on each chunk, rendering completed top-level blocks once and
+  re-parsing only the growing tail. This structurally eliminates a class of
+  streaming glitches: a code block's language label ("python") could leak as a
+  bare text line, adjacent code fences could desync the scanner, a literal `\n`
+  could appear, and inline `` `code` `` after a code block could render with raw
+  backticks. Fenced code is still Pygments-highlighted; headers, lists,
+  blockquotes, rules, **bold**/_italic_/inline-code, and clickable links render as
+  before (spaced `a * b` still isn't italicized). Adds `markdown-it-py` as a
+  dependency.
+
+### Added
+
+- **Background sub-agents + resume.** `spawn_agent(…, run_in_background=true)` now
+  launches a sub-agent on a daemon thread and **returns immediately** with an
+  agent id — you keep working while it runs. When it finishes it **auto-surfaces
+  its report**: if you're idle, a turn is triggered automatically (no need to
+  type anything) to deliver it; if a turn is running, it's delivered at the start
+  of your next turn. Either way it's folded in as a user message so the model
+  addresses it. A background sub-agent has no terminal to prompt on, so it
+  **auto-skips (denies) any destructive tool that isn't already approved** —
+  never runs one unattended (a pre-trusted category from the session still
+  proceeds); safe by construction. `resume_agent(agent_id, prompt)` continues a
+  finished sub-agent with a follow-up, re-briefing it from its original task +
+  prior report (no re-explaining). It **defaults to background too** (matching the
+  original background run — returns immediately, report delivered on completion;
+  pass `run_in_background=false` to wait inline), and works **across a restart or
+  a loaded conversation**, since each run's brief + report is persisted under the
+  tasks dir and resume falls back to it when the in-memory record is gone. This
+  completes the sub-agent feature (foreground/parallel shipped earlier; this adds
+  detached execution).
+- **Mid-turn steering — talk to the assistant while it's working.** A plain
+  message typed WHILE a turn is running is now **folded into that running turn**
+  instead of queued as a separate one: the agent holds it on a thread-safe queue
+  and drains it at the next tool-round boundary (the top of the tool node, and —
+  during orchestration — into the aggregator), injecting it as a user message
+  ("The user sent a new message while you were working: …") so the model
+  addresses it after finishing the current step. The in-flight work isn't
+  discarded, and the current tool batch runs to completion (additive steering).
+  Slash commands still queue as a separate turn (they can't steer mid-run);
+  **Esc still cancels** the turn — and cancelling now **discards** any message
+  steered into that (aborted) turn, so it can't leak into and get answered by the
+  next turn. A steered message shows a dim `> … (steering →)` echo instead of the
+  `(queued)` line.
+
+- **Sub-agents (`spawn_agent`) — model-initiated, isolated-context delegation.**
+  The model can now call `spawn_agent(agent_type, prompt, description)` to hand a
+  self-contained task to a fresh sub-agent that runs on its **own isolated
+  context** and returns **only its final report** — the sub-agent's intermediate
+  tool calls never enter the parent's window, keeping it clean during search- or
+  multi-step-heavy work. It complements the existing (framework-driven)
+  orchestrator. Built-in agent
+  types: `general-purpose` (full toolset), `explore` and `plan` (read-only —
+  search/read only, no writes or shell). Each carries its own system prompt,
+  customizable in `prompts.yaml`
+  (`SUBAGENT_{GENERAL,EXPLORE,PLAN}_PROMPT`). Nested spawning is blocked. Reuses
+  the existing worker loop (already isolated) and the `exit_plan_mode` thin-stub +
+  client-side-interception pattern.
+- **Custom sub-agent types from `~/.mnemoai/agents/*.md`.** Drop a markdown file
+  with YAML frontmatter (`description` required; optional `name` — defaults to the
+  filename — and `tools` allowlist, list or CSV, `*`/omitted = all tools) and a
+  body used as the sub-agent's system prompt, and it becomes a `spawn_agent` type.
+  Tolerant scan (a bad/incomplete file is reported and skipped, never fatal); a
+  custom type overrides a built-in of the same name. All available types (built-in
+  - custom) are listed to the model in an `<available_subagents>` system-prompt
+    block at session start, re-injected after compaction so they survive a summary.
+    No `/agents` command — agents are authored as files and
+    discovered automatically; the model, not the user, decides when to spawn one.
+    Each type also advertises its tool scope (`(Tools: all)` or the allowlist) in
+    the listing, so the model can pick by capability. A spawned sub-agent runs on
+    the **same generous turn budget as the main agent loop** (`LLM.RECURSION_LIMIT`,
+    default 200) rather than the orchestrator-worker default of 10 — a whole
+    self-contained task (esp. search-heavy `explore`/`plan`) would otherwise starve
+    and stop before delivering its report.
+- **Parallel sub-agents + quiet display.** The assistant can now emit several
+  `spawn_agent` calls in one turn and they run **concurrently** on a bounded pool
+  (`LLM.SUBAGENT_MAX_CONCURRENCY`, default 4; 1 forces sequential; a lone spawn
+  runs inline), with results collected and handed back together — a failing
+  sub-agent yields an error string without aborting its siblings. Sub-agents now
+  run **quiet**: their internal trace no longer floods the terminal — you see a
+  live "N sub-agents running…" / "N tool calls…" status line instead, and only
+  each sub-agent's final report surfaces. The model call still **streams** under
+  the hood (so a sub-agent keeps the stalled-stream idle-timeout + network retry —
+  it won't hang if the socket dies on sleep); only the display is suppressed, and
+  no shared display state is touched, which is what makes the parallel runs safe.
+  Confirmation prompts from concurrent sub-agents are serialized, and the
+  nested-spawn guard is now thread-local so parallel top-level spawns don't
+  interfere. Background execution + resume remain a planned follow-up.
+- **Parallel orchestrator subtasks (dependency-aware).** The orchestrator (the
+  framework decomposer for complex "full" queries) no longer runs its workers
+  strictly one-after-another. The decomposition schema gains an optional
+  `depends_on` (a list of earlier subtask indices); the orchestrator now schedules
+  by that dependency graph — **independent subtasks run concurrently** on the same
+  bounded pool as sub-agents (`LLM.SUBAGENT_MAX_CONCURRENCY`), while genuinely
+  dependent steps wait for exactly the inputs they declared (only those results
+  are threaded in, not every prior step). This lets a "do two independent things"
+  request actually run them in parallel through the orchestrator. Fully backward-
+  compatible: no `depends_on` → today's sequential behavior; malformed/cyclic/
+  forward references are sanitized away and can never deadlock (the scheduler
+  force-runs any stuck remainder). Orchestrator workers now run quiet too, so a
+  parallel wave shows one "N steps running…" line instead of interleaved traces.
+  Workers in a parallel wave run **headless** — an untrusted destructive tool
+  auto-skips instead of stacking multiple confirmation prompts on one terminal
+  (a category you already approved this session still runs); a sequential run
+  (`SUBAGENT_MAX_CONCURRENCY=1`) still prompts normally.
+
 ## [1.4.5] — 2026-07-17
 
 ### Added
@@ -89,7 +201,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   backoff**; if all retries fail it ends with a clear "lost the connection — send
   your message again" message instead of crashing. The partial (including partial
   reasoning) is discarded — a dropped stream can't be resumed mid-generation — but
-  the conversation continues, matching how Claude Code recovers. This lives in the
+  the conversation continues instead of crashing. This lives in the
   agent stream layer, so it applies to **every** provider, not one client.
 
 ### Changed

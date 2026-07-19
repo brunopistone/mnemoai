@@ -1,10 +1,16 @@
 """Conversation manager that uses simple text-based summaries."""
 
 import json
+import re
 import textwrap
 from datetime import date
 from typing import Any, Dict, List, Union
 
+from mnemoai.client.agent.subagents import available_subagents_block
+from mnemoai.client.memory.skill_store import (
+    SkillStore,
+    format_available_skills,
+)
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.tokenization import count_tokens as _count_text_tokens
@@ -175,8 +181,6 @@ class AgentConversationManager:
         structured summary; we keep only the summary. If no tags are present
         (or only an opening tag), return the text unchanged/after the tag.
         """
-        import re
-
         # Drop a complete <analysis>...</analysis> block.
         cleaned = re.sub(
             r"<analysis>.*?</analysis>\s*", "", text, flags=re.DOTALL | re.IGNORECASE
@@ -411,6 +415,9 @@ class AgentConversationManager:
         skills_block = self._skills_block()
         if skills_block:
             parts.append(skills_block)
+        subagents_block = self._subagents_block()
+        if subagents_block:
+            parts.append(subagents_block)
         parts.append(summary_block)
         return "\n\n".join(parts)
 
@@ -421,12 +428,16 @@ class AgentConversationManager:
         """
         if not config.get("ENABLE_SKILLS", True):
             return ""
-        from mnemoai.client.memory.skill_store import (
-            SkillStore,
-            format_available_skills,
-        )
-
         return format_available_skills(SkillStore().list_skills())
+
+    def _subagents_block(self) -> str:
+        """Build the ``<available_subagents>`` block, so the spawn_agent types
+        survive compaction (mirrors the client's session-start injection).
+
+        Delegates to the single source in ``subagents`` so the block prose can't
+        drift between this compaction path and the client's session-start path.
+        """
+        return available_subagents_block()
 
     async def manage_messages(self, client: Any, model: Any, agent: Any) -> None:
         """Auto-compact: summarize if the conversation exceeds the token limit.
@@ -535,10 +546,10 @@ class AgentConversationManager:
 
         Either case makes providers like the OpenAI Responses API reject the
         request: "No tool call found for function call output with call_id …".
-        We move the split EARLIER (summarize a little more, pulling the whole
+        We move the split EARLIER (keep a little more verbatim, pulling the whole
         tool exchange into the kept window) until the boundary is clean.
 
-        Returns the adjusted split (0 = summarize everything, also safe).
+        Returns the adjusted split (0 = keep everything verbatim, also safe).
         """
         n = len(raw_messages)
         while split > 0:

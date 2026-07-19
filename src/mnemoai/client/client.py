@@ -22,6 +22,7 @@ from mnemoai.client.agent.message_codec import (
     convert_strands_messages_to_langchain,
 )
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
+from mnemoai.client.agent.subagents import available_subagents_block
 from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
     messages_to_dict_list,
@@ -214,6 +215,12 @@ class LangGraphClient:
         if skills_context:
             system_prompt = f"{system_prompt}\n\n{skills_context}"
 
+        # Available sub-agent types (built-in + custom) for the spawn_agent tool,
+        # so the model can discover custom agents from ~/.mnemoai/agents/.
+        subagents_context = self._inject_subagents_context()
+        if subagents_context:
+            system_prompt = f"{system_prompt}\n\n{subagents_context}"
+
         return system_prompt
 
     @staticmethod
@@ -374,21 +381,28 @@ class LangGraphClient:
         with self.spinner_lock:
             self.spinner.start()
 
+        # Delivery-only turn (empty prompt): a background sub-agent finished and
+        # we're auto-triggering a turn to surface it. Skip the per-turn prompt
+        # injections (episodic/plan/steering) — there's no user prompt to frame —
+        # and let the agent run on the drained completion messages alone.
+        delivery_only = not (prompt or "").strip()
+
         try:
-            if self.episodic_memory:
+            if not delivery_only and self.episodic_memory:
                 prompt = self._inject_episodic_context(prompt)
 
             # Plan mode: remind the model per-turn that it's read-only (the
             # system prompt is frozen at session start).
-            if self.plan_mode_active:
+            if not delivery_only and self.plan_mode_active:
                 prompt = self._plan_mode_reminder() + prompt
 
             # STEERING.md: user-authored always-on instructions, prepended last so
             # they LEAD the prompt (highest priority). Re-read each turn; stripped
             # before storage, so compaction never summarizes them away.
-            steering = self._steering_reminder()
-            if steering:
-                prompt = steering + prompt
+            if not delivery_only:
+                steering = self._steering_reminder()
+                if steering:
+                    prompt = steering + prompt
 
             with self.mcp_client:
                 response = self.agent(prompt)
@@ -670,6 +684,11 @@ class LangGraphClient:
         )
 
         return format_available_skills(SkillStore().list_skills())
+
+    def _inject_subagents_context(self) -> str:
+        """``<available_subagents>`` block for the spawn_agent tool (built-in +
+        custom types), so the model can discover custom ~/.mnemoai/agents/ types."""
+        return available_subagents_block()
 
     def _get_playbook_context(self) -> str:
         """Formatted general playbook strategies for the system prompt, or ""."""

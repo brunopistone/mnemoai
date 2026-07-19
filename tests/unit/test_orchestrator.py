@@ -14,13 +14,15 @@ class TestParseSubtasks:
         )
         result = parse_subtasks(content, FALLBACK, VALID)
         assert len(result) == 2
-        assert result[0] == {"description": "read the file", "category": "code"}
+        assert result[0] == {
+            "description": "read the file", "category": "code", "depends_on": []
+        }
         assert result[1]["category"] == "simple_qa"
 
     def test_strips_markdown_code_fences(self):
         content = '```json\n[{"description": "do x", "category": "code"}]\n```'
         result = parse_subtasks(content, FALLBACK, VALID)
-        assert result == [{"description": "do x", "category": "code"}]
+        assert result == [{"description": "do x", "category": "code", "depends_on": []}]
 
     def test_strips_thinking_tags_before_json(self):
         content = (
@@ -28,7 +30,9 @@ class TestParseSubtasks:
             '[{"description": "task a", "category": "research"}]'
         )
         result = parse_subtasks(content, FALLBACK, VALID)
-        assert result == [{"description": "task a", "category": "research"}]
+        assert result == [
+            {"description": "task a", "category": "research", "depends_on": []}
+        ]
 
     def test_invalid_category_normalized_to_full(self):
         content = '[{"description": "do y", "category": "nonsense"}]'
@@ -42,20 +46,20 @@ class TestParseSubtasks:
 
     def test_malformed_json_falls_back_to_single_subtask(self):
         result = parse_subtasks("this is not json at all", FALLBACK, VALID)
-        assert result == [{"description": FALLBACK, "category": "full"}]
+        assert result == [{"description": FALLBACK, "category": "full", "depends_on": []}]
 
     def test_empty_string_falls_back(self):
         result = parse_subtasks("", FALLBACK, VALID)
-        assert result == [{"description": FALLBACK, "category": "full"}]
+        assert result == [{"description": FALLBACK, "category": "full", "depends_on": []}]
 
     def test_non_list_json_falls_back(self):
         result = parse_subtasks('{"description": "x"}', FALLBACK, VALID)
-        assert result == [{"description": FALLBACK, "category": "full"}]
+        assert result == [{"description": FALLBACK, "category": "full", "depends_on": []}]
 
     def test_entries_without_description_are_skipped(self):
         content = '[{"category": "code"}, {"description": "keep me", "category": "code"}]'
         result = parse_subtasks(content, FALLBACK, VALID)
-        assert result == [{"description": "keep me", "category": "code"}]
+        assert result == [{"description": "keep me", "category": "code", "depends_on": []}]
 
     def test_bedrock_list_content_blocks(self):
         content = [
@@ -63,4 +67,46 @@ class TestParseSubtasks:
             {"type": "text", "text": '[{"description": "t", "category": "full"}]'},
         ]
         result = parse_subtasks(content, FALLBACK, VALID)
-        assert result == [{"description": "t", "category": "full"}]
+        assert result == [{"description": "t", "category": "full", "depends_on": []}]
+
+
+class TestParseSubtasksDependsOn:
+    def test_valid_backward_dependency_kept(self):
+        content = (
+            '[{"description": "a", "category": "code"}, '
+            '{"description": "b", "category": "code", "depends_on": [0]}]'
+        )
+        result = parse_subtasks(content, FALLBACK, VALID)
+        assert result[0]["depends_on"] == []
+        assert result[1]["depends_on"] == [0]
+
+    def test_forward_and_self_references_dropped(self):
+        # index 0 depends on 1 (forward) and 0 (self) — both invalid → dropped.
+        content = (
+            '[{"description": "a", "category": "code", "depends_on": [1, 0]}, '
+            '{"description": "b", "category": "code"}]'
+        )
+        result = parse_subtasks(content, FALLBACK, VALID)
+        assert result[0]["depends_on"] == []
+
+    def test_out_of_range_and_non_int_dropped(self):
+        content = (
+            '[{"description": "a", "category": "code"}, '
+            '{"description": "b", "category": "code", "depends_on": [0, 9, "x", true]}]'
+        )
+        result = parse_subtasks(content, FALLBACK, VALID)
+        assert result[1]["depends_on"] == [0]  # 9 out of range, "x"/true rejected
+
+    def test_dedup_and_sorted(self):
+        content = (
+            '[{"description": "a", "category": "code"}, '
+            '{"description": "b", "category": "code"}, '
+            '{"description": "c", "category": "code", "depends_on": [1, 0, 1]}]'
+        )
+        result = parse_subtasks(content, FALLBACK, VALID)
+        assert result[2]["depends_on"] == [0, 1]
+
+    def test_non_list_depends_on_ignored(self):
+        content = '[{"description": "a", "category": "code", "depends_on": "0"}]'
+        result = parse_subtasks(content, FALLBACK, VALID)
+        assert result[0]["depends_on"] == []

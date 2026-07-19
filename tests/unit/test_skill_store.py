@@ -62,15 +62,15 @@ class TestListSkills:
         names = [s.name for s in SkillStore(tmp_path).list_skills()]
         assert names == ["good"]
 
-    def test_tolerates_cc_optional_keys(self, tmp_path):
+    def test_tolerates_extra_optional_keys(self, tmp_path):
         front = (
-            "name: cc\ndescription: Use for CC stuff.\n"
+            "name: extras\ndescription: Uses extra frontmatter keys.\n"
             "license: MIT\nallowed-tools: Read Grep\ncompatibility: anything\n"
             "metadata:\n  author: someone"
         )
-        _write_skill(tmp_path, "cc", front)
+        _write_skill(tmp_path, "extras", front)
         skills = SkillStore(tmp_path).list_skills()
-        assert [s.name for s in skills] == ["cc"]
+        assert [s.name for s in skills] == ["extras"]
 
     def test_extra_unknown_key_is_tolerated(self, tmp_path):
         _write_skill(tmp_path, "x", _valid() + "\nsomething_custom: 1")
