@@ -212,3 +212,53 @@ class TestMarkdownRendering:
     def test_code_block_still_highlighted_with_markdown_around(self):
         out = self._render("# Title\n", "```python\n", "x = 1\n", "```\n", "- done\n")
         assert "Title" in out and "x" in out and "done" in out
+
+    def _plain(self, s):
+        import re
+
+        return re.sub(r"\033\[[0-9;]*m|\033\]8;;[^\033]*\033\\", "", s)
+
+    def _render_by_char(self, text):
+        import contextlib
+        import io
+
+        cf = CodeFormatter()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            for ch in text:
+                cf.process_chunk(ch)
+            cf.flush()
+        return buf.getvalue()
+
+    def test_language_label_never_leaks_as_text(self):
+        # Regression: the old split('```') state machine could emit a bare
+        # "python" line before a code block. The parser consumes the fence's
+        # language into the token, so it can never render as visible text.
+        for render in (lambda t: self._render(t), self._render_by_char):
+            p = self._plain(render("```python\nx = 1\n```\n"))
+            assert not any(line.strip() == "python" for line in p.splitlines())
+            assert "x = 1" in p
+
+    def test_adjacent_code_fences_render_as_two_blocks(self):
+        # Two back-to-back fenced blocks — the classic case that desyncs a naive
+        # split('```') scanner. Both bodies must appear, no fence markers leak.
+        text = "```\nAAA\n```\n```python\nBBB\n```\n"
+        for render in (lambda t: self._render(t), self._render_by_char):
+            p = self._plain(render(text))
+            assert "AAA" in p and "BBB" in p
+            assert "```" not in p
+
+    def test_no_literal_backslash_n_in_output(self):
+        # Regression: a chunk boundary once caused an escaped "\n" to render
+        # literally. Streaming char-by-char must never emit a literal \n.
+        text = "line one\n\n```python\ny = 2\n```\nline `two` after.\n"
+        p = self._plain(self._render_by_char(text))
+        assert "\\n" not in p
+
+    def test_inline_code_after_code_block_still_styled_char_stream(self):
+        # Regression: a paragraph with inline code following adjacent fences was
+        # rendered raw (backticks shown) when streamed char-by-char.
+        text = "```\nA\n```\n```python\nB\n```\nBoth `explore` and `plan` here.\n"
+        out = self._render_by_char(text)
+        assert "\033[1;36m" in out  # inline code styled
+        assert "`explore`" not in self._plain(out)  # no raw backticks

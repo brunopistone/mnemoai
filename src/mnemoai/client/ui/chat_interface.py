@@ -523,6 +523,25 @@ class ChatInterface:
                 result = self._dispatch(line)
             return _ExitRepl if result is self._EXIT else None
 
+        def _steer(text: str) -> bool:
+            """Fold a mid-turn plain message into the running turn via the agent's
+            steering queue. Returns False (→ normal queuing) if the agent isn't
+            available, so nothing is lost."""
+            agent = getattr(self.client, "agent", None)
+            steer_fn = getattr(agent, "steer", None) if agent else None
+            if steer_fn is None:
+                return False
+            steer_fn(text)
+            return True
+
+        def _clear_steering() -> None:
+            """Drop steering queued into a turn being cancelled, so it doesn't
+            leak into the next turn."""
+            agent = getattr(self.client, "agent", None)
+            clear_fn = getattr(agent, "clear_steering", None) if agent else None
+            if clear_fn is not None:
+                clear_fn()
+
         reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
             commands=self._COMMANDS,
@@ -531,6 +550,8 @@ class ChatInterface:
             toolbar_text=lambda: spinner_toolbar_text(status),
             reasoning_text=lambda: reasoning.render(time.monotonic()),
             on_cancel=lambda: None,  # Esc interrupt is handled inside the reader
+            steer=_steer,
+            clear_steering=_clear_steering,
         )
 
         # Route the worker-thread confirmation gate through the app (a plain
@@ -541,6 +562,11 @@ class ChatInterface:
             # and, on approval, flips plan mode off + persists the plan.
             self.client.agent._plan_approval_ui = reader.plan_approval_ui
             self.client.agent._exit_plan_mode_provider = self.client._approve_plan
+            # Background sub-agent completion: auto-trigger a delivery-only turn
+            # while idle so the finished report surfaces without the user typing.
+            self.client.agent._on_background_complete = (
+                lambda agent_id: reader.notify_background_complete()
+            )
         # Exposed so _dispatch can route dialog commands through the reader.
         self._pinned_reader = reader
 
@@ -676,7 +702,16 @@ class ChatInterface:
             return None
 
         if not query.strip():
-            print("Input cannot be empty. Please try again.")
+            # An empty line is normally rejected — EXCEPT a delivery-only turn
+            # auto-enqueued when a background sub-agent finished (surfaces its
+            # report without the user typing). Run it only when a completion is
+            # actually undelivered; otherwise it's a stray blank line.
+            agent = getattr(self.client, "agent", None)
+            has_undelivered = getattr(agent, "has_undelivered_background", None)
+            if has_undelivered is not None and has_undelivered():
+                self.client.query("")  # delivery-only turn
+            else:
+                print("Input cannot be empty. Please try again.")
             return None
 
         use_immediate_storage = config.get("EPISODIC_MEMORY", {}).get(

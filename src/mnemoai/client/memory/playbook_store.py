@@ -139,11 +139,16 @@ class PlaybookStore:
         if len(entries) <= 1:
             return entries
 
-        # Use embeddings if available for semantic deduplication
+        # Use embeddings if available for semantic deduplication.
         if self.embeddings:
             return self._merge_with_embeddings(entries)
 
-        # Fallback: keep highest confidence entries
+        return self._merge_by_strategy_key(entries)
+
+    def _merge_by_strategy_key(self, entries: List[Dict]) -> List[Dict]:
+        """Dedup without embeddings: keep the highest-confidence entry per
+        strategy prefix. Used both when no embeddings are configured and as the
+        fallback when the embedding merge fails."""
         sorted_entries = sorted(
             entries,
             key=lambda x: (x.get("confidence", 0), x.get("timestamp", "")),
@@ -207,8 +212,9 @@ class PlaybookStore:
 
         except Exception as e:
             logger.error(f"Embedding merge failed: {e}")
-            # Fallback to simple deduplication
-            return self._merge_similar.__wrapped__(self, entries)
+            # Fallback to the non-embedding keyword dedup (avoids re-dispatching
+            # back into this method, which the old __wrapped__ call did wrongly).
+            return self._merge_by_strategy_key(entries)
 
     def get_relevant_entries(
         self, task: str, top_k: int = 10, include_failures: bool = True

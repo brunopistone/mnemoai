@@ -110,6 +110,8 @@ class PinnedPromptReader:
         toolbar_text: Optional[Callable[[], Any]] = None,
         reasoning_text: Optional[Callable[[], str]] = None,
         on_cancel: Optional[Callable[[], None]] = None,
+        steer: Optional[Callable[[str], bool]] = None,
+        clear_steering: Optional[Callable[[], None]] = None,
     ) -> None:
         """Build the pinned app.
 
@@ -123,12 +125,18 @@ class PinnedPromptReader:
             toolbar_text: Returns the status-line content; empty hides the line.
             reasoning_text: Returns the live-reasoning ANSI block; empty hides it.
             on_cancel: Called (UI thread) on Esc during a turn to request cancel.
+            steer: Called (UI thread) with a plain message submitted mid-turn;
+                returns True if it was accepted as steering (folded into the
+                running turn), False to fall back to FIFO queuing. None disables
+                steering (everything queues).
         """
         self._prompt_text = prompt_text
         self._dispatch = dispatch
         self._toolbar_text = toolbar_text or (lambda: "")
         self._reasoning_text = reasoning_text or (lambda: "")
         self._on_cancel = on_cancel
+        self._steer = steer
+        self._clear_steering = clear_steering
         self._busy = False
         self._pending = 0  # queued-but-not-started lines (for the status line)
         self._queued_lines = []  # queued text, shown live in the pinned region
@@ -347,19 +355,72 @@ class PinnedPromptReader:
 
     # --- accept / run / worker -----------------------------------------------
 
+    def notify_background_complete(self) -> None:
+        """Called (from a background sub-agent's daemon thread) when one finishes.
+
+        Marshals to the event-loop thread and enqueues a delivery-only turn (an
+        empty line) so the finished report is auto-surfaced while the user is
+        idle. If a turn is already running or one is already queued, does nothing
+        — the agent drains pending completions at the start of every turn, so the
+        in-flight/queued turn will pick it up; we never pile up redundant empty
+        turns."""
+        loop = self._loop
+        if loop is None or self._queue is None:
+            return
+
+        def _enqueue() -> None:
+            if self._busy or self._queued_lines or self._pending:
+                return  # a running/queued turn will drain the completion itself
+            self._pending += 1
+            self._queue.put_nowait("")  # empty line → delivery-only turn
+
+        loop.call_soon_threadsafe(_enqueue)
+
     def _on_accept(self, buff: Buffer) -> bool:
         """Enqueue the submitted line (on the event-loop thread).
 
-        Not echoed to scrollback here — only when :meth:`_worker` starts it, so
-        each ``>`` sits directly above its own answer; meanwhile it shows live via
-        :meth:`_queued_text`. Returns False so prompt_toolkit clears the input.
+        While a turn is running, a plain message is STEERED into it (folded into
+        the running turn) via ``self._steer``. Slash commands, and anything the 
+        steer hook declines, fall back to FIFO queuing.
+        When idle, everything queues normally. Not echoed to scrollback here —
+        only when :meth:`_worker` starts it (so each ``>`` sits above its own
+        answer); a queued line shows live via :meth:`_queued_text`. Returns False
+        so prompt_toolkit clears the input.
         """
         text = buff.text
-        if text.strip() and self._queue is not None:
-            self._pending += 1
-            self._queued_lines.append(text)
-            self._queue.put_nowait(text)
+        if not text.strip() or self._queue is None:
+            return False
+
+        # Mid-turn + plain message + a steer hook → fold into the running turn.
+        stripped = text.strip()
+        if (
+            self._busy
+            and self._steer is not None
+            and not stripped.startswith("/")
+        ):
+            try:
+                if self._steer(text):
+                    # Echo to scrollback so the user sees it was accepted as
+                    # steering (it won't get its own `>`-above-answer later).
+                    self._echo_steered(stripped)
+                    return False
+            except Exception:
+                pass  # fall through to normal queuing on any hook failure
+
+        self._pending += 1
+        self._queued_lines.append(text)
+        self._queue.put_nowait(text)
         return False
+
+    def _echo_steered(self, text: str) -> None:
+        """Echo a steered message to scrollback (dim), acknowledging it was folded
+        into the running turn rather than queued as a separate turn."""
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                lambda: run_in_terminal(
+                    lambda: print(f"\033[90m> {text}  (steering →)\033[0m")
+                )
+            )
 
     def run(self) -> None:
         """Run the pinned REPL (sync entry) under ``patch_stdout`` until dispatch
@@ -539,8 +600,18 @@ class PinnedPromptReader:
             self._cancelled = False
             self._ctrl_c_while_busy = False
             # Echo NOW (at dispatch, not submit) so a queued line's `>` prints
-            # directly above its own answer.
-            await run_in_terminal(lambda line=line: print(f"\033[36m>\033[0m {line}"))
+            # directly above its own answer. An empty line is a delivery-only
+            # turn (a background sub-agent finished) — show a marker, not a bare `>`.
+            if line.strip():
+                await run_in_terminal(
+                    lambda line=line: print(f"\033[36m>\033[0m {line}")
+                )
+            else:
+                await run_in_terminal(
+                    lambda: print(
+                        "\033[90m[↳ a background sub-agent finished]\033[0m"
+                    )
+                )
             if self._app is not None:
                 self._app.invalidate()
             try:
@@ -580,6 +651,14 @@ class PinnedPromptReader:
         if not self._busy or tid is None or self._cancelled:
             return
         self._cancelled = True
+        # Discard anything steered into the turn being cancelled — otherwise a
+        # mid-turn message tied to this (aborted) turn would leak into the next
+        # one and get answered out of context.
+        if self._clear_steering is not None:
+            try:
+                self._clear_steering()
+            except Exception:
+                pass
         run_in_terminal(lambda: print("\033[90m(cancelling…)\033[0m"))
         ctypes.pythonapi.PyThreadState_SetAsyncExc(
             ctypes.c_long(tid), ctypes.py_object(KeyboardInterrupt)

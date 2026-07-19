@@ -43,7 +43,7 @@ _MAX_DESC_CHARS = 200
 _MAX_LISTING_CHARS = 4000
 
 # `name`/`description` are the only required frontmatter keys. Other keys —
-# are tolerated (so CC-authored skills parse cleanly) and simply not acted on. 
+# are tolerated (so skills authored elsewhere parse cleanly) and not acted on.
 # We never reject a skill for extra keys; that would be more friction than help 
 # on a local tool. Sanity cap on description length, so a runaway description is 
 # reported rather than silently injected.

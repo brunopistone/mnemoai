@@ -110,7 +110,11 @@ async def read_csv(path: str) -> str:
             except (UnicodeDecodeError, csv.Error):
                 continue
 
-        logger.error(f"Error during read csv: {str(e)}", exc_info=True)
+        # All fallback encodings failed. (No exception is bound in this
+        # UnicodeDecodeError handler — don't reference one here.)
+        logger.error(
+            "Error during read csv: could not decode with any supported encoding"
+        )
 
         return json.dumps(
             {

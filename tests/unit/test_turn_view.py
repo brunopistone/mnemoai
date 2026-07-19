@@ -75,7 +75,7 @@ class TestToolCall:
 
 
 class TestFileOpRendering:
-    """file_edit / fs_write get a Claude-Code-style block (Update/Create header +
+    """file_edit / fs_write get a structured block (Update/Create header +
     a red/green diff or numbered content) instead of a flattened ↳ arg line."""
 
     def test_file_edit_shows_update_header_and_diff(self):

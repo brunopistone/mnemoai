@@ -90,6 +90,7 @@ class ToolManager:
         from .plan_mode_exit import register_plan_mode_exit_tools
         from .rag import register_rag_tools
         from .skill_tool import register_skill_tools
+        from .subagent_tool import register_subagent_tools
         from .todo_manager import register_todo_tools
         from .web_crawler import register_web_crawler_tools
         from .web_search import register_web_search_tools
@@ -103,6 +104,7 @@ class ToolManager:
         register_git_safety_tools(mcp)
         register_plan_mode_exit_tools(mcp)
         register_search_tools(mcp)
+        register_subagent_tools(mcp)
         register_todo_tools(mcp)
 
         if self.get_vision_model() is not None:

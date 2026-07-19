@@ -1,8 +1,9 @@
-"""Unit tests for background-task log sweeping (server/tools/background_tasks).
+"""Unit tests for background-task artifact sweeping (server/tools/background_tasks).
 
-The in-memory task registry is cleared on each restart, so `clear_completed_tasks`
-can never remove `.log` files from prior sessions. `sweep_old_task_logs` prunes
-stale ones at startup so the task dir doesn't grow without bound.
+The in-memory registries are cleared on each restart, so nothing removes prior
+sessions' artifacts at runtime. `sweep_old_task_logs` prunes stale ones at
+startup — both a bash task's ``*.log`` and a sub-agent's ``subagent_*.json``
+record — so the task dir doesn't grow without bound.
 """
 
 import os
@@ -33,7 +34,7 @@ def test_sweeps_only_old_log_files(tmp_path, monkeypatch):
 def test_ignores_non_log_files(tmp_path, monkeypatch):
     monkeypatch.setattr(bt, "TASK_OUTPUT_DIR", str(tmp_path))
     _touch(tmp_path / "old.log", age_days=30)
-    _touch(tmp_path / "keepme.txt", age_days=30)  # not a .log -> never touched
+    _touch(tmp_path / "keepme.txt", age_days=30)  # not swept -> never touched
     _touch(tmp_path / ".DS_Store", age_days=30)
 
     bt.sweep_old_task_logs(max_age_days=7)
@@ -41,6 +42,32 @@ def test_ignores_non_log_files(tmp_path, monkeypatch):
     assert not (tmp_path / "old.log").exists()
     assert (tmp_path / "keepme.txt").exists()
     assert (tmp_path / ".DS_Store").exists()
+
+
+def test_sweeps_old_subagent_json_records(tmp_path, monkeypatch):
+    # A background/resumed sub-agent's record must be pruned on the same policy
+    # as .log files — else these accumulate forever (the bug this fixes).
+    monkeypatch.setattr(bt, "TASK_OUTPUT_DIR", str(tmp_path))
+    _touch(tmp_path / "subagent_explore-1.json", age_days=10)   # old -> removed
+    _touch(tmp_path / "subagent_plan-2.json", age_days=1)       # recent -> kept
+
+    removed = bt.sweep_old_task_logs(max_age_days=7)
+
+    assert removed == 1
+    assert not (tmp_path / "subagent_explore-1.json").exists()
+    assert (tmp_path / "subagent_plan-2.json").exists()
+
+
+def test_unrelated_json_is_not_swept(tmp_path, monkeypatch):
+    # Only subagent_*.json is swept; another app's JSON in the dir is left alone.
+    monkeypatch.setattr(bt, "TASK_OUTPUT_DIR", str(tmp_path))
+    _touch(tmp_path / "config.json", age_days=30)
+    _touch(tmp_path / "subagent_x-1.json", age_days=30)
+
+    bt.sweep_old_task_logs(max_age_days=7)
+
+    assert (tmp_path / "config.json").exists()
+    assert not (tmp_path / "subagent_x-1.json").exists()
 
 
 def test_zero_age_disables_sweep(tmp_path, monkeypatch):

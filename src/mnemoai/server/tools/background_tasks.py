@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict
 
 from mcp.server.fastmcp import FastMCP
 
@@ -42,10 +42,12 @@ TASK_LOG_MAX_AGE_DAYS = 7
 
 
 def sweep_old_task_logs(max_age_days: int = TASK_LOG_MAX_AGE_DAYS) -> int:
-    """Delete task ``.log`` files older than ``max_age_days``; return the count.
+    """Delete old task artifacts in the task dir; return the count.
 
-    Best-effort startup housekeeping (0 disables). Only touches ``*.log`` files
-    in the task dir, so unrelated files are never removed.
+    Best-effort startup housekeeping (0 disables). Covers both a background
+    bash task's ``*.log`` file and a background/resumed sub-agent's
+    ``subagent_*.json`` record — same dir, same age policy — so neither grows
+    without bound. Only these two patterns are touched; unrelated files are left.
     """
     if max_age_days <= 0:
         return 0
@@ -53,7 +55,10 @@ def sweep_old_task_logs(max_age_days: int = TASK_LOG_MAX_AGE_DAYS) -> int:
     removed = 0
     try:
         for name in os.listdir(TASK_OUTPUT_DIR):
-            if not name.endswith(".log"):
+            if not (
+                name.endswith(".log")
+                or (name.startswith("subagent_") and name.endswith(".json"))
+            ):
                 continue
             path = os.path.join(TASK_OUTPUT_DIR, name)
             try:

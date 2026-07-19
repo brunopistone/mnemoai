@@ -256,6 +256,9 @@ LLM:
   # legitimate long tasks aren't capped — context compaction is the real
   # limiter; this is just a runaway guard.
   RECURSION_LIMIT: 200
+  # Max sub-agents (spawn_agent) run in parallel from one turn's tool calls; the
+  # rest queue. 1 forces sequential. A single spawn always runs inline.
+  SUBAGENT_MAX_CONCURRENCY: 4
   # Upper bound (seconds) for a single MCP tool call at the transport layer.
   # Must exceed the longest tool-level timeout (execute_bash allows up to 120s).
   MCP_CALL_TIMEOUT: 300

@@ -23,10 +23,16 @@ def parse_subtasks(
     fallback_query: str,
     valid_categories: set,
 ) -> List[Dict[str, Any]]:
-    """Parse the orchestrator response into ``[{description, category}]``.
+    """Parse the orchestrator response into ``[{description, category, depends_on}]``.
 
     Tolerant of thinking tags, markdown fences, and malformed JSON — falls back
     to a single ``full`` subtask from ``fallback_query`` when parsing fails.
+
+    Each subtask may carry an optional ``depends_on``: a list of 0-based indices
+    of EARLIER subtasks whose results it needs. Subtasks with no (unmet)
+    dependency can run concurrently; dependents wait. Absent/empty ``depends_on``
+    means "no dependency". Malformed/out-of-range/forward/self references are
+    dropped (treated as no dependency) so a bad plan degrades to safe behavior.
     """
     # Handle Bedrock-style list content blocks (thinking enabled)
     if isinstance(content, list):
@@ -65,10 +71,10 @@ def parse_subtasks(
             f"Orchestrator returned no parseable JSON ({e}); "
             "falling back to a single subtask"
         )
-        return [{"description": fallback_query, "category": "full"}]
+        return [{"description": fallback_query, "category": "full", "depends_on": []}]
 
     if not isinstance(subtasks, list):
-        return [{"description": fallback_query, "category": "full"}]
+        return [{"description": fallback_query, "category": "full", "depends_on": []}]
 
     # Validate and normalize
     validated = []
@@ -82,10 +88,27 @@ def parse_subtasks(
             {
                 "description": st["description"],
                 "category": category,
+                # Raw deps kept for a second pass (indices refer to the ORIGINAL
+                # positions; we validate after we know the final length).
+                "_raw_depends_on": st.get("depends_on"),
             }
         )
 
     if not validated:
-        return [{"description": fallback_query, "category": "full"}]
+        return [{"description": fallback_query, "category": "full", "depends_on": []}]
+
+    # Second pass: sanitize depends_on against the validated list. An index is
+    # kept only if it's an int in range and refers to an EARLIER subtask (no
+    # self/forward refs → the dependency graph is a DAG, safe to schedule).
+    for i, st in enumerate(validated):
+        raw = st.pop("_raw_depends_on", None)
+        deps = []
+        if isinstance(raw, list):
+            for d in raw:
+                if isinstance(d, bool):
+                    continue  # bool is an int subclass — reject explicitly
+                if isinstance(d, int) and 0 <= d < i:
+                    deps.append(d)
+        st["depends_on"] = sorted(set(deps))
 
     return validated
