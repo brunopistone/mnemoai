@@ -124,7 +124,9 @@ class PinnedPromptReader:
             history: Optional shared prompt history.
             toolbar_text: Returns the status-line content; empty hides the line.
             reasoning_text: Returns the live-reasoning ANSI block; empty hides it.
-            on_cancel: Called (UI thread) on Esc during a turn to request cancel.
+            on_cancel: Called (UI thread) on Esc/Ctrl+C during a turn — fires the
+                cooperative cancel so blocking stream/backoff waits wake at once
+                (the async KeyboardInterrupt alone can't preempt them).
             steer: Called (UI thread) with a plain message submitted mid-turn;
                 returns True if it was accepted as steering (folded into the
                 running turn), False to fall back to FIFO queuing. None disables
@@ -284,10 +286,11 @@ class PinnedPromptReader:
         # Esc still cancels.
         @kb.add("escape", filter=Condition(lambda: self._busy))
         def _(event) -> None:
-            """Esc cancels the in-flight turn (interrupts the worker thread)."""
+            """Esc cancels the in-flight turn (interrupts the worker thread).
+
+            ``_request_cancel`` also fires ``on_cancel`` (the cooperative signal),
+            so both Esc and Ctrl+C wake blocking waits — no separate call here."""
             self._request_cancel()
-            if self._on_cancel is not None:
-                self._on_cancel()
 
         @kb.add("c-c")
         def _(event) -> None:
@@ -657,6 +660,15 @@ class PinnedPromptReader:
         if self._clear_steering is not None:
             try:
                 self._clear_steering()
+            except Exception:
+                pass
+        # Cooperative cancel FIRST: wake any blocking stream/backoff wait instantly
+        # (the async KeyboardInterrupt below can't preempt those C-level waits, so
+        # on its own a stalled-stream cancel stalls for the whole idle/backoff).
+        # Covers both Esc and Ctrl+C, which both route through here.
+        if self._on_cancel is not None:
+            try:
+                self._on_cancel()
             except Exception:
                 pass
         run_in_terminal(lambda: print("\033[90m(cancelling…)\033[0m"))

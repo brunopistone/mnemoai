@@ -419,26 +419,46 @@ class TestSpawnConcurrency:
             lambda at, prompt, description="", in_batch=False:
             f"RESULT[{prompt}]"
         )
+        # Only FOREGROUND spawns (run_in_background=False) join the wait-batch;
+        # background is the default, so foreground must be explicit.
         calls = [
-            {"name": "spawn_agent", "id": "a", "args": {"prompt": "one"}},
-            {"name": "spawn_agent", "id": "b", "args": {"prompt": "two"}},
+            {"name": "spawn_agent", "id": "a",
+             "args": {"prompt": "one", "run_in_background": False}},
+            {"name": "spawn_agent", "id": "b",
+             "args": {"prompt": "two", "run_in_background": False}},
             {"name": "grep_search", "id": "c", "args": {}},  # ignored by batch
         ]
         results = a._run_spawn_batch(calls)
         assert results == {"a": "RESULT[one]", "b": "RESULT[two]"}
 
+    def test_batch_excludes_background_spawns(self):
+        # Background is the default: an omitted (or true) run_in_background is NOT
+        # batched (those launch detached via the inline path), so the batch is a
+        # no-op even with several such spawns.
+        a = _agent(["fs_read"])
+        a._max_subagent_concurrency = 4
+        calls = [
+            {"name": "spawn_agent", "id": "a", "args": {"prompt": "one"}},  # default bg
+            {"name": "spawn_agent", "id": "b",
+             "args": {"prompt": "two", "run_in_background": True}},
+        ]
+        assert a._run_spawn_batch(calls) == {}
+
     def test_batch_noop_for_single_spawn(self):
         a = _agent(["fs_read"])
         a._max_subagent_concurrency = 4
-        calls = [{"name": "spawn_agent", "id": "a", "args": {"prompt": "only"}}]
+        calls = [{"name": "spawn_agent", "id": "a",
+                  "args": {"prompt": "only", "run_in_background": False}}]
         assert a._run_spawn_batch(calls) == {}  # inline path handles a lone spawn
 
     def test_batch_noop_when_concurrency_disabled(self):
         a = _agent(["fs_read"])
         a._max_subagent_concurrency = 1  # forced sequential
         calls = [
-            {"name": "spawn_agent", "id": "a", "args": {"prompt": "one"}},
-            {"name": "spawn_agent", "id": "b", "args": {"prompt": "two"}},
+            {"name": "spawn_agent", "id": "a",
+             "args": {"prompt": "one", "run_in_background": False}},
+            {"name": "spawn_agent", "id": "b",
+             "args": {"prompt": "two", "run_in_background": False}},
         ]
         assert a._run_spawn_batch(calls) == {}
 
