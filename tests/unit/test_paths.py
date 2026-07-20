@@ -173,6 +173,45 @@ class TestSubdirs:
             )
             assert known, f"{skill_dir.name} has an empty pristine-hash set"
 
+    def test_prompts_seeded_when_absent(self, tmp_home):
+        # A fresh install gets prompts.yaml copied out of the box.
+        paths.seed_example_files()
+        dest = paths.prompts_path()
+        assert dest.is_file()
+        assert "SYSTEM_PROMPT" in dest.read_text()
+
+    def test_pristine_prompts_refreshed_on_upgrade(self, tmp_home, monkeypatch):
+        # A prompts.yaml whose installed hash is PRISTINE (a version we shipped)
+        # is refreshed in place so prompt improvements reach existing installs.
+        dest = paths.prompts_path()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        old = "SYSTEM_PROMPT: |\n  an old shipped prompt\n"
+        dest.write_text(old)
+        monkeypatch.setattr(
+            paths, "_PRISTINE_BUNDLED_PROMPTS_HASHES", {paths._sha256(dest)}
+        )
+        paths.seed_example_files()
+        # Refreshed to the current bundled prompts.
+        assert dest.read_text() != old
+        assert "SYSTEM_PROMPT" in dest.read_text()
+
+    def test_customized_prompts_left_untouched(self, tmp_home, monkeypatch):
+        # A user-customized prompts.yaml (hash NOT in the pristine set) is never
+        # overwritten, even though the file exists.
+        dest = paths.prompts_path()
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text("SYSTEM_PROMPT: |\n  MY CUSTOM PROMPT\n")
+        monkeypatch.setattr(paths, "_PRISTINE_BUNDLED_PROMPTS_HASHES", {"deadbeef"})
+        paths.seed_example_files()
+        assert "MY CUSTOM PROMPT" in dest.read_text()
+
+    def test_current_bundled_prompts_hash_tracked(self):
+        # Guard: the pristine set must be non-empty so the mechanism applies. When
+        # the bundled prompts.yaml changes, its PREVIOUS shipped hash must be added.
+        assert paths._PRISTINE_BUNDLED_PROMPTS_HASHES, (
+            "_PRISTINE_BUNDLED_PROMPTS_HASHES is empty — prompt refresh won't apply"
+        )
+
     def test_plans_and_tasks_created(self, tmp_home):
         assert paths.plans_dir() == tmp_home / "plans"
         assert paths.tasks_dir() == tmp_home / "tasks"

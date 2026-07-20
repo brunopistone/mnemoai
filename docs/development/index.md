@@ -17,7 +17,7 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 
 **External Tools:**
 
-- **ripgrep**: Used by the `grep_search` tool. Install via system package manager (see [Recommended optional tools](getting-started.md#7-recommended-optional-tools)). If not installed, the assistant automatically falls back to slower alternatives.
+- **ripgrep**: Used by the `grep_search` tool. Install via system package manager (see [Recommended optional tools](../getting-started/installation.md#7-recommended-optional-tools)). If not installed, the assistant automatically falls back to slower alternatives.
 
 **Core Python Packages:**
 
@@ -180,104 +180,6 @@ def initialize_model(self):
 ```
 
 2. Add configuration in `config.yaml`
-
-## 🔧 Ollama Utilities (Optional)
-
-The `bash/` directory contains helper scripts for Ollama users on macOS and Linux.
-
-### Ollama Environment Setup (macOS)
-
-Sets Ollama performance environment variables at boot and launches the Ollama app:
-
-```bash
-# Variables set: OLLAMA_FLASH_ATTENTION=1, OLLAMA_KV_CACHE_TYPE=q8_0, OLLAMA_NUM_GPU=999
-```
-
-**Setup:**
-
-1. Edit `bash/ollama-env-mac/ollama.environment.plist` (no changes needed for defaults)
-2. Copy to LaunchAgents:
-
-```bash
-cp bash/ollama-env-mac/ollama.environment.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/ollama.environment.plist
-```
-
-### VRAM Cleaner
-
-Automatically unloads idle Ollama models from VRAM to free GPU memory. Useful when running multiple models or when GPU memory is limited.
-
-**macOS (LaunchAgent, runs every 60 seconds):**
-
-1. Edit `bash/ollama-freeup-vram/com.ollama.vramcleaner.plist`:
-   - Replace `<PATH_TO_FOLDER>` with the actual path to this repository
-   - Replace `<PATH_TO_USER_HOME>` with your home directory
-2. Install:
-
-```bash
-cp bash/ollama-freeup-vram/com.ollama.vramcleaner.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.ollama.vramcleaner.plist
-```
-
-**Linux (systemd):**
-
-1. Edit `bash/ollama-freeup-vram/ollama-vram-cleaner.service`:
-   - Replace `<PATH_TO_FOLDER>` with the actual path
-2. Install:
-
-```bash
-sudo cp bash/ollama-freeup-vram/ollama-vram-cleaner.service /etc/systemd/system/
-sudo systemctl enable ollama-vram-cleaner
-sudo systemctl start ollama-vram-cleaner
-```
-
-See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for more details.
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**MCP Connection Errors**
-
-- Verify Python path in `client.py` matches your environment
-- Check server path is correct
-- Ensure all dependencies are installed (`pip install -r requirements.txt`)
-
-**Model Loading Issues**
-
-- Verify model name and type in `config.yaml`
-- For Ollama: Ensure Ollama is running (`ollama serve`) and model is pulled (`ollama pull model-name`)
-- For AWS Bedrock: Check credentials (`aws sts get-caller-identity`), region, and model access
-- For OpenAI: Ensure `OPENAI_API_KEY` environment variable is set
-
-**RAG / Episodic Memory Not Working**
-
-- Ensure `ENABLE_RAG: true` (or `ENABLE_EPISODIC_MEMORY: true`) in config
-- Verify embedding model is configured and available (`RAG.EMBED_MODEL_ID` in config)
-- For Ollama embeddings: ensure the embedding model is pulled, for example `ollama pull qwen3-embedding:0.6b`
-- Check logs for "fallback embeddings" warnings — this means the real model is unreachable
-- Verify documents are being indexed with `list_documents()`
-
-**Permission Errors**
-
-- Ensure write permissions for `~/.mnemoai/`
-- Ensure write permissions for `~/.mnemoai/` (the app home: config, plans, tasks, per-profile state)
-- Check file paths in configuration
-
-**Import Errors on Startup**
-
-- Some dependencies (chromadb, faiss-cpu, crawl4ai) can be tricky to install. Check platform-specific instructions.
-- On Apple Silicon: `faiss-cpu` may require `pip install faiss-cpu --no-cache-dir`
-
-### Logging
-
-Logs are output to stderr with configurable level:
-
-```bash
-LOG_LEVEL=DEBUG mnemoai  # Detailed logs
-LOG_LEVEL=INFO mnemoai   # Informational logs
-mnemoai                  # Default: WARNING-level diagnostics only
-```
 
 ## 📄 License
 

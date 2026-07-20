@@ -73,7 +73,7 @@ grep_search(pattern="import React", output_mode="content")  # Show matched lines
 - `context_lines`: Lines of context around matches
 - `max_results`: Maximum matches per file (default: 100)
 
-**Requirements:** [ripgrep](getting-started.md#7-recommended-optional-tools) is recommended for full speed; without it, `grep_search` automatically falls back to a slower built-in search.
+**Requirements:** [ripgrep](../getting-started/installation.md#7-recommended-optional-tools) is recommended for full speed; without it, `grep_search` automatically falls back to a slower built-in search.
 
 **Performance:** 10-100x faster than traditional grep for large codebases.
 
@@ -145,14 +145,14 @@ Destructive tools ask for explicit confirmation before they run — shell comman
 ```
 ▶ Run shell command?
   rm -rf build/
-  Proceed? (y/N):
+  Proceed? (y/N/a=allow all this session):
 
 ▶ Write to file?
   create ~/script.py
-  Proceed? (y/N):
+  Proceed? (y/N/a=allow all this session):
 ```
 
-Only an explicit `y`/`yes` proceeds; anything else (including Enter) declines, and the model is told the user declined. This is a **hard gate enforced client-side** — the prompt always fires regardless of what the model does, because the client owns the terminal (the MCP server is a piped subprocess and can't prompt).
+Only an explicit `y`/`yes` proceeds; `a` trusts that whole category (bash / file writes / memory) for the rest of the session so a multi-step task doesn't re-prompt; anything else (including Enter) declines, and the model is told the user declined. This is a **hard gate enforced client-side** — the prompt always fires regardless of what the model does, because the client owns the terminal (the MCP server is a piped subprocess and can't prompt).
 
 - Toggles: `REQUIRE_BASH_CONFIRMATION` and `REQUIRE_WRITE_CONFIRMATION` (both default `true`). Set either to `false` for trusted/automation setups.
 - Non-interactive runs (no TTY — tests, pipes, CI) auto-proceed so they don't hang.

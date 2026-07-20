@@ -604,9 +604,17 @@ class LangGraphAgent:
 
             if len(ready) == 1 or max_workers <= 1:
                 # A lone/sequential worker runs on THIS thread and CAN prompt for
-                # destructive-tool confirmation (only one prompt at a time).
+                # destructive-tool confirmation (only one prompt at a time). Keep a
+                # spinner up while it works — the worker runs quiet (no trace), so
+                # without this the UI looks finished while the step is still going.
                 for i in ready:
-                    results[i] = self._run_subtask(i, subtasks, results)
+                    desc = subtasks[i].get("description", "")
+                    label = desc[:40] + ("…" if len(desc) > 40 else "")
+                    self._start_spinner(f"step {i + 1}/{total}: {label}")
+                    try:
+                        results[i] = self._run_subtask(i, subtasks, results)
+                    finally:
+                        self._stop_spinner()
             else:
                 if self.verbose:
                     print(
@@ -2806,6 +2814,13 @@ class LangGraphAgent:
         turn's input and the model addresses them with no user message. This is
         how a background completion auto-triggers a turn while the user is idle.
         """
+        # Snapshot the history length BEFORE this turn appends anything, so a
+        # cancel (KeyboardInterrupt) mid-turn can roll the whole turn back — the
+        # user message and any partial assistant/tool work — leaving history as if
+        # the turn never happened. Otherwise a cancelled user turn lingers with no
+        # answer and the model addresses it (out of context) on the NEXT turn.
+        turn_start_len = len(self._messages)
+
         # Deliver any background sub-agent that finished since the last turn: its
         # report is folded into history as a user message so THIS turn's model
         # call addresses it alongside the prompt (or on its own, if empty).
@@ -2859,6 +2874,14 @@ class LangGraphAgent:
             result = self.graph.invoke(
                 initial_state, config={"recursion_limit": self.recursion_limit}
             )
+        except KeyboardInterrupt:
+            # User cancelled mid-turn (the UI injects KeyboardInterrupt into this
+            # worker thread): roll the WHOLE turn out of history — the user message
+            # + any partial tool/assistant work appended so far — so the cancelled
+            # request doesn't linger and get answered on the NEXT turn.
+            del self._messages[turn_start_len:]
+            self._last_input_tokens = None  # stale after the rollback
+            raise
         except GraphRecursionError:
             logger.warning(
                 "Agent stopped after the safety step limit (%d); the task may be "

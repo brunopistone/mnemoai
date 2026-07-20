@@ -642,7 +642,7 @@ EPISODIC_MEMORY:
 
 **How it works, success detection, storage paths, and a worked example** of
 the injected context are covered on the conceptual page: see
-[Episodic Memory](advanced-features.md#episodic-memory).
+[Episodic Memory](guides/memory.md#episodic-memory).
 
 #### Embeddings Model
 
