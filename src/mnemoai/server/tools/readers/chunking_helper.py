@@ -18,7 +18,7 @@ import tiktoken
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
-from mnemoai.utils.paths import profile_dir
+from mnemoai.utils.paths import chunk_session_pointer_path, profile_dir
 
 MODEL_ID = "gpt-4"
 
@@ -30,14 +30,15 @@ def _get_cache_db_path() -> str:
         Path to cache database
     """
 
-    # Read session_id from file (written by client)
+    # Read session_id from THIS instance's pointer (per-instance, namespaced by
+    # MNEMOAI_INSTANCE_ID inherited from the parent) so a concurrent tab's cache
+    # is never picked up.
     rag_dir = str(profile_dir())
-    session_file = os.path.join(rag_dir, "chunk_session_id.txt")
+    session_file = chunk_session_pointer_path()
 
-    if os.path.exists(session_file):
+    if session_file.exists():
         try:
-            with open(session_file, "r") as f:
-                session_id = f.read().strip()
+            session_id = session_file.read_text().strip()
             _cache_db_path = os.path.join(rag_dir, f"chunk_cache_{session_id}.db")
             return _cache_db_path
         except Exception:
@@ -49,13 +50,11 @@ def _get_cache_db_path() -> str:
 
 
 def reset_session_chunk_cache() -> None:
-    """Reset the session Chunk cache instance (called on /clear or app exit)."""
+    """Remove THIS instance's chunk-session pointer (called on /clear or exit)."""
 
-    rag_dir = str(profile_dir())
-    session_file = os.path.join(rag_dir, "chunk_session_id.txt")
-
-    if os.path.exists(session_file):
-        os.remove(session_file)
+    session_file = chunk_session_pointer_path()
+    if session_file.exists():
+        session_file.unlink()
 
 
 def _get_cached_summary(key: str) -> str | None:

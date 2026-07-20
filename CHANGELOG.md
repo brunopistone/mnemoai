@@ -9,6 +9,40 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.2] — 2026-07-20
+
+### Fixed
+
+- **Spinner no longer dies for the rest of an orchestrator step after the first
+  confirmation.** During a sequential orchestrator step (or a foreground
+  sub-agent) the worker runs **quiet** — it deliberately doesn't drive the shared
+  spinner, relying on the caller's. But the destructive-tool **confirmation
+  prompt** stops the spinner to borrow the terminal, and nothing in the quiet
+  path ever restarted it — so after the first `Proceed?` the terminal sat at a
+  bare `>` while work continued, looking frozen. `_prompt_confirm` now snapshots
+  the spinner's state (active + label) before prompting and **restores it
+  afterward** (on accept, decline, or trust-all), so the step keeps animating
+  through every subsequent tool call. The foreground path is unaffected (its
+  spinner is already stopped before the tool loop, so there's nothing to restore
+  — `_invoke_tool` still drives it as before).
+- **Multiple concurrent instances (e.g. terminal tabs) no longer corrupt or
+  delete each other's RAG/chunk-cache session data.** Each running instance and
+  its MCP subprocess exchanged the active `session_id` through two **fixed-name**
+  files in the shared profile dir (`rag_session_id.txt`, `chunk_session_id.txt`),
+  so a second tab starting **overwrote** the first tab's pointer — its MCP
+  subprocess then read the wrong session and cross-contaminated RAG/chunk
+  lookups. Worse, on `/exit` (and `/clear`) the flush wildcard-swept **every**
+  `rag_store_*` / `chunk_cache_*` and the shared pointer files, **wiping other
+  live tabs' data**. Now: (1) the session-pointer files are **per-instance**,
+  namespaced by a new `MNEMOAI_INSTANCE_ID` that the client pins before spawning
+  the MCP subprocess (which inherits it), so both halves of one instance resolve
+  the same pointer and different tabs never collide; (2) the exit/`clear`
+  flush deletes **only this instance's own** store + cache + pointer (scoped to
+  its `session_id`), never a wildcard sweep; (3) a startup housekeeping pass
+  (`sweep_old_rag_artifacts`, mirroring the plan sweep) prunes only **stale**
+  (default 7-day) orphans left by a crashed instance, so nothing accumulates
+  while a concurrently-running instance's fresh files stay untouched.
+
 ## [1.5.1] — 2026-07-20
 
 ### Changed

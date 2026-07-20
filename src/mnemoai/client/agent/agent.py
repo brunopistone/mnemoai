@@ -2608,7 +2608,23 @@ class LangGraphAgent:
 
         Split out of :meth:`_confirm_tool` so the interactive part can run under
         the confirm lock (serializing concurrent sub-agent prompts)."""
+        # We borrow the terminal for the prompt, so stop the spinner — but
+        # remember whether it was running (and its label) so we can put it back
+        # afterward. This matters for a QUIET worker that can prompt (a sequential
+        # orchestrator step / a foreground sub-agent): nothing else restarts the
+        # spinner in that path, so without restoring it here it would stay dead
+        # for the rest of the subtask after the first confirmation (the terminal
+        # then looks frozen at a bare `>` while work continues). In the foreground
+        # `_execute_tools` path the spinner is already stopped before the tool
+        # loop, so `was_active` is False and `_invoke_tool` restarts it as before.
+        was_active, prev_label = self._spinner_snapshot()
         self._stop_spinner()
+
+        def _finish(proceed: bool) -> bool:
+            # Hand the spinner back exactly as it was (label preserved).
+            if was_active:
+                self._start_spinner(prev_label)
+            return proceed
 
         # The pinned-input UI installs a `_confirm_ui` hook (in-app y/N/a keypress
         # → yes|no|all) since a plain input() would fight the live app for stdin.
@@ -2618,8 +2634,8 @@ class LangGraphAgent:
             answer = confirm_ui(header, detail, category)
             if answer == "all":
                 self._trusted_confirm_categories.add(category)
-                return True
-            return answer == "yes"
+                return _finish(True)
+            return _finish(answer == "yes")
 
         # "a" = allow this whole category for the rest of the session.
         print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
@@ -2632,8 +2648,24 @@ class LangGraphAgent:
             if not hasattr(self, "_trusted_confirm_categories"):
                 self._trusted_confirm_categories = set()
             self._trusted_confirm_categories.add(category)
-            return True
-        return answer in ("y", "yes")
+            return _finish(True)
+        return _finish(answer in ("y", "yes"))
+
+    def _spinner_snapshot(self) -> tuple:
+        """Return ``(active, label)`` for the shared spinner, or ``(False, …)``.
+
+        Reads the pinned-UI sink when present (the spinner's own ``spinning`` flag
+        stays False in sink mode), else the stdout spinner's own state.
+        """
+        for cb in getattr(self, "callbacks", None) or []:
+            sp = getattr(cb, "spinner", None)
+            if sp is None:
+                continue
+            sink = getattr(sp, "_sink", None)
+            if sink is not None:
+                return sink.snapshot()
+            return getattr(sp, "spinning", False), getattr(sp, "label", "Thinking")
+        return False, "Thinking"
 
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
         """Execute the tool calls on the last AI message."""

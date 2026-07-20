@@ -112,6 +112,52 @@ class TestInvokeToolSpinner:
         assert LangGraphAgent._SELF_REPORTING_TOOLS == set()
 
 
+class TestConfirmRestoresSpinner:
+    """A confirmation prompt borrows the terminal (stops the spinner). In the
+    QUIET worker path (a sequential orchestrator step / foreground sub-agent)
+    nothing else restarts it, so `_prompt_confirm` must hand it back — otherwise
+    the spinner stays dead for the rest of the subtask and the terminal looks
+    frozen at a bare `>` after the first confirmation (the reported bug).
+    """
+
+    def _agent(self, active, label="step 1/2: analyze"):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        events = []
+        a._spinner_snapshot = lambda: (active, label)
+        a._start_spinner = lambda lbl="Thinking": events.append(("start", lbl))
+        a._stop_spinner = lambda: events.append(("stop", None))
+        a._confirm_ui = lambda h, d, c: "yes"
+        a._trusted_confirm_categories = set()
+        return a, events
+
+    def test_spinner_restored_after_confirm_when_it_was_running(self):
+        a, events = self._agent(active=True, label="step 1/2: analyze")
+        assert a._prompt_confirm("Run shell command?", "ls", "bash") is True
+        # It stopped to prompt, then restarted with the SAME label.
+        assert ("stop", None) in events
+        assert events[-1] == ("start", "step 1/2: analyze")
+
+    def test_spinner_not_restarted_when_it_was_idle(self):
+        # Foreground _execute_tools already stopped the spinner before the tool
+        # loop, so it's idle here — _invoke_tool restarts it, not _prompt_confirm.
+        a, events = self._agent(active=False)
+        a._prompt_confirm("Run shell command?", "ls", "bash")
+        assert all(e[0] != "start" for e in events)  # never restarted
+
+    def test_decline_still_restores_spinner(self):
+        a, events = self._agent(active=True, label="step 2/2: write")
+        a._confirm_ui = lambda h, d, c: "no"
+        assert a._prompt_confirm("Write to file?", "x.py", "write") is False
+        assert events[-1] == ("start", "step 2/2: write")
+
+    def test_allow_all_restores_spinner(self):
+        a, events = self._agent(active=True, label="step 1/2: analyze")
+        a._confirm_ui = lambda h, d, c: "all"
+        assert a._prompt_confirm("Run shell command?", "ls", "bash") is True
+        assert "bash" in a._trusted_confirm_categories
+        assert events[-1] == ("start", "step 1/2: analyze")
+
+
 class _AnswerResponse:
     """Minimal stand-in for an AIMessage with visible content, no tool calls."""
 

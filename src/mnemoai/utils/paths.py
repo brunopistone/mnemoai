@@ -16,7 +16,8 @@ find, back up, or relocate:
     ├── STEERING.md                         # user-authored always-on instructions
     ├── tasks/                              # background-task output
     └── {profile}/                          # per-user-profile data
-        ├── conversations/  todos/  rag_*  chunk_cache_*  profile JSON
+        ├── conversations/  todos/  rag_store_*  chunk_cache_*  profile JSON
+        ├── {rag,chunk}_session_id_<iid>.txt # per-instance session pointers
         └── models/{model}/                # per-chat-model memory
             ├── episodic_memory/
             └── playbook/
@@ -386,6 +387,89 @@ def profile_dir(profile: str = None) -> Path:
     d = app_home() / name
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def instance_id() -> str:
+    """A stable id unique to THIS running app instance (process + its MCP child).
+
+    Multiple ``mnemoai`` instances (e.g. one per terminal tab) share the same
+    profile dir, so any per-session state they hand to their MCP subprocess via a
+    file must be namespaced per-instance or they clobber each other. The id is
+    cached in ``$MNEMOAI_INSTANCE_ID`` so it's **inherited by the MCP subprocess**
+    (which copies ``os.environ``) — both halves of one instance resolve the same
+    pointer file, while a different tab gets a different one. Call this before the
+    client copies the env for the subprocess so the child sees the same value.
+    """
+    iid = os.environ.get("MNEMOAI_INSTANCE_ID")
+    if not iid:
+        iid = f"{os.getpid()}_{int(time.time() * 1000) % 1_000_000:06d}"
+        os.environ["MNEMOAI_INSTANCE_ID"] = iid
+    return iid
+
+
+def rag_session_pointer_path(profile: str = None) -> Path:
+    """Per-instance file holding this instance's RAG ``session_id``.
+
+    Namespaced by :func:`instance_id` so concurrent instances (terminal tabs)
+    don't overwrite each other's pointer (the multi-tab clobber bug).
+    """
+    return profile_dir(profile) / f"rag_session_id_{instance_id()}.txt"
+
+
+def chunk_session_pointer_path(profile: str = None) -> Path:
+    """Per-instance file holding this instance's chunk-cache ``session_id``.
+
+    Namespaced by :func:`instance_id`, like :func:`rag_session_pointer_path`.
+    """
+    return profile_dir(profile) / f"chunk_session_id_{instance_id()}.txt"
+
+
+# Age after which orphaned RAG/chunk session artifacts are swept at startup.
+# Session RAG stores + chunk caches + their pointer files are per-instance
+# scratch; an instance cleans up its own on exit, but a crashed/killed instance
+# can leave some behind. This bounds that so they don't accumulate — WITHOUT an
+# instance deleting another live instance's files (the multi-tab delete-all bug).
+RAG_ARTIFACT_MAX_AGE_DAYS = 7
+
+
+def sweep_old_rag_artifacts(
+    max_age_days: int = RAG_ARTIFACT_MAX_AGE_DAYS, profile: str = None
+) -> int:
+    """Delete orphaned RAG/chunk session artifacts older than ``max_age_days``.
+
+    Best-effort startup housekeeping (0 disables). Touches only the per-session
+    scratch files/dirs (``rag_store_*``, ``chunk_cache_*``, ``rag_session_id_*``,
+    ``chunk_session_id_*``) and only when stale, so a concurrently-running
+    instance's fresh files are left alone. Returns the count removed.
+    """
+    if max_age_days <= 0:
+        return 0
+    d = profile_dir(profile)
+    cutoff = time.time() - max_age_days * 86400
+    prefixes = (
+        "rag_store_",
+        "chunk_cache_",
+        "rag_session_id_",
+        "chunk_session_id_",
+    )
+    removed = 0
+    try:
+        for entry in d.iterdir():
+            if not entry.name.startswith(prefixes):
+                continue
+            try:
+                if entry.stat().st_mtime >= cutoff:
+                    continue  # still recent — may belong to a live instance
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink()
+                removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
 
 
 def conversations_dir(profile: str = None) -> Path:
