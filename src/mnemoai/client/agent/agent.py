@@ -138,6 +138,10 @@ class LangGraphAgent:
     )
     # Sentinel the stream reader thread enqueues to signal a clean end of stream.
     _STREAM_DONE = object()
+    # How often the idle-timeout stream wait re-checks the cancel event (seconds),
+    # so a stalled-stream cancel is noticed promptly instead of after the full
+    # idle window. Small enough to feel instant, large enough to be cheap.
+    _CANCEL_POLL_SECONDS = 0.25
 
     # Ephemeral per-turn reminder blocks (the plan-mode banner, the STEERING.md
     # block) the client prepends: sent to the model this turn but stripped before
@@ -213,6 +217,11 @@ class LangGraphAgent:
         # so the model addresses them without ending the turn
         self._steer_queue: List[str] = []
         self._steer_lock = threading.Lock()
+        # Cooperative cancel: Esc/Ctrl+C sets this (via request_cancel) so the
+        # blocking stream waits (idle-timeout queue get + network-retry backoff)
+        # abort IMMEDIATELY, instead of waiting on an async KeyboardInterrupt that
+        # can't preempt a thread parked in a C-level socket read / time.sleep.
+        self._cancel_event = threading.Event()
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
@@ -394,6 +403,26 @@ class LangGraphAgent:
                 self._steer_queue = []
         else:
             self._steer_queue = []
+
+    def request_cancel(self) -> None:
+        """Signal a cooperative cancel of the running turn (called from the UI
+        thread on Esc/Ctrl+C, alongside the async-exc injection).
+
+        The async ``KeyboardInterrupt`` can't preempt a worker parked in a C-level
+        blocking wait — a stalled-stream ``queue.get(timeout=…)`` or a network-retry
+        ``time.sleep`` backoff — so it only fires when the wait finally returns
+        (up to `STREAM_IDLE_TIMEOUT`/30s later), which is the "cancel takes ages"
+        bug. This event is the mnemoai analog of an ``AbortSignal``: the blocking
+        waits ``.wait()`` on it (waking instantly) and check it at each retry, so
+        the turn tears down immediately. Idempotent; no-op on a bare object."""
+        ev = getattr(self, "_cancel_event", None)
+        if ev is not None:
+            ev.set()
+
+    def _cancelled(self) -> bool:
+        """True if a cooperative cancel was requested for this turn."""
+        ev = getattr(self, "_cancel_event", None)
+        return ev is not None and ev.is_set()
 
     def _is_headless(self) -> bool:
         """True on a background sub-agent's thread (no TTY → can't prompt)."""
@@ -909,8 +938,8 @@ class LangGraphAgent:
                                 str(tool_args.get("agent_type", "")),
                                 str(tool_args.get("prompt", "")),
                                 str(tool_args.get("description", "")),
-                                run_in_background=bool(
-                                    tool_args.get("run_in_background")
+                                run_in_background=tool_args.get(
+                                    "run_in_background", True
                                 ),
                             ),
                             tool_call_id=tool_id,
@@ -1535,7 +1564,12 @@ class LangGraphAgent:
                     "connection in %.1fs (attempt %d/%d)",
                     e, delay, attempt + 1, attempts,
                 )
-                time.sleep(delay)
+                # Abortable backoff: wait ON the cancel event, not time.sleep — so
+                # Esc/Ctrl+C wakes it INSTANTLY (an async KeyboardInterrupt can't
+                # preempt a C-level time.sleep, which is why cancel felt stuck for
+                # the whole backoff). If cancelled mid-wait, abort the turn now.
+                if self._sleep_or_cancel(delay):
+                    raise KeyboardInterrupt("cancelled during retry backoff")
                 if not quiet:  # quiet runs may be concurrent — don't touch spinner
                     self._start_spinner()
                 continue
@@ -1560,6 +1594,19 @@ class LangGraphAgent:
         base = float(llm.get("RETRY_DELAY", 1.0))
         factor = float(llm.get("RETRY_BACKOFF", 2.0))
         return min(base * (factor ** attempt), 30.0)
+
+    def _sleep_or_cancel(self, delay: float) -> bool:
+        """Sleep up to ``delay`` seconds, waking early if a cancel is requested.
+
+        Returns True if cancelled during the wait, False if the full delay
+        elapsed. Uses the cancel event's ``wait`` (interruptible) instead of
+        ``time.sleep`` (a C-level block the async KeyboardInterrupt can't
+        preempt). Falls back to ``time.sleep`` on a bare object with no event."""
+        ev = getattr(self, "_cancel_event", None)
+        if ev is None:
+            time.sleep(delay)
+            return False
+        return ev.wait(delay)
 
     @classmethod
     def _is_context_overflow_error(cls, exc: Exception) -> bool:
@@ -1623,15 +1670,28 @@ class LangGraphAgent:
 
         t = threading.Thread(target=_reader, daemon=True)
         t.start()
+        # Poll in short slices so a cancel (Esc/Ctrl+C) is noticed within
+        # ~POLL seconds instead of after the full `idle` window — a blocking
+        # queue.get(timeout=120) can't be preempted by the async KeyboardInterrupt,
+        # which is why a stalled-stream cancel felt stuck. We still only declare an
+        # idle-timeout once `idle` seconds have truly elapsed with no chunk.
+        poll = min(idle, self._CANCEL_POLL_SECONDS)
+        waited = 0.0
         while True:
+            if self._cancelled():
+                raise KeyboardInterrupt("cancelled while waiting for stream")
             try:
-                item, chunk = q.get(timeout=idle)
+                item, chunk = q.get(timeout=poll)
             except queue.Empty:
-                # No chunk for `idle` seconds — the stream is wedged (likely a
-                # dead socket after sleep). Abandon the reader; let retry re-run.
-                raise _StreamIdleTimeout(
-                    f"No stream data for {idle:.0f}s (connection likely dropped)"
-                )
+                waited += poll
+                if waited >= idle:
+                    # No chunk for `idle` seconds — the stream is wedged (likely a
+                    # dead socket after sleep). Abandon the reader; let retry re-run.
+                    raise _StreamIdleTimeout(
+                        f"No stream data for {idle:.0f}s (connection likely dropped)"
+                    )
+                continue
+            waited = 0.0  # a chunk (or terminal item) arrived — reset the idle clock
             if item is self._STREAM_DONE:
                 return
             if item is not None:  # the reader captured an exception — re-raise it
@@ -2207,11 +2267,13 @@ class LangGraphAgent:
         from concurrent.futures import ThreadPoolExecutor
 
         # Background spawns return immediately (they don't block), so they're not
-        # part of the concurrent-wait batch — the inline path launches them.
+        # part of the concurrent-wait batch — the inline path launches them. Only
+        # explicit run_in_background=false spawns wait here (background is now the
+        # default, so an omitted arg means background → excluded from the batch).
         spawns = [
             tc for tc in tool_calls
             if tc.get("name") == "spawn_agent"
-            and not (tc.get("args") or {}).get("run_in_background")
+            and (tc.get("args") or {}).get("run_in_background", True) is False
         ]
         max_workers = getattr(self, "_max_subagent_concurrency", 1)
         if len(spawns) <= 1 or max_workers <= 1:
@@ -2721,7 +2783,7 @@ class LangGraphAgent:
                         str(tool_args.get("agent_type", "")),
                         str(tool_args.get("prompt", "")),
                         str(tool_args.get("description", "")),
-                        run_in_background=bool(tool_args.get("run_in_background")),
+                        run_in_background=tool_args.get("run_in_background", True),
                     )
                 )
                 tool_results.append(
@@ -2852,6 +2914,12 @@ class LangGraphAgent:
         # the turn never happened. Otherwise a cancelled user turn lingers with no
         # answer and the model addresses it (out of context) on the NEXT turn.
         turn_start_len = len(self._messages)
+
+        # Fresh cancel token for this turn (see request_cancel): a stale set flag
+        # from a prior cancelled turn must not abort this one.
+        cancel_ev = getattr(self, "_cancel_event", None)
+        if cancel_ev is not None:
+            cancel_ev.clear()
 
         # Deliver any background sub-agent that finished since the last turn: its
         # report is folded into history as a user message so THIS turn's model

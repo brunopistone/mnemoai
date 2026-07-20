@@ -7,6 +7,7 @@ timeout and re-runs the turn on a dead/transient connection with backoff, instea
 of hanging. These tests exercise that logic with fake models (no network/LLM).
 """
 
+import threading
 import time
 
 import pytest
@@ -94,6 +95,57 @@ class TestIdleTimeoutIterator:
         assert next(it) == "ok"
         with pytest.raises(ValueError, match="boom"):
             next(it)
+
+
+class TestCooperativeCancel:
+    """Esc/Ctrl+C must abort blocking stream/backoff waits IMMEDIATELY.
+
+    The async KeyboardInterrupt injected into the worker thread can't preempt a
+    C-level blocking wait (a `queue.get(timeout=120)` idle wait or a `time.sleep`
+    backoff), so a stalled-stream cancel would otherwise stall for the full
+    window. `request_cancel` sets a cooperative event the waits poll/`.wait()` on.
+    """
+
+    def _agent(self, idle=120.0):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a._stream_idle_timeout = idle
+        a._cancel_event = threading.Event()
+        a._CANCEL_POLL_SECONDS = 0.05
+        return a
+
+    def test_request_cancel_sets_event(self):
+        a = self._agent()
+        assert a._cancelled() is False
+        a.request_cancel()
+        assert a._cancelled() is True
+
+    def test_backoff_wakes_immediately_on_cancel(self):
+        a = self._agent()
+        t0 = time.time()
+        threading.Timer(0.2, a.request_cancel).start()
+        cancelled = a._sleep_or_cancel(30)  # would otherwise block 30s
+        assert cancelled is True
+        assert time.time() - t0 < 2.0
+
+    def test_backoff_returns_false_when_delay_elapses(self):
+        a = self._agent()
+        assert a._sleep_or_cancel(0.05) is False  # no cancel → full (tiny) wait
+
+    def test_idle_wait_raises_keyboardinterrupt_on_cancel(self):
+        # A never-yielding stream (dropped connection): cancel must break the
+        # idle wait with KeyboardInterrupt long before the 120s idle timeout.
+        a = self._agent(idle=120.0)
+        model = _FakeModel(["a"], stall_before=0, stall_seconds=300)
+        threading.Timer(0.2, a.request_cancel).start()
+        t0 = time.time()
+        with pytest.raises(KeyboardInterrupt):
+            list(a._iter_stream_with_idle_timeout(model, [], {}))
+        assert time.time() - t0 < 2.0
+
+    def test_sleep_or_cancel_no_event_falls_back(self):
+        # Bare object with no cancel event still sleeps (short) and reports False.
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        assert a._sleep_or_cancel(0.01) is False
 
 
 class TestNetworkRetryDelay:

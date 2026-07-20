@@ -9,6 +9,37 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.3] — 2026-07-20
+
+### Changed
+
+- **`spawn_agent` now runs in the background by default.** Previously a spawned
+  sub-agent ran foreground (the parent blocked on its report) unless the model
+  passed `run_in_background=true`. The default is now **background**: the call
+  returns immediately with an id, the main turn stays responsive, and the report
+  is auto-delivered when the sub-agent finishes — so delegation no longer stalls
+  the conversation. The model is instructed to pass `run_in_background=false`
+  only when it needs the report to continue the same turn (its next step depends
+  on the answer) or when a `general-purpose` sub-agent must edit/run un-approved
+  things (a background one runs headless and would auto-skip them). The prompt
+  refresh reaches existing installs via the pristine-`prompts.yaml` mechanism.
+
+### Fixed
+
+- **Cancelling (Esc / Ctrl+C) is now immediate, even mid-stream or mid-retry.**
+  Cancellation worked only by injecting an async `KeyboardInterrupt` into the
+  worker thread — but that **cannot preempt a thread parked in a C-level blocking
+  wait** (verified: it can't break a `queue.get(timeout=…)` or `time.sleep`). So
+  when a turn was in the stalled-stream idle wait (`STREAM_IDLE_TIMEOUT`, default
+  120s) or a network-retry backoff (`time.sleep`, up to 30s), pressing cancel
+  showed `(cancelling…)` but the turn kept running until that wait naturally
+  returned. Now the agent carries a cooperative cancel token (a `threading.Event`,
+  the mnemoai analog of an `AbortSignal`) that the UI **sets on Esc/Ctrl+C**: the
+  idle-timeout stream wait polls it on a short (0.25s) interval and the retry
+  backoff `.wait()`s on it instead of sleeping — so both wake **instantly** and
+  the turn tears down in a fraction of a second instead of up to 120s. Modeled on
+  Claude Code's abortable-sleep + signal-checked-per-attempt pattern.
+
 ## [1.5.2] — 2026-07-20
 
 ### Fixed

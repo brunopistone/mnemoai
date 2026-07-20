@@ -31,7 +31,7 @@ def register_subagent_tools(mcp: FastMCP) -> None:
         agent_type: str,
         prompt: str,
         description: str = "",
-        run_in_background: bool = False,
+        run_in_background: bool = True,
     ) -> str:
         """Delegate a self-contained task to a fresh sub-agent and get its report.
 
@@ -51,16 +51,20 @@ def register_subagent_tools(mcp: FastMCP) -> None:
             can't ask you follow-ups.
           - **Pick the right type.** Use ``explore``/``plan`` (read-only) for
             investigation; ``general-purpose`` when it must edit or run things.
+          - **Runs in the background by DEFAULT** (``run_in_background=true``): the
+            call returns immediately with an agent id, you keep working, and its
+            report is delivered when it finishes. This is the right choice for most
+            delegation — you stay responsive instead of blocking on the sub-agent.
+            A background sub-agent CANNOT ask for confirmation, so it auto-skips any
+            destructive tool that isn't already approved.
+          - **Pass ``run_in_background=false`` when you need the report to
+            CONTINUE** — i.e. your very next step depends on the answer (so you'd
+            just wait anyway), or the sub-agent is ``general-purpose`` and must
+            edit/run things that aren't pre-approved (a background one would
+            auto-skip them). A foreground call blocks and returns the report.
           - **Run several in parallel.** For independent investigations, emit
-            multiple ``spawn_agent`` calls in the SAME turn — they run concurrently
-            and you get all reports back together. Only do this when the tasks
-            don't depend on each other's results.
-          - **Run in the background** (``run_in_background=true``) for a long task
-            you don't need to wait on: the call returns immediately with an agent
-            id, you keep working, and its report is delivered when it finishes. A
-            background sub-agent CANNOT ask for confirmation, so it will auto-skip
-            any destructive tool that isn't already approved — only use it for
-            work that's read-only or whose actions were pre-approved.
+            multiple ``spawn_agent`` calls in the SAME turn — they run concurrently.
+            Only do this when the tasks don't depend on each other's results.
           - **The result is NOT shown to the user.** When the sub-agent returns,
             summarize what matters for the user yourself.
           - Don't use it for a single quick file read — call fs_read directly.
@@ -69,11 +73,13 @@ def register_subagent_tools(mcp: FastMCP) -> None:
             agent_type: One of the available types above.
             prompt: The complete, self-contained task/brief for the sub-agent.
             description: Optional 3-5 word summary of the task (for display).
-            run_in_background: If true, run detached and return an id immediately.
+            run_in_background: Run detached and return an id immediately (default
+                true); pass false to wait inline and get the report back now.
 
         Returns:
-            The sub-agent's final report (or, for background, an ack + id). Handled
-            client-side; this stub reply only appears if driven without the client.
+            The sub-agent's final report (foreground) or an ack + id (background).
+            Handled client-side; this stub reply only appears if driven without
+            the client.
         """
         return (
             "(spawn_agent is handled by the client; no sub-agent was run in this "

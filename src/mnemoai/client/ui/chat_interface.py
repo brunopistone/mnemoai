@@ -542,6 +542,16 @@ class ChatInterface:
             if clear_fn is not None:
                 clear_fn()
 
+        def _on_cancel() -> None:
+            """Cooperatively signal the agent to abort NOW. The reader also injects
+            a KeyboardInterrupt, but that can't preempt a worker parked in a
+            blocking stream/backoff wait — this event wakes those waits instantly
+            so a stalled-stream cancel isn't stuck for the whole idle/backoff."""
+            agent = getattr(self.client, "agent", None)
+            req = getattr(agent, "request_cancel", None) if agent else None
+            if req is not None:
+                req()
+
         reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
             commands=self._COMMANDS,
@@ -549,7 +559,7 @@ class ChatInterface:
             dispatch=_dispatch,
             toolbar_text=lambda: spinner_toolbar_text(status),
             reasoning_text=lambda: reasoning.render(time.monotonic()),
-            on_cancel=lambda: None,  # Esc interrupt is handled inside the reader
+            on_cancel=_on_cancel,
             steer=_steer,
             clear_steering=_clear_steering,
         )

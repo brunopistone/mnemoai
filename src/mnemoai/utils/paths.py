@@ -145,6 +145,7 @@ _PRISTINE_BUNDLED_SKILL_HASHES = {
 # when the bundled ``prompts.yaml`` changes, append its PREVIOUS shipped hash here.
 _PRISTINE_BUNDLED_PROMPTS_HASHES = {
     "fe423553bed74ced37b53503e7249fb1981528d8fdda206341782968699f2267",  # ≤1.5.0
+    "4efc9492288fbc386b0e71adfae3482b6698b04990674ffcb92f3d1b53074adf",  # 1.5.1–1.5.2
 }
 
 
