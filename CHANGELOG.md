@@ -9,6 +9,56 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.1] — 2026-07-20
+
+### Changed
+
+- **System/sub-agent/orchestrator prompts overhauled with delegation guidance.**
+  The `SYSTEM_PROMPT` now tells the model **when and how to use `spawn_agent`** —
+  delegate to keep context clean or parallelize independent work; use
+  `explore`/`plan` (read-only) vs `general-purpose`; and **honor explicit
+  requests literally** (run agents "in parallel" → multiple `spawn_agent` calls
+  in one turn; "in the background"/"don't wait" → `run_in_background=true`). It
+  also gains scope-discipline ("do only what was asked"), a reversibility/blast-
+  radius + confirm-before taxonomy for risky actions, prefer-dedicated-tools-over-
+  bash guidance, symmetric faithful-reporting (don't over-claim _or_ over-hedge),
+  and tighter conciseness/formatting rules. The `ORCHESTRATOR_PROMPT` now
+  **defers to the agent** (a single passthrough subtask) when the user explicitly
+  asks for sub-agents, so an explicit "run 2 background agents" reaches
+  `spawn_agent` instead of being decomposed into framework workers. Sub-agent and
+  aggregator prompts tightened (absolute paths, load-bearing snippets only,
+  retry-alternate-spellings, lead-with-the-answer).
+- **Prompt improvements now reach existing installs.** `prompts.yaml` is refreshed
+  in place on upgrade **when the installed copy is still pristine** (a version we
+  shipped, unmodified — hash in `_PRISTINE_BUNDLED_PROMPTS_HASHES`), so edits to
+  existing prompt keys land for users who never customized it, while a
+  user-customized `prompts.yaml` is left untouched. (The bundled-fallback loader
+  only fills _missing_ keys, so it couldn't deliver edits to existing ones.)
+
+### Fixed
+
+- **Loaded conversations now render Markdown like a live turn.** On `/load`, the
+  replayed assistant answers were printed **raw** — literal `**bold**`, ` ``` `
+  code fences, `##` headings, and list markers — instead of going through the
+  `CodeFormatter` every live turn uses. `turn_view.render_conversation` now
+  renders each answer through the **same** formatter (new `render_markdown`
+  helper: a fresh `CodeFormatter` with stdout captured), so a reloaded answer
+  looks identical to a freshly-streamed one (Markdown, Pygments-highlighted
+  code). Falls back to raw text if rendering fails, so a load can never break.
+- **Orchestrator now shows a spinner during sequential steps.** A lone/sequential
+  subtask ran quiet with no spinner, so the UI looked finished while a step was
+  still going. Each sequential step now drives a `step N/M: …` spinner.
+- **Cancelling a turn no longer leaves the question in history.** When a turn was
+  cancelled (Esc) mid-flight, the user's message had already been appended to the
+  conversation but no answer followed — so the **next** turn saw a dangling,
+  unanswered user turn and the model addressed it out of context (e.g. cancel
+  "what's the World Cup result?", then ask "who are you?" → it answered both).
+  `invoke()` now snapshots the history length before the turn and, on cancel
+  (`KeyboardInterrupt`), rolls the **whole** turn back — the user message plus any
+  partial tool/assistant work — so a cancelled request leaves history exactly as
+  it was. (Distinct from the 1.5.0 fix that cleared the mid-turn _steering_ queue
+  on cancel; this covers the message stored in the agent's own history.)
+
 ## [1.5.0] — 2026-07-19
 
 ### Changed

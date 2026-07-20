@@ -36,14 +36,17 @@ You only need Python 3.11+ and access to at least one model provider. For the ea
 
 | Goal                                                                         | Start here                                                                                  |
 | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Install and use Mnemo AI from scratch                                        | [Getting Started](getting-started.md)                                                       |
-| Fix a setup or runtime problem                                               | [Troubleshooting](development.md#troubleshooting)                                           |
-| Learn the chat commands and feature toggles                                  | [Usage](usage.md)                                                                           |
+| Install and use Mnemo AI from scratch                                        | [Getting Started](getting-started/installation.md)                                          |
+| Fix a setup or runtime problem                                               | [Troubleshooting](development/troubleshooting.md)                                           |
+| Learn the chat commands and feature toggles                                  | [Usage](guides/usage.md)                                                                    |
 | Configure providers, models, prompts, RAG, and memory                        | [Configuration](configuration.md)                                                           |
-| Add external MCP servers, RAG, memory, web tools, and skills                 | [Advanced Features](advanced-features.md)                                                   |
-| Understand file editing, search, git safety, plan mode, and background tasks | [Productivity Tools](productivity.md)                                                       |
-| Contribute or run tests                                                      | [Development](development.md)                                                               |
-| Understand the internal design                                               | [Architecture](architecture-overview.md)                                                    |
+| Orchestrate complex tasks: query routing, workers, and sub-agents            | [Orchestration & sub-agents](guides/orchestration.md)                                       |
+| Give the assistant memory: profiles, MEMORY.md, steering, episodic, playbook | [Memory & learning](guides/memory.md)                                                       |
+| Add knowledge: RAG, web search, and web crawling                             | [Knowledge & web tools](guides/knowledge-and-web.md)                                        |
+| Connect external MCP servers                                                 | [External MCP servers](guides/mcp.md)                                                       |
+| Understand file editing, search, git safety, plan mode, and background tasks | [Productivity Tools](guides/productivity-tools.md)                                          |
+| Contribute or run tests                                                      | [Development](development/index.md)                                                         |
+| Understand the internal design                                               | [Architecture](getting-started/architecture.md)                                             |
 | Browse the detailed per-file map (repo-only, agent/contributor reference)    | [Architecture Reference](https://github.com/brunopistone/mnemoai/blob/main/ARCHITECTURE.md) |
 
 ## Typical workflow

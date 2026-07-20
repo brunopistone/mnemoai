@@ -4,8 +4,12 @@ Pure string builders (no I/O, no prompt_toolkit) written into native scrollback
 above the pinned input; colors degrade harmlessly where unsupported.
 """
 
+import contextlib
+import io
 import re
 import threading
+
+from mnemoai.utils.formatting.code_formatter import CodeFormatter
 
 _GREEN = "\033[32m"
 _GRAY = "\033[90m"
@@ -267,6 +271,27 @@ def _visible_text(content) -> str:
     return ""
 
 
+def render_markdown(text: str) -> str:
+    """Render Markdown text to an ANSI string using the SAME formatter a live
+    turn streams through, so a replayed answer looks identical to a fresh one.
+
+    ``CodeFormatter`` prints to stdout as it renders; we run a fresh instance
+    with stdout captured so the replay path can embed the result in the
+    transcript string instead of streaming it.
+    """
+    if not text:
+        return ""
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            fmt = CodeFormatter()
+            fmt.process_chunk(text)
+            fmt.flush()
+    except Exception:
+        return text  # never let rendering break a load
+    return buf.getvalue().rstrip("\n")
+
+
 def render_conversation(messages: list) -> str:
     """Replay loaded messages to a scrollback transcript: user prompts, 
     ``Thought for…`` blocks, tool calls, and answers.
@@ -299,5 +324,8 @@ def render_conversation(messages: list) -> str:
                     )
             answer = _visible_text(content)
             if answer:
-                out.append(f"{_ANSWER_MARKER}{answer}")
+                # Render through the live formatter so a loaded answer matches a
+                # freshly-streamed one (markdown, code highlighting, no raw
+                # ``**bold``/fences/tables leaking through).
+                out.append(f"{_ANSWER_MARKER}{render_markdown(answer)}")
     return "\n\n".join(out)

@@ -27,8 +27,11 @@ theme:
   features:
     - navigation.instant
     - navigation.tracking
+    - navigation.tabs
     - navigation.sections
+    - navigation.indexes
     - navigation.top
+    - navigation.footer
     - toc.follow
     - content.code.copy
     - search.suggest
@@ -36,13 +39,27 @@ theme:
 
 nav:
   - Home: index.md
-  - Getting Started: getting-started.md
-  - Usage: usage.md
+  - Getting Started:
+      - getting-started/index.md
+      - Installation & first run: getting-started/installation.md
+      - Core concepts:
+          - Architecture: getting-started/architecture.md
+  - Guides:
+      - guides/index.md
+      - Everyday use:
+          - Usage & commands: guides/usage.md
+          - Agent skills: guides/agent-skills.md
+      - Extending & advanced:
+          - Orchestration & sub-agents: guides/orchestration.md
+          - Memory & learning: guides/memory.md
+          - Knowledge & web tools: guides/knowledge-and-web.md
+          - External MCP servers: guides/mcp.md
+          - Productivity tools: guides/productivity-tools.md
   - Configuration: configuration.md
-  - Advanced Features: advanced-features.md
-  - Productivity Tools: productivity.md
-  - Architecture: architecture-overview.md
-  - Development: development.md
+  - Development:
+      - development/index.md
+      - Ollama utilities: development/ollama-utilities.md
+      - Troubleshooting: development/troubleshooting.md
 
 markdown_extensions:
   - admonition

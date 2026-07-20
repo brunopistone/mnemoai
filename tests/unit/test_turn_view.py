@@ -256,6 +256,16 @@ class TestRenderConversation:
         assert "Thought" in out
         assert "thinking hard" in out
 
+    def test_loaded_answer_markdown_is_rendered_not_raw(self):
+        # Regression: a loaded answer must go through the live formatter, so
+        # markdown syntax (bold, code fences) is rendered, not printed literally.
+        md = "This is **important**\n\n```python\ndef f():\n    return 1\n```"
+        out = render_conversation([_ai(md)])
+        assert "**important**" not in out  # bold markers consumed
+        assert "```" not in out            # fence consumed by the parser
+        assert "important" in out          # the text survives
+        assert "\033[" in out              # ANSI styling was applied
+
     def test_tool_calls_rendered(self):
         msg = _ai(tool_calls=[{"name": "web_search", "args": {"query": "x"}}])
         out = render_conversation([msg])

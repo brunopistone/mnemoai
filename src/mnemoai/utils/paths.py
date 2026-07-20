@@ -136,11 +136,44 @@ _PRISTINE_BUNDLED_SKILL_HASHES = {
 }
 
 
+# sha256 of every bundled ``prompts.yaml`` a PRIOR release shipped (the current
+# bundle is compared at runtime). An installed ``prompts.yaml`` whose hash is here
+# — a version WE shipped, unmodified by the user — is "pristine", so it is safe to
+# refresh in place on upgrade so prompt improvements reach existing installs. Any
+# other hash means the user customized it, and we never touch it. **Maintenance:**
+# when the bundled ``prompts.yaml`` changes, append its PREVIOUS shipped hash here.
+_PRISTINE_BUNDLED_PROMPTS_HASHES = {
+    "fe423553bed74ced37b53503e7249fb1981528d8fdda206341782968699f2267",  # ≤1.5.0
+}
+
+
 def _sha256(path: Path) -> str:
     """Hex sha256 of a file's bytes (matches ``shasum -a 256``)."""
     import hashlib
 
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _refresh_pristine_prompts(src: Path, dest: Path) -> None:
+    """Refresh the live ``prompts.yaml`` in place IF the installed copy is pristine
+    (a version we shipped, unmodified); otherwise leave the user's customized file.
+
+    Unlike ``*.example`` files (always refreshed) and unlike the never-touched
+    ``config.yaml``, ``prompts.yaml`` IS loaded as config but is rarely customized —
+    so refreshing a pristine copy lets prompt improvements (edits to existing keys,
+    which the bundled-fallback loader can't deliver since it only fills MISSING
+    keys) reach existing installs on upgrade, without clobbering a user's edits."""
+    if not src.is_file() or not dest.is_file():
+        return
+    try:
+        installed = _sha256(dest)
+        if installed == _sha256(src):
+            return  # already current
+        if installed in _PRISTINE_BUNDLED_PROMPTS_HASHES:
+            shutil.copyfile(src, dest)  # pristine → safe to refresh
+        # else: user-customized → leave untouched
+    except OSError:
+        pass
 
 
 def _refresh_pristine_skill(src_dir: Path, dest_dir: Path) -> None:
@@ -177,21 +210,27 @@ def seed_example_files() -> None:
     on upgrade (they're read-only reference, not loaded as config). Bundled example
     skills are copied when absent, and an already-installed one whose ``SKILL.md``
     is still **pristine** (a version we shipped, unmodified) is refreshed in place
-    so doc/frontmatter updates also reach existing installs. The live files
-    (``config.yaml`` / ``mcp.json`` / ``prompts.yaml`` / user-edited skills) are
-    only ever created when absent and are NEVER overwritten.
+    so doc/frontmatter updates also reach existing installs. ``prompts.yaml`` is
+    likewise refreshed in place when pristine (so prompt improvements reach
+    existing installs). ``config.yaml``/``mcp.json`` and any user-customized
+    ``prompts.yaml``/skill are created when absent and otherwise NEVER overwritten.
     """
     pkg_templates = Path(__file__).resolve().parent  # mnemoai/utils/
     try:
         for example in pkg_templates.glob("config.yaml*.example"):
             _refresh_example(example, config_dir() / example.name)
-        # prompts.yaml is the live prompts file (not a *.example): seed the
-        # actual file so the app has prompts out of the box. Never overwrite.
+        # prompts.yaml is the live prompts file (not a *.example): seed the actual
+        # file so the app has prompts out of the box when absent, and refresh it in
+        # place when the installed copy is still PRISTINE (a version we shipped,
+        # unmodified) so prompt improvements reach existing installs — a
+        # user-customized prompts.yaml is left untouched.
         prompts_template = pkg_templates / "prompts.yaml"
         if prompts_template.is_file():
             dest = prompts_path()
             if not dest.exists():
                 shutil.copyfile(prompts_template, dest)
+            else:
+                _refresh_pristine_prompts(prompts_template, dest)
         mcp_example = pkg_templates / "mcp.json.example"
         if mcp_example.is_file():
             _refresh_example(mcp_example, mcp_dir() / mcp_example.name)

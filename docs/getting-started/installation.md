@@ -86,7 +86,7 @@ After setup, try a simple prompt:
 What files are in the current directory?
 ```
 
-If the assistant lists files or uses the file-reading tools, the core loop is working. If something doesn't work, see [Troubleshooting](development.md#troubleshooting).
+If the assistant lists files or uses the file-reading tools, the core loop is working. If something doesn't work, see [Troubleshooting](../development/troubleshooting.md).
 
 Useful startup flags:
 
@@ -110,7 +110,7 @@ If you enable RAG, episodic memory, or ACE playbook refinement, also pull an emb
 ollama pull qwen3-embedding:0.6b
 ```
 
-Here is a **deliberately minimal, everything-off** Ollama config — the smallest thing that runs. This is _not_ what the first-run wizard writes: the bundled template (and the shipped [`config.yaml.example`](configuration.md#complete-example-config)) enable RAG, episodic memory, the playbook, web search, and web crawling by default. Start minimal and switch features on as you need them:
+Here is a **deliberately minimal, everything-off** Ollama config — the smallest thing that runs. This is _not_ what the first-run wizard writes: the bundled template (and the shipped [`config.yaml.example`](../configuration.md#complete-example-config)) enable RAG, episodic memory, the playbook, web search, and web crawling by default. Start minimal and switch features on as you need them:
 
 ```yaml
 MODEL_ID:
@@ -130,7 +130,7 @@ ENABLE_WEB_SEARCH: false
 ENABLE_WEB_CRAWL: false
 ```
 
-To see the full, annotated defaults instead, see the [complete example config](configuration.md#complete-example-config). For normal installs, save manual configs at `~/.mnemoai/config/config.yaml`.
+To see the full, annotated defaults instead, see the [complete example config](../configuration.md#complete-example-config). For normal installs, save manual configs at `~/.mnemoai/config/config.yaml`.
 
 ## 6. Where config files live
 
@@ -216,7 +216,7 @@ You can also use the wrapper under `bash/system-command-app/` if you want a `mne
 
 ## 9. Next steps
 
-- Learn commands and feature toggles in [Usage](usage.md).
-- Configure providers and advanced model parameters in [Configuration](configuration.md).
-- Add RAG, external MCP servers, web tools, memory, and skills in [Advanced Features](advanced-features.md).
-- See [Development](development.md) if you want to run tests or contribute.
+- Learn commands and feature toggles in [Usage](../guides/usage.md).
+- Configure providers and advanced model parameters in [Configuration](../configuration.md).
+- Add RAG, external MCP servers, web tools, memory, and skills — browse the [Guides](../guides/index.md).
+- See [Development](../development/index.md) if you want to run tests or contribute.
