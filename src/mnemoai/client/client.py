@@ -39,12 +39,16 @@ from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import (
+    chunk_session_pointer_path,
     conversations_dir,
+    instance_id,
     model_dir,
     plans_dir,
     profile_dir,
+    rag_session_pointer_path,
     sanitize_model_name,
     sweep_old_plans,
+    sweep_old_rag_artifacts,
 )
 from mnemoai.utils.tokenization import count_tokens
 
@@ -132,6 +136,10 @@ class LangGraphClient:
         pkg_parent = os.path.dirname(
             os.path.dirname(os.path.abspath(mnemoai.__file__))
         )
+        # Pin this instance's id BEFORE copying the env so the MCP subprocess
+        # inherits the same MNEMOAI_INSTANCE_ID — both halves then resolve the
+        # same per-instance session-pointer file (multiple tabs don't clobber).
+        instance_id()
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = (
@@ -310,6 +318,15 @@ class LangGraphClient:
                 sweep_old_plans()
             except Exception as e:
                 logger.debug(f"Plan sweep skipped: {e}")
+
+            # Prune ORPHANED per-session RAG/chunk artifacts left by a crashed
+            # instance. Age-based so a concurrently-running instance's fresh
+            # files are never deleted (fixes the multi-tab delete-all bug — exit
+            # no longer wildcard-sweeps, so this bounds crash leftovers instead).
+            try:
+                sweep_old_rag_artifacts()
+            except Exception as e:
+                logger.debug(f"RAG artifact sweep skipped: {e}")
 
             # Fail fast if prompts.yaml is missing a required prompt (a feature's
             # prompt is required when that feature is enabled).
@@ -948,6 +965,14 @@ class LangGraphClient:
         if self.agent:
             self.agent.clear_messages()
 
+        # Flush THIS session's RAG/chunk artifacts (capture the id before we mint
+        # a new one) — never a wildcard sweep, which would delete other live
+        # instances' data.
+        old_session_id = self.session_id
+        if config.get("ENABLE_RAG", False):
+            self._flush_rag_store(old_session_id)
+        self._flush_chunk_cache_store(old_session_id)
+
         profile_name = config.get("PROFILE", {}).get("NAME", "default")
         self.session_id = f"{profile_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.system_prompt = self._build_system_prompt()
@@ -957,20 +982,14 @@ class LangGraphClient:
         # Fresh conversation: the next /save makes a new file.
         self.current_conversation_path = None
 
-        if config.get("ENABLE_RAG", False):
-            self._flush_rag_store()
-
-        self._flush_chunk_cache_store()
-
     def _initialize_rag_session(self) -> None:
         """Initialize RAG session at application startup."""
         try:
-            rag_dir = str(profile_dir())
-            os.makedirs(rag_dir, exist_ok=True)
+            profile_dir()  # ensure the dir exists
 
-            session_file = os.path.join(rag_dir, "rag_session_id.txt")
-            with open(session_file, "w") as f:
-                f.write(self.session_id)
+            # Per-instance pointer so concurrent tabs don't overwrite each other.
+            session_file = rag_session_pointer_path()
+            session_file.write_text(self.session_id)
 
             logger.debug(f"RAG session initialized: {self.session_id}")
         except Exception as e:
@@ -980,11 +999,9 @@ class LangGraphClient:
         """Initialize chunk cache DB at application startup."""
         try:
             rag_dir = str(profile_dir())
-            os.makedirs(rag_dir, exist_ok=True)
 
-            session_file = os.path.join(rag_dir, "chunk_session_id.txt")
-            with open(session_file, "w") as f:
-                f.write(self.session_id)
+            # Per-instance pointer so concurrent tabs don't overwrite each other.
+            chunk_session_pointer_path().write_text(self.session_id)
 
             db_path = os.path.join(rag_dir, f"chunk_cache_{self.session_id}.db")
             conn = sqlite3.connect(db_path)
@@ -1006,52 +1023,61 @@ class LangGraphClient:
         except Exception as e:
             logger.warning(f"Failed to initialize chunk cache: {e}")
 
-    def _flush_chunk_cache_store(self) -> None:
-        """Flush the chunk cache database."""
+    def _flush_chunk_cache_store(self, session_id: str = None) -> None:
+        """Flush THIS instance's chunk cache — its own DB + pointer only.
+
+        Scoped to ``session_id`` (defaults to the current one) so a concurrent
+        instance's ``chunk_cache_*.db`` is never touched.
+        """
+        session_id = session_id or self.session_id
         try:
             from mnemoai.server.tools.readers.chunking_helper import (
                 reset_session_chunk_cache,
             )
 
-            reset_session_chunk_cache()
+            reset_session_chunk_cache()  # removes this instance's pointer file
 
-            rag_dir = str(profile_dir())
-
-            if os.path.exists(rag_dir):
-                for file in os.listdir(rag_dir):
-                    if file.startswith("chunk_cache_"):
-                        file_path = os.path.join(rag_dir, file)
-                        try:
-                            os.remove(file_path)
-                            logger.debug(f"Deleted session file: {file}")
-                        except Exception as e:
-                            logger.debug(f"Failed to delete {file}: {e}")
+            db_path = os.path.join(
+                str(profile_dir()), f"chunk_cache_{session_id}.db"
+            )
+            if os.path.exists(db_path):
+                try:
+                    os.remove(db_path)
+                    logger.debug(f"Deleted chunk cache: {os.path.basename(db_path)}")
+                except OSError as e:
+                    logger.debug(f"Failed to delete {db_path}: {e}")
 
             logger.debug("Chunk cache store cleared")
         except Exception as e:
             logger.warning(f"Failed to reset chunk cache: {e}")
 
-    def _flush_rag_store(self) -> None:
-        """Flush the RAG database."""
+    def _flush_rag_store(self, session_id: str = None) -> None:
+        """Flush THIS instance's RAG store — its own store dir/file + pointer only.
+
+        Scoped to ``session_id`` (defaults to the current one) so a concurrent
+        instance's ``rag_store_*`` is never touched.
+        """
+        session_id = session_id or self.session_id
         try:
             from mnemoai.server.tools.rag import reset_session_rag
 
-            reset_session_rag()
+            reset_session_rag()  # removes this instance's pointer file
 
             rag_dir = str(profile_dir())
-
-            if os.path.exists(rag_dir):
-                for file in os.listdir(rag_dir):
-                    if file.startswith("rag_store_"):
-                        file_path = os.path.join(rag_dir, file)
-                        try:
-                            if os.path.isdir(file_path):
-                                shutil.rmtree(file_path)
-                            else:
-                                os.remove(file_path)
-                            logger.debug(f"Deleted session file/dir: {file}")
-                        except Exception as e:
-                            logger.debug(f"Failed to delete {file}: {e}")
+            # Both backends key the store by session_id: FAISS → a
+            # ``rag_store_<id>.faiss`` file, ChromaDB → a ``rag_store_<id>`` dir.
+            for name in (f"rag_store_{session_id}.faiss", f"rag_store_{session_id}"):
+                path = os.path.join(rag_dir, name)
+                if not os.path.exists(path):
+                    continue
+                try:
+                    if os.path.isdir(path):
+                        shutil.rmtree(path)
+                    else:
+                        os.remove(path)
+                    logger.debug(f"Deleted RAG store: {name}")
+                except OSError as e:
+                    logger.debug(f"Failed to delete {name}: {e}")
 
             logger.debug("RAG store cleared")
         except Exception as e:

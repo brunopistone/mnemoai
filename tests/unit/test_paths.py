@@ -5,6 +5,8 @@ All persistent state lives under a single app-home dir
 $MNEMOAI_HOME).
 """
 
+import os
+
 import pytest
 
 from mnemoai.utils import paths
@@ -294,6 +296,73 @@ class TestSubdirs:
         legacy.write_text("{}")  # retired plan_mode.py artifact
         paths.sweep_old_plans(max_age_days=7)
         assert not legacy.exists()
+
+    def test_instance_id_stable_within_process(self, tmp_home, monkeypatch):
+        # Cached in the env so both halves of one instance (client + its MCP
+        # subprocess, which copies os.environ) resolve the same id.
+        monkeypatch.delenv("MNEMOAI_INSTANCE_ID", raising=False)
+        first = paths.instance_id()
+        assert paths.instance_id() == first
+        assert os.environ["MNEMOAI_INSTANCE_ID"] == first
+
+    def test_instance_id_inherited_from_env(self, tmp_home, monkeypatch):
+        # A subprocess that inherited MNEMOAI_INSTANCE_ID reuses it verbatim.
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "parent_123")
+        assert paths.instance_id() == "parent_123"
+
+    def test_session_pointers_are_per_instance(self, tmp_home, monkeypatch):
+        # The multi-tab clobber bug: two instances must NOT share a pointer file.
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "tab_A")
+        rag_a = paths.rag_session_pointer_path()
+        chunk_a = paths.chunk_session_pointer_path()
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "tab_B")
+        rag_b = paths.rag_session_pointer_path()
+        chunk_b = paths.chunk_session_pointer_path()
+        assert rag_a != rag_b
+        assert chunk_a != chunk_b
+        assert "tab_A" in rag_a.name and "tab_B" in rag_b.name
+
+    def test_sweep_old_rag_artifacts_removes_stale_only(self, tmp_home, monkeypatch):
+        import time
+
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "iid")
+        d = paths.profile_dir()
+        stale_files = [
+            d / "rag_store_default_20260101.faiss",
+            d / "chunk_cache_default_20260101.db",
+            d / "rag_session_id_dead.txt",
+            d / "chunk_session_id_dead.txt",
+        ]
+        for f in stale_files:
+            f.write_text("x")
+        stale_store_dir = d / "rag_store_default_20260101"  # chromadb dir form
+        stale_store_dir.mkdir()
+        (stale_store_dir / "data").write_text("x")
+        # A file belonging to a concurrently-running instance (fresh mtime).
+        fresh = d / "rag_store_default_20260720.faiss"
+        fresh.write_text("x")
+
+        old = time.time() - 30 * 86400
+        for f in stale_files + [stale_store_dir]:
+            os.utime(f, (old, old))
+
+        removed = paths.sweep_old_rag_artifacts(max_age_days=7)
+
+        assert removed == 5  # 4 files + 1 dir
+        for f in stale_files:
+            assert not f.exists()
+        assert not stale_store_dir.exists()
+        assert fresh.exists()  # a live instance's fresh file is untouched
+
+    def test_sweep_old_rag_artifacts_ignores_unrelated(self, tmp_home):
+        import time
+
+        d = paths.profile_dir()
+        keep = d / "MEMORY.md"
+        keep.write_text("facts")
+        os.utime(keep, (time.time() - 30 * 86400, time.time() - 30 * 86400))
+        paths.sweep_old_rag_artifacts(max_age_days=7)
+        assert keep.exists()  # only rag_store_/chunk_cache_/*_session_id_ touched
 
     def test_profile_dir_explicit(self, tmp_home):
         d = paths.profile_dir("alice")

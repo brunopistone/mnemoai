@@ -164,7 +164,8 @@ Session data is stored in `~/.mnemoai/{profile_name}/`:
     ├── conversations/           # Saved conversations
     ├── profiles/                # User profiles
     ├── todos/                   # Todo list data
-    ├── rag_session_id.txt       # Current RAG session
+    ├── rag_session_id_*.txt     # Per-instance RAG session pointer (one per tab)
+    ├── chunk_session_id_*.txt   # Per-instance chunk-cache session pointer
     ├── rag_store_*.faiss        # FAISS vector index (or ChromaDB directory)
     ├── chunk_cache_*.db         # SQLite chunk cache
     └── models/                  # Per-model memory (isolated by chat model)
@@ -174,6 +175,8 @@ Session data is stored in `~/.mnemoai/{profile_name}/`:
 ```
 
 > **Model-scoped memory:** episodic memory and the playbook live under `models/{model}/` so trying a different chat model doesn't contaminate the memory/strategies learned with another. Conversations, todos, RAG, and the user profile remain shared across models.
+
+> **Multi-instance isolation:** several `mnemoai` instances (e.g. one per terminal tab) share the profile dir, so the per-session RAG/chunk pointer files are **namespaced per-instance** (`MNEMOAI_INSTANCE_ID`, inherited by each instance's MCP subprocess). One instance uses only its own session's `rag_store_*` / `chunk_cache_*`, and exiting cleans up only its own — never another live tab's. Stale orphans from a crashed instance are pruned at startup on a 7-day age policy.
 
 #### Context Compaction
 

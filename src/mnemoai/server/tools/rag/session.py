@@ -3,7 +3,6 @@
 This is a compact, defensive implementation to avoid previous merge/indent issues.
 """
 
-import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,7 +12,7 @@ from mnemoai.models.controllers.embeddings_controller import EmbeddingsControlle
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
-from mnemoai.utils.paths import profile_dir
+from mnemoai.utils.paths import profile_dir, rag_session_pointer_path
 
 from ..readers.chunking_helper import __split_into_chunks as split_into_chunks
 from .vector_store_controller import VectorStoreController
@@ -47,15 +46,16 @@ def get_rag_session() -> Optional[Any]:
     if _rag_session is not None:
         return _rag_session
 
-    # MCP subprocess: read session_id from file and create session
+    # MCP subprocess: read session_id from file and create session. The pointer
+    # file is per-instance (namespaced by MNEMOAI_INSTANCE_ID, inherited from the
+    # parent) so this subprocess reads ITS OWN parent's session, not another tab's.
     try:
         # Profile-specific directory under the app home
         rag_dir = str(profile_dir())
-        session_file = os.path.join(rag_dir, "rag_session_id.txt")
+        session_file = rag_session_pointer_path()
 
-        if os.path.exists(session_file):
-            with open(session_file, "r") as f:
-                session_id = f.read().strip()
+        if session_file.exists():
+            session_id = session_file.read_text().strip()
 
             embed_model_config = config.get("RAG", {}).get("EMBED_MODEL_ID", {})
             _rag_session = SessionRAG(
@@ -78,12 +78,10 @@ def reset_session_rag() -> None:
         logger.debug(f"Closing RAG session: {_rag_session.session_id}")
         _rag_session = None
 
-    # Also remove session file
-    rag_dir = str(profile_dir())
-    session_file = os.path.join(rag_dir, "rag_session_id.txt")
-
-    if os.path.exists(session_file):
-        os.remove(session_file)
+    # Also remove THIS instance's pointer file (never another tab's).
+    session_file = rag_session_pointer_path()
+    if session_file.exists():
+        session_file.unlink()
 
 
 def _fallback_chunker(content: str, chunk_size: int = 1024 * 8) -> List[str]:
