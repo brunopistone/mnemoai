@@ -131,6 +131,9 @@ class LangGraphAgent:
         "bad gateway",
         "gateway timeout",
         "overloaded",
+        "overloaded_error",
+        "internal server error",
+        "api_error",
         "502",
         "503",
         "504",
@@ -1271,31 +1274,37 @@ class LangGraphAgent:
                     ],
                     "thinking": None,
                 }
-        except (_StreamIdleTimeout, Exception) as e:
-            # A dead/stalled connection that survived all stream retries (e.g. the
-            # network is still down after a long sleep). End the turn with a clear,
-            # non-crashing message the user can act on — the history is intact, so
-            # simply asking again re-runs the turn on a fresh connection.
-            if isinstance(e, _ContextOverflow) or not (
-                isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e)
-            ):
-                raise
-            logger.error(f"Stream failed after retries (connection issue): {e}")
+        except _ContextOverflow:
+            raise  # handled by the dedicated branch above; never reach here as a generic error
+        except KeyboardInterrupt:
+            raise  # user cancel — propagate so the turn rolls back cleanly
+        except Exception as e:
+            # A stream error that survived the retry wrapper. Two families:
+            #  - transient (dead/stalled connection, 5xx/overloaded) exhausted its
+            #    abortable retries — e.g. the network is still down after a sleep;
+            #  - a non-transient API error (the streaming call raised something the
+            #    retry wrapper won't retry) — previously this was swallowed by a
+            #    BLOCKING non-streaming invoke here, which couldn't be cancelled and
+            #    wedged the turn (the reported bug). We no longer do that.
+            # Either way, END the turn with a clear, non-crashing message: the
+            # history is intact, so the user can just send again (a transient issue
+            # then re-runs on a fresh connection). Tailor the wording per family.
             self._stop_spinner()
-            return {
-                "messages": [
-                    AIMessage(
-                        content=(
-                            "I lost the connection to the model and couldn't "
-                            "reconnect after several retries (this can happen after "
-                            "the machine sleeps or the network drops). Your "
-                            "conversation is intact — just send your message again "
-                            "and I'll continue."
-                        )
-                    )
-                ],
-                "thinking": None,
-            }
+            if isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e):
+                logger.error(f"Stream failed after retries (connection issue): {e}")
+                msg = (
+                    "I lost the connection to the model and couldn't reconnect after "
+                    "several retries (this can happen after the machine sleeps or the "
+                    "network drops). Your conversation is intact — just send your "
+                    "message again and I'll continue."
+                )
+            else:
+                logger.error(f"Model request failed: {e}")
+                msg = (
+                    "The model request failed with an error I can't recover from "
+                    "automatically. Your conversation is intact — please try again."
+                )
+            return {"messages": [AIMessage(content=msg)], "thinking": None}
 
         if response is None:
             response = active_model.invoke(messages, config=config)
@@ -1858,23 +1867,19 @@ class LangGraphAgent:
                 if sink is not None:
                     sink.stop()
                 raise _ContextOverflow(e) from e
-            # A wedged/dead stream (idle timeout) or a transient network drop:
-            # re-raise so _stream_response re-runs the turn on a fresh connection
-            # with backoff. Any partial output is discarded — a mid-stream drop
-            # can't be resumed, and partial reasoning would be invalid anyway.
-            if isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e):
-                if sink is not None:
-                    sink.stop()
-                raise
-            # Other stream errors: retry once non-streaming and prefer its
-            # complete result; keep the partial only if that yields none.
-            logger.warning(f"Streaming error: {e}; falling back to non-streaming")
-            try:
-                full = active_model.invoke(messages, config=config)
-                if full is not None:
-                    response = full
-            except Exception as e2:
-                logger.error(f"Non-streaming fallback also failed: {e2}")
+            # Any other stream error (idle timeout, transient network drop, or a
+            # mid-stream API error like a 500/overloaded/api_error): RE-RAISE so
+            # the retry wrapper (_stream_response) re-runs the turn on a fresh
+            # streaming connection with abortable backoff. We deliberately do NOT
+            # fall back to a blocking `active_model.invoke()` here: that call can't
+            # be cancelled (Esc/Ctrl+C can't preempt a C-level request), so it
+            # wedged the turn on exactly the errors seen in the field; retrying the
+            # STREAM keeps the turn interruptible and idle-timeout-protected. Any
+            # partial output is discarded — a mid-stream failure can't be resumed
+            # and partial reasoning would be invalid anyway.
+            if sink is not None:
+                sink.stop()
+            raise
         finally:
             # Never leave a lingering transient block (cancel / error / no flush).
             if sink is not None:

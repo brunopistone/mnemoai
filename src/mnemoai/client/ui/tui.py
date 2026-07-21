@@ -7,6 +7,7 @@ output streams above it via ``patch_stdout``. Also provides the full-screen dial
 Non-TTY sessions degrade to plain ``input()`` and never use this.
 """
 
+import re
 import shutil
 import sys
 from typing import Any, Callable, Iterable, List, Optional
@@ -20,6 +21,7 @@ from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import History, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
 from prompt_toolkit.key_binding.defaults import load_key_bindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import (
     ConditionalContainer,
@@ -51,6 +53,30 @@ _TUI_STYLE = Style(
         ("pinned-queued", "noreverse bg:default fg:#888888"),
     ]
 )
+
+# A paste is collapsed into a `[Pasted text #N +M lines]` placeholder (rather than
+# inserted verbatim) when it's long by EITHER measure: > this many chars, OR 
+# more than this many line breaks.
+_PASTE_CHAR_THRESHOLD = 800
+_PASTE_LINE_THRESHOLD = 2
+# Matches a placeholder for expansion on submit; the `+M lines` suffix is optional
+# (a paste with no newlines collapses to `[Pasted text #N]`).
+_PASTE_REF_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]")
+
+
+def _paste_num_lines(text: str) -> int:
+    """Number of line breaks in ``text`` (``\\r\\n``/``\\r``/``\\n``).
+
+    This is line breaks, not visual lines — "a\\nb\\nc" → 2 — matching Claude
+    Code's ``+M lines`` count (visual lines minus one)."""
+    return len(re.findall(r"\r\n|\r|\n", text))
+
+
+def _format_paste_ref(paste_id: int, num_lines: int) -> str:
+    """The compact input placeholder for a collapsed paste."""
+    if num_lines == 0:
+        return f"[Pasted text #{paste_id}]"
+    return f"[Pasted text #{paste_id} +{num_lines} lines]"
 
 
 class SlashCommandCompleter(Completer):
@@ -151,6 +177,12 @@ class PinnedPromptReader:
         self._confirm_answer = None
         self._confirm_prompt = None
         self._confirm_keys = None  # dimmed [y · n · a] segment of the pinned prompt
+        # Large-paste collapse: a big paste is shown in the input as a compact
+        # `[Pasted text #N +M lines]` placeholder and stored full here; on submit
+        # the placeholder is expanded back to the real text for the model. Keeps
+        # the input readable when pasting a long transcript/file.
+        self._pasted: dict = {}       # id -> full pasted text
+        self._paste_counter = 0       # per-session incrementing id
         # Set when a dialog command asks to exit-run-relaunch the app.
         self._pending_dialog = None
         # Keep constructor args so the app can be rebuilt after a dialog exit.
@@ -278,6 +310,25 @@ class PinnedPromptReader:
             """Ctrl+J inserts a newline (Enter submits)."""
             event.current_buffer.insert_text("\n")
 
+        @kb.add(Keys.BracketedPaste)
+        def _(event) -> None:
+            """Collapse a LONG paste into a compact placeholder in the input.
+
+            A big paste (a transcript, a file) would otherwise flood the input
+            box. If it's long by char or line count, we stash the full text and
+            insert a `[Pasted text #N +M lines]` placeholder instead; on submit
+            the placeholder is expanded back to the real text for the model
+            (:meth:`_expand_pastes`). Short pastes insert verbatim as usual."""
+            data = event.data or ""
+            num_lines = _paste_num_lines(data)
+            if len(data) > _PASTE_CHAR_THRESHOLD or num_lines > _PASTE_LINE_THRESHOLD:
+                self._paste_counter += 1
+                pid = self._paste_counter
+                self._pasted[pid] = data
+                event.current_buffer.insert_text(_format_paste_ref(pid, num_lines))
+            else:
+                event.current_buffer.insert_text(data)
+
         # Bare-Esc cancels the in-flight turn — but NOT eager: an eager Esc fires
         # on the ``ESC`` prefix of macOS Option+←/→ (``ESC b`` / ``ESC f``), so
         # word-motion while typing (even a queued message mid-turn) would cancel
@@ -379,6 +430,21 @@ class PinnedPromptReader:
 
         loop.call_soon_threadsafe(_enqueue)
 
+    def _expand_pastes(self, text: str) -> str:
+        """Replace each `[Pasted text #N …]` placeholder with its full stored text.
+
+        Splices by match offset in REVERSE so a placeholder-looking string inside
+        one paste's content can't be re-expanded, and later offsets stay valid.
+        Unknown ids (e.g. a placeholder the user typed by hand) are left as-is."""
+        if not self._pasted:
+            return text
+        matches = list(_PASTE_REF_RE.finditer(text))
+        for m in reversed(matches):
+            full = self._pasted.get(int(m.group(1)))
+            if full is not None:
+                text = text[: m.start()] + full + text[m.end():]
+        return text
+
     def _on_accept(self, buff: Buffer) -> bool:
         """Enqueue the submitted line (on the event-loop thread).
 
@@ -402,7 +468,8 @@ class PinnedPromptReader:
             and not stripped.startswith("/")
         ):
             try:
-                if self._steer(text):
+                # The model gets the paste EXPANDED; the echo stays collapsed.
+                if self._steer(self._expand_pastes(text)):
                     # Echo to scrollback so the user sees it was accepted as
                     # steering (it won't get its own `>`-above-answer later).
                     self._echo_steered(stripped)
@@ -618,7 +685,9 @@ class PinnedPromptReader:
             if self._app is not None:
                 self._app.invalidate()
             try:
-                result = await asyncio.to_thread(self._dispatch_tracked, line)
+                # Echo/queue kept the COLLAPSED line; the model gets it EXPANDED.
+                dispatched = self._expand_pastes(line)
+                result = await asyncio.to_thread(self._dispatch_tracked, dispatched)
             finally:
                 self._busy = False
                 self._worker_tid = None

@@ -468,3 +468,53 @@ class TestEscapeWordMotion:
         r = _reader(lambda line: None)
         r._busy = True
         assert _escape_binding(r).filter() is True
+
+
+class TestPasteCollapse:
+    """A long paste is collapsed to a compact `[Pasted text #N +M lines]`
+    placeholder in the input (readable), stored full, and EXPANDED back to the
+    real text for the model on submit — while the scrollback echo/queue stays
+    collapsed. Short pastes insert verbatim."""
+
+    def test_num_lines_counts_linebreaks(self):
+        from mnemoai.client.ui.tui import _paste_num_lines
+        assert _paste_num_lines("a\nb\nc") == 2      # breaks, not visual lines
+        assert _paste_num_lines("none") == 0
+        assert _paste_num_lines("x\r\ny\rz\n") == 3
+
+    def test_format_ref(self):
+        from mnemoai.client.ui.tui import _format_paste_ref
+        assert _format_paste_ref(8, 524) == "[Pasted text #8 +524 lines]"
+        assert _format_paste_ref(3, 0) == "[Pasted text #3]"  # no suffix when 0
+
+    def test_expand_replaces_placeholder_with_full_text(self):
+        r = _reader(lambda line: None)
+        r._pasted = {1: "L1\nL2", 2: "SECOND"}
+        out = r._expand_pastes("a [Pasted text #1 +1 lines] b [Pasted text #2] c")
+        assert out == "a L1\nL2 b SECOND c"
+
+    def test_expand_leaves_unknown_ids(self):
+        r = _reader(lambda line: None)
+        r._pasted = {}
+        assert r._expand_pastes("hi [Pasted text #9]") == "hi [Pasted text #9]"
+
+    def test_expand_does_not_reexpand_placeholder_inside_content(self):
+        # A placeholder-looking string INSIDE one paste's content must not be
+        # treated as a ref (reverse-offset splice guarantees this).
+        r = _reader(lambda line: None)
+        r._pasted = {1: "contains [Pasted text #2] literally"}
+        assert r._expand_pastes("[Pasted text #1]") == "contains [Pasted text #2] literally"
+
+    def test_submit_dispatches_expanded_text(self):
+        # End-to-end: the collapsed placeholder is what's queued, but dispatch
+        # (the model) receives the FULL expanded paste.
+        seen = []
+
+        def dispatch(line):
+            seen.append(line)
+            return _ExitRepl if line == "/quit" else None
+
+        r = _reader(dispatch)
+        r._pasted = {1: "line one\nline two\nline three"}
+        _drive(r, ["Review this: [Pasted text #1 +2 lines]", "/quit"])
+        assert seen[0] == "Review this: line one\nline two\nline three"

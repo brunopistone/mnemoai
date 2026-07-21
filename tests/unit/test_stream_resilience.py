@@ -38,6 +38,18 @@ class TestTransientNetworkClassifier:
         ]:
             assert LangGraphAgent._is_transient_network_error(Exception(msg)), msg
 
+    def test_matches_500_api_error(self):
+        # A streamed Anthropic 500 (the reported bug): its str() carries these
+        # phrasings — must be retriable so the turn retries the STREAM (abortable)
+        # rather than falling to a blocking, uncancellable non-streaming invoke.
+        for msg in [
+            "{'type': 'error', 'error': {'type': 'api_error', "
+            "'message': 'Internal server error'}}",
+            "Internal server error",
+            "api_error",
+        ]:
+            assert LangGraphAgent._is_transient_network_error(Exception(msg)), msg
+
     def test_does_not_match_deterministic_errors(self):
         for msg in [
             "invalid_request_error: bad parameter",
@@ -241,3 +253,73 @@ class TestStreamResponseRetries:
         with pytest.raises(_ContextOverflow):
             a._stream_response([], {})
         assert calls["n"] == 1  # raised immediately, no retry
+
+
+class TestNoBlockingNonStreamingFallback:
+    """A mid-stream error must RE-RAISE from _stream_once (so the retry wrapper
+    handles it, abortably) — NOT be swallowed by a blocking active_model.invoke()
+    that can't be cancelled. That blocking fallback was the wedge behind a 500
+    api_error freezing the turn and cancel not working.
+    """
+
+    def _agent(self):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a._stream_idle_timeout = 0
+        a.verbose = False
+        a.callbacks = []
+        a.styled_turn_view = False
+        a.reasoning_sink = None
+        a._code_formatter = None
+        a._stop_spinner = lambda: None
+        a._start_spinner = lambda *x, **k: None
+        return a
+
+    def test_stream_error_reraises_and_never_calls_invoke(self):
+        # A model whose .stream() raises a 500 api_error, and whose .invoke()
+        # explodes if ever called (it must NOT be — no blocking fallback).
+        class _Model:
+            invoked = False
+
+            def stream(self, messages, config=None):
+                raise RuntimeError(
+                    "{'type': 'error', 'error': {'type': 'api_error', "
+                    "'message': 'Internal server error'}}"
+                )
+                yield  # pragma: no cover
+
+            def invoke(self, messages, config=None):
+                _Model.invoked = True
+                raise AssertionError("blocking non-streaming fallback must not run")
+
+        a = self._agent()
+        with pytest.raises(RuntimeError, match="api_error"):
+            a._stream_once(_Model(), [], {})
+        assert _Model.invoked is False
+
+    def test_transient_stream_error_is_retried_by_wrapper(self, monkeypatch):
+        # End-to-end: a 500 api_error from _stream_once is now transient, so
+        # _stream_response retries it (previously it was swallowed → no retry).
+        from langchain_core.messages import AIMessage
+
+        import mnemoai.client.agent.agent as mod
+
+        monkeypatch.setattr(mod.config, "get", lambda k, d=None: d or {})
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a._empty_response_retries = 2
+        a._stream_idle_timeout = 0
+        a.model_with_tools = object()
+        a._start_spinner = lambda *x, **k: None
+        a._sleep_or_cancel = lambda delay: False  # no real backoff, not cancelled
+        a._is_empty_response = lambda r: not getattr(r, "content", "")
+        calls = {"n": 0}
+
+        def _once(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("api_error: Internal server error")
+            return AIMessage(content="recovered"), False
+
+        a._stream_once = _once
+        resp, _ = a._stream_response([], {})
+        assert resp.content == "recovered"
+        assert calls["n"] == 2  # 500 retried, then succeeded

@@ -6,9 +6,19 @@ These tests capture the OpenAI client kwargs without any network call.
 """
 
 import numpy as np
+import pytest
 
 import mnemoai.models.controllers.embeddings_controller as ec
 from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
+
+
+@pytest.fixture(autouse=True)
+def _clear_learned_limits():
+    """The runtime-learned embed limits are a process-global cache; clear it
+    between tests so one test's discovered limit doesn't leak into another."""
+    ec._LEARNED_EMBED_LIMITS.clear()
+    yield
+    ec._LEARNED_EMBED_LIMITS.clear()
 
 
 class _FakeResp:
@@ -150,8 +160,10 @@ class TestOllamaHost:
 
 
 class TestOllamaRetryAndTruncation:
-    """The Ollama runner can EOF transiently; the embed path retries before
-    degrading to deterministic fallback, and caps oversized input as hygiene."""
+    """The Ollama runner can EOF (transiently, OR because the input is too long);
+    the generic embed path retries — shrinking the input on a probable-overflow
+    EOF — before degrading to deterministic fallback. Recovery lives in
+    _embed_uncached (provider-agnostic); _embed_ollama is now a single raw call."""
 
     def _patch_client(self, monkeypatch, fail_times):
         # Fail the first `fail_times` calls (transient EOF), then succeed.
@@ -174,12 +186,14 @@ class TestOllamaRetryAndTruncation:
         return state
 
     def test_retry_recovers_transient_eof(self, monkeypatch):
+        # EOF now triggers shrink-and-retry via the generic loop; a short input
+        # that fails twice then succeeds is recovered with a real embedding.
         state = self._patch_client(monkeypatch, fail_times=2)  # fail twice, then OK
         c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama"})
         c.cache_enabled = False
         c._embed_retries = 3
-        out = c._embed_ollama(["hello"])
-        assert state["calls"] == 3          # retried until success
+        out = c.embed(["hello"])            # go through the generic recovery loop
+        assert state["calls"] == 3          # retried (shrinking) until success
         assert out.shape == (1, 3)          # real embedding, not fallback
 
     def test_falls_back_after_exhausting_retries(self, monkeypatch):
@@ -187,8 +201,62 @@ class TestOllamaRetryAndTruncation:
         c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "DIMENSION": 3})
         c.cache_enabled = False
         c._embed_retries = 3
-        out = c._embed_ollama(["hello"])
+        out = c.embed(["hello"])            # generic loop owns the fallback now
         assert out.shape == (1, 3)          # deterministic fallback shape
+
+    def _capture_ai_app(self, level):
+        # The ai_app logger has propagate=False, so caplog's root handler won't
+        # see it — attach a capturing handler directly at the given level.
+        import logging
+
+        logger = logging.getLogger("ai_app")
+
+        class _Cap(logging.Handler):
+            def __init__(self):
+                super().__init__(level)
+                self.records = []
+
+            def emit(self, record):
+                self.records.append(record)
+
+        h = _Cap()
+        logger.addHandler(h)
+        return logger, h
+
+    def test_recovery_is_silent_only_fallback_logs(self, monkeypatch):
+        # UX contract: the self-healing retry/shrink steps log at DEBUG (invisible
+        # at the default WARNING level); only a genuine degrade-to-fallback is
+        # ERROR. So a successful recovery emits NOTHING at WARNING+.
+        import logging
+
+        self._patch_client(monkeypatch, fail_times=2)  # fails, shrinks, succeeds
+        c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama"})
+        c.cache_enabled = False
+        c._embed_retries = 3
+        logger, h = self._capture_ai_app(logging.WARNING)
+        try:
+            c.embed(["hello"])
+        finally:
+            logger.removeHandler(h)
+        assert h.records == []  # recovered silently — no WARNING/ERROR noise
+
+    def test_fallback_logs_at_error_not_warning(self, monkeypatch):
+        import logging
+
+        self._patch_client(monkeypatch, fail_times=99)  # never succeeds → fallback
+        c = EmbeddingsController(
+            {"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "DIMENSION": 3}
+        )
+        c.cache_enabled = False
+        c._embed_retries = 3
+        logger, h = self._capture_ai_app(logging.DEBUG)
+        try:
+            c.embed(["hello"])
+        finally:
+            logger.removeHandler(h)
+        # The give-up + the fallback notice are ERROR; none of it is WARNING.
+        assert any(r.levelno == logging.ERROR for r in h.records)
+        assert not any(r.levelno == logging.WARNING for r in h.records)
 
     def test_oversized_input_truncated(self):
         c = EmbeddingsController({"NAME": "x", "TYPE": "ollama"})
@@ -234,25 +302,23 @@ class TestTokenCapAndOverflow:
         c = EmbeddingsController({"NAME": "text-embedding-3-small", "TYPE": "openai"})
         assert c._resolve_token_limit() == ec._DEFAULT_EMBED_TOKEN_LIMIT
 
-    def test_ollama_probe_applies_margin(self, monkeypatch):
-        # A probed context window is reduced by the 0.9 safety margin.
-        class _FakeClient:
-            def __init__(self, host=None):
-                pass
-
-            def show(self, name):
-                return {"model_info": {"qwen3.context_length": 1000}}
-
-        monkeypatch.setattr(ec.ollama, "Client", _FakeClient)
+    def test_reported_context_is_not_trusted(self):
+        # We deliberately do NOT probe/trust the model's reported context (an
+        # embed runner often accepts far less than the model advertises); with no
+        # explicit config and nothing learned yet, the conservative default holds.
         c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama"})
-        assert c._resolve_token_limit() == 900  # 1000 * 0.9
+        assert c._resolve_token_limit() == ec._DEFAULT_EMBED_TOKEN_LIMIT
 
-    def test_eof_is_not_overflow_so_retry_preserved(self):
-        # A transient EOF must NOT be classified as overflow (we want to retry).
-        assert EmbeddingsController._is_overflow_error(Exception("... EOF (status code: 400)")) is False
+    def test_eof_is_treated_as_probable_overflow(self):
+        # A bare runner EOF / 400 is how llama.cpp rejects an over-length batch —
+        # so it counts as probable-overflow and drives shrink-and-retry (the old
+        # behavior — resend 3x then permanent fallback — was the reported bug).
+        assert EmbeddingsController._is_overflow_error(
+            Exception("... EOF (status code: 400)")
+        ) is True
 
     def test_context_length_error_is_overflow(self):
-        # A deterministic context error IS overflow (don't retry the same input).
+        # An explicit context error IS overflow too.
         assert EmbeddingsController._is_overflow_error(
             Exception("the input length exceeds the context length")
         ) is True
@@ -260,8 +326,16 @@ class TestTokenCapAndOverflow:
             Exception("maximum context length is 8192 tokens")
         ) is True
 
-    def test_overflow_error_skips_retries(self, monkeypatch):
-        # An overflow error short-circuits the retry loop → one call, then fallback.
+    def test_transient_non_overflow_error_is_not_overflow(self):
+        # A clearly non-size error (auth, model missing) is not overflow — it gets
+        # the plain retry, not a shrink.
+        assert EmbeddingsController._is_overflow_error(
+            Exception("model 'x' not found")
+        ) is False
+
+    def test_overflow_shrinks_limit_then_falls_back(self, monkeypatch):
+        # An always-overflowing input SHRINKS the token limit each attempt (down
+        # toward the floor) and, only after the budget, degrades to fallback.
         state = {"calls": 0}
 
         class _OverflowClient:
@@ -277,6 +351,9 @@ class TestTokenCapAndOverflow:
         c = EmbeddingsController({"NAME": "x", "TYPE": "ollama", "DIMENSION": 3})
         c.cache_enabled = False
         c._embed_retries = 3
-        out = c._embed_ollama(["hello"])
-        assert state["calls"] == 1       # did NOT retry the deterministic error
+        start = c._resolve_token_limit()
+        out = c.embed(["hello world " * 100])
+        assert state["calls"] == 3            # tried, shrinking, across the budget
+        assert c._max_input_tokens < start    # limit was lowered by the shrink
+        assert out.shape == (1, 3)            # then deterministic fallback
         assert out.shape == (1, 3)       # fell back once
