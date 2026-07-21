@@ -384,16 +384,70 @@ class EmbeddingsController:
         return np.array(emb, dtype=np.float32)
 
     def _embed_bedrock(self, texts: List[str]) -> np.ndarray:
-        """One AWS Bedrock embed call; raises on failure (caller handles recovery)."""
+        """One AWS Bedrock embed call; raises on failure (caller handles recovery).
+
+        Bedrock embedding models have NO shared request/response schema — each
+        provider family differs — so this dispatches on the model id (all schemas
+        verified live against Bedrock). A wrong schema surfaces as
+        ``ValidationException: Malformed request``, which is what broke a
+        non-Titan embed model before this dispatch existed:
+
+          - **Cohere** (``cohere.embed-*`` incl. ``embed-v4``): batched —
+            ``{"texts":[…], "input_type":"search_document",
+            "embedding_types":["float"]}`` → ``{"embeddings":{"float":[[…],…]}}``.
+          - **Amazon Nova Multimodal** (``…nova-…multimodal-embed…``): per-text —
+            ``{"taskType":"SINGLE_EMBEDDING","singleEmbeddingParams":{…,"text":
+            {"truncationMode":"END","value":text}}}`` →
+            ``{"embeddings":[{"embeddingType":"TEXT","embedding":[…]}]}``.
+          - **Amazon Titan** (``amazon.titan-embed-*``) and anything else: per-text
+            ``{"inputText":text}`` → ``{"embedding":[…]}`` (the widest default).
+        """
         client = boto3.client("bedrock-runtime", region_name=self.region)
+        name = (self.embed_model_name or "").lower()
+
+        # --- Cohere: one batched call for all texts ---
+        if "cohere.embed" in name or ".cohere.embed" in name:
+            body = {
+                "texts": list(texts),
+                "input_type": "search_document",
+                "embedding_types": ["float"],
+            }
+            result = self._bedrock_invoke_json(client, body)
+            emb = result.get("embeddings", {})
+            # v3/v4 nest under "float"; tolerate an older flat list too.
+            vectors = emb.get("float", emb) if isinstance(emb, dict) else emb
+            return np.array(vectors, dtype=np.float32)
+
+        # --- Amazon Nova Multimodal: per-text task-shaped request ---
+        if "nova" in name and "multimodal-embed" in name:
+            vectors = []
+            for text in texts:
+                body = {
+                    "taskType": "SINGLE_EMBEDDING",
+                    "singleEmbeddingParams": {
+                        "embeddingPurpose": "GENERIC_INDEX",
+                        "text": {"truncationMode": "END", "value": text},
+                    },
+                }
+                result = self._bedrock_invoke_json(client, body)
+                items = result.get("embeddings", [])
+                # Each item: {"embeddingType": "TEXT", "embedding": [...]}.
+                vectors.append(items[0].get("embedding", []) if items else [])
+            return np.array(vectors, dtype=np.float32)
+
+        # --- Amazon Titan (and default): one text per request ---
         embeddings = []
         for text in texts:
-            response = client.invoke_model(
-                modelId=self.embed_model_name, body=json.dumps({"inputText": text})
-            )
-            result = json.loads(response["body"].read())
+            result = self._bedrock_invoke_json(client, {"inputText": text})
             embeddings.append(result.get("embedding", []))
         return np.array(embeddings, dtype=np.float32)
+
+    def _bedrock_invoke_json(self, client, body: dict) -> dict:
+        """Invoke a Bedrock model with a JSON body and parse the JSON response."""
+        response = client.invoke_model(
+            modelId=self.embed_model_name, body=json.dumps(body)
+        )
+        return json.loads(response["body"].read())
 
     def _embed_openai(self, texts: List[str]) -> np.ndarray:
         """One OpenAI / OpenAI-compatible embed call; raises on failure.

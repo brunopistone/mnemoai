@@ -9,6 +9,44 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.6] — 2026-07-21
+
+### Fixed
+
+- **Bedrock embeddings now work for every embedding-model family, not just
+  Titan.** The Bedrock embed path only ever sent the Amazon Titan request schema
+  (`{"inputText": …}`), so switching to a Cohere or Nova embedding model failed
+  with `ValidationException: Malformed request` and silently degraded to the
+  sha256 fallback. `_embed_bedrock` now dispatches on the model id (all schemas
+  verified live against Bedrock): **Cohere** (`cohere.embed-*` incl. v4) →
+  batched `{"texts", "input_type", "embedding_types":["float"]}` →
+  `{"embeddings":{"float":[…]}}`; **Nova Multimodal**
+  (`…nova-…multimodal-embed…`) → per-text `taskType`/`singleEmbeddingParams` →
+  `{"embeddings":[{"embedding":[…]}]}`; **Titan** (and any unrecognized model) →
+  the existing per-text `{"inputText"}` → `{"embedding"}`.
+- **A moved/locked episodic-memory database no longer crashes a turn.** After the
+  answer was already produced, an episodic-store write could raise (ChromaDB
+  SQLite code 1032 "readonly database moved" when the store dir was moved/replaced
+  under the open connection, or a FAISS persist-dir that vanished) and surface as
+  a turn error. Now: (1) the post-answer learning side effects (episodic store,
+  reflection, memory auto-extraction) are each **best-effort** — a failure is
+  logged, never shown as a turn error, since the user already has their answer;
+  (2) the **ChromaDB** store reopens the client + collection once and retries on a
+  moved-DB error; and (3) the **FAISS** store recreates its persist dir and
+  retries the write once (faiss wraps file errors in `RuntimeError`, handled).
+
+### Changed
+
+- **A message typed while the assistant is working is now QUEUED, not steered.**
+  It runs as its **own turn after** the current one ends (shown as a dim
+  `> … (queued)` line), matching Claude Code — it is never folded into the
+  running turn. This fixes a stranding bug where a message steered during the
+  final, tool-call-free model call was never drained at turn end and leaked into
+  the **next** turn (echoed `(steering →)` at submit, then answered later). The
+  agent-side mid-turn steering machinery (`agent.steer`/`_drain_steering`) is
+  left intact but dormant. Background sub-agent auto-delivery is unaffected — it
+  uses a separate mechanism (`drain_background_completions`), not the steer queue.
+
 ## [1.5.5] — 2026-07-21
 
 ### Changed

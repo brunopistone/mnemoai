@@ -73,8 +73,9 @@ keep typing during a turn — see the shortcuts below.
 
 - `Ctrl+J`: Insert a new line in the input (`Enter` submits)
 - `Enter`: Submit the message. **While the assistant is working**, a submitted
-  message is **queued** (shown as a dim `> … (queued)` line) and runs after the
-  current turn finishes — it never starts a second query in parallel.
+  message is **queued** (shown as a dim `> … (queued)` line) and runs as its own
+  turn after the current one finishes — it's never folded into the running turn
+  and never starts a second query in parallel.
 - `Esc`: Cancel the turn that's currently running
 - `Ctrl+C`: Cancel the running turn; when nothing is running, press twice (or
   `Ctrl+D`) to exit

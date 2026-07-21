@@ -93,16 +93,55 @@ class ChromaEpisodicStore:
         # Generate embedding using configured model
         embedding = self.embeddings.embed([text])
 
-        # Add to ChromaDB with pre-computed embedding
-        self.collection.add(
-            embeddings=embedding.tolist(), metadatas=[metadata], ids=[episode_id]
-        )
+        # Add to ChromaDB with pre-computed embedding. If the on-disk DB was moved
+        # or replaced under our open handle (SQLite code 1032 "readonly database
+        # moved" — e.g. a backup/sync tool or a restore touched the dir), reopen
+        # the client once and retry; a stale handle then self-heals.
+        try:
+            self.collection.add(
+                embeddings=embedding.tolist(), metadatas=[metadata], ids=[episode_id]
+            )
+        except Exception as e:
+            if not self._is_db_moved_error(e) or not self._reconnect():
+                raise
+            self.collection.add(
+                embeddings=embedding.tolist(), metadatas=[metadata], ids=[episode_id]
+            )
 
         # Update local metadata list
         self.metadatas.append(metadata)
         self._rebuild_bm25()
 
         logger.debug(f"Stored episode: {episode_id}")
+
+    @staticmethod
+    def _is_db_moved_error(exc: Exception) -> bool:
+        """True for the SQLite 'database moved / readonly' family (code 1032),
+        which ChromaDB surfaces when its dir was moved/replaced under an open
+        connection — recoverable by reopening the client."""
+        msg = str(exc).lower()
+        return "readonly database" in msg or "1032" in msg or "database moved" in msg
+
+    def _reconnect(self) -> bool:
+        """Reopen the ChromaDB client + collection against the persist path.
+
+        Returns True on success. Best-effort — a failure to reconnect returns
+        False so the caller re-raises the original error rather than masking it."""
+        try:
+            os.makedirs(self.persist_path, exist_ok=True)
+            self.client = chromadb.PersistentClient(path=self.persist_path)
+            try:
+                self.collection = self.client.get_collection(name="episodic_memory")
+            except Exception:
+                self.collection = self.client.create_collection(
+                    name="episodic_memory",
+                    metadata={"description": "Task solutions with tool usage patterns"},
+                )
+            logger.info("Reconnected episodic ChromaDB after a moved-DB error")
+            return True
+        except Exception as e:
+            logger.warning(f"Episodic ChromaDB reconnect failed: {e}")
+            return False
 
     def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """Search for similar episodes using hybrid search (semantic + BM25).

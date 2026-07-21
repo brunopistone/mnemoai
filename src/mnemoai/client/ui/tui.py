@@ -156,10 +156,13 @@ class PinnedPromptReader:
             on_cancel: Called (UI thread) on Esc/Ctrl+C during a turn — fires the
                 cooperative cancel so blocking stream/backoff waits wake at once
                 (the async KeyboardInterrupt alone can't preempt them).
-            steer: Called (UI thread) with a plain message submitted mid-turn;
-                returns True if it was accepted as steering (folded into the
-                running turn), False to fall back to FIFO queuing. None disables
-                steering (everything queues).
+            steer: **Currently unused** (dormant). A hook that would fold a
+                mid-turn message into the running turn; retired as the default in
+                favor of pure FIFO queuing (a message submitted mid-turn runs as
+                its own turn after see :meth:`_on_accept`).
+                Kept wired so re-enabling steering is a small change, not a rebuild.
+            clear_steering: Called on cancel to purge any pending steer messages;
+                a harmless no-op now that nothing is steered.
         """
         self._prompt_text = prompt_text
         self._dispatch = dispatch
@@ -473,34 +476,22 @@ class PinnedPromptReader:
     def _on_accept(self, buff: Buffer) -> bool:
         """Enqueue the submitted line (on the event-loop thread).
 
-        While a turn is running, a plain message is STEERED into it (folded into
-        the running turn) via ``self._steer``. Slash commands, and anything the 
-        steer hook declines, fall back to FIFO queuing.
-        When idle, everything queues normally. Not echoed to scrollback here —
-        only when :meth:`_worker` starts it (so each ``>`` sits above its own
-        answer); a queued line shows live via :meth:`_queued_text`. Returns False
-        so prompt_toolkit clears the input.
+        A message submitted WHILE a turn is running is QUEUED (FIFO) and runs as
+        its OWN separate turn after the current one fully ends — matching Claude
+        Code. It shows live as a dim ``> … (queued)`` line via
+        :meth:`_queued_text` and is echoed to scrollback only when :meth:`_worker`
+        dequeues it (so each ``>`` sits above its own answer). Returns False so
+        prompt_toolkit clears the input.
+
+        (Mid-turn *steering* — folding the message into the running turn — was
+        retired here as the default: it could strand a message steered during the
+        final, tool-call-free model call [it was never drained at turn end] into
+        the NEXT turn. The agent-side steering machinery [``agent.steer`` /
+        ``_drain_steering``] is left intact but unused by this UI.)
         """
         text = buff.text
         if not text.strip() or self._queue is None:
             return False
-
-        # Mid-turn + plain message + a steer hook → fold into the running turn.
-        stripped = text.strip()
-        if (
-            self._busy
-            and self._steer is not None
-            and not stripped.startswith("/")
-        ):
-            try:
-                # Model gets plain expanded text; the echo dims the pasted body.
-                if self._steer(self._expand_pastes(text)):
-                    # Echo to scrollback so the user sees it was accepted as
-                    # steering (it won't get its own `>`-above-answer later).
-                    self._echo_steered(self._expand_pastes(text, dim=True).strip())
-                    return False
-            except Exception:
-                pass  # fall through to normal queuing on any hook failure
 
         self._pending += 1
         self._queued_lines.append(text)
