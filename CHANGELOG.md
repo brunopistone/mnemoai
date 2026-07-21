@@ -9,6 +9,26 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.8] — 2026-07-21
+
+### Fixed
+
+- **Submitting a large paste no longer garbles the scrollback.** The 1.5.5
+  "expand the paste in scrollback on submit" echo printed the entire expanded
+  body (e.g. an 18 KB / 757-line file) as one monolithic write into the
+  pinned-input terminal; that overran the non-full-screen app's cursor-relative
+  repaint (which tracks how many rows it last drew), so its refresh emitted
+  cursor-up/erase-line sequences over the just-scrolled text and the paste showed
+  as a garbled single line of overlapping fragments. Now the scrollback echo of a
+  large paste is **capped to a head+tail preview** (first ~12 and last ~6 lines
+  with a `… +N lines …` marker), dimmed **per line**, and written with **CRLF**
+  line endings (raw mode leaves `ONLCR` off, so a bare `\n` staircased and
+  desynced the renderer). The **model still receives the full, untruncated
+  paste** — only the on-screen echo is capped. Applies to both immediately-sent
+  and **queued** messages (both flow through the same echo path); a queued
+  paste's live `> … (queued)` line already showed the compact placeholder. Small
+  pastes are still echoed in full.
+
 ## [1.5.7] — 2026-07-21
 
 ### Fixed

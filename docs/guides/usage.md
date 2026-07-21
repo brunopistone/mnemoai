@@ -87,12 +87,13 @@ keep typing during a turn — see the shortcuts below.
 Pasting a long block (a transcript, a file, a stack trace) collapses it into a
 compact **`[Pasted text #N +M lines]`** placeholder in the input instead of
 flooding the prompt — `M` is the number of line breaks. The full text is kept
-aside; when you submit, the placeholder is **expanded back to the real text** —
-both for the assistant and in the scrollback, where the pasted portion is shown
-**dimmed (gray)** so it's easy to tell apart from what you typed. So the
-collapsed view is only while you're composing. Backspace over the placeholder
-deletes the **whole block at once** (not character by character). Short pastes
-insert normally.
+aside; when you submit, the **assistant receives the complete paste**, and the
+scrollback shows it **dimmed (gray)** so it's easy to tell apart from what you
+typed. A large paste is shown **capped** in the scrollback — the first and last
+few lines with a `… +N lines …` marker in between — so it never floods the
+screen (the assistant still gets all of it). The collapsed view is only while
+you're composing. Backspace over the placeholder deletes the **whole block at
+once** (not character by character). Short pastes insert normally.
 
 In dialogs (the `/load` picker and the `/config`, `/model`, `/params`,
 `/features` prompts): arrow keys move, `Enter` confirms, `Esc` cancels, and

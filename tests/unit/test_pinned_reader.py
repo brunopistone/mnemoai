@@ -561,9 +561,9 @@ class TestPasteCollapse:
         assert seen[0] == "Review this: line one\nline two\nline three"
 
     def test_submit_echoes_expanded_text_to_scrollback(self, capsys):
-        # The scrollback echo shows the FULL pasted text (not the placeholder),
-        # with the pasted body wrapped in gray ANSI (dim). The run_in_terminal
-        # stub prints inline, so capsys captures it.
+        # A SMALL submitted paste is echoed to scrollback expanded + gray-dimmed
+        # (per line), not as the placeholder. The run_in_terminal stub prints
+        # inline, so capsys captures it (CRLF line endings under raw mode).
         def dispatch(line):
             return _ExitRepl if line == "/quit" else None
 
@@ -571,19 +571,37 @@ class TestPasteCollapse:
         r._pasted = {1: "FULL PASTED BODY\nsecond line"}
         _drive(r, ["Look: [Pasted text #1 +1 lines]", "/quit"])
         out = capsys.readouterr().out
-        assert "FULL PASTED BODY\nsecond line" in out
+        assert "FULL PASTED BODY" in out and "second line" in out
         assert "[Pasted text #1" not in out       # placeholder is not what's echoed
-        assert "\033[90mFULL PASTED BODY" in out   # pasted body dimmed (gray)
+        assert "\033[90mFULL PASTED BODY\033[0m" in out  # dimmed per line
 
-    def test_dim_wraps_only_pasted_portion(self):
-        # The gray wrap covers ONLY the pasted content, not the typed text.
+    def test_echo_paste_body_expands_only_pasted_portion(self):
+        # echo=True dims ONLY the pasted content (per line), not typed text; the
+        # model path (echo=False) is plain, verbatim, no ANSI.
         r = _reader(lambda line: None)
         r._pasted = {1: "BODY"}
-        assert r._expand_pastes("typed [Pasted text #1]", dim=True) == (
+        assert r._expand_pastes("typed [Pasted text #1]", echo=True) == (
             "typed \033[90mBODY\033[0m"
         )
-        # Model path (dim=False) is plain — no ANSI.
         assert r._expand_pastes("typed [Pasted text #1]") == "typed BODY"
+
+    def test_large_paste_echo_is_capped_but_model_gets_full(self):
+        # A large paste: the echo is capped to head+tail with a "… +N lines …"
+        # marker (so it can't flood scrollback / garble the pinned repaint), while
+        # the model still receives the FULL untruncated text.
+        r = _reader(lambda line: None)
+        body = "\n".join(f"line {i}" for i in range(100))
+        r._pasted = {1: body}
+        ref = "See: [Pasted text #1 +100 lines]"
+
+        model = r._expand_pastes(ref)                    # echo=False
+        assert model == f"See: {body}"                   # full, verbatim, no ANSI
+        assert "… +" not in model and "\033[90m" not in model
+
+        echo = r._expand_pastes(ref, echo=True)
+        assert "… +82 lines …" in echo                   # 100 - 12 head - 6 tail
+        assert "line 0" in echo and "line 99" in echo    # head + tail shown
+        assert "line 50" not in echo                      # middle hidden
 
 
 def _backspace_binding(reader):
