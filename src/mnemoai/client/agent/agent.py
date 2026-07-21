@@ -240,6 +240,13 @@ class LangGraphAgent:
         # last model turn — ground truth for "how big is my context"
         self._last_input_tokens: Optional[int] = None
         self._code_formatter = CodeFormatter()
+        # Set True once a turn has STREAMED visible answer text to the terminal.
+        # The display contract is "streaming prints the answer", so any path that
+        # produces answer text WITHOUT a visible stream (orchestrator single
+        # subtask, aggregation fallback, context-overflow / stream-error / recursion
+        # terminal messages, empty-final salvage) would otherwise be a silent turn.
+        # invoke() checks this flag and emits the answer if nothing was shown.
+        self._answer_displayed = False
         # Categories the user chose to trust this session (the "a = allow" option),
         # skipping re-prompts until restart.
         self._trusted_confirm_categories: set = set()
@@ -1072,13 +1079,15 @@ class LangGraphAgent:
                 worker_messages.append(retry_response)
                 return visible
 
-        # Still nothing usable: surface a fallback (never a silent turn).
+        # Still nothing usable: surface a fallback (never a silent turn). No
+        # ad-hoc print — the fallback becomes the worker's result and, via the
+        # orchestrator, the turn's AIMessage, which the central net (invoke() →
+        # _emit_answer) renders exactly once; printing here too would double it.
         fallback = (
             "I wasn't able to produce a response for that. "
             "Could you rephrase or give me a bit more detail?"
         )
         self._stop_spinner()
-        print(f"\n{fallback}", flush=True)
         worker_messages.append(AIMessage(content=fallback))
         return fallback
 
@@ -1356,9 +1365,10 @@ class LangGraphAgent:
                 )
                 if thinking:
                     truncated.additional_kwargs["reasoning_content"] = thinking
-                print("\n", end="", flush=True)
+                # No ad-hoc print — the central net (invoke() → _emit_answer) renders
+                # this returned AIMessage exactly once; printing here too would
+                # double it (nothing streamed, so _answer_displayed is still False).
                 self._stop_spinner()
-                print(truncated.content, flush=True)
                 return {"messages": [truncated], "thinking": thinking}
 
         # Only reasoning, no visible content: retry once with reasoning disabled.
@@ -1404,6 +1414,10 @@ class LangGraphAgent:
                     return {"messages": [retry_response], "thinking": thinking}
 
             # Both attempts yielded nothing usable: surface a fallback (never silent).
+            # No ad-hoc print here — the fallback flows back as the turn's AIMessage
+            # and the central net (invoke() → _emit_answer) renders it exactly once,
+            # with the ● marker; printing here too would double it (nothing streamed,
+            # so _answer_displayed is still False).
             fallback = AIMessage(
                 content=(
                     "I wasn't able to produce a response for that. "
@@ -1411,9 +1425,7 @@ class LangGraphAgent:
                 )
             )
             fallback.additional_kwargs["reasoning_content"] = thinking
-            print("\n", end="", flush=True)
             self._stop_spinner()
-            print(fallback.content, flush=True)
             return {"messages": [fallback], "thinking": thinking}
 
         return {"messages": [response], "thinking": thinking}
@@ -1837,6 +1849,9 @@ class LangGraphAgent:
                             # repaint erases before the answer joins it.
                             chunk_content = self._answer_marker() + chunk_content
                         answer_marker_printed = True
+                        # Record that this turn has shown a visible answer, so the
+                        # invoke() safety net doesn't re-emit it.
+                        self._answer_displayed = True
                     self._code_formatter.process_chunk(chunk_content)
 
                 response = chunk if response is None else response + chunk
@@ -1891,6 +1906,30 @@ class LangGraphAgent:
     def _answer_marker() -> str:
         """The cyan ● prefix for a streamed answer (prepended to the first chunk)."""
         return "\033[36m●\033[0m "
+
+    def _emit_answer(self, text: str) -> None:
+        """Display an answer that was PRODUCED WITHOUT STREAMING, rendered exactly
+        like a streamed one (``●`` marker + markdown via ``CodeFormatter``).
+
+        The turn's answer is normally shown live inside ``_stream_once``. A few
+        paths instead compute the final text without a visible stream — the
+        orchestrator single-subtask result, the aggregation-fallback concatenation,
+        and the context-overflow / stream-error / recursion terminal messages —
+        and would otherwise reach the user as a silent turn (only ``[Context: N]``
+        prints). ``invoke()`` calls this as a safety net when ``_answer_displayed``
+        is still False, so every path shows its answer. Idempotent-safe: it sets
+        ``_answer_displayed`` so it can't double-print."""
+        if not text or self._answer_displayed:
+            return
+        self._stop_spinner()
+        fmt = CodeFormatter()
+        fmt.process_chunk(self._answer_marker() + text)
+        fmt.flush()
+        # Commit the final line to scrollback (patch_stdout only commits on a
+        # newline; the pinned UI would otherwise erase an uncommitted tail).
+        if getattr(self, "styled_turn_view", False):
+            print(flush=True)
+        self._answer_displayed = True
 
     def _flush_reasoning_block(self, parts: list, started: Optional[float]) -> None:
         """Commit the collapsed 'Thought for Ns…' block to scrollback and clear
@@ -2926,6 +2965,10 @@ class LangGraphAgent:
         if cancel_ev is not None:
             cancel_ev.clear()
 
+        # Reset the "answer shown" flag: streaming sets it True as it prints; the
+        # safety net at the end of this method emits the answer if it's still False.
+        self._answer_displayed = False
+
         # Deliver any background sub-agent that finished since the last turn: its
         # report is folded into history as a user message so THIS turn's model
         # call addresses it alongside the prompt (or on its own, if empty).
@@ -2996,12 +3039,14 @@ class LangGraphAgent:
             )
             self._stop_spinner()
             partial = self._last_visible_from(self._messages)
-            return partial or (
+            msg = partial or (
                 "I reached my safety step limit while working on that and "
                 "couldn't finish. Try narrowing the request, or raise "
                 "LLM.RECURSION_LIMIT in config if the task legitimately needs "
                 "more steps."
             )
+            self._emit_answer(msg)  # never streamed on this path — show it
+            return msg
 
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
@@ -3017,21 +3062,31 @@ class LangGraphAgent:
         ]
         self._messages.extend(new_messages)
 
-        # Prefer the most recent AI turn with visible text.
+        # Prefer the most recent AI turn with visible text. Emit it if the turn
+        # produced it WITHOUT streaming (orchestrator single-subtask, aggregation
+        # fallback, context-overflow / stream-error terminal messages) — the safety
+        # net that guarantees no silent turn. `_emit_answer` is a no-op when the
+        # answer already streamed (`_answer_displayed`), so a normal turn isn't
+        # double-printed.
         for msg in reversed(final_messages):
             if isinstance(msg, AIMessage) and not msg.tool_calls:
                 visible = self._extract_visible(msg.content)
                 if visible:
+                    self._emit_answer(visible)
                     return visible
 
         # Empty final turn: salvage the last tool result rather than return "".
         last_tool = self._last_tool_result(final_messages)
         if last_tool:
-            return f"The last tool reported:\n{last_tool}"
-        return (
+            salvaged = f"The last tool reported:\n{last_tool}"
+            self._emit_answer(salvaged)
+            return salvaged
+        fallback = (
             "I wasn't able to produce a response for that. Could you rephrase "
             "or give me a bit more detail?"
         )
+        self._emit_answer(fallback)
+        return fallback
 
     def _last_visible_from(self, messages: List[BaseMessage]) -> str:
         """Most recent visible AI text (to salvage a cut-short answer), or ""."""

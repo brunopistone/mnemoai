@@ -10,6 +10,7 @@ import sys
 import threading
 import traceback
 from datetime import date, datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -458,11 +459,16 @@ class LangGraphClient:
             with self.spinner_lock:
                 self.spinner.stop()
             logger.error(f"Query failed: {e}", exc_info=True)
-            return (
+            msg = (
                 "Something went wrong while processing that request "
                 f"({type(e).__name__}). Your conversation is intact — "
                 "please try again or rephrase."
             )
+            # The turn errored before/without streaming an answer, so PRINT this
+            # (nothing else will) — otherwise the turn ends silently with only
+            # the traceback in the log and no user-facing message.
+            print(f"\n\033[91m{msg}\033[0m", flush=True)
+            return msg
 
         finally:
             with self.spinner_lock:
@@ -1206,6 +1212,31 @@ class LangGraphClient:
         except Exception as e:
             logger.error(f"Failed to list saved conversations: {e}")
             return []
+
+    def delete_conversation(self, file_path) -> bool:
+        """Delete a saved conversation file; True on success.
+
+        Guarded to only remove a regular ``*.json`` file inside the profile's
+        ``conversations/`` dir (so a bad/hand-typed path can't delete something
+        elsewhere). If the deleted file is the currently-open conversation, forget
+        it so a later bare ``/save`` starts fresh."""
+        try:
+            p = Path(os.path.expanduser(str(file_path))).resolve()
+            conv_dir = conversations_dir().resolve()
+            if p.parent != conv_dir or p.suffix != ".json" or not p.is_file():
+                logger.warning(f"Refusing to delete non-conversation path: {p}")
+                return False
+            p.unlink()
+            if (
+                self.current_conversation_path
+                and Path(self.current_conversation_path).resolve() == p
+            ):
+                self.current_conversation_path = None
+            logger.info(f"Deleted conversation: {p.name}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete conversation: {e}")
+            return False
 
     @staticmethod
     def conversation_title(file_path, max_len: int = 60) -> str:

@@ -510,6 +510,85 @@ class TestEscapeWordMotion:
         assert _escape_binding(r).filter() is True
 
 
+def _paste_binding(reader):
+    """The reader's BracketedPaste key handler."""
+    from mnemoai.client.ui.tui import Keys
+
+    for b in reader._make_bindings().bindings:
+        keys = tuple(getattr(k, "value", k) for k in b.keys)
+        if keys == (Keys.BracketedPaste.value,):
+            return b.handler
+    raise AssertionError("no bracketed-paste binding found")
+
+
+class _PasteBuf:
+    """Minimal buffer capturing inserted text for the paste handler."""
+
+    def __init__(self):
+        self.text = ""
+
+    def insert_text(self, t):
+        self.text += t
+
+
+class _PasteEvent:
+    def __init__(self, data, buf):
+        self.data = data
+        self.current_buffer = buf
+
+
+class TestPasteNormalization:
+    """Pasted content is normalized (CRLF/CR → LF, ANSI stripped, tabs expanded,
+    control chars dropped) at the paste boundary — so a paste with `\\r` line
+    endings (e.g. a table copied from a UI) can't overwrite earlier text via
+    carriage returns and garble the echo. This is the real fix for the reported
+    'weight_decaylit_0.01oxc6...' single-line collapse."""
+
+    def test_normalize_folds_cr_and_crlf_to_lf(self):
+        from mnemoai.client.ui.tui import _normalize_paste
+        assert _normalize_paste("a\r\nb\rc\nd") == "a\nb\nc\nd"
+        assert "\r" not in _normalize_paste("x\r\ny\rz")
+
+    def test_normalize_strips_ansi_and_expands_tabs(self):
+        from mnemoai.client.ui.tui import _normalize_paste
+        assert _normalize_paste("\033[31mred\033[0m") == "red"
+        assert "\t" not in _normalize_paste("k\tv")
+        assert _normalize_paste("k\tv").startswith("k")
+
+    def test_normalize_drops_other_control_chars(self):
+        from mnemoai.client.ui.tui import _normalize_paste
+        # a stray NUL / bell must not survive, but newline is kept
+        assert _normalize_paste("a\x00b\x07c\nd") == "abc\nd"
+
+    def test_cr_table_paste_stores_clean_lf_text(self):
+        # The reported case: a table copied with CR/CRLF line endings. After the
+        # handler runs, the stored paste must be clean LF text (no \r), so its
+        # echo can't collapse rows onto one line.
+        rows = ["Key\tValue", "learning_rate\t0.0001",
+                "model_name_or_path\tnvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+                "name\texample-name-xc6gd", "weight_decay\t0.01"]
+        r = _reader(lambda line: None)
+        r._pasted = {}
+        r._paste_counter = 0
+        buf = _PasteBuf()
+        _paste_binding(r)(_PasteEvent("\r".join(rows), buf))  # CR-only paste
+        # collapsed to a placeholder (it's multi-line)
+        assert buf.text.startswith("[Pasted text #1")
+        stored = r._pasted[1]
+        assert "\r" not in stored              # normalized to LF
+        assert stored.count("\n") == len(rows) - 1   # rows preserved as lines
+        assert "example-name-xc6gd" in stored and "weight_decay" in stored
+
+    def test_short_cr_paste_inserted_verbatim_but_normalized(self):
+        # A short paste isn't collapsed, but its \r is still folded to \n.
+        r = _reader(lambda line: None)
+        r._pasted = {}
+        r._paste_counter = 0
+        buf = _PasteBuf()
+        _paste_binding(r)(_PasteEvent("a\rb", buf))  # short, 1 line-break
+        assert buf.text == "a\nb"  # inserted inline, CR normalized
+
+
 class TestPasteCollapse:
     """A long paste is collapsed to a compact `[Pasted text #N +M lines]`
     placeholder in the input (readable) and stored full; on submit the

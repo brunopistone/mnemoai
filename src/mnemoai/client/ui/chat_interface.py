@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from prompt_toolkit.formatted_text import HTML
@@ -17,8 +18,10 @@ from mnemoai.client.memory.episodic_memory import (
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.skill_store import SkillStore
 from mnemoai.client.ui.tui import (
+    _DELETE,
     PinnedPromptReader,
     _ExitRepl,
+    confirm_dialog,
     confirm_inline,
     select_from_list,
 )
@@ -311,15 +314,12 @@ class ChatInterface:
     def _select_saved_conversation(self):
         """List saved conversations (newest first) and let the user pick one via
         :func:`tui.select_from_list`; returns the chosen path or None. Used by
-        ``/load`` with no argument."""
-        files = self.client.list_saved_conversations()
-        if not files:
-            print(
-                "No saved conversations found. Use /save first, or "
-                "/load <path> to load from a specific file."
-            )
-            return None
+        ``/load`` with no argument.
 
+        The picker offers a **Delete** button: pressing it asks "Are you sure?
+        Yes/No", deletes the highlighted conversation on Yes, then reopens the
+        (refreshed) picker — so the user can prune saved chats without leaving the
+        dialog."""
         now = _dt.datetime.now().timestamp()
 
         def _ago(ts: float) -> str:
@@ -332,21 +332,46 @@ class ChatInterface:
                 return f"{s // 3600}h ago"
             return f"{s // 86400}d ago"
 
-        shown = files[:20]  # cap the menu; older ones load via /load <path>
-        # Label with the auto-derived title (first user message); fall back to
-        # the filename when a conversation has no readable user text.
-        options = [
-            (
-                str(p),
-                f"{self.client.conversation_title(p) or p.name}  "
-                f"({_ago(p.stat().st_mtime)})",
-            )
-            for p in shown
-        ]
-        title = "Load conversation"
-        if len(files) > len(shown):
-            title += f"  (showing {len(shown)} of {len(files)}; /load <path> for older)"
-        return select_from_list(title, options)
+        while True:
+            files = self.client.list_saved_conversations()
+            if not files:
+                print(
+                    "No saved conversations found. Use /save first, or "
+                    "/load <path> to load from a specific file."
+                )
+                return None
+
+            shown = files[:20]  # cap the menu; older ones load via /load <path>
+            # Label with the auto-derived title (first user message); fall back to
+            # the filename when a conversation has no readable user text.
+            options = [
+                (
+                    str(p),
+                    f"{self.client.conversation_title(p) or p.name}  "
+                    f"({_ago(p.stat().st_mtime)})",
+                )
+                for p in shown
+            ]
+            title = "Load conversation"
+            if len(files) > len(shown):
+                title += (
+                    f"  (showing {len(shown)} of {len(files)}; /load <path> for older)"
+                )
+            choice = select_from_list(title, options, allow_delete=True)
+
+            # Delete flow: (_DELETE, path) → confirm → delete → reopen the picker.
+            if isinstance(choice, tuple) and len(choice) == 2 and choice[0] is _DELETE:
+                path = choice[1]
+                name = self.client.conversation_title(path) or Path(path).name
+                short = name if len(name) <= 60 else name[:57] + "…"
+                if confirm_dialog(f"Delete this conversation?\n\n{short}"):
+                    if self.client.delete_conversation(path):
+                        print(f"Deleted: {short}")
+                    else:
+                        print("Could not delete that conversation.")
+                continue  # reopen the picker with the refreshed list
+
+            return choice  # a chosen path, or None (cancelled)
 
     def _handle_memory_command(self, arg: str) -> None:
         """Handle ``/memory`` (view) and ``/memory clear`` over ``MemoryStore``."""
