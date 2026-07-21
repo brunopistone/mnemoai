@@ -54,3 +54,57 @@ def test_cleanup_self_heals_when_dir_removed(tmp_path):
     s.cleanup(max_episodes=1, max_age_days=99999)
     assert (d / "episodic.index").exists()
     assert len(s.metadata) == 1
+
+
+class _FakeEmbDim:
+    """Fake embeddings with a model fingerprint (name + dim), like the real
+    controller — so a same-DIM model swap is still detected."""
+
+    def __init__(self, dim, name="modelA"):
+        self.dim = dim
+        self._name = name
+
+    def embed(self, texts):
+        return np.ones((len(texts), self.dim), dtype=np.float32)
+
+    def runtime_dimension(self):
+        return self.dim
+
+    def fingerprint(self):
+        return f"{self._name}|{self.dim}"
+
+
+def test_reset_when_embedding_dimension_changes(tmp_path):
+    # Build the index at dim 8, then reopen with a dim-16 model: the store must
+    # RESET (drop old index + metadata) rather than let a later add/search crash
+    # on the dimension mismatch. Episodic memory is re-learnable model-scoped
+    # scratch, so a reset is the safe migration.
+    d = str(tmp_path / "ep")
+    s = FAISSEpisodicStore(d, _FakeEmbDim(8))
+    s.add("old episode", {"task": "t"})
+    assert s.index.d == 8 and len(s.metadata) == 1
+
+    s2 = FAISSEpisodicStore(d, _FakeEmbDim(16))  # new model, different dim
+    assert s2.index is None          # reset — index dropped
+    assert s2.metadata == []         # metadata dropped
+    s2.add("new episode", {"task": "t2"})  # works at the new dim
+    assert s2.index.d == 16
+
+
+def test_reset_on_same_dim_different_model(tmp_path):
+    # Same dimension, different model → still incompatible vectors → must reset
+    # (the case a dimension-only check misses).
+    d = str(tmp_path / "ep")
+    s = FAISSEpisodicStore(d, _FakeEmbDim(8, name="qwen"))
+    s.add("old episode", {"task": "t"})
+    assert len(s.metadata) == 1
+    s2 = FAISSEpisodicStore(d, _FakeEmbDim(8, name="cohere"))  # same dim, new model
+    assert s2.index is None and s2.metadata == []
+
+
+def test_no_reset_when_same_model(tmp_path):
+    d = str(tmp_path / "ep")
+    s = FAISSEpisodicStore(d, _FakeEmbDim(8, name="modelA"))
+    s.add("episode", {"task": "t"})
+    s2 = FAISSEpisodicStore(d, _FakeEmbDim(8, name="modelA"))  # same model → keep
+    assert s2.index is not None and len(s2.metadata) == 1

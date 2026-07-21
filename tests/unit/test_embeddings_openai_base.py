@@ -448,3 +448,47 @@ class TestBedrockEmbedSchemaDispatch:
         assert req["singleEmbeddingParams"]["text"]["value"] == "a"
         assert "inputText" not in req and "texts" not in req  # neither other schema
         assert len(cap["requests"]) == 2                  # per-text
+
+    def test_cohere_sends_output_dimension_when_configured(self, monkeypatch):
+        # DIMENSION must reach the Cohere request as `output_dimension` so the
+        # returned vectors match the configured size (the bug: it was ignored and
+        # always came back 1536).
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController(
+            {"NAME": "us.cohere.embed-v4:0", "TYPE": "bedrock", "DIMENSION": 1024}
+        )
+        c.cache_enabled = False
+        c.embed(["a"])
+        assert cap["requests"][0]["output_dimension"] == 1024
+
+    def test_cohere_omits_output_dimension_when_not_configured(self, monkeypatch):
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController({"NAME": "us.cohere.embed-v4:0", "TYPE": "bedrock"})
+        c.cache_enabled = False
+        c.embed(["a"])
+        assert "output_dimension" not in cap["requests"][0]
+
+    def test_titan_v2_sends_dimensions_when_configured(self, monkeypatch):
+        # Titan v2 uses `dimensions` (not Cohere's `output_dimension`).
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController(
+            {"NAME": "amazon.titan-embed-text-v2:0", "TYPE": "bedrock", "DIMENSION": 512}
+        )
+        c.cache_enabled = False
+        c.embed(["a"])
+        assert cap["requests"][0]["dimensions"] == 512
+        assert "output_dimension" not in cap["requests"][0]
+
+    def test_titan_v1_ignores_dimension(self, monkeypatch):
+        # Titan v1/g1 have no resize knob — DIMENSION must NOT be sent (would 400).
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController(
+            {"NAME": "amazon.titan-embed-text-v1", "TYPE": "bedrock", "DIMENSION": 512}
+        )
+        c.cache_enabled = False
+        c.embed(["a"])
+        assert "dimensions" not in cap["requests"][0]

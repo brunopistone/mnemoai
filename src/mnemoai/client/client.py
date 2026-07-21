@@ -159,8 +159,7 @@ class LangGraphClient:
         self.profile_manager = UserProfileManager()
         self.system_prompt = self._build_system_prompt()
 
-        profile_name = config.get("PROFILE", {}).get("NAME", "default")
-        self.session_id = f"{profile_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.session_id = self._new_session_id()
 
         self.agent: Optional[LangGraphAgent] = None
         self.tools = None
@@ -973,8 +972,7 @@ class LangGraphClient:
             self._flush_rag_store(old_session_id)
         self._flush_chunk_cache_store(old_session_id)
 
-        profile_name = config.get("PROFILE", {}).get("NAME", "default")
-        self.session_id = f"{profile_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        self.session_id = self._new_session_id()
         self.system_prompt = self._build_system_prompt()
         if self.agent:
             self.agent.system_prompt = self.system_prompt
@@ -982,13 +980,59 @@ class LangGraphClient:
         # Fresh conversation: the next /save makes a new file.
         self.current_conversation_path = None
 
+    def _new_session_id(self) -> str:
+        """A session id unique to THIS instance: ``{profile}_{ts}_{instance_id}``.
+
+        The timestamp alone is second-granular, so two instances (terminal tabs)
+        on the same profile started in the SAME second would otherwise mint an
+        IDENTICAL session id — and since the per-session artifact filenames
+        (``chunk_cache_{id}.db``, ``rag_store_{id}``) key off it with no other
+        namespacing, they'd share the SAME files on disk and clobber/delete each
+        other's data. Appending the instance id (unique per live process; see
+        ``paths.instance_id``) makes every instance's artifacts physically
+        distinct, which also makes this instance's own restart-orphan cleanup safe
+        (a session id belongs to exactly one instance)."""
+        profile_name = config.get("PROFILE", {}).get("NAME", "default")
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return f"{profile_name}_{ts}_{instance_id()}"
+
+    def _prev_session_from_pointer(self, pointer_path) -> Optional[str]:
+        """This instance's PREVIOUS session_id, read from its own per-instance
+        pointer file, or None. A ``/model``/``/params`` restart re-execs in place
+        (``os.execv`` preserves ``MNEMOAI_INSTANCE_ID``), so the pointer still
+        names THIS instance's id — but the fresh startup mints a NEW ``session_id``.
+        The old one identifies this instance's now-orphaned store/cache.
+
+        Safe to delete ONLY because ``session_id`` embeds the instance id (see its
+        generation), so it is unique per instance: a concurrent tab can never share
+        this session_id, hence never share the artifact we remove. Returns None if
+        the pointer is absent, empty/whitespace, or already equals the current id.
+        """
+        try:
+            if pointer_path.is_file():
+                prev = pointer_path.read_text().strip()
+                if prev and prev != self.session_id:
+                    return prev
+        except OSError:
+            pass
+        return None
+
     def _initialize_rag_session(self) -> None:
-        """Initialize RAG session at application startup."""
+        """Initialize RAG session at application startup.
+
+        Also cleans up THIS instance's own store left by a prior run (e.g. after a
+        ``/model`` restart), so stale ``rag_store_*`` don't accumulate.
+        """
         try:
             profile_dir()  # ensure the dir exists
 
             # Per-instance pointer so concurrent tabs don't overwrite each other.
             session_file = rag_session_pointer_path()
+            # Sweep this instance's own prior-session store BEFORE repointing
+            # (safe: session_id is instance-unique, so this is never a sibling's).
+            prev = self._prev_session_from_pointer(session_file)
+            if prev is not None:
+                self._flush_rag_store(prev)
             session_file.write_text(self.session_id)
 
             logger.debug(f"RAG session initialized: {self.session_id}")
@@ -996,12 +1040,23 @@ class LangGraphClient:
             logger.warning(f"Failed to initialize RAG session: {e}")
 
     def _initialize_chunk_cache(self) -> None:
-        """Initialize chunk cache DB at application startup."""
+        """Initialize chunk cache DB at application startup.
+
+        Also deletes THIS instance's own chunk cache left by a prior run (e.g.
+        after a ``/model`` restart re-execs and mints a new session_id), so stale
+        ``chunk_cache_*.db`` don't accumulate.
+        """
         try:
             rag_dir = str(profile_dir())
 
             # Per-instance pointer so concurrent tabs don't overwrite each other.
-            chunk_session_pointer_path().write_text(self.session_id)
+            pointer = chunk_session_pointer_path()
+            # Sweep this instance's own prior-session cache BEFORE repointing
+            # (safe: session_id is instance-unique, so this is never a sibling's).
+            prev = self._prev_session_from_pointer(pointer)
+            if prev is not None:
+                self._flush_chunk_cache_store(prev)
+            pointer.write_text(self.session_id)
 
             db_path = os.path.join(rag_dir, f"chunk_cache_{self.session_id}.db")
             conn = sqlite3.connect(db_path)

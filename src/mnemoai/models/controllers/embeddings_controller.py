@@ -68,9 +68,14 @@ class EmbeddingsController:
         ) or self.embed_model_config.get("ENDPOINT_URL")
         self.api_key = self.embed_model_config.get("API_KEY")
 
-        # Dimension used ONLY for fallback vectors / empty-result shape (real
-        # embeddings keep their native size). Explicit DIMENSION wins, else a
-        # known-model lookup, else 1024.
+        # ``DIMENSION`` has two roles: (1) the fallback-vector / empty-result shape
+        # (always), and (2) the REQUESTED output size for providers that support a
+        # configurable embedding dimension (Cohere v4 → ``output_dimension``,
+        # Titan v2 → ``dimensions``). ``_configured_dim`` is the user's explicit
+        # value (or None); we only send it to the provider when explicitly set, so
+        # a model without a resize knob isn't forced to one. ``self.dim`` always
+        # has a concrete value for the fallback shape (explicit → known-model
+        # lookup → 1024).
         model_dims = {
             "mxbai-embed-large": 1024,
             "nomic-embed-text": 768,
@@ -78,9 +83,10 @@ class EmbeddingsController:
             "qwen3-embedding": 1024,
             "qwen3-embedding:0.6b": 1024,
         }
-        configured_dim = self.embed_model_config.get("DIMENSION")
-        if configured_dim is not None:
-            self.dim = int(configured_dim)
+        cfg_dim = self.embed_model_config.get("DIMENSION")
+        self._configured_dim = int(cfg_dim) if cfg_dim is not None else None
+        if self._configured_dim is not None:
+            self.dim = self._configured_dim
         else:
             self.dim = model_dims.get(self.embed_model_name, 1024)
 
@@ -112,6 +118,51 @@ class EmbeddingsController:
 
         if self.cache_enabled:
             logger.debug(f"Embedding cache enabled with max size: {self.cache_size}")
+
+        self._runtime_dim: Optional[int] = None  # cached real dimension (probed)
+
+    def runtime_dimension(self) -> Optional[int]:
+        """The ACTUAL embedding dimension this model produces, cached.
+
+        When ``DIMENSION`` is configured we trust it (no call). Otherwise we make
+        ONE real embed call and measure the vector length — the only reliable way,
+        since a model's advertised size can differ from what it returns (and some
+        providers resize). Falls back to the declared ``self.dim`` if the probe
+        fails (e.g. provider unreachable), so callers always get something."""
+        if self._runtime_dim is not None:
+            return self._runtime_dim
+        if self._configured_dim is not None:
+            self._runtime_dim = self._configured_dim
+            return self._runtime_dim
+        try:
+            vec = self.embed(["dimension probe"])
+            if getattr(vec, "shape", None) is not None and vec.shape[0] > 0:
+                self._runtime_dim = int(vec.shape[1])
+                return self._runtime_dim
+        except Exception as e:
+            logger.debug(f"Embedding dimension probe failed ({e}); using declared")
+        self._runtime_dim = self.dim
+        return self._runtime_dim
+
+    def fingerprint(self) -> str:
+        """A stable identity for (provider, model, endpoint, dimension) — the key
+        an episodic store records so it can detect an embedding-model change.
+
+        Includes the DIMENSION so a resize also triggers migration; includes the
+        endpoint so the same model name served by different backends is
+        distinguished. Crucially it keys on the MODEL, not just the dimension: two
+        different 1024-dim models (e.g. Ollama qwen3-embedding vs Cohere v4 @1024)
+        produce incompatible vectors that a dimension-only check would miss."""
+        return "|".join(
+            [
+                str(self.embed_model_type),
+                str(self.embed_model_name),
+                str(self.api_base or ""),
+                str(self.embed_model_config.get("HOST", "")),
+                str(self.embed_model_config.get("PORT", "")),
+                str(self.runtime_dimension()),
+            ]
+        )
 
     def _learned_key(self) -> str:
         """Cache key for the runtime-learned embed token limit (per provider+model
@@ -412,6 +463,11 @@ class EmbeddingsController:
                 "input_type": "search_document",
                 "embedding_types": ["float"],
             }
+            # Cohere v4 supports a configurable output size via `output_dimension`
+            # (default 1536; also 1024/256). Only sent when the user set DIMENSION,
+            # so the returned vectors match the configured/collection dimension.
+            if self._configured_dim is not None:
+                body["output_dimension"] = self._configured_dim
             result = self._bedrock_invoke_json(client, body)
             emb = result.get("embeddings", {})
             # v3/v4 nest under "float"; tolerate an older flat list too.
@@ -436,9 +492,17 @@ class EmbeddingsController:
             return np.array(vectors, dtype=np.float32)
 
         # --- Amazon Titan (and default): one text per request ---
+        # Titan v2 supports a configurable output size via `dimensions` (default
+        # 1024; also 512/256); only sent when DIMENSION is set. Titan v1/g1 ignore
+        # it, but they're per-text with the same {"inputText"} schema either way.
+        titan_extra = {}
+        if self._configured_dim is not None and "titan-embed-text-v2" in name:
+            titan_extra["dimensions"] = self._configured_dim
         embeddings = []
         for text in texts:
-            result = self._bedrock_invoke_json(client, {"inputText": text})
+            result = self._bedrock_invoke_json(
+                client, {"inputText": text, **titan_extra}
+            )
             embeddings.append(result.get("embedding", []))
         return np.array(embeddings, dtype=np.float32)
 

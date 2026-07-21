@@ -9,6 +9,41 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.7] — 2026-07-21
+
+### Fixed
+
+- **Switching the embedding model (or its dimension) no longer crashes every
+  turn — the episodic store migrates.** An existing episodic vector store is only
+  comparable to vectors from the SAME embedding model: a different dimension makes
+  every query raise (`Collection expecting embedding with dimension of X, got Y`),
+  and even a **same-dimension** switch (e.g. Ollama `qwen3-embedding`@1024 →
+  Cohere `embed-v4`@1024) yields semantically incompatible vectors. Each store now
+  records a **model fingerprint** (`type|name|endpoint|dimension`) and **resets**
+  when it changes — for both ChromaDB (stamped in collection metadata) and FAISS
+  (a sidecar `episodic_fingerprint.txt`). Episodic memory is model-scoped,
+  re-learnable scratch, so a reset is the safe migration (old vectors can't be
+  reused across models). Triggered by a new model OR a changed `DIMENSION` (via
+  `/model` or `/params`). Also hardens both stores against a moved/removed persist
+  dir (ChromaDB reconnect on SQLite code 1032; FAISS dir-recreate).
+- **`DIMENSION` is now sent to Bedrock embedders that support resizing.**
+  Previously `DIMENSION` only shaped the fallback vector and was never sent, so
+  e.g. `us.cohere.embed-v4:0` with `DIMENSION: 1024` still returned 1536-dim
+  vectors (then mismatched the collection). It is now passed with the correct
+  provider-specific parameter — Cohere v4 `output_dimension`, Titan v2
+  `dimensions` — and only when explicitly set (a model without a resize knob, e.g.
+  Titan v1, is never forced). When `DIMENSION` is unset, the real output size is
+  determined by a one-time embed probe (used for the fingerprint), never guessed.
+- **Stale per-session artifacts no longer accumulate on `/model`/`/params`
+  restart.** Those commands re-exec the process, minting a fresh `session_id` and
+  a new `chunk_cache_*.db` / `rag_store_*` while the prior run's was orphaned
+  (os.execv runs no exit cleanup). `session_id` now embeds the instance id
+  (`{profile}_{ts}_{instance_id}`), so each instance's artifacts are physically
+  unique — this (a) lets an instance safely delete its OWN prior-session artifacts
+  on restart (cleanup keyed to its own per-instance pointer), and (b) fixes a
+  latent bug where two tabs started in the same second on one profile shared —
+  and could clobber — a single on-disk store/cache.
+
 ## [1.5.6] — 2026-07-21
 
 ### Fixed
@@ -39,9 +74,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 - **A message typed while the assistant is working is now QUEUED, not steered.**
   It runs as its **own turn after** the current one ends (shown as a dim
-  `> … (queued)` line), matching Claude Code — it is never folded into the
-  running turn. This fixes a stranding bug where a message steered during the
-  final, tool-call-free model call was never drained at turn end and leaked into
+  `> … (queued)` line), it is never folded into the running turn.
+  This fixes a stranding bug where a message steered during the final,
+  tool-call-free model call was never drained at turn end and leaked into
   the **next** turn (echoed `(steering →)` at submit, then answered later). The
   agent-side mid-turn steering machinery (`agent.steer`/`_drain_steering`) is
   left intact but dormant. Background sub-agent auto-delivery is unaffected — it
