@@ -140,3 +140,50 @@ class TestConversationTitle:
 
     def test_unreadable_file_returns_blank(self, tmp_path):
         assert LangGraphClient.conversation_title(tmp_path / "nope.json") == ""
+
+
+def test_delete_conversation_removes_file(tmp_path, monkeypatch):
+    import mnemoai.client.client as mod
+
+    monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+    c = _client(tmp_path)
+    f = tmp_path / "conversation_20260629_120000.json"
+    f.write_text('{"messages": []}')
+    assert c.delete_conversation(str(f)) is True
+    assert not f.exists()
+
+
+def test_delete_refuses_path_outside_conversations_dir(tmp_path, monkeypatch):
+    import mnemoai.client.client as mod
+
+    conv = tmp_path / "conversations"
+    conv.mkdir()
+    monkeypatch.setattr(mod, "conversations_dir", lambda: conv)
+    c = _client(tmp_path)
+    outside = tmp_path / "elsewhere.json"
+    outside.write_text("secret")
+    assert c.delete_conversation(str(outside)) is False
+    assert outside.exists()  # untouched
+
+
+def test_delete_refuses_non_json(tmp_path, monkeypatch):
+    import mnemoai.client.client as mod
+
+    monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+    c = _client(tmp_path)
+    notes = tmp_path / "notes.txt"
+    notes.write_text("x")
+    assert c.delete_conversation(str(notes)) is False
+    assert notes.exists()
+
+
+def test_delete_open_conversation_clears_current_path(tmp_path, monkeypatch):
+    import mnemoai.client.client as mod
+
+    monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+    c = _client(tmp_path)
+    f = tmp_path / "conversation_20260629_120000.json"
+    f.write_text('{"messages": []}')
+    c.current_conversation_path = str(f)
+    c.delete_conversation(str(f))
+    assert c.current_conversation_path is None  # forgotten so /save starts fresh

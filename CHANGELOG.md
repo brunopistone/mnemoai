@@ -9,6 +9,39 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.9] — 2026-07-21
+
+### Added
+
+- **Delete saved conversations from the `/load` picker.** The `/load` dialog now
+  has a **Delete** button (next to OK/Cancel); pressing it asks "Delete this
+  conversation? Yes/No", removes the highlighted conversation on Yes, then reopens
+  the refreshed picker — so you can prune saved chats without leaving the dialog.
+  Deletion is guarded to only remove a `*.json` file inside the profile's
+  `conversations/` dir, and clears the open-conversation pointer if you delete the
+  one currently loaded.
+
+### Fixed
+
+- **No more silent turns — every answer path now displays.** The app's display
+  contract was "streaming prints the answer", but several paths produce the final
+  text WITHOUT streaming and so showed nothing (only `[Context: N]`): the
+  **orchestrator single-subtask** result (the reported case — a `use the skill`
+  turn ended blank), the aggregation-fallback concatenation, and the
+  context-overflow / stream-error / recursion terminal messages, and the empty-
+  final salvage. A turn now tracks whether it streamed a visible answer and, at
+  the single point where every path returns its final text, emits anything that
+  wasn't streamed (via the same `●`-marker + `CodeFormatter` rendering, so it
+  looks identical) — a central safety net that closes all of these at once and
+  can't regress on a future path. Normal streamed turns are unaffected (the flag
+  prevents double-printing). The `client.query()` error handler also now prints
+  its failure message instead of only logging it. As part of centralizing on this
+  one display point, three pre-existing ad-hoc `print()`s (the truncated-token and
+  reasoning-only fallbacks in `_call_model`, and the worker-salvage fallback) were
+  removed — they returned the same text that the net now renders, so they'd have
+  printed it twice; `_emit_answer` is now the single chokepoint for every
+  non-streamed answer.
+
 ## [1.5.8] — 2026-07-21
 
 ### Fixed

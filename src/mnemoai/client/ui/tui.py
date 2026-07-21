@@ -73,11 +73,42 @@ _PASTE_REF_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]")
 _PASTE_REF_AT_END_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]$")
 
 
+# Matches ANSI escape sequences (CSI/SGR etc.) to strip from pasted text — a
+# paste from a styled source (a terminal, a rendered UI) can carry color codes
+# that would corrupt both the echo and the text sent to the model.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _normalize_paste(text: str) -> str:
+    """Normalize pasted text so it's safe to store, echo, and send to the model.
+
+    Pasted content can carry line endings and control characters that wreck a
+    raw-mode terminal echo — most importantly a carriage return (``\\r``), which
+    moves the cursor to column 0 and makes later text OVERWRITE earlier text
+    (e.g. a table copied from a UI collapses all rows onto one garbled line). We:
+
+      * strip ANSI escape sequences,
+      * fold ``\\r\\n`` and lone ``\\r`` to ``\\n`` (the ONLY newline we emit),
+      * expand tabs to spaces (raw-mode tab handling is terminal-dependent),
+      * drop other C0 control chars except ``\\n`` (keep the text printable).
+
+    Everything downstream (line count, the collapsed placeholder, the model
+    text, and the scrollback echo) then works on clean, ``\\n``-only text.
+    """
+    text = _ANSI_RE.sub("", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.expandtabs(4)
+    # Remove remaining control chars (0x00-0x1f) except newline, plus DEL.
+    return "".join(ch for ch in text if ch == "\n" or ord(ch) >= 32)
+
+
 def _paste_num_lines(text: str) -> int:
-    """Number of line breaks in ``text`` (``\\r\\n``/``\\r``/``\\n``).
+    """Number of line breaks in normalized ``text`` (``\\n`` only).
 
     This is line breaks, not visual lines — "a\\nb\\nc" → 2 — matching Claude
-    Code's ``+M lines`` count (visual lines minus one)."""
+    Code's ``+M lines`` count (visual lines minus one). Callers normalize first
+    (``_normalize_paste``), so only ``\\n`` remains; the regex still tolerates a
+    stray ``\\r`` defensively."""
     return len(re.findall(r"\r\n|\r|\n", text))
 
 
@@ -330,8 +361,13 @@ class PinnedPromptReader:
             box. If it's long by char or line count, we stash the full text and
             insert a `[Pasted text #N +M lines]` placeholder instead; on submit
             the placeholder is expanded back to the real text for the model
-            (:meth:`_expand_pastes`). Short pastes insert verbatim as usual."""
-            data = event.data or ""
+            (:meth:`_expand_pastes`). Short pastes insert verbatim as usual.
+
+            The paste is NORMALIZED first (:func:`_normalize_paste`) — CRLF/CR →
+            LF, ANSI/control chars stripped, tabs expanded — so a paste from a
+            styled source or with `\\r` line endings (e.g. a table copied from a
+            UI) can't corrupt the input, the echo, or the text sent to the model."""
+            data = _normalize_paste(event.data or "")
             num_lines = _paste_num_lines(data)
             if len(data) > _PASTE_CHAR_THRESHOLD or num_lines > _PASTE_LINE_THRESHOLD:
                 self._paste_counter += 1
@@ -895,21 +931,33 @@ def confirm_inline(message: str) -> bool:
     return answer in ("y", "yes")
 
 
+# Sentinels: user cancelled the pick dialog (distinct from a valid None value),
+# and "the user pressed Delete on the highlighted row" (the caller then confirms
+# + deletes + reopens the picker).
+_CANCEL = object()
+_DELETE = object()
+
+
 def select_from_list(
     title: str,
     options: List[tuple],
     *,
     cancel_text: str = "Cancel",
+    allow_delete: bool = False,
 ) -> Optional[Any]:
     """Pick one value from ``options`` (``[(value, label), …]``) via a full-screen
     menu; returns the chosen value or None. TTY: ↑/↓ move, Enter confirms, Esc
     cancels. Non-TTY: a numbered ``input()`` prompt so pipes/tests never block.
+
+    With ``allow_delete=True`` the dialog gains a **Delete** button; when pressed
+    it returns ``(_DELETE, value)`` so the caller can confirm + delete that entry
+    and reopen the picker. (Delete is TTY-only; the non-TTY fallback just picks.)
     """
     if not options:
         return None
 
     if _dialog_is_tty():
-        result = _radio_pick(title, options)
+        result = _radio_pick(title, options, allow_delete=allow_delete)
         return None if result is _CANCEL else result
 
     # Non-TTY fallback: numbered list + input().
@@ -932,14 +980,13 @@ def select_from_list(
     return options[idx - 1][0]
 
 
-# Sentinel: user cancelled the pick dialog (distinct from a valid None value).
-_CANCEL = object()
-
-
-def _radio_pick(title: str, options: List[tuple]):
+def _radio_pick(title: str, options: List[tuple], *, allow_delete: bool = False):
     """Full-screen single-pick menu (↑/↓ move, Enter confirms, Esc cancels);
     returns the chosen value or ``_CANCEL``. Enter is bound on the RadioList so it
-    confirms the highlighted row directly (no Tab-to-button step)."""
+    confirms the highlighted row directly (no Tab-to-button step).
+
+    With ``allow_delete``, a **Delete** button returns ``(_DELETE, value)`` for the
+    highlighted row so the caller can delete it and reopen."""
     radio = RadioList(values=options)
 
     def _ok() -> None:
@@ -948,18 +995,22 @@ def _radio_pick(title: str, options: List[tuple]):
     def _cancel() -> None:
         get_app().exit(result=_CANCEL)
 
+    def _delete() -> None:
+        get_app().exit(result=(_DELETE, radio.current_value))
+
     radio.control.key_bindings.add("enter")(lambda event: _ok())
+
+    hint = "↑/↓ to move · Enter to confirm · Esc to cancel"
+    buttons = [Button(text="OK", handler=_ok)]
+    if allow_delete:
+        hint += " · Delete to remove"
+        buttons.append(Button(text="Delete", handler=_delete))
+    buttons.append(Button(text="Cancel", handler=_cancel))
 
     dialog = Dialog(
         title=title,
-        body=HSplit(
-            [Label(text="↑/↓ to move · Enter to confirm · Esc to cancel"), radio],
-            padding=1,
-        ),
-        buttons=[
-            Button(text="OK", handler=_ok),
-            Button(text="Cancel", handler=_cancel),
-        ],
+        body=HSplit([Label(text=hint), radio], padding=1),
+        buttons=buttons,
         with_background=True,
     )
 
@@ -977,3 +1028,41 @@ def _radio_pick(title: str, options: List[tuple]):
         full_screen=True,
     )
     return app.run()
+
+
+def confirm_dialog(title: str, *, yes_text: str = "Yes", no_text: str = "No") -> bool:
+    """Full-screen Yes/No confirmation dialog; returns True only on Yes.
+
+    TTY-only styling to match :func:`select_from_list` (used e.g. by the ``/load``
+    Delete flow). Esc / Ctrl+C / No all return False. Off-TTY, degrades to a
+    ``y/N`` ``input()`` prompt so pipes/tests never block."""
+    if not _dialog_is_tty():
+        try:
+            return input(f"  {title} [y/N]: ").strip().lower() in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return False
+
+    def _yes() -> None:
+        get_app().exit(result=True)
+
+    def _no() -> None:
+        get_app().exit(result=False)
+
+    dialog = Dialog(
+        title="Confirm",
+        body=Label(text=title),
+        buttons=[Button(text=yes_text, handler=_yes), Button(text=no_text, handler=_no)],
+        with_background=True,
+    )
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:
+        _no()
+
+    app = Application(
+        layout=Layout(dialog), key_bindings=kb, mouse_support=False, full_screen=True
+    )
+    return bool(app.run())

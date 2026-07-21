@@ -65,3 +65,36 @@ class TestConfirmInline:
 
         monkeypatch.setattr(builtins, "input", _raise)
         assert tui.confirm_inline("Clear?") is False
+
+
+class TestConfirmDialog:
+    """confirm_dialog is a full-screen Yes/No on a TTY; off-TTY it degrades to a
+    y/N input() prompt (used by the /load Delete flow)."""
+
+    @pytest.mark.parametrize("answer,expected", [
+        ("y", True), ("yes", True), ("Y", True),
+        ("n", False), ("", False), ("nope", False),
+    ])
+    def test_non_tty_answers(self, not_a_tty, monkeypatch, answer, expected):
+        monkeypatch.setattr(builtins, "input", lambda *_: answer)
+        assert tui.confirm_dialog("Delete this conversation?") is expected
+
+    def test_non_tty_eof_is_no(self, not_a_tty, monkeypatch):
+        def _raise(*_):
+            raise EOFError
+
+        monkeypatch.setattr(builtins, "input", _raise)
+        assert tui.confirm_dialog("Delete this?") is False
+
+
+class TestSelectAllowDelete:
+    """allow_delete adds a Delete button on a TTY (returns (_DELETE, value)); the
+    non-TTY fallback just picks and ignores the delete affordance."""
+
+    OPTIONS = [("/a/one.json", "one"), ("/a/two.json", "two")]
+
+    def test_non_tty_allow_delete_still_picks(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", lambda *_: "1")
+        assert tui.select_from_list("Pick", self.OPTIONS, allow_delete=True) == (
+            "/a/one.json"
+        )

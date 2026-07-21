@@ -471,10 +471,13 @@ def test_worker_salvage_falls_back_when_retry_still_empty():
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         out = a._salvage_empty_worker_turn(msgs, {}, object())
-    # Never empty — a visible fallback is returned AND printed.
+    # Never empty — a visible fallback is RETURNED. It is NOT printed here: the
+    # fallback flows back as the turn's answer and the central display net
+    # (invoke() → _emit_answer) renders it exactly once. Printing here too would
+    # double it (nothing streamed → _answer_displayed stays False).
     assert out
     assert "wasn't able to produce" in out
-    assert "wasn't able to produce" in buf.getvalue()
+    assert "wasn't able to produce" not in buf.getvalue()  # net displays, not this
 
 
 # --- Auto-continue on output-token truncation --------------------------------
