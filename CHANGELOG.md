@@ -9,6 +9,51 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.4] — 2026-07-20
+
+### Added
+
+- **Large pastes collapse to a compact placeholder in the input.** Pasting a long
+  transcript or file no longer floods the input box: a paste that's long by
+  character (> 800) or line count (> 2 line breaks) is shown as
+  `[Pasted text #N +M lines]` while the full text is stored aside, and on submit
+  the placeholder is **expanded back to the real text for the model** (the
+  scrollback echo stays collapsed). `M` counts line breaks (visual lines − 1),
+  matching Claude Code. Placeholder-looking strings inside the pasted content are
+  never re-expanded (reverse-offset splice). Short pastes insert verbatim as
+  before; the non-TTY plain loop is unaffected.
+
+### Fixed
+
+- **Embeddings no longer fail (and spam warnings) on a long input.** A long paste
+  could exceed the embedding runner's real limit — which is often FAR below the
+  context length the model reports (e.g. `qwen3-embedding:0.6b` reports 32k but
+  its runner EOFs at ~5.5k tokens) — so truncation trusted the wrong number, the
+  over-length input was sent whole, the runner dropped the socket (a bare `EOF` /
+  `400`), and the code then re-sent the identical input twice more before
+  degrading to (degraded) sha256 fallback — all logged loudly at WARNING. Now:
+  (1) an embed input rejected as too big (including a bare EOF/400, which is how
+  llama.cpp signals it) triggers an **adaptive shrink-and-retry** that halves the
+  token budget until it fits and **remembers the working limit** per (provider,
+  model, endpoint) so later inputs truncate proactively — model- and
+  provider-agnostic, no per-model table, so it works for every provider; (2) we
+  no longer trust a model's reported generation context for embeddings; and
+  (3) the self-healing retry/shrink/truncate steps log at **DEBUG** (silent at
+  the default level) — only a genuine degrade-to-fallback is an **ERROR**, so a
+  normal recovery is silent.
+- **A mid-stream API error (e.g. a 500 `api_error` "Internal server error") no
+  longer wedges the turn or makes cancel unresponsive.** On such an error the
+  streaming path used to fall back to a **blocking, non-cancellable, un-retried**
+  `model.invoke()` — so the turn froze and Esc/Ctrl+C couldn't preempt the
+  in-flight C-level request. Two changes fix it: (1) 500 / `api_error` /
+  `internal server error` / `overloaded_error` are now classified as **transient**,
+  so they get the existing **abortable streaming retry** with backoff instead of
+  the blocking fallback; and (2) the blocking non-streaming fallback inside `_stream_once`
+  is **removed** — a stream error now re-raises so the retry wrapper (`_stream_response`)
+  owns recovery, keeping the turn interruptible and idle-timeout-protected throughout.
+  If a stream error survives all retries, `_call_model` ends the turn with a
+  clear, non-crashing message (the conversation stays intact) rather than hanging.
+
 ## [1.5.3] — 2026-07-20
 
 ### Changed
@@ -37,8 +82,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   the mnemoai analog of an `AbortSignal`) that the UI **sets on Esc/Ctrl+C**: the
   idle-timeout stream wait polls it on a short (0.25s) interval and the retry
   backoff `.wait()`s on it instead of sleeping — so both wake **instantly** and
-  the turn tears down in a fraction of a second instead of up to 120s. Modeled on
-  Claude Code's abortable-sleep + signal-checked-per-attempt pattern.
+  the turn tears down in a fraction of a second instead of up to 120s.
 
 ## [1.5.2] — 2026-07-20
 

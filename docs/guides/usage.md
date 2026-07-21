@@ -81,6 +81,14 @@ keep typing during a turn — see the shortcuts below.
 - `/` then a letter: shows a slash-command completion menu (↑/↓ to move,
   `Enter`/`Tab` to accept)
 
+### Pasting long text
+
+Pasting a long block (a transcript, a file, a stack trace) collapses it into a
+compact **`[Pasted text #N +M lines]`** placeholder in the input instead of
+flooding the prompt — `M` is the number of line breaks. The full text is kept
+aside and **sent to the assistant in full** when you submit; only the input and
+the scrollback echo stay collapsed. Short pastes insert normally.
+
 In dialogs (the `/load` picker and the `/config`, `/model`, `/params`,
 `/features` prompts): arrow keys move, `Enter` confirms, `Esc` cancels, and
 `Ctrl+B` steps back to the previous prompt within a model-section flow. These

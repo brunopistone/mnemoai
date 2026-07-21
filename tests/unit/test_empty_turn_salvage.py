@@ -41,10 +41,13 @@ def test_last_tool_result_truncates():
     assert len(a._last_tool_result(msgs)) <= 500
 
 
-def test_stream_error_prefers_complete_nonstreaming_result():
-    """On a streaming error, the truncated partial chunk must be discarded in
-    favor of the complete non-streaming invoke() result (else a mid-stream
-    parse failure surfaces as an empty/incomplete turn)."""
+def test_stream_error_reraises_no_blocking_fallback():
+    """A mid-stream error must RE-RAISE (so the abortable retry wrapper handles
+    it), NOT be swallowed by a blocking non-streaming invoke(). That blocking
+    fallback couldn't be cancelled and wedged the turn on a 500 api_error; it was
+    removed. invoke() must never be called from the stream error path."""
+    import pytest
+
     class _FakeChunk:
         def __init__(self):
             self.content = ""
@@ -53,21 +56,31 @@ def test_stream_error_prefers_complete_nonstreaming_result():
             return self
 
     class _FakeModel:
+        invoked = False
+
         def stream(self, messages, config=None):
             yield _FakeChunk()  # a partial chunk arrives...
             raise ValueError("simulated mid-stream parse error")
+
         def invoke(self, messages, config=None):
-            return AIMessage(content="COMPLETE ANSWER")
+            _FakeModel.invoked = True
+            raise AssertionError("blocking non-streaming fallback must not run")
 
     a = _agent()
     a.callbacks = []
     a.verbose = False
+    a.styled_turn_view = False
+    a.reasoning_sink = None
+    a._stream_idle_timeout = 0
     a._code_formatter = type("F", (), {"process_chunk": lambda s, c: None})()
     a._stop_spinner = lambda: None
+    a._start_spinner = lambda *x, **k: None
     a._extract_content = lambda chunk: (getattr(chunk, "content", ""), None)
 
-    resp, _ = a._stream_response(["msg"], {}, model=_FakeModel())
-    assert getattr(resp, "content", None) == "COMPLETE ANSWER"
+    # A non-transient ValueError isn't retried by the wrapper → it propagates.
+    with pytest.raises(ValueError, match="mid-stream parse error"):
+        a._stream_response(["msg"], {}, model=_FakeModel())
+    assert _FakeModel.invoked is False
 
 
 def test_last_visible_from_skips_empty_ai_turns():
