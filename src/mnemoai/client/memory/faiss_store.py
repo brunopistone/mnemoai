@@ -48,8 +48,88 @@ class FAISSEpisodicStore:
         else:
             self.metadata = []
 
+        # The index is only comparable to vectors from the SAME embedding model:
+        # a different model — even at the same dimension (e.g. qwen3-embedding@1024
+        # → Cohere v4@1024) — yields incompatible vectors, and a different
+        # dimension makes add/search raise (FAISS asserts on dim). We stamp a
+        # sidecar fingerprint file and RESET the index+metadata when the current
+        # model's fingerprint differs — episodic memory is model-scoped,
+        # re-learnable scratch, so a reset is the safe migration, not a crash.
+        self.fingerprint_path = os.path.join(persist_path, "episodic_fingerprint.txt")
+        self._migrate_if_model_changed()
+
         self.bm25: Optional[BM25] = None
         self._rebuild_bm25()
+
+    def _embed_fingerprint(self) -> str:
+        """Current embedding model's fingerprint (falls back to a dim string)."""
+        fp = getattr(self.embeddings, "fingerprint", None)
+        if callable(fp):
+            return fp()
+        return f"dim={getattr(self.embeddings, 'dim', '?')}"
+
+    def _migrate_if_model_changed(self) -> None:
+        """Reset the index+metadata if the embedding-model fingerprint changed."""
+        current_fp = self._embed_fingerprint()
+        stored_fp = None
+        try:
+            if os.path.exists(self.fingerprint_path):
+                with open(self.fingerprint_path, "r") as f:
+                    stored_fp = f.read().strip()
+        except OSError:
+            pass
+
+        # Nothing indexed yet: just (re)stamp so the next build is attributed.
+        if self.index is None and not self.metadata:
+            self._write_fingerprint(current_fp)
+            return
+
+        # A pre-fingerprint (legacy) store: only force a reset if the dimension is
+        # actually incompatible; otherwise adopt it and stamp going forward.
+        if stored_fp is None:
+            if self._legacy_dimension_mismatch(current_fp):
+                self._reset(current_fp, "dimension changed")
+            else:
+                self._write_fingerprint(current_fp)
+            return
+
+        if stored_fp != current_fp:
+            self._reset(current_fp, f"embedding model changed ({stored_fp} → {current_fp})")
+
+    def _legacy_dimension_mismatch(self, current_fp: str) -> bool:
+        """True if an unstamped index's dim differs from the current model's dim."""
+        stored = getattr(self.index, "d", None) if self.index is not None else None
+        if not stored:
+            return False
+        current = None
+        rd = getattr(self.embeddings, "runtime_dimension", None)
+        if callable(rd):
+            current = rd()
+        return current is not None and current != stored
+
+    def _write_fingerprint(self, fp: str) -> None:
+        try:
+            with open(self.fingerprint_path, "w") as f:
+                f.write(fp)
+        except OSError as e:
+            logger.debug(f"Failed to write episodic fingerprint: {e}")
+
+    def _reset(self, current_fp: str, reason: str) -> None:
+        """Drop the index+metadata and re-stamp the fingerprint, logging why."""
+        logger.warning(
+            "Resetting episodic memory (%s). Past episodes are dropped; the store "
+            "will re-learn with the new embedding model.",
+            reason,
+        )
+        self.index = None
+        self.metadata = []
+        for p in (self.index_path, self.metadata_path):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+            except OSError as e:
+                logger.debug(f"Failed to remove {p} during reset: {e}")
+        self._write_fingerprint(current_fp)
 
     def _get_searchable_text(self, metadata: Dict[str, Any]) -> str:
         """Build searchable text from episode metadata for BM25 indexing."""
@@ -113,6 +193,9 @@ class FAISSEpisodicStore:
             faiss.write_index(self.index, self.index_path)
             with open(self.metadata_path, "w") as f:
                 json.dump(self.metadata, f, indent=2)
+            # Stamp the model fingerprint alongside so a later model change is
+            # detected and migrated (see _migrate_if_model_changed).
+            self._write_fingerprint(self._embed_fingerprint())
 
         try:
             _write()

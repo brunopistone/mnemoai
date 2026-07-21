@@ -32,26 +32,109 @@ class ChromaEpisodicStore:
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(path=self.persist_path)
 
-        # Get or create episodic memory collection
-        try:
-            self.collection = self.client.get_collection(name="episodic_memory")
-            logger.info(
-                f"Loaded existing episodic memory collection from {self.persist_path}"
-            )
-        except:
-            self.collection = self.client.create_collection(
-                name="episodic_memory",
-                metadata={"description": "Task solutions with tool usage patterns"},
-            )
-            logger.info(
-                f"Created new episodic memory collection at {self.persist_path}"
-            )
+        # Get or create the collection, migrating it if the embedding model
+        # changed. An existing collection's vectors are only comparable to new
+        # ones from the SAME embedding model: a different model — even at the same
+        # dimension (e.g. Ollama qwen3-embedding@1024 → Cohere v4@1024) — produces
+        # semantically incompatible vectors, and a different dimension makes every
+        # query/add raise outright ("expecting embedding with dimension of X, got
+        # Y"). We stamp the collection with a model fingerprint and RESET it when
+        # the current model's fingerprint differs — episodic memory is
+        # model-scoped, re-learnable scratch (stores live under models/{model}/),
+        # so a reset is the safe migration (old vectors can't be reused, and
+        # re-embedding the whole history on every switch would be slow).
+        self._open_or_migrate_collection()
 
         # Track metadata separately
         self.metadatas = []
         self.bm25: Optional[BM25] = None
         self._load_metadatas()
         self._rebuild_bm25()
+
+    def _embed_fingerprint(self) -> str:
+        """Current embedding model's fingerprint (falls back to a dim string)."""
+        fp = getattr(self.embeddings, "fingerprint", None)
+        if callable(fp):
+            return fp()
+        return f"dim={getattr(self.embeddings, 'dim', '?')}"
+
+    def _create_collection(self):
+        """Create the collection stamped with the current model fingerprint."""
+        return self.client.create_collection(
+            name="episodic_memory",
+            metadata={
+                "description": "Task solutions with tool usage patterns",
+                "embed_fingerprint": self._embed_fingerprint(),
+            },
+        )
+
+    def _open_or_migrate_collection(self) -> None:
+        """Load the collection, or reset it if the embedding model changed."""
+        current_fp = self._embed_fingerprint()
+        try:
+            self.collection = self.client.get_collection(name="episodic_memory")
+        except Exception:
+            self.collection = self._create_collection()
+            logger.info(
+                f"Created new episodic memory collection at {self.persist_path}"
+            )
+            return
+
+        stored_fp = (self.collection.metadata or {}).get("embed_fingerprint")
+        # An unstamped legacy collection: if it holds data at a DIFFERENT dimension
+        # than the current model, it can't be queried — reset. If empty or same
+        # dimension, adopt it (re-stamp on next create isn't needed — it works).
+        if stored_fp is None:
+            if self._legacy_dimension_mismatch():
+                self._reset_collection(current_fp, reason="dimension changed")
+            else:
+                logger.info(
+                    f"Loaded existing episodic memory collection from "
+                    f"{self.persist_path}"
+                )
+            return
+
+        if stored_fp == current_fp:
+            logger.info(
+                f"Loaded existing episodic memory collection from {self.persist_path}"
+            )
+            return
+
+        self._reset_collection(
+            current_fp, reason=f"embedding model changed ({stored_fp} → {current_fp})"
+        )
+
+    def _legacy_dimension_mismatch(self) -> bool:
+        """For an unstamped collection: True if its stored dim differs from the
+        current embedding dim (so queries would crash). None/empty → False."""
+        try:
+            if self.collection.count() == 0:
+                return False
+            peek = self.collection.peek(1)
+            emb = peek.get("embeddings")
+            stored = len(emb[0]) if emb is not None and len(emb) > 0 else None
+        except Exception:
+            return False
+        if stored is None:
+            return False
+        current = None
+        rd = getattr(self.embeddings, "runtime_dimension", None)
+        if callable(rd):
+            current = rd()
+        return current is not None and current != stored
+
+    def _reset_collection(self, current_fp: str, reason: str) -> None:
+        """Drop and recreate the collection (re-stamped), logging why."""
+        logger.warning(
+            "Resetting episodic memory (%s). Past episodes are dropped; the store "
+            "will re-learn with the new embedding model.",
+            reason,
+        )
+        try:
+            self.client.delete_collection(name="episodic_memory")
+        except Exception as e:
+            logger.debug(f"delete_collection during reset failed: {e}")
+        self.collection = self._create_collection()
 
     def _load_metadatas(self) -> None:
         """Load existing metadatas from collection."""
