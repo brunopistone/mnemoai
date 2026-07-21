@@ -62,6 +62,9 @@ _PASTE_LINE_THRESHOLD = 2
 # Matches a placeholder for expansion on submit; the `+M lines` suffix is optional
 # (a paste with no newlines collapses to `[Pasted text #N]`).
 _PASTE_REF_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]")
+# Same placeholder anchored at the END of the text before the cursor — used to
+# delete a placeholder as one token on backspace.
+_PASTE_REF_AT_END_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]$")
 
 
 def _paste_num_lines(text: str) -> int:
@@ -329,6 +332,22 @@ class PinnedPromptReader:
             else:
                 event.current_buffer.insert_text(data)
 
+        @kb.add("backspace")
+        def _(event) -> None:
+            """Backspace deletes a paste placeholder as ONE token, not char by char.
+
+            When the text right before the cursor is a `[Pasted text #N …]`
+            placeholder, remove the whole thing (and forget its stored content) in
+            one keystroke. Otherwise fall back to the normal single-character backspace."""
+            buff = event.current_buffer
+            before = buff.document.text_before_cursor
+            m = _PASTE_REF_AT_END_RE.search(before)
+            if m:
+                self._pasted.pop(int(m.group(1)), None)
+                buff.delete_before_cursor(len(m.group(0)))
+            else:
+                buff.delete_before_cursor(1)
+
         # Bare-Esc cancels the in-flight turn — but NOT eager: an eager Esc fires
         # on the ``ESC`` prefix of macOS Option+←/→ (``ESC b`` / ``ESC f``), so
         # word-motion while typing (even a queued message mid-turn) would cancel
@@ -430,18 +449,24 @@ class PinnedPromptReader:
 
         loop.call_soon_threadsafe(_enqueue)
 
-    def _expand_pastes(self, text: str) -> str:
+    def _expand_pastes(self, text: str, dim: bool = False) -> str:
         """Replace each `[Pasted text #N …]` placeholder with its full stored text.
 
         Splices by match offset in REVERSE so a placeholder-looking string inside
         one paste's content can't be re-expanded, and later offsets stay valid.
-        Unknown ids (e.g. a placeholder the user typed by hand) are left as-is."""
+        Unknown ids (e.g. a placeholder the user typed by hand) are left as-is.
+        With ``dim=True`` the inserted paste body is wrapped in gray ANSI (only
+        the pasted portion, not the surrounding typed text) — used for the
+        scrollback echo so a pasted block reads as distinct; the model always
+        gets the plain text (``dim=False``)."""
         if not self._pasted:
             return text
         matches = list(_PASTE_REF_RE.finditer(text))
         for m in reversed(matches):
             full = self._pasted.get(int(m.group(1)))
             if full is not None:
+                if dim:
+                    full = f"\033[90m{full}\033[0m"
                 text = text[: m.start()] + full + text[m.end():]
         return text
 
@@ -468,11 +493,11 @@ class PinnedPromptReader:
             and not stripped.startswith("/")
         ):
             try:
-                # The model gets the paste EXPANDED; the echo stays collapsed.
+                # Model gets plain expanded text; the echo dims the pasted body.
                 if self._steer(self._expand_pastes(text)):
                     # Echo to scrollback so the user sees it was accepted as
                     # steering (it won't get its own `>`-above-answer later).
-                    self._echo_steered(stripped)
+                    self._echo_steered(self._expand_pastes(text, dim=True).strip())
                     return False
             except Exception:
                 pass  # fall through to normal queuing on any hook failure
@@ -669,12 +694,19 @@ class PinnedPromptReader:
             self._busy = True
             self._cancelled = False
             self._ctrl_c_while_busy = False
+            # The live queue kept the COLLAPSED line (compact `[Pasted text …]`);
+            # expand it now so BOTH the scrollback echo and the model get the full
+            # pasted text — the placeholder was only the composing-time view. The
+            # echo dims the pasted body (gray) to mark it as pasted; the model
+            # gets the plain text.
+            dispatched = self._expand_pastes(line)
+            echoed = self._expand_pastes(line, dim=True)
             # Echo NOW (at dispatch, not submit) so a queued line's `>` prints
             # directly above its own answer. An empty line is a delivery-only
             # turn (a background sub-agent finished) — show a marker, not a bare `>`.
             if line.strip():
                 await run_in_terminal(
-                    lambda line=line: print(f"\033[36m>\033[0m {line}")
+                    lambda t=echoed: print(f"\033[36m>\033[0m {t}")
                 )
             else:
                 await run_in_terminal(
@@ -685,8 +717,6 @@ class PinnedPromptReader:
             if self._app is not None:
                 self._app.invalidate()
             try:
-                # Echo/queue kept the COLLAPSED line; the model gets it EXPANDED.
-                dispatched = self._expand_pastes(line)
                 result = await asyncio.to_thread(self._dispatch_tracked, dispatched)
             finally:
                 self._busy = False

@@ -9,6 +9,23 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.5.5] — 2026-07-21
+
+### Changed
+
+- **A submitted paste now expands to its full text in the scrollback (dimmed),
+  not just for the model.** 1.5.4 kept the `[Pasted text #N +M lines]`
+  placeholder in the scrollback echo after submit; now the placeholder is
+  expanded back to the real text **everywhere on submit** — the scrollback echo
+  and the mid-turn-steering echo both show what was actually sent — so the
+  collapsed view is only while you're composing the input. The **pasted portion
+  is rendered gray** (dim) so it reads as distinct from your typed text; the
+  model still receives plain text. (The input-box collapse is unchanged.)
+- **Backspace deletes a paste placeholder as one token.** With the cursor right
+  after a `[Pasted text #N …]` placeholder in the input, Backspace now removes
+  the **whole placeholder** in a single keystroke (and forgets its stored
+  content) instead of erasing it one character at a time.
+
 ## [1.5.4] — 2026-07-20
 
 ### Added
@@ -18,10 +35,10 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   character (> 800) or line count (> 2 line breaks) is shown as
   `[Pasted text #N +M lines]` while the full text is stored aside, and on submit
   the placeholder is **expanded back to the real text for the model** (the
-  scrollback echo stays collapsed). `M` counts line breaks (visual lines − 1),
-  matching Claude Code. Placeholder-looking strings inside the pasted content are
-  never re-expanded (reverse-offset splice). Short pastes insert verbatim as
-  before; the non-TTY plain loop is unaffected.
+  scrollback echo stays collapsed). `M` counts line breaks (visual lines − 1).
+  Placeholder-looking strings inside the pasted content are never re-expanded
+  (reverse-offset splice). Short pastes insert verbatim as before; the non-TTY plain
+  loop is unaffected.
 
 ### Fixed
 

@@ -324,9 +324,23 @@ class _FakeBuffer:
     def reset(self):
         self.text = ""
 
+    class _Doc:
+        def __init__(self, text):
+            self.text_before_cursor = text
+
+    @property
+    def document(self):
+        # Cursor is treated as at end-of-text for these tests.
+        return self._Doc(self.text)
+
+    def delete_before_cursor(self, n):
+        if n:
+            self.text = self.text[:-n]
+        return n
+
 
 class _FakeEvent:
-    def __init__(self, buffer, app):
+    def __init__(self, buffer, app=None):
         self.current_buffer = buffer
         self.app = app
 
@@ -472,9 +486,10 @@ class TestEscapeWordMotion:
 
 class TestPasteCollapse:
     """A long paste is collapsed to a compact `[Pasted text #N +M lines]`
-    placeholder in the input (readable), stored full, and EXPANDED back to the
-    real text for the model on submit — while the scrollback echo/queue stays
-    collapsed. Short pastes insert verbatim."""
+    placeholder in the input (readable) and stored full; on submit the
+    placeholder is EXPANDED back to the real text for BOTH the model and the
+    scrollback echo (the placeholder was only the composing-time view). Short
+    pastes insert verbatim."""
 
     def test_num_lines_counts_linebreaks(self):
         from mnemoai.client.ui.tui import _paste_num_lines
@@ -518,3 +533,63 @@ class TestPasteCollapse:
         r._pasted = {1: "line one\nline two\nline three"}
         _drive(r, ["Review this: [Pasted text #1 +2 lines]", "/quit"])
         assert seen[0] == "Review this: line one\nline two\nline three"
+
+    def test_submit_echoes_expanded_text_to_scrollback(self, capsys):
+        # The scrollback echo shows the FULL pasted text (not the placeholder),
+        # with the pasted body wrapped in gray ANSI (dim). The run_in_terminal
+        # stub prints inline, so capsys captures it.
+        def dispatch(line):
+            return _ExitRepl if line == "/quit" else None
+
+        r = _reader(dispatch)
+        r._pasted = {1: "FULL PASTED BODY\nsecond line"}
+        _drive(r, ["Look: [Pasted text #1 +1 lines]", "/quit"])
+        out = capsys.readouterr().out
+        assert "FULL PASTED BODY\nsecond line" in out
+        assert "[Pasted text #1" not in out       # placeholder is not what's echoed
+        assert "\033[90mFULL PASTED BODY" in out   # pasted body dimmed (gray)
+
+    def test_dim_wraps_only_pasted_portion(self):
+        # The gray wrap covers ONLY the pasted content, not the typed text.
+        r = _reader(lambda line: None)
+        r._pasted = {1: "BODY"}
+        assert r._expand_pastes("typed [Pasted text #1]", dim=True) == (
+            "typed \033[90mBODY\033[0m"
+        )
+        # Model path (dim=False) is plain — no ANSI.
+        assert r._expand_pastes("typed [Pasted text #1]") == "typed BODY"
+
+
+def _backspace_binding(reader):
+    # prompt_toolkit normalizes "backspace" to Keys.ControlH (value "c-h").
+    for b in reader._make_bindings().bindings:
+        keys = tuple(getattr(k, "value", k) for k in b.keys)
+        if keys in (("backspace",), ("c-h",)):
+            return b
+    raise AssertionError("no backspace binding found")
+
+
+class TestPasteAtomicDelete:
+    """Backspace deletes a `[Pasted text …]` placeholder as one token, 
+    and forgets its stored content."""
+
+    def test_backspace_deletes_whole_placeholder(self):
+        r = _reader(lambda line: None)
+        r._pasted = {3: "big body"}
+        buff = _FakeBuffer("Review: [Pasted text #3 +157 lines]")
+        _backspace_binding(r).handler(_FakeEvent(buff))
+        assert buff.text == "Review: "        # whole token gone in one keystroke
+        assert 3 not in r._pasted             # stored content forgotten
+
+    def test_backspace_deletes_suffixless_placeholder(self):
+        r = _reader(lambda line: None)
+        r._pasted = {7: "x"}
+        buff = _FakeBuffer("a [Pasted text #7]")
+        _backspace_binding(r).handler(_FakeEvent(buff))
+        assert buff.text == "a "
+
+    def test_backspace_normal_char_when_no_placeholder(self):
+        r = _reader(lambda line: None)
+        buff = _FakeBuffer("hello")
+        _backspace_binding(r).handler(_FakeEvent(buff))
+        assert buff.text == "hell"            # ordinary single-char delete
