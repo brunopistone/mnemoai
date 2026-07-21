@@ -59,6 +59,12 @@ _TUI_STYLE = Style(
 # more than this many line breaks.
 _PASTE_CHAR_THRESHOLD = 800
 _PASTE_LINE_THRESHOLD = 2
+# The scrollback ECHO of a submitted paste is expanded but capped to a head+tail
+# preview (with a "… +N lines …" middle marker) when it's large — so a huge paste
+# can't flood scrollback (or overrun the pinned-app repaint and garble). The MODEL
+# always gets the full untruncated text; only the on-screen echo is capped.
+_ECHO_PASTE_HEAD_LINES = 12
+_ECHO_PASTE_TAIL_LINES = 6
 # Matches a placeholder for expansion on submit; the `+M lines` suffix is optional
 # (a paste with no newlines collapses to `[Pasted text #N]`).
 _PASTE_REF_RE = re.compile(r"\[Pasted text #(\d+)(?: \+\d+ lines)?\]")
@@ -452,26 +458,54 @@ class PinnedPromptReader:
 
         loop.call_soon_threadsafe(_enqueue)
 
-    def _expand_pastes(self, text: str, dim: bool = False) -> str:
-        """Replace each `[Pasted text #N …]` placeholder with its full stored text.
+    def _expand_pastes(self, text: str, echo: bool = False) -> str:
+        """Replace each `[Pasted text #N …]` placeholder with its stored text.
 
         Splices by match offset in REVERSE so a placeholder-looking string inside
         one paste's content can't be re-expanded, and later offsets stay valid.
         Unknown ids (e.g. a placeholder the user typed by hand) are left as-is.
-        With ``dim=True`` the inserted paste body is wrapped in gray ANSI (only
-        the pasted portion, not the surrounding typed text) — used for the
-        scrollback echo so a pasted block reads as distinct; the model always
-        gets the plain text (``dim=False``)."""
+
+        ``echo=False`` (the MODEL path) inserts the FULL text verbatim. ``echo=True``
+        (the scrollback path) inserts a **capped, gray-dimmed** rendering of the
+        paste (:meth:`_echo_paste_body`): a big paste is truncated to head+tail so
+        it can't flood scrollback / overrun the pinned repaint — the model still
+        receives the full text via the ``echo=False`` call."""
         if not self._pasted:
             return text
         matches = list(_PASTE_REF_RE.finditer(text))
         for m in reversed(matches):
             full = self._pasted.get(int(m.group(1)))
             if full is not None:
-                if dim:
-                    full = f"\033[90m{full}\033[0m"
-                text = text[: m.start()] + full + text[m.end():]
+                repl = self._echo_paste_body(full) if echo else full
+                text = text[: m.start()] + repl + text[m.end():]
         return text
+
+    @staticmethod
+    def _echo_paste_body(body: str) -> str:
+        """Render a pasted body for the scrollback echo: capped to head+tail with a
+        ``… +N lines …`` marker when large, and dimmed **per line** (so a torn
+        write can't strand the gray SGR across the block)."""
+        lines = body.split("\n")
+        head, tail = _ECHO_PASTE_HEAD_LINES, _ECHO_PASTE_TAIL_LINES
+        if len(lines) > head + tail + 1:
+            hidden = len(lines) - head - tail
+            shown = lines[:head] + [f"… +{hidden} lines …"] + lines[-tail:]
+        else:
+            shown = lines
+        # Dim each line independently (reset at each newline) so an interleaved
+        # repaint can't leave color state bleeding into later scrollback.
+        return "\n".join(f"\033[90m{ln}\033[0m" for ln in shown)
+
+    @staticmethod
+    def _print_echo_block(text: str) -> None:
+        """Print a (possibly multi-line) scrollback echo safely under the pinned
+        UI. ``patch_stdout(raw=True)`` leaves the tty in raw mode (ONLCR off), so a
+        bare ``\\n`` line-feeds without a carriage return — a multi-line block then
+        staircases and desyncs the pinned renderer's row/column model. Emit CRLF
+        line endings and a single trailing newline so each line starts at column 0
+        and the block scrolls cleanly as one unit."""
+        sys.stdout.write(text.replace("\n", "\r\n") + "\n")
+        sys.stdout.flush()
 
     def _on_accept(self, buff: Buffer) -> bool:
         """Enqueue the submitted line (on the event-loop thread).
@@ -685,19 +719,18 @@ class PinnedPromptReader:
             self._busy = True
             self._cancelled = False
             self._ctrl_c_while_busy = False
-            # The live queue kept the COLLAPSED line (compact `[Pasted text …]`);
-            # expand it now so BOTH the scrollback echo and the model get the full
-            # pasted text — the placeholder was only the composing-time view. The
-            # echo dims the pasted body (gray) to mark it as pasted; the model
-            # gets the plain text.
+            # The live queue kept the COLLAPSED line (compact `[Pasted text …]`).
+            # The MODEL gets the FULL expanded paste (echo=False); the SCROLLBACK
+            # echo gets a capped, gray, head+tail rendering (echo=True) so a huge
+            # paste can't flood scrollback or overrun the pinned-app repaint.
             dispatched = self._expand_pastes(line)
-            echoed = self._expand_pastes(line, dim=True)
+            echoed = self._expand_pastes(line, echo=True)
             # Echo NOW (at dispatch, not submit) so a queued line's `>` prints
             # directly above its own answer. An empty line is a delivery-only
             # turn (a background sub-agent finished) — show a marker, not a bare `>`.
             if line.strip():
                 await run_in_terminal(
-                    lambda t=echoed: print(f"\033[36m>\033[0m {t}")
+                    lambda t=echoed: self._print_echo_block(f"\033[36m>\033[0m {t}")
                 )
             else:
                 await run_in_terminal(
