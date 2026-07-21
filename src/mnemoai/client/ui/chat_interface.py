@@ -737,18 +737,32 @@ class ChatInterface:
         try:
             response = self.client.query(query)
 
+            # Post-answer learning side effects are BEST-EFFORT: the user already
+            # has their answer, so a failure here (e.g. a moved/locked ChromaDB —
+            # SQLite code 1032 "readonly database moved", a backup/sync racing the
+            # store dir) must be logged quietly, NOT surfaced as a turn error.
+            # Each is guarded independently so one failing doesn't skip the others.
             if self.client.episodic_memory and use_immediate_storage:
-                self.__store_current_episode_immediately(query, response)
+                try:
+                    self.__store_current_episode_immediately(query, response)
+                except Exception as e:
+                    logger.warning(f"Episodic storage failed (non-fatal): {e}")
 
             if self.client.reflector:
-                self.client.reflect_and_learn(query)
+                try:
+                    self.client.reflect_and_learn(query)
+                except Exception as e:
+                    logger.warning(f"Reflection failed (non-fatal): {e}")
 
             # Auto-distill durable facts into MEMORY.md (opt-in; runs in the
             # background so it never blocks the turn). getattr-guarded so a
             # minimal/stub client without the method still works.
             extract = getattr(self.client, "auto_extract_memory", None)
             if callable(extract):
-                extract(query, response)
+                try:
+                    extract(query, response)
+                except Exception as e:
+                    logger.warning(f"Memory auto-extraction failed (non-fatal): {e}")
 
             if response == "Operation was cancelled.":
                 # Resolve the transient "(cancelling…)" line to a final state.

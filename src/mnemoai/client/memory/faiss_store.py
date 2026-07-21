@@ -95,12 +95,35 @@ class FAISSEpisodicStore:
         self.metadata.append(metadata)
         self._rebuild_bm25()
 
-        # Persist
-        faiss.write_index(self.index, self.index_path)
-        with open(self.metadata_path, "w") as f:
-            json.dump(self.metadata, f, indent=2)
-
+        self._persist()
         logger.debug(f"Stored episode in FAISS: {episode_id}")
+
+    def _persist(self) -> None:
+        """Write the index + metadata to disk, self-healing a moved/deleted dir.
+
+        FAISS keeps the index in memory (no open DB handle like ChromaDB), so the
+        equivalent failure is the persist DIR being moved/removed under us (a
+        backup/sync/restore, or the app-home relocating) — ``write_index`` /
+        ``open`` then raises. We recreate the dir and retry ONCE so a transient
+        move self-heals instead of crashing; the in-memory index is intact, so a
+        retry fully recovers. The caller (chat_interface) also treats any residual
+        failure as non-fatal, so a turn's answer is never lost to this."""
+
+        def _write() -> None:
+            faiss.write_index(self.index, self.index_path)
+            with open(self.metadata_path, "w") as f:
+                json.dump(self.metadata, f, indent=2)
+
+        try:
+            _write()
+        except (OSError, RuntimeError) as e:
+            # faiss.write_index wraps a file-open failure in RuntimeError, not
+            # OSError, so catch both.
+            logger.warning(
+                f"FAISS persist failed ({e}); recreating dir and retrying once"
+            )
+            os.makedirs(self.persist_path, exist_ok=True)
+            _write()  # retry; if it still fails the caller handles it non-fatally
 
     def search(self, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
         """Search for similar episodes using hybrid search (semantic + BM25).
@@ -212,11 +235,7 @@ class FAISSEpisodicStore:
             self.metadata = new_metadata
             self._rebuild_bm25()
 
-            # Persist
-            faiss.write_index(self.index, self.index_path)
-            with open(self.metadata_path, "w") as f:
-                json.dump(self.metadata, f, indent=2)
-
+            self._persist()
             logger.info(
                 f"Cleaned up episodic memory: {old_count} → {len(self.metadata)} episodes"
             )

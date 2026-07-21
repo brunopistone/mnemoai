@@ -97,3 +97,27 @@ def test_normal_query_does_not_print_stopped(ci, capsys):
     ci.client.query_return = "here is your answer"
     ci._dispatch("a question")
     assert "Stopped" not in capsys.readouterr().out
+
+
+class _BoomEpisodic:
+    """Episodic memory whose storage always fails (e.g. ChromaDB code 1032)."""
+
+    def store_episode(self, *a, **k):
+        raise RuntimeError(
+            "Query error: Database error: (code: 1032) attempt to write a "
+            "readonly database"
+        )
+
+
+def test_episodic_storage_failure_does_not_crash_turn(ci, capsys):
+    # The answer already succeeded; a best-effort episodic-store failure must be
+    # swallowed (logged), NOT surfaced as a turn "Error:" line.
+    ci.client.episodic_memory = _BoomEpisodic()
+    ci.client.query_return = "here is your answer"
+    # __store_current_episode_immediately checks tools/length + success markers;
+    # simplest is to make the store itself raise, which it does above. Route
+    # through the real immediate-storage branch:
+    ci._dispatch("please do the thing")
+    out = capsys.readouterr().out
+    assert "Error:" not in out          # the turn did NOT error out
+    assert "readonly database" not in out

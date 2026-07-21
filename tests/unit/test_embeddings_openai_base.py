@@ -357,3 +357,94 @@ class TestTokenCapAndOverflow:
         assert c._max_input_tokens < start    # limit was lowered by the shrink
         assert out.shape == (1, 3)            # then deterministic fallback
         assert out.shape == (1, 3)       # fell back once
+
+
+class TestBedrockEmbedSchemaDispatch:
+    """Bedrock embedding models use different request/response schemas by family.
+    Sending the Titan schema to a Cohere model is what produced a
+    ValidationException ("Malformed request"). The controller must dispatch by
+    model id: Cohere → batched {"texts", input_type, embedding_types} with the
+    response nested under embeddings.float; Titan → per-text {"inputText"} →
+    {"embedding"}."""
+
+    def _patch_bedrock(self, monkeypatch, capture):
+        import json
+
+        class _Body:
+            def __init__(self, payload):
+                self._b = json.dumps(payload).encode()
+
+            def read(self):
+                return self._b
+
+        class _Client:
+            def invoke_model(self, modelId, body):
+                req = json.loads(body)
+                capture.setdefault("requests", []).append(req)
+                capture.setdefault("model_ids", []).append(modelId)
+                if "cohere" in modelId:
+                    n = len(req["texts"])
+                    return {"body": _Body({"embeddings": {"float": [[0.1, 0.2]] * n}})}
+                if "nova" in modelId and "multimodal-embed" in modelId:
+                    # Per-text; response nests the vector in a typed dict.
+                    return {"body": _Body(
+                        {"embeddings": [{"embeddingType": "TEXT",
+                                         "embedding": [0.5, 0.6, 0.7]}]}
+                    )}
+                # Titan: one text per call
+                return {"body": _Body({"embedding": [0.3, 0.4]})}
+
+        monkeypatch.setattr(ec.boto3, "client", lambda *a, **k: _Client())
+
+    def test_cohere_uses_batched_texts_schema(self, monkeypatch):
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController({"NAME": "us.cohere.embed-v4:0", "TYPE": "bedrock"})
+        c.cache_enabled = False
+        out = c.embed(["a", "b", "c"])
+        assert out.shape == (3, 2)                       # real vectors, not fallback
+        req = cap["requests"][0]
+        assert req["texts"] == ["a", "b", "c"]           # batched, not per-text
+        assert req["input_type"] == "search_document"
+        assert req["embedding_types"] == ["float"]
+        assert "inputText" not in req                    # NOT the Titan schema
+        assert len(cap["requests"]) == 1                 # one batched call
+
+    def test_titan_uses_input_text_schema(self, monkeypatch):
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController(
+            {"NAME": "amazon.titan-embed-text-v2:0", "TYPE": "bedrock"}
+        )
+        c.cache_enabled = False
+        out = c.embed(["a", "b"])
+        assert out.shape == (2, 2)
+        assert cap["requests"][0] == {"inputText": "a"}  # per-text Titan schema
+        assert len(cap["requests"]) == 2                 # one call per text
+
+    def test_cohere_v3_english_also_uses_cohere_schema(self, monkeypatch):
+        # The dispatch keys on "cohere.embed" — v3 english/multilingual too, not
+        # just v4 — so they don't fall through to the wrong Titan schema.
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController({"NAME": "cohere.embed-english-v3", "TYPE": "bedrock"})
+        c.cache_enabled = False
+        c.embed(["a", "b"])
+        assert cap["requests"][0]["texts"] == ["a", "b"]  # cohere batched schema
+
+    def test_nova_multimodal_uses_task_schema(self, monkeypatch):
+        # Nova needs the taskType/singleEmbeddingParams shape and the vector is
+        # nested under embeddings[0].embedding.
+        cap = {}
+        self._patch_bedrock(monkeypatch, cap)
+        c = EmbeddingsController(
+            {"NAME": "amazon.nova-2-multimodal-embeddings-v1:0", "TYPE": "bedrock"}
+        )
+        c.cache_enabled = False
+        out = c.embed(["a", "b"])
+        assert out.shape == (2, 3)                        # 3-dim fake vectors
+        req = cap["requests"][0]
+        assert req["taskType"] == "SINGLE_EMBEDDING"
+        assert req["singleEmbeddingParams"]["text"]["value"] == "a"
+        assert "inputText" not in req and "texts" not in req  # neither other schema
+        assert len(cap["requests"]) == 2                  # per-text

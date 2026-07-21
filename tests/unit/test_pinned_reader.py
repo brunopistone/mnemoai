@@ -203,6 +203,32 @@ def test_accept_handler_ignores_blank_lines():
     asyncio.run(main())
 
 
+def test_mid_turn_message_is_queued_not_steered():
+    # A message submitted WHILE a turn runs must be QUEUED to run as its own turn
+    # after, NOT folded into the running turn via the steer hook — even when a steer 
+    # hook is present. This prevents the stranding bug where a message steered during 
+    # the final tool-call-free model call was never drained and leaked into the next turn.
+    steer_calls = []
+
+    reader = _reader(lambda line: None)
+    reader._steer = lambda text: steer_calls.append(text) or True  # would-be steer
+
+    async def main():
+        reader._queue = asyncio.Queue()
+        reader._busy = True  # a turn is running
+
+        class _Buff:
+            text = "look at file X too"
+
+        assert reader._on_accept(_Buff()) is False
+        # Steer hook must NOT have been called; the message went to the queue.
+        assert steer_calls == []
+        assert reader._queued_lines == ["look at file X too"]
+        assert reader._queue.get_nowait() == "look at file X too"
+
+    asyncio.run(main())
+
+
 def test_request_cancel_interrupts_blocking_dispatch(monkeypatch):
     # Esc must interrupt a dispatch that's blocked (e.g. waiting on the model).
     # _request_cancel injects KeyboardInterrupt into the worker's thread;
