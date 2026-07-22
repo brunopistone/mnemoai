@@ -9,6 +9,17 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.6.1] — 2026-07-22
+
+### Fixed
+
+- **`grep_search` result order was nondeterministic**, so the new `offset`
+  pagination could return a different page on repeated runs (ripgrep searches
+  files in parallel and doesn't order them). It now runs with `--sort path` for a
+  stable cross-file order — a prerequisite for meaningful paging. (CI: the Tests
+  workflow now installs ripgrep so the `grep_search` tests run there; they skip
+  gracefully where `rg` is absent.)
+
 ## [1.6.0] — 2026-07-22
 
 Tool-quality pass: sharpen the built-in MCP tools where they lagged,
