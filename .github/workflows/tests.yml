@@ -21,6 +21,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Install ripgrep
+        # grep_search shells out to ripgrep; install it so its unit tests
+        # actually run (they skip gracefully where rg is absent).
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

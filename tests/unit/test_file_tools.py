@@ -7,6 +7,7 @@ Exercise the real filesystem logic via temp files/dirs — no LLM involved.
 import asyncio
 import json
 import os
+import shutil
 
 import pytest
 
@@ -14,6 +15,13 @@ from mnemoai.server.tools import read_state
 from mnemoai.server.tools.file_edit import register_edit_tools
 from mnemoai.server.tools.file_search import register_search_tools
 from mnemoai.server.tools.fs_write import _resolve_path
+
+# grep_search shells out to ripgrep; skip its tests where rg isn't installed so
+# the unit tier stays environment-robust. CI installs rg (see tests.yml) so the
+# behavior is still genuinely covered there, not silently skipped.
+_needs_rg = pytest.mark.skipif(
+    shutil.which("rg") is None, reason="ripgrep (rg) not installed"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -281,6 +289,7 @@ class TestLineNumberGutters:
         assert "42\tCHANGED" in f.read_text()  # digit+TAB new content preserved
 
 
+@_needs_rg
 class TestGrepModes:
     """grep_search: true TOTAL result cap across all modes, and that
     files_with_matches / count return results at all (they used to be silently
@@ -402,6 +411,7 @@ class TestGrepModes:
             os.chmod(str(noperm), 0o644)
 
 
+@_needs_rg
 class TestGrepContextAndPaging:
     """grep_search: asymmetric -A/-B/-C context (actually returned), offset
     paging (counts matches only), and the long-line width cap."""
