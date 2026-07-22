@@ -9,6 +9,38 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.6.2] — 2026-07-22
+
+Compaction was firing far too early and taking minutes on a large-window,
+reasoning-heavy model. Four fixes, all provider-agnostic:
+
+### Fixed
+
+- **Compaction triggered ~2× too early.** The high-water check compared against
+  an _estimate_ (tiktoken over the serialized message JSON × a per-provider
+  safety multiplier, e.g. 1.5× for Anthropic/Mantle) that inflates the real
+  prompt ~2×, so it fired while the true context was well under the window. It
+  now triggers on the provider's **exact `input_tokens`** (the same figure shown
+  as `[Context: N]`) when a turn has run, using the estimate only as a fallback
+  before any turn — so the trigger and the displayed count agree.
+- **Compaction ran the summary on the main reasoning model with extended
+  thinking ON** (the dominant cost — minutes per call on a max-reasoning model).
+  Summaries now use a **reasoning-disabled variant of the same model**, built via
+  the controller by clearing `REASONING`/`REASONING_EFFORT` (and, for Ollama,
+  `verbose`), so it works for every provider and no-ops where thinking doesn't
+  exist. Set `LLM.SUMMARIZATION_THINK: true` to keep thinking on.
+- **The map-reduce summary was sequential.** It folded each batch into a rolling
+  summary one call at a time, so wall-clock was the SUM of all batch calls. It's
+  now a **parallel map + single reduce**: batches are summarized concurrently
+  (bounded by `LLM.SUBAGENT_MAX_CONCURRENCY`), then one reduce call folds the
+  ordered partials (and any prior summary) into a coherent whole. A single batch
+  skips the reduce. Wall-clock drops to ~one batch + one reduce.
+- **The cheap tool-result eviction ran only on the proactive path.** It now runs
+  first on **every** compaction path (manual `/compact`, post-turn auto, and the
+  overflow backstop) — in tool-heavy sessions this shrinks old grep/read/web
+  dumps (no LLM call) so the summary that follows has far less to read, and often
+  avoids the LLM summary entirely.
+
 ## [1.6.1] — 2026-07-22
 
 ### Fixed

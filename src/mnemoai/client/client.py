@@ -435,7 +435,7 @@ class LangGraphClient:
 
                 asyncio.run(
                     self.conversation_manager.manage_messages(
-                        self, self.model, self.agent
+                        self, self._summary_model(), self.agent
                     )
                 )
 
@@ -490,9 +490,31 @@ class LangGraphClient:
             return False
         return asyncio.run(
             self.conversation_manager.compact(
-                self, self.model, self.agent, focus_instructions
+                self, self._summary_model(), self.agent, focus_instructions
             )
         )
+
+    def _summary_model(self):
+        """The model used for compaction summaries.
+
+        Defaults to a reasoning-DISABLED variant of the main model (built once,
+        lazily): a summary doesn't benefit from a slow extended-thinking pass, and
+        on a max-reasoning model that pass is the dominant cost of compaction.
+        Provider-agnostic (the controller clears REASONING/REASONING_EFFORT, a
+        no-op for providers without thinking). Set ``LLM.SUMMARIZATION_THINK: true``
+        to keep thinking on (then the main model is reused). Falls back to the main
+        model if building the variant fails."""
+        if config.get("LLM", {}).get("SUMMARIZATION_THINK", False):
+            return self.model
+        cached = getattr(self, "_summary_model_cached", "unset")
+        if cached == "unset":
+            try:
+                cached = self.llm_controller.build_non_reasoning_model()
+            except Exception as e:
+                logger.warning(f"Non-reasoning summary model unavailable, using main model: {e}")
+                cached = self.model
+            self._summary_model_cached = cached
+        return cached
 
     def _compact_now(self, force: bool = False) -> bool:
         """Mid-loop compaction hook the agent calls before each model call.
@@ -513,29 +535,30 @@ class LangGraphClient:
             )
             if high_water <= 0:
                 return False
-            # Use the LARGER of our estimate and the provider's exact input_tokens
-            # from the last turn (ground truth). The estimate alone undercounts
-            # non-OpenAI models, so trusting only it lets the prompt overflow.
-            msgs = messages_to_dict_list(self.agent.messages)
-            estimated = mgr.count_tokens(msgs)
+            # Prefer the provider's EXACT input_tokens from the last turn (ground
+            # truth — the same number shown as [Context: N]). Our own estimate
+            # tiktoken-counts the serialized message JSON and applies a per-provider
+            # safety multiplier (e.g. 1.5x for mantle/anthropic), so it over-counts
+            # the real prompt ~2x and would fire compaction far too early. Use the
+            # estimate ONLY as a fallback before any turn has run (no actual yet).
             actual = getattr(self.agent, "_last_input_tokens", None) or 0
-            current = max(estimated, actual)
+            if actual:
+                current = actual
+            else:
+                current = mgr.count_tokens(messages_to_dict_list(self.agent.messages))
             if current <= high_water:
                 return False
-            # Cheapest layer first: evict OLD tool-result bodies (no LLM call). If
-            # that alone brings the estimate back under the high-water mark, skip
-            # the expensive full summary entirely.
+            # Cheapest layer first: evict OLD tool-result bodies (no LLM call).
+            # Eviction shrinks history and nulls the provider's exact count, so
+            # re-measure with the (conservative) estimate; if that alone brings us
+            # back under the high-water mark, skip the expensive full summary.
             if mgr.evict_old_tool_results(self.agent):
-                estimated = mgr.count_tokens(
-                    messages_to_dict_list(self.agent.messages)
-                )
-                if estimated <= high_water:
+                if mgr.count_tokens(messages_to_dict_list(self.agent.messages)) <= high_water:
                     return True
-                current = estimated
         keep = 2 if force else config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)
         try:
             return asyncio.run(
-                mgr._compact(self, self.model, self.agent, keep_recent=keep)
+                mgr._compact(self, self._summary_model(), self.agent, keep_recent=keep)
             )
         except Exception as e:
             logger.error(f"Mid-loop compaction failed: {e}")

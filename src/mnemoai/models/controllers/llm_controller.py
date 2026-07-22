@@ -317,6 +317,26 @@ class LangChainLLMController(BaseModelController):
             self.initialize_model()
         return self.model
 
+    def build_non_reasoning_model(
+        self, callbacks: list[BaseCallbackHandler] = None
+    ) -> BaseChatModel:
+        """Build a fresh model instance with extended thinking/reasoning DISABLED.
+
+        Provider-agnostic: most ``_initialize_*`` paths gate thinking on
+        ``REASONING`` / ``REASONING_EFFORT`` (self.reasoning_model /
+        self.reasoning_effort), so a peer controller with both cleared yields the
+        SAME model with reasoning off — no crash for providers that never had it.
+        The Ollama path instead surfaces reasoning via ``verbose_mode`` (sets
+        ``reasoning=True``), so the peer is also built non-verbose to suppress it
+        there. Used for compaction summaries, which don't benefit from a slow
+        reasoning pass. Returns an independent instance; never mutates this one.
+        """
+        peer = LangChainLLMController(verbose=False)
+        peer.reasoning_effort = None
+        peer.reasoning_model = False
+        peer.initialize_model(callbacks=callbacks)
+        return peer.get_model()
+
     def get_model_type(self) -> str:
         """The model type string (bedrock, ollama, openai, …)."""
         return self.model_type

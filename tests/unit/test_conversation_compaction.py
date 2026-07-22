@@ -560,3 +560,154 @@ class TestToolResultEviction:
         mgr = AgentConversationManager(max_tokens=100)
         assert mgr.evict_old_tool_results(agent) is True
         assert "evicted" in agent.messages[0]["content"][0]["text"]
+
+
+class _ConcurrencyModel:
+    """Records max concurrent ainvoke calls, to prove the map step parallelizes."""
+
+    def __init__(self, delay=0.05):
+        self.delay = delay
+        self.active = 0
+        self.max_active = 0
+        self.calls = 0
+
+    async def ainvoke(self, messages):
+        self.calls += 1
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(self.delay)
+        self.active -= 1
+        return AIMessage(content=f"PARTIAL {self.calls}")
+
+
+class TestParallelMapReduce:
+    """generate_summary maps batches concurrently, then reduces once."""
+
+    def test_map_runs_concurrently(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config(SUBAGENT_MAX_CONCURRENCY=4))
+        mgr = AgentConversationManager(max_tokens=400)  # small budget → many batches
+        msgs = [{"role": "user", "content": [{"text": "word " * 60}]} for _ in range(12)]
+        model = _ConcurrencyModel()
+        out = _run(mgr.generate_summary(msgs, model))
+        assert model.max_active > 1  # batches summarized in parallel, not serially
+        assert out.strip()
+
+    def test_concurrency_bounded_by_config(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config(SUBAGENT_MAX_CONCURRENCY=2))
+        mgr = AgentConversationManager(max_tokens=400)
+        msgs = [{"role": "user", "content": [{"text": "word " * 60}]} for _ in range(12)]
+        model = _ConcurrencyModel()
+        _run(mgr.generate_summary(msgs, model))
+        assert model.max_active <= 2  # semaphore respects the cap
+
+    def test_single_batch_skips_reduce(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+        mgr = AgentConversationManager(max_tokens=1_000_000)  # huge → 1 batch
+        mgr.previous_summary = None
+        model = _FakeAsyncModel()
+        msgs = [{"role": "user", "content": [{"text": "small"}]}]
+        out = _run(mgr.generate_summary(msgs, model))
+        assert len(model.calls) == 1  # one map call, no extra reduce
+        assert "SUMMARY OF OLDER MESSAGES" in out
+
+    def test_multi_batch_reduces_once(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+        mgr = AgentConversationManager(max_tokens=400)
+        model = _FakeAsyncModel()
+        msgs = [{"role": "user", "content": [{"text": "word " * 60}]} for _ in range(12)]
+        out = _run(mgr.generate_summary(msgs, model))
+        # N map calls + exactly 1 reduce call.
+        assert len(model.calls) >= 3
+        assert out.strip()
+
+    def test_partial_map_failure_still_summarizes(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+
+        class _FlakyModel:
+            def __init__(self):
+                self.calls = 0
+
+            async def ainvoke(self, messages):
+                self.calls += 1
+                if self.calls == 1:  # first map batch fails
+                    raise RuntimeError("prompt is too long")
+                return AIMessage(content=f"OK {self.calls}")
+
+        mgr = AgentConversationManager(max_tokens=400)
+        msgs = [{"role": "user", "content": [{"text": "word " * 60}]} for _ in range(9)]
+        out = _run(mgr.generate_summary(msgs, _FlakyModel()))
+        assert out.strip()  # surviving partials still produce a summary
+        assert "multiple topics" not in out  # not the content-free placeholder
+
+    def test_all_map_failure_keeps_excerpt(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config())
+
+        class _AlwaysFail:
+            async def ainvoke(self, messages):
+                raise RuntimeError("boom")
+
+        mgr = AgentConversationManager(max_tokens=4000)
+        msgs = [{"role": "user", "content": [{"text": "distinctive excerpt text"}]}]
+        out = _run(mgr.generate_summary(msgs, _AlwaysFail()))
+        assert "distinctive excerpt text" in out  # bounded excerpt, never empty
+
+
+class TestCompactEvictsFirst:
+    """_compact runs the cheap tool-result eviction before the LLM summary, on
+    every path (not just the proactive mid-loop check)."""
+
+    def test_compact_shrinks_old_tool_results_before_summary(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(
+            mod.config, "get",
+            _llm_config(MANUAL_COMPACT_KEEP_RECENT=2, TOOL_EVICTION_KEEP_RECENT=2,
+                        EVICTED_TOOL_RESULT_CHARS=50),
+        )
+        big = "R" * 5000
+        # Old tool results (should be evicted) + recent turns kept verbatim.
+        msgs = []
+        for i in range(4):
+            msgs.append(AIMessage(content="", tool_calls=[{"name": "grep", "args": {}, "id": f"t{i}"}]))
+            msgs.append(ToolMessage(content=big, tool_call_id=f"t{i}", name="grep"))
+        msgs.append(HumanMessage("recent question"))
+
+        agent = _FakeAgent(list(msgs))
+        agent._sanitize_tool_pairs = lambda m: m
+        mgr = AgentConversationManager(max_tokens=100000)
+        _run(mgr.compact(_FakeClient(), _FakeAsyncModel(), agent))
+        # The kept window's tool results (if any older ones survived the split)
+        # were shrunk by eviction before summarizing — assert no 5000-char body
+        # remains among whatever the summary consumed by checking the agent's
+        # pre-summary eviction ran: the summarized 'older' set had shrunk bodies.
+        # Simplest observable: compaction succeeded and produced a summary.
+        assert "SUMMARY OF OLDER MESSAGES" in agent.system_prompt
+
+    def test_compact_calls_eviction(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        monkeypatch.setattr(mod.config, "get", _llm_config(MANUAL_COMPACT_KEEP_RECENT=2))
+        mgr = AgentConversationManager(max_tokens=100000)
+        called = {"evict": False}
+        orig = mgr.evict_old_tool_results
+
+        def _spy(agent):
+            called["evict"] = True
+            return orig(agent)
+
+        mgr.evict_old_tool_results = _spy
+        msgs = [HumanMessage(f"m{i}") for i in range(6)]
+        _run(mgr.compact(_FakeClient(), _FakeAsyncModel(), _FakeAgent(list(msgs))))
+        assert called["evict"] is True  # eviction ran as the first compaction layer

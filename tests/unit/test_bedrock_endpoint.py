@@ -160,6 +160,51 @@ class TestStandardBedrockEndpoint:
             not in patch_bedrock["ChatBedrockConverse"]
         )
 
+    def test_build_non_reasoning_model_disables_thinking(self, patch_bedrock, monkeypatch):
+        # Config has reasoning ON, but build_non_reasoning_model() (used for
+        # compaction summaries) must produce a model with thinking OFF —
+        # provider-agnostic, via clearing REASONING/REASONING_EFFORT.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "global.anthropic.claude-sonnet-5",
+                "TYPE": "bedrock",
+                "REASONING_EFFORT": "max",
+            },
+        )
+        ctrl.build_non_reasoning_model()
+        assert (
+            "additional_model_request_fields"
+            not in patch_bedrock["ChatBedrockConverse"]
+        )
+
+    def test_build_non_reasoning_model_suppresses_ollama_reasoning(self, monkeypatch):
+        # Ollama surfaces reasoning via verbose_mode (sets reasoning=True), NOT
+        # via REASONING_EFFORT — so build_non_reasoning_model must also drop
+        # verbose on the peer so the summary model has no reasoning flag, even
+        # when the MAIN controller is verbose.
+        import mnemoai.models.controllers.llm_controller as mod
+
+        captured = {}
+
+        class _FakeOllama:
+            def __init__(self, **kw):
+                captured.update(kw)
+
+        monkeypatch.setattr(mod, "ChatOllamaWrapper", _FakeOllama)
+
+        def fake_get(key, default=None):
+            if key == "MODEL_ID":
+                return {"NAME": "qwen3:8b", "TYPE": "ollama", "REASONING_EFFORT": "high"}
+            if key == "MAX_CONVERSATION_TOKENS":
+                return 8192
+            return default
+
+        monkeypatch.setattr(mod.config, "get", fake_get)
+        ctrl = mod.LangChainLLMController(verbose=True)  # main is verbose
+        ctrl.build_non_reasoning_model()
+        assert captured.get("reasoning") is not True  # no reasoning on the summary model
+
 
 class TestMantleModelType:
     def test_builds_chatopenai_with_token_and_default_endpoint(
