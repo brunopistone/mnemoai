@@ -1,5 +1,6 @@
 """Conversation manager that uses simple text-based summaries."""
 
+import asyncio
 import json
 import re
 import textwrap
@@ -214,9 +215,13 @@ class AgentConversationManager:
 
         A single-shot summary of very long history 400s ("prompt is too long"),
         which used to silently degrade to a content-free placeholder — losing all
-        that history. Instead we split the messages into batches that each fit a
-        safe fraction of the window and fold them into a rolling summary
-        (map-reduce): batch 1 → summary; (summary + batch 2) → summary; …
+        that history. So we split the messages into batches that each fit a safe
+        fraction of the window. **Parallel map + single reduce:** each batch is
+        summarized INDEPENDENTLY and CONCURRENTLY (map), then — only if there was
+        more than one batch — a single call folds the partial summaries (plus any
+        previous compaction's summary) into one coherent whole (reduce). This is
+        far faster than the old sequential rolling fold, whose wall-clock was the
+        SUM of all batch calls; here it is ~max(one batch) + one reduce.
 
         Args:
             messages: List of conversation messages
@@ -227,41 +232,90 @@ class AgentConversationManager:
             Summary text (never empty; falls back to a bounded excerpt on error).
         """
         # Budget per summary call: a small fraction of the window so the CALL
-        # (batch + rolling summary + prompt + reasoning output) fits with wide
-        # margin. Relative to max_tokens (never an absolute floor that could
-        # itself exceed a small window).
+        # (batch + prompt + reasoning output) fits with wide margin. Relative to
+        # max_tokens (never an absolute floor that could exceed a small window).
         budget = max(256, int(self.max_tokens * _SUMMARY_CALL_FRACTION))
         batches = self._batch_messages(messages, budget)
 
-        # Cap the rolling summary carried between batches so a late call (prior
-        # summary + next batch) can't overflow. ~4 chars/token.
-        rolling_cap = max(1000, int(self.max_tokens * _ROLLING_SUMMARY_MAX_CHARS_FRACTION * 4))
+        # MAP: summarize every batch independently and concurrently, bounded by a
+        # semaphore (reuse the sub-agent concurrency cap) so we don't hammer the
+        # provider. Each batch stands alone (no prior_summary), so order doesn't
+        # matter and the calls parallelize.
+        max_concurrency = max(
+            1, int(config.get("LLM", {}).get("SUBAGENT_MAX_CONCURRENCY", 4))
+        )
+        sem = asyncio.Semaphore(max_concurrency)
 
-        rolling = self.previous_summary
-        last_error = None
-        for i, batch in enumerate(batches):
-            try:
-                capped_prior = (
-                    rolling[:rolling_cap] if rolling and len(rolling) > rolling_cap
-                    else rolling
-                )
-                rolling = await self._summarize_batch(
-                    batch, model, focus_instructions, prior_summary=capped_prior
-                )
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "Summary batch %d/%d failed (%s)", i + 1, len(batches), e
-                )
+        async def _map_one(idx: int, batch: List[Dict]):
+            async with sem:
+                try:
+                    return idx, await self._summarize_batch(
+                        batch, model, focus_instructions, prior_summary=None
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Summary batch %d/%d failed (%s)", idx + 1, len(batches), e
+                    )
+                    return idx, None
 
-        if rolling and rolling != self.previous_summary:
-            return self._strip_analysis(rolling).strip()
+        mapped = await asyncio.gather(
+            *(_map_one(i, b) for i, b in enumerate(batches))
+        )
+        # Keep partials in original batch order (chronological coherence).
+        partials = [s for _, s in sorted(mapped, key=lambda t: t[0]) if s]
 
-        # Every batch failed: keep a bounded excerpt of the raw history rather
-        # than a content-free placeholder, so nothing is silently lost.
-        if last_error:
-            log_green(f"Failed to generate model summary: {last_error}", "error")
-        return self._excerpt_fallback(messages, budget)
+        if not partials:
+            # Every batch failed: keep a bounded excerpt of the raw history rather
+            # than a content-free placeholder, so nothing is silently lost.
+            log_green("Failed to generate model summary for every batch", "error")
+            return self._excerpt_fallback(messages, budget)
+
+        # A single batch (the common case after tool-result eviction) needs no
+        # reduce — its map result IS the summary. Only fold when >1 partial, or
+        # when a previous compaction's summary must be carried forward.
+        if len(partials) == 1 and not self.previous_summary:
+            return self._strip_analysis(partials[0]).strip()
+
+        # REDUCE: one call merges the ordered partials (+ any prior summary) into
+        # a single coherent summary. If the reduce itself fails, fall back to the
+        # concatenated partials so no content is lost.
+        try:
+            reduced = await self._reduce_summaries(
+                partials, model, focus_instructions
+            )
+            if reduced:
+                return self._strip_analysis(reduced).strip()
+        except Exception as e:
+            logger.warning("Summary reduce step failed (%s); using joined partials", e)
+
+        joined = "\n\n".join(self._strip_analysis(p).strip() for p in partials)
+        return joined or self._excerpt_fallback(messages, budget)
+
+    async def _reduce_summaries(
+        self, partials: List[str], model: Any, focus_instructions: str
+    ) -> str:
+        """Fold ordered per-batch partial summaries (and any previous compaction
+        summary) into one coherent summary via a single model call.
+
+        The partials are fed as prior-summary context to one more summarization
+        pass, so the reduce reuses the same summary prompt/system framing as the
+        map — no second template to maintain.
+        """
+        # Cap each partial so the concatenated reduce input can't itself overflow.
+        cap = max(1000, int(self.max_tokens * _ROLLING_SUMMARY_MAX_CHARS_FRACTION * 4))
+        pieces = []
+        if self.previous_summary:
+            pieces.append(f"[Earlier session summary]\n{self.previous_summary[:cap]}")
+        for i, p in enumerate(partials, 1):
+            pieces.append(f"[Summary of conversation part {i}]\n{p[:cap]}")
+        merged_context = "\n\n".join(pieces)
+
+        # Present the partials as the "messages" to summarize; the summary prompt
+        # then produces one consolidated summary over them.
+        reduce_input = [{"role": "user", "content": [{"text": merged_context}]}]
+        return await self._summarize_batch(
+            reduce_input, model, focus_instructions, prior_summary=None
+        )
 
     def _batch_messages(self, messages: List[Dict], budget: int) -> List[List[Dict]]:
         """Split messages into ordered batches each under ``budget`` tokens.
@@ -661,6 +715,13 @@ class AgentConversationManager:
         Returns:
             True if there were older messages to summarize, else False.
         """
+        # Cheapest layer first, on EVERY compaction path (not just the proactive
+        # mid-loop check): shrink OLD tool-result bodies (no LLM call) so the
+        # summary that follows has far less bulk to read. In tool-heavy sessions
+        # most of the context is old grep/read/web dumps; evicting them first is
+        # near-free and cuts the summary's input dramatically.
+        self.evict_old_tool_results(agent)
+
         raw_messages = agent.messages.copy() if hasattr(agent, "messages") else []
         if not raw_messages:
             return False

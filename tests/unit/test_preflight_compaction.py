@@ -38,12 +38,15 @@ class _FakeManager:
 
 
 class _FakeAgent:
-    messages = [1, 2, 3]  # non-empty; content irrelevant (count is faked)
+    def __init__(self, last_input_tokens=None):
+        self.messages = [1, 2, 3]  # non-empty; content irrelevant (count is faked)
+        self._last_input_tokens = last_input_tokens
 
 
-def _client(token_count, high_water=None, evict_returns=False, token_after_evict=None):
+def _client(token_count, high_water=None, evict_returns=False, token_after_evict=None,
+            last_input_tokens=None):
     c = LangGraphClient.__new__(LangGraphClient)
-    c.agent = _FakeAgent()
+    c.agent = _FakeAgent(last_input_tokens=last_input_tokens)
     c.model = object()
     c.conversation_manager = _FakeManager(
         token_count, evict_returns=evict_returns, token_after_evict=token_after_evict
@@ -133,3 +136,69 @@ class TestToolEvictionShortCircuit:
         assert c._compact_now(force=True) is True
         assert c.conversation_manager.evict_calls == 0
         assert c.conversation_manager.compacted == [2]
+
+
+class TestTriggerPrefersGroundTruth:
+    """The trigger prefers the provider's exact input_tokens (_last_input_tokens,
+    ground truth) over the manager's estimate, which over-counts non-OpenAI
+    models ~2x and would fire compaction far too early."""
+
+    def test_uses_actual_not_inflated_estimate(self, monkeypatch):
+        _patch_config(monkeypatch)
+        # Estimate says 5000 (>800 high-water) but the provider's real count is
+        # 100 (<800). Must NOT compact — trust the ground truth.
+        c = _client(token_count=5000, last_input_tokens=100)
+        assert c._compact_now() is False
+        assert c.conversation_manager.compacted == []
+
+    def test_actual_over_high_water_compacts(self, monkeypatch):
+        _patch_config(monkeypatch)
+        # Real count 900 > 800 → compact, regardless of a low estimate.
+        c = _client(token_count=10, last_input_tokens=900)
+        assert c._compact_now() is True
+        assert c.conversation_manager.compacted == [6]
+
+    def test_estimate_fallback_when_no_actual(self, monkeypatch):
+        _patch_config(monkeypatch)
+        # No turn has run yet (actual is None) → fall back to the estimate.
+        c = _client(token_count=900, last_input_tokens=None)
+        assert c._compact_now() is True
+
+
+class TestSummaryModel:
+    """_summary_model returns a reasoning-disabled variant by default (built once,
+    provider-agnostic), reuses the main model when SUMMARIZATION_THINK is on, and
+    falls back to the main model if the variant can't be built."""
+
+    def _client_with_ctrl(self, monkeypatch, think, ctrl):
+        _patch_config(monkeypatch, SUMMARIZATION_THINK=think)
+        c = LangGraphClient.__new__(LangGraphClient)
+        c.model = "MAIN"
+        c.llm_controller = ctrl
+        return c
+
+    def test_default_builds_non_reasoning_variant(self, monkeypatch):
+        class _Ctrl:
+            def build_non_reasoning_model(self):
+                return "NO_THINK"
+
+        c = self._client_with_ctrl(monkeypatch, think=False, ctrl=_Ctrl())
+        assert c._summary_model() == "NO_THINK"
+        # Cached: a second call reuses it (no rebuild).
+        assert c._summary_model() == "NO_THINK"
+
+    def test_summarization_think_reuses_main_model(self, monkeypatch):
+        class _Ctrl:
+            def build_non_reasoning_model(self):
+                raise AssertionError("must not build when thinking is kept on")
+
+        c = self._client_with_ctrl(monkeypatch, think=True, ctrl=_Ctrl())
+        assert c._summary_model() == "MAIN"
+
+    def test_falls_back_to_main_on_build_failure(self, monkeypatch):
+        class _Ctrl:
+            def build_non_reasoning_model(self):
+                raise RuntimeError("provider error")
+
+        c = self._client_with_ctrl(monkeypatch, think=False, ctrl=_Ctrl())
+        assert c._summary_model() == "MAIN"
