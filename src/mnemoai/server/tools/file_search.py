@@ -238,9 +238,11 @@ def register_search_tools(mcp: FastMCP) -> None:
         # read — which silently returned empty results) nor --max-count (a
         # PER-FILE cap, not the total the caller expects). The limit is applied
         # in Python after parsing, so max_results caps the true number of results
-        # across all files in every mode. max_results <= 0 means unlimited
-        # (mirrors glob_search).
-        cmd = ["rg", "--json"]
+        # across all files in every mode. max_results <= 0 means unlimited.
+        # --sort path forces a deterministic cross-file order (rg is parallel and
+        # otherwise emits files in a nondeterministic order): the total cap and
+        # offset paging are only meaningful over a STABLE order.
+        cmd = ["rg", "--json", "--sort", "path"]
 
         if case_insensitive:
             cmd.append("-i")
