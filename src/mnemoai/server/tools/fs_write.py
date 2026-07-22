@@ -1,5 +1,6 @@
 """File system writing tool with intelligent path resolution."""
 
+import io
 import json
 import os
 
@@ -10,11 +11,20 @@ from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import clean_path_syntax
 
 from ..error_handler import tool_error_handler
+from .file_encoding import decode_to_lf, encode_from_lf
+from .read_state import check_write_allowed, record_read
 from .safety import classify_write_path
 
 
 def _resolve_path(path: str) -> str:
-    """Resolve local path.
+    """Resolve a user-supplied path to an absolute one.
+
+    A relative path resolves against the current working directory (like any
+    normal tool), NOT the home directory — the model asked to write "here".
+    Only an absolute path or an explicit ``~`` goes elsewhere. (An earlier
+    version silently relocated relative paths into ``~`` by file extension, so
+    ``fs_write("notes.txt", ...)`` clobbered ``~/notes.txt`` instead of writing
+    in the working dir — a surprise-overwrite footgun.)
 
     Args:
         path: Input path to resolve
@@ -27,54 +37,16 @@ def _resolve_path(path: str) -> str:
     # may not exist yet, so this is syntactic only (no filesystem probe).
     path = clean_path_syntax(path)
 
-    # Get paths from config
-    default_output = os.path.expanduser("~")
-
-    # Already absolute path
-    if path.startswith("/"):
+    # Already absolute.
+    if os.path.isabs(path):
         return path
 
-    # Home directory expansion
+    # Explicit home-directory expansion.
     if path.startswith("~"):
         return os.path.expanduser(path)
 
-    # Check if it's a project file (code, config, docs)
-    project_extensions = {
-        ".py",
-        ".yaml",
-        ".yml",
-        ".json",
-        ".md",
-        ".txt",
-        ".sh",
-        ".toml",
-    }
-    file_ext = os.path.splitext(path)[1].lower()
-
-    # If it's a project-related file, put it in project root or appropriate subdir
-    if file_ext in project_extensions:
-        if file_ext == ".py":
-            # Python files go in project root or appropriate subdirectory
-            return os.path.join(default_output, path)
-        elif file_ext in {".yaml", ".yml", ".json", ".toml"}:
-            # Config files go in project root
-            return os.path.join(default_output, path)
-        elif file_ext == ".md":
-            # Documentation goes in project root
-            return os.path.join(default_output, path)
-        elif file_ext == ".sh":
-            # Scripts go in project root
-            return os.path.join(default_output, path)
-
-    # For data files, reports, outputs -> use output directory
-    # Create output directory if it doesn't exist
-    os.makedirs(default_output, exist_ok=True)
-
-    # If path contains subdirectories, preserve them
-    if "/" in path:
-        return os.path.join(default_output, path)
-    else:
-        return os.path.join(default_output, path)
+    # Relative → resolve against the working directory.
+    return os.path.abspath(os.path.join(os.getcwd(), path))
 
 
 def register_fs_write_tools(mcp: FastMCP) -> None:
@@ -158,14 +130,21 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
                     }
                 )
 
+            # Read-before-write gate (server-side, never prompts): refuse to
+            # overwrite/modify an EXISTING file the model never read, or that
+            # changed on disk since the last read. A brand-new file is allowed.
+            read_verdict = check_write_allowed(resolved_path)
+            if read_verdict is not None:
+                return json.dumps(read_verdict)
+
             if command == "create":
-                return await _create_file(resolved_path, file_text, summary)
+                result = await _create_file(resolved_path, file_text, summary)
             elif command == "str_replace":
-                return await _str_replace(resolved_path, old_str, new_str, summary)
+                result = await _str_replace(resolved_path, old_str, new_str, summary)
             elif command == "insert":
-                return await _insert_line(resolved_path, insert_line, new_str, summary)
+                result = await _insert_line(resolved_path, insert_line, new_str, summary)
             elif command == "append":
-                return await _append_file(resolved_path, new_str, summary)
+                result = await _append_file(resolved_path, new_str, summary)
             else:
                 return json.dumps(
                     {
@@ -173,6 +152,15 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
                         "message": f"Invalid command '{command}'. Use: create, str_replace, insert, append",
                     }
                 )
+
+            # Our own successful write becomes the new read baseline so a
+            # follow-up edit in the same turn isn't falsely flagged stale.
+            try:
+                if not json.loads(result).get("error"):
+                    record_read(resolved_path)
+            except (ValueError, TypeError):
+                pass
+            return result
 
         except Exception as e:
             logger.error(f"Error in fs_write: {str(e)}", exc_info=True)
@@ -233,8 +221,10 @@ async def _str_replace(path: str, old_str: str, new_str: str, summary: str) -> s
         return json.dumps({"error": True, "message": f"File does not exist: {path}"})
 
     try:
-        with open(path, "r", encoding="utf-8") as file:
-            content = file.read()
+        # Decode to LF-normalized text, capturing the file's shape so the write
+        # below preserves its encoding/BOM/line-ending (in-place edit).
+        with open(path, "rb") as file:
+            content, shape = decode_to_lf(file.read())
 
         # Check if old_str exists
         if old_str not in content:
@@ -255,8 +245,8 @@ async def _str_replace(path: str, old_str: str, new_str: str, summary: str) -> s
         # Perform replacement
         new_content = content.replace(old_str, new_str)
 
-        with open(path, "w", encoding="utf-8") as file:
-            file.write(new_content)
+        with open(path, "wb") as file:
+            file.write(encode_from_lf(new_content, shape))
 
         return json.dumps(
             {
@@ -292,8 +282,13 @@ async def _insert_line(path: str, line_number: int, content: str, summary: str) 
         return json.dumps({"error": True, "message": f"File does not exist: {path}"})
 
     try:
-        with open(path, "r", encoding="utf-8") as file:
-            lines = file.readlines()
+        # Decode to LF text + capture shape; split via StringIO.readlines() so
+        # the line count/index matches the old readlines() EXACTLY (str.splitlines
+        # also breaks on \v, \f, \x1c-\x1e and Unicode separators — readlines
+        # does not, so a file containing those would get a wrong insert index).
+        with open(path, "rb") as file:
+            text, shape = decode_to_lf(file.read())
+        lines = io.StringIO(text).readlines()
 
         # Validate line number
         if line_number < 0 or line_number > len(lines):
@@ -310,8 +305,8 @@ async def _insert_line(path: str, line_number: int, content: str, summary: str) 
 
         lines.insert(line_number, content)
 
-        with open(path, "w", encoding="utf-8") as file:
-            file.writelines(lines)
+        with open(path, "wb") as file:
+            file.write(encode_from_lf("".join(lines), shape))
 
         return json.dumps(
             {
@@ -345,16 +340,18 @@ async def _append_file(path: str, content: str, summary: str) -> str:
         return json.dumps({"error": True, "message": f"File does not exist: {path}"})
 
     try:
-        # Check if file ends with newline
-        with open(path, "r", encoding="utf-8") as file:
-            existing_content = file.read()
+        # Decode to LF text + capture shape; rewrite the whole file (instead of
+        # mode "a") so the appended content re-emits the original BOM/encoding
+        # and line ending (mode "a" would append UTF-8 LF into a UTF-16/CRLF file).
+        with open(path, "rb") as file:
+            existing_content, shape = decode_to_lf(file.read())
 
         # Add newline if file doesn't end with one
         if existing_content and not existing_content.endswith("\n"):
             content = "\n" + content
 
-        with open(path, "a", encoding="utf-8") as file:
-            file.write(content)
+        with open(path, "wb") as file:
+            file.write(encode_from_lf(existing_content + content, shape))
 
         return json.dumps(
             {

@@ -24,6 +24,7 @@ The **directory name is the canonical skill id** used by ``use_skill(name)``; th
 frontmatter ``name`` is display only.
 """
 
+import re
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Tuple
 
@@ -36,18 +37,35 @@ from mnemoai.utils.logger import logger
 # description can't bloat the system prompt.
 _MAX_DESC_CHARS = 200
 
-# Aggregate cap on the whole <available_skills> listing (it is injected every
+# Aggregate caps on the whole <available_skills> listing (it is injected every
 # turn). With many skills installed, the per-description cap alone is unbounded —
 # N skills produce N lines — so we also bound the total: once the accumulated
-# lines exceed this many chars, the rest are summarized as a "+N more" line.
+# lines exceed the token budget (primary, since the prompt is billed in tokens)
+# OR the char cap (hard secondary bound), the rest are summarized as a "+N more"
+# line. The token budget uses the provider-aware counter when available.
+_MAX_LISTING_TOKENS = 1000
 _MAX_LISTING_CHARS = 4000
 
 # `name`/`description` are the only required frontmatter keys. Other keys —
 # are tolerated (so skills authored elsewhere parse cleanly) and not acted on.
-# We never reject a skill for extra keys; that would be more friction than help 
-# on a local tool. Sanity cap on description length, so a runaway description is 
+# We never reject a skill for extra keys; that would be more friction than help
+# on a local tool. Sanity cap on description length, so a runaway description is
 # reported rather than silently injected.
 _MAX_DESC_LEN = 1024
+
+# Process-global memoization of the (expensive) read+parse scan, keyed by root
+# path. Invalidated by a cheap directory fingerprint so on-disk edits still take
+# effect on the next turn. The client re-instantiates SkillStore each turn.
+_SCAN_CACHE: dict = {}
+
+# Placeholders substituted in a skill body on load. Matched in ONE pass (so a
+# substituted value is never re-scanned) and the unbraced forms use a trailing
+# word boundary — `$SKILL_DIR` must NOT match inside `$SKILL_DIRECTORY`.
+_SKILL_PLACEHOLDER_RE = re.compile(
+    r"\$ARGUMENTS\b"
+    r"|\$\{CLAUDE_SKILL_DIR\}|\$\{SKILL_DIR\}"
+    r"|\$CLAUDE_SKILL_DIR\b|\$SKILL_DIR\b"
+)
 
 
 class Skill(NamedTuple):
@@ -106,6 +124,25 @@ def _parse_frontmatter(text: str) -> Tuple[dict, str]:
     return data, body.lstrip("\n")
 
 
+def _dir_signature(root: Path) -> tuple:
+    """Cheap fingerprint of the skills root: (name, SKILL.md mtime) per subdir.
+
+    Changes on any skill add/remove OR edit (mtime bumps), so a memoized scan
+    invalidates exactly when the on-disk skills change — statting is far cheaper
+    than re-reading + YAML-parsing every SKILL.md each turn.
+    """
+    sig = []
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir():
+            continue
+        skill_md = entry / "SKILL.md"
+        try:
+            sig.append((entry.name, skill_md.stat().st_mtime_ns))
+        except OSError:
+            continue  # a dir without a readable SKILL.md isn't a skill attempt
+    return tuple(sig)
+
+
 class SkillStore:
     """Scan and read skills from a skills root directory."""
 
@@ -133,6 +170,18 @@ class SkillStore:
         """
         if not self.root.is_dir():
             return [], []
+        # Memoize the parse: re-scan only when the dir's fingerprint (per-skill
+        # SKILL.md mtimes + membership) changed, so an unchanged dir isn't
+        # re-read+parsed every turn (the client re-instantiates per turn).
+        key = str(self.root)
+        try:
+            sig = _dir_signature(self.root)
+        except OSError:
+            sig = None
+        if sig is not None:
+            cached = _SCAN_CACHE.get(key)
+            if cached is not None and cached[0] == sig:
+                return cached[1], cached[2]
         skills: List[Skill] = []
         issues: List[SkillIssue] = []
         for entry in sorted(self.root.iterdir()):
@@ -177,6 +226,8 @@ class SkillStore:
             logger.debug("Loaded %d skill(s): %s", len(skills), ", ".join(s.name for s in skills))
         for issue in issues:
             print_error(f"Skill '{issue.name}': {issue.reason}; skipping.")
+        if sig is not None:
+            _SCAN_CACHE[key] = (sig, skills, issues)
         return skills, issues
 
     def list_skills(self) -> List[Skill]:
@@ -223,13 +274,29 @@ def _skill_line(entry) -> str:
     return line
 
 
+def _estimate_tokens(text: str) -> int:
+    """Provider-aware token estimate for the injected listing.
+
+    Uses the shared ``count_tokens`` (tiktoken basis, provider multiplier) when
+    available; falls back to a chars/4 heuristic so this pure file-logic module
+    stays importable/unit-testable even without a tokenizer or config.
+    """
+    try:
+        from mnemoai.utils.tokenization import count_tokens
+
+        return count_tokens(text)
+    except Exception:
+        return max(1, len(text) // 4)
+
+
 def format_available_skills(meta) -> str:
     """Build the always-on ``<available_skills>`` system-prompt block.
 
     ``meta`` is a list of ``Skill`` objects or legacy ``(name, description)``
     tuples. Returns "" when there are no skills. Each description is truncated
-    and the whole listing is bounded by ``_MAX_LISTING_CHARS`` (it is injected on
-    every turn); skills beyond the budget are collapsed into a "+N more" line so
+    and the whole listing is bounded by a token budget (``_MAX_LISTING_TOKENS``,
+    with ``_MAX_LISTING_CHARS`` as a hard secondary cap) since it is injected on
+    every turn; skills beyond the budget are collapsed into a "+N more" line so
     a large skills library can't dominate the prompt. Used by both the client's
     session-start injection and the compaction re-injection so the format is
     defined once.
@@ -237,16 +304,24 @@ def format_available_skills(meta) -> str:
     if not meta:
         return ""
     lines = []
-    used = 0
+    used_chars = 0
+    used_tokens = 0
     remaining = 0
     for i, entry in enumerate(meta):
         line = _skill_line(entry)
-        # Always keep the first line; otherwise stop once over the aggregate cap.
-        if lines and used + len(line) > _MAX_LISTING_CHARS:
+        tok = _estimate_tokens(line)
+        # Always keep the first line; otherwise stop once over EITHER the token
+        # budget (primary — the prompt is billed in tokens) or the char cap.
+        over = (
+            used_chars + len(line) > _MAX_LISTING_CHARS
+            or used_tokens + tok > _MAX_LISTING_TOKENS
+        )
+        if lines and over:
             remaining = len(meta) - i
             break
         lines.append(line)
-        used += len(line) + 1  # +1 for the newline
+        used_chars += len(line) + 1  # +1 for the newline
+        used_tokens += tok
     if remaining:
         lines.append(f"  … (+{remaining} more — see /skills)")
     body = "\n".join(lines)
@@ -258,3 +333,23 @@ def format_available_skills(meta) -> str:
         f"{body}\n"
         "</available_skills>"
     )
+
+
+def render_skill_body(skill: Skill, arguments: str = "") -> str:
+    """Substitute placeholders in a skill body before returning it (tier-2).
+
+    ``$ARGUMENTS`` → the caller-provided argument string; ``${SKILL_DIR}`` /
+    ``${CLAUDE_SKILL_DIR}`` (and the unbraced ``$SKILL_DIR`` / ``$CLAUDE_SKILL_DIR``)
+    → the skill's own directory absolute path, so a skill can reference bundled
+    scripts/resources reliably. A single regex pass so a substituted value isn't
+    re-scanned (args containing a ``${SKILL_DIR}`` literal stay intact), and the
+    unbraced tokens are word-bounded so ``$SKILL_DIR`` won't match a longer name.
+    Bodies with no placeholders are returned unchanged.
+    """
+    args = (arguments or "").strip()
+    skill_dir = str(skill.path)
+
+    def _sub(m: "re.Match") -> str:
+        return args if m.group(0) == "$ARGUMENTS" else skill_dir
+
+    return _SKILL_PLACEHOLDER_RE.sub(_sub, skill.body)

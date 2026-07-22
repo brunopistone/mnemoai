@@ -17,6 +17,8 @@ def looks_like_binary(path: str) -> bool:
     """
     import os
 
+    from .file_encoding import bom_encoding
+
     if path.lower().endswith(IMAGE_EXTENSIONS):
         return True
     try:
@@ -25,6 +27,10 @@ def looks_like_binary(path: str) -> bool:
     except OSError:
         return False
     if not chunk:
+        return False
+    # A leading BOM means real text in a wide encoding (UTF-16/UTF-32) — full of
+    # NUL bytes but NOT binary; readers decode it with the BOM's codec.
+    if bom_encoding(chunk):
         return False
     if b"\x00" in chunk:
         return True

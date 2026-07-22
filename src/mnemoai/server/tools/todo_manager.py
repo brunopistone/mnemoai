@@ -2,15 +2,60 @@
 
 import json
 import os
-from typing import Dict, List
+import re
+import tempfile
 
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
-from mnemoai.utils.paths import profile_dir
+from mnemoai.utils.paths import instance_id, profile_dir
 
-TODO_FILE = str(profile_dir() / "todos" / "current_todos.json")
+
+def _sanitize_scope(scope: str) -> str:
+    """Reduce a scope label to a filename-safe token (default 'default').
+
+    Non-alphanumerics collapse to '_' and the token is capped at 64 chars, so
+    labels differing only in punctuation/length may alias to one file (last
+    writer wins — never corrupts, thanks to atomic writes). Pass stable, simple
+    labels for isolation.
+    """
+    token = re.sub(r"[^A-Za-z0-9_-]", "_", (scope or "").strip()) or "default"
+    return token[:64]
+
+
+def _todo_file(scope: str = "default") -> str:
+    """Path to the todo list for ``scope``, namespaced per app instance.
+
+    Namespaced by :func:`instance_id` (inherited by the MCP subprocess via
+    ``MNEMOAI_INSTANCE_ID``) so concurrent app instances (terminal tabs) don't
+    clobber each other's list; ``scope`` further isolates lists WITHIN one
+    instance for callers that pass a stable label. No per-agent id is threaded
+    through MCP, so same-scope concurrent agents are last-writer-wins (never
+    corrupt, thanks to atomic writes).
+    """
+    return str(
+        profile_dir()
+        / "todos"
+        / f"current_todos_{instance_id()}_{_sanitize_scope(scope)}.json"
+    )
+
+
+def _atomic_write_json(path: str, data) -> None:
+    """Write JSON to ``path`` atomically (temp file + os.replace) so a concurrent
+    reader never sees a half-written list."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def register_todo_tools(mcp: FastMCP) -> None:
@@ -21,7 +66,7 @@ def register_todo_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def todo_write(todos: str) -> str:
+    async def todo_write(todos: str, scope: str = "default") -> str:
         """Update the current todo list.
 
         Use this for tasks with 3 or more steps; skip it for simple, single-step
@@ -89,10 +134,9 @@ def register_todo_tools(mcp: FastMCP) -> None:
                     f"You should have exactly one task in_progress at a time."
                 )
 
-            # Write to file
-            os.makedirs(os.path.dirname(TODO_FILE), exist_ok=True)
-            with open(TODO_FILE, "w") as f:
-                json.dump(todos_list, f, indent=2)
+            # Atomic write (temp + os.replace) so concurrent orchestrator waves /
+            # background sub-agents can't read a half-written list.
+            _atomic_write_json(_todo_file(scope), todos_list)
 
             # Build status summary
             pending = sum(1 for t in todos_list if t["status"] == "pending")
@@ -120,17 +164,21 @@ def register_todo_tools(mcp: FastMCP) -> None:
             )
 
     @mcp.tool()
-    async def todo_read() -> str:
+    async def todo_read(scope: str = "default") -> str:
         """Read the current todo list.
+
+        Args:
+            scope: Optional list label (must match the ``scope`` used to write).
 
         Returns:
             JSON string with current todos
         """
         try:
-            if not os.path.exists(TODO_FILE):
+            todo_file = _todo_file(scope)
+            if not os.path.exists(todo_file):
                 return json.dumps({"todos": [], "message": "No active todo list"})
 
-            with open(TODO_FILE, "r") as f:
+            with open(todo_file, "r") as f:
                 todos_list = json.load(f)
 
             return json.dumps({"todos": todos_list, "count": len(todos_list)})
@@ -141,18 +189,22 @@ def register_todo_tools(mcp: FastMCP) -> None:
             )
 
     @mcp.tool()
-    async def todo_clear() -> str:
+    async def todo_clear(scope: str = "default") -> str:
         """Clear the current todo list.
 
         Use this when starting a completely new task or when
         the current todo list is no longer relevant.
 
+        Args:
+            scope: Optional list label (must match the ``scope`` used to write).
+
         Returns:
             JSON string with success status
         """
         try:
-            if os.path.exists(TODO_FILE):
-                os.remove(TODO_FILE)
+            todo_file = _todo_file(scope)
+            if os.path.exists(todo_file):
+                os.remove(todo_file)
 
             return json.dumps({"success": True, "message": "Todo list cleared"})
         except Exception as e:

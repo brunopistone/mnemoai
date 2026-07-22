@@ -13,7 +13,7 @@ surface, mirroring ``memory_tool.py``.
 
 from mcp.server.fastmcp import FastMCP
 
-from mnemoai.client.memory.skill_store import SkillStore
+from mnemoai.client.memory.skill_store import SkillStore, render_skill_body
 
 from ..error_handler import tool_error_handler
 
@@ -27,7 +27,7 @@ def register_skill_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def use_skill(name: str) -> str:
+    async def use_skill(name: str, arguments: str = "") -> str:
         """Load a skill's full step-by-step instructions into context.
 
         Call this the MOMENT the user's request matches one of the skills listed
@@ -42,6 +42,10 @@ def register_skill_tools(mcp: FastMCP) -> None:
 
         Args:
             name: The skill's name, exactly as shown in <available_skills>.
+            arguments: Optional free-text arguments for the skill. If the body
+                contains ``$ARGUMENTS`` it is replaced with this string;
+                ``${SKILL_DIR}``/``${CLAUDE_SKILL_DIR}`` are replaced with the
+                skill's own directory so it can reference bundled scripts.
 
         Returns:
             The skill's full instructions, or an error listing available skills
@@ -55,9 +59,10 @@ def register_skill_tools(mcp: FastMCP) -> None:
                 f"No skill named {name!r}. Available skills: {available}. "
                 "Use the exact name shown in <available_skills>."
             )
+        body = render_skill_body(skill, arguments)
         return (
             f"# Skill: {skill.name}\n\n"
-            f"{skill.body}\n\n"
+            f"{body}\n\n"
             "---\n"
             f"(Bundled resources for this skill, if any, live in: {skill.path} — "
             "read reference files with fs_read and run scripts with execute_bash there.)"

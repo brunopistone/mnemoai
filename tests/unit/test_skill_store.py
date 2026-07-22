@@ -10,6 +10,7 @@ from mnemoai.client.memory.skill_store import (
     SkillStore,
     _parse_frontmatter,
     format_available_skills,
+    render_skill_body,
 )
 
 
@@ -212,3 +213,99 @@ class TestListingBudget:
         # A single oversized description still yields a line (never an empty list).
         block = format_available_skills([("alpha", "x" * 5000)])
         assert "alpha:" in block
+
+    def test_listing_bounded_by_token_budget(self, monkeypatch):
+        # Make each line "expensive" in tokens while staying tiny in chars, so
+        # the TOKEN budget (not the char cap) is what forces the "+N more" line.
+        import mnemoai.client.memory.skill_store as ss
+
+        monkeypatch.setattr(ss, "_estimate_tokens", lambda text: 300)
+        # 3 lines * 300 tokens = 900; _MAX_LISTING_TOKENS default is 1000, so the
+        # 4th line trips the token budget well before the 4000-char cap.
+        meta = [(f"s{i}", "short") for i in range(10)]
+        block = format_available_skills(meta)
+        assert "more — see /skills" in block
+
+
+class TestRenderSkillBody:
+    def _skill(self, tmp_path, body):
+        from mnemoai.client.memory.skill_store import Skill
+
+        return Skill(name="alpha", description="d", body=body, path=tmp_path)
+
+    def test_arguments_substituted(self, tmp_path):
+        s = self._skill(tmp_path, "Handle $ARGUMENTS now.")
+        out = render_skill_body(s, "PR 42")
+        assert "PR 42" in out and "$ARGUMENTS" not in out
+
+    def test_skill_dir_substituted_braced_and_unbraced(self, tmp_path):
+        s = self._skill(tmp_path, "run ${SKILL_DIR}/go.sh and $CLAUDE_SKILL_DIR/x")
+        out = render_skill_body(s, "")
+        assert str(tmp_path) in out
+        assert "${SKILL_DIR}" not in out and "$CLAUDE_SKILL_DIR" not in out
+
+    def test_no_placeholders_returned_unchanged(self, tmp_path):
+        s = self._skill(tmp_path, "Just plain instructions.")
+        assert render_skill_body(s, "ignored") == "Just plain instructions."
+
+    def test_blank_arguments_becomes_empty(self, tmp_path):
+        s = self._skill(tmp_path, "x=[$ARGUMENTS]")
+        assert render_skill_body(s, "") == "x=[]"
+
+    def test_unbraced_token_does_not_eat_longer_identifier(self, tmp_path):
+        # $SKILL_DIR must NOT match inside $SKILL_DIRECTORY (word-bounded).
+        s = self._skill(tmp_path, "$SKILL_DIRECTORY vs ${SKILL_DIR}")
+        out = render_skill_body(s, "")
+        assert "$SKILL_DIRECTORY" in out  # untouched
+        assert str(tmp_path) in out  # the braced one was substituted
+
+    def test_arguments_value_is_not_re_substituted(self, tmp_path):
+        # A ${SKILL_DIR} literal inside the args value must survive (single pass).
+        s = self._skill(tmp_path, "args=$ARGUMENTS")
+        out = render_skill_body(s, "keep ${SKILL_DIR} literal")
+        assert out == "args=keep ${SKILL_DIR} literal"
+
+
+class TestScanMemoization:
+    def _clear(self):
+        import mnemoai.client.memory.skill_store as ss
+
+        ss._SCAN_CACHE.clear()
+
+    def test_unchanged_dir_served_from_cache(self, tmp_path, monkeypatch):
+        self._clear()
+        _write_skill(tmp_path, "alpha", _valid())
+        calls = {"n": 0}
+        import pathlib
+
+        orig = pathlib.Path.read_text
+
+        def counting(self, *a, **k):
+            if self.name == "SKILL.md":
+                calls["n"] += 1
+            return orig(self, *a, **k)
+
+        monkeypatch.setattr(pathlib.Path, "read_text", counting)
+        SkillStore(tmp_path).list_skills()
+        SkillStore(tmp_path).list_skills()  # second scan, unchanged dir
+        assert calls["n"] == 1  # parsed once, then cache-served
+
+    def test_edit_invalidates_cache(self, tmp_path, monkeypatch):
+        import time
+
+        self._clear()
+        _write_skill(tmp_path, "alpha", _valid(desc="original"))
+        assert SkillStore(tmp_path).load_body("alpha").description == "original"
+        time.sleep(0.01)
+        (tmp_path / "alpha" / "SKILL.md").write_text(
+            "---\nname: alpha\ndescription: edited\n---\nBody\n"
+        )
+        # mtime bumped → signature changes → re-parsed.
+        assert SkillStore(tmp_path).load_body("alpha").description == "edited"
+
+    def test_added_skill_invalidates_cache(self, tmp_path):
+        self._clear()
+        _write_skill(tmp_path, "alpha", _valid())
+        assert len(SkillStore(tmp_path).list_skills()) == 1
+        _write_skill(tmp_path, "beta", _valid(name="beta"))
+        assert len(SkillStore(tmp_path).list_skills()) == 2  # new dir seen
