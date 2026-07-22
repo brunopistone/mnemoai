@@ -171,6 +171,9 @@ class LangGraphClient:
         self.plan_mode_active: bool = False
 
         self.llm_controller = LangChainLLMController(verbose=self.verbose_mode)
+        # Cache of same-provider models built for a custom sub-agent's 'model'
+        # override (keyed by model name), so repeated spawns don't rebuild.
+        self._subagent_model_cache = {}
 
         self.conversation_manager = AgentConversationManager(
             max_tokens=config.get("MAX_CONVERSATION_TOKENS", 1024 * 4)
@@ -384,6 +387,9 @@ class LangGraphClient:
                 # model call when history exceeds its high-water mark, reusing the
                 # same manager as the post-turn /compact path.
                 self.agent._compact_provider = self._compact_now
+                # Per-agent model override (custom sub-agent frontmatter 'model'):
+                # build a same-provider model with the NAME swapped, on demand.
+                self.agent._subagent_model_factory = self._subagent_model_factory
 
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -619,6 +625,32 @@ class LangGraphClient:
                 logger.debug(f"Auto-memory: applied {applied} operation(s)")
         except Exception as e:
             logger.error(f"Auto memory extraction failed: {e}")
+
+    def _subagent_model_factory(self, model_name: str):
+        """Build a callback-free chat model for a custom sub-agent's ``model``
+        override. Reuses the configured provider/TYPE/params, swapping only
+        ``MODEL_ID.NAME`` (provider-agnostic — a cheap sub-agent runs a cheaper
+        model of the SAME provider). Cached by name; returns None on failure so
+        the caller falls back to the parent model."""
+        if model_name in self._subagent_model_cache:
+            return self._subagent_model_cache[model_name]
+        model = None
+        try:
+            ctrl = LangChainLLMController(verbose=self.verbose_mode)
+            # Copy model_id (never mutate the shared config dict) and set both
+            # forms of the name — mantle_factory reads model_id['NAME'], the
+            # other providers read self.model_name.
+            ctrl.model_id = {**ctrl.model_id, "NAME": model_name}
+            ctrl.model_name = model_name
+            ctrl.initialize_model(callbacks=None)
+            model = ctrl.get_model()
+        except Exception as e:
+            logger.error(
+                f"Sub-agent model override '{model_name}' failed to build; "
+                f"using the default model: {e}"
+            )
+        self._subagent_model_cache[model_name] = model
+        return model
 
     def _invoke_model_once(self, prompt: str) -> str:
         """Run a single, isolated model call for ``prompt`` and return its text.

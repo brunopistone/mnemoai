@@ -8,6 +8,7 @@ from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import normalize_path
 
 from ..error_handler import tool_error_handler
+from .read_state import record_read
 from .readers import (
     read_csv,
     read_directory,
@@ -92,19 +93,20 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             normalized_path = normalize_path(path)
 
             if mode == "Directory":
+                # A directory listing isn't a file read; nothing to gate later.
                 return await read_directory(normalized_path, depth)
             elif mode == "Line":
-                return await read_lines(normalized_path, start_line, end_line)
+                result = await read_lines(normalized_path, start_line, end_line)
             elif mode == "Search":
-                return await search_file(normalized_path, pattern, context_lines)
+                result = await search_file(normalized_path, pattern, context_lines)
             elif mode == "CSV":
-                return await read_csv(normalized_path)
+                result = await read_csv(normalized_path)
             elif mode in ["JSON", "JSONL"]:
-                return await read_json(normalized_path, start_line, end_line)
+                result = await read_json(normalized_path, start_line, end_line)
             elif mode == "PDF":
-                return await read_pdf(normalized_path)
+                result = await read_pdf(normalized_path)
             elif mode == "DOCX":
-                return await read_docx(normalized_path)
+                result = await read_docx(normalized_path)
             else:
                 return json.dumps(
                     {
@@ -112,6 +114,16 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
                         "message": f"Invalid mode '{mode}'. Use 'Line', 'Search', 'Directory', 'CSV', or 'JSON'",
                     }
                 )
+
+            # Record read-state (current mtime) so a later fs_write/file_edit on
+            # this file is allowed. Skip on a failed read so we never bless a
+            # file the model didn't actually see.
+            try:
+                if not json.loads(result).get("error"):
+                    record_read(normalized_path)
+            except (ValueError, TypeError):
+                pass
+            return result
 
         except Exception as e:
             logger.error(f"Error in fs_read: {str(e)}", exc_info=True)

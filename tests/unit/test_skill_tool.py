@@ -66,3 +66,37 @@ class TestUseSkill:
     def test_blank_name_lists_available(self, use_skill):
         out = run(use_skill(""))
         assert "No skill named" in out
+
+
+class TestUseSkillArguments:
+    """use_skill substitutes $ARGUMENTS and ${SKILL_DIR} in the body."""
+
+    @pytest.fixture
+    def use_skill_ph(self, tmp_path, monkeypatch):
+        import mnemoai.client.memory.skill_store as ss
+
+        ss._SCAN_CACHE.clear()  # avoid a stale cross-test cache entry
+        monkeypatch.setattr(
+            "mnemoai.utils.paths.skills_dir", lambda: tmp_path, raising=True
+        )
+        _write_skill(
+            tmp_path, "beta", "Use for beta.",
+            body="Run ${SKILL_DIR}/go.sh with $ARGUMENTS please.",
+        )
+        mcp = _CapturingMCP()
+        register_skill_tools(mcp)
+        fn = mcp.registered["use_skill"]
+        fn._dir = str(tmp_path / "beta")
+        return fn
+
+    def test_arguments_substituted(self, use_skill_ph):
+        out = run(use_skill_ph("beta", "PR 42"))
+        assert "PR 42" in out
+        assert use_skill_ph._dir in out  # ${SKILL_DIR} -> absolute skill dir
+        assert "$ARGUMENTS" not in out and "${SKILL_DIR}" not in out
+
+    def test_no_arguments_still_works(self, use_skill_ph):
+        # Backward-compatible: omitting arguments leaves $ARGUMENTS empty, no crash.
+        out = run(use_skill_ph("beta"))
+        assert "# Skill: beta" in out
+        assert "$ARGUMENTS" not in out  # replaced with ""

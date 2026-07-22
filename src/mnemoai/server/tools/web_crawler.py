@@ -23,6 +23,11 @@ except ImportError:
 # per process.
 _browser_install_attempted = False
 
+# Fallback cap on inline-returned markdown (chars) when the RAG-offload path
+# isn't taken (RAG disabled/unavailable, or page under the RAG token threshold).
+# The RAG path stays the primary large-page handler; this only bounds context.
+_MAX_INLINE_CHARS = 100_000
+
 
 def _is_missing_browser_error(exc: Exception) -> bool:
     """True if the exception is Playwright's missing-browser launch error."""
@@ -79,6 +84,17 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
         if not url or not url.startswith(("http://", "https://")):
             return json.dumps({"error": True, "message": "Invalid URL"})
 
+        # Explicit per-page crawl timeout (ms); tunable via config, code default
+        # so no config edit is required to reach existing installs. Guarded so a
+        # malformed WEB_CRAWL (bare key -> None, or a non-numeric value) falls
+        # back to the default instead of raising outside the error-handling try.
+        try:
+            web_crawl_cfg = config.get("WEB_CRAWL", {}) or {}
+            page_timeout_ms = int(web_crawl_cfg.get("PAGE_TIMEOUT_MS", 60000))
+        except (AttributeError, TypeError, ValueError):
+            page_timeout_ms = 60000
+        run_config = CrawlerRunConfig(page_timeout=page_timeout_ms)
+
         async def _crawl():
             """Run the crawl with stdout muted; returns the crawl result."""
             old_stdout = sys.stdout
@@ -87,7 +103,7 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                 async with AsyncWebCrawler(
                     browser_type="none", verbose=False
                 ) as crawler:
-                    return await crawler.arun(url=url)
+                    return await crawler.arun(url=url, config=run_config)
             finally:
                 sys.stdout = old_stdout
 
@@ -157,12 +173,27 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                     except Exception as e:
                         logger.exception("RAG ingestion failed: %s", e)
 
+            # Fallback inline return (RAG offload not taken). Cap oversized
+            # markdown so a huge page can't blow up the model context. The RAG
+            # path above is the primary large-page handler and is untouched.
+            truncated = False
+            if content and len(content) > _MAX_INLINE_CHARS:
+                content = (
+                    content[:_MAX_INLINE_CHARS]
+                    + f"\n\n[... content truncated at {_MAX_INLINE_CHARS} chars. "
+                    + "Enable RAG or re-crawl to index this page and use "
+                    + "search_in_documents to retrieve the rest — do not assume "
+                    + "the omitted content.]"
+                )
+                truncated = True
+
             return json.dumps(
                 {
                     "success": True,
                     "url": result.url,
                     "status_code": result.status_code,
                     "content": content,
+                    "truncated": truncated,
                     "metadata": result.metadata,
                 },
                 indent=2,

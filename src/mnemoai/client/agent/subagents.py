@@ -42,6 +42,14 @@ class SubAgentType(NamedTuple):
         inline_prompt: A custom type's system prompt (the ``.md`` body); "" for a
             built-in (which resolves via ``prompt_key``).
         source: "built-in" or "custom" (from ``~/.mnemoai/agents/``).
+        disallowed_tools: Optional denylist of tool names removed AFTER the
+            allowlist (and after the always-added meta tools) when resolving the
+            sub-agent's toolset; ``None`` = nothing denied. The counterpart to
+            the ``tools`` allowlist.
+        model: Optional per-agent model NAME override (custom types only). When
+            set, the sub-agent runs on a same-provider model with only
+            ``MODEL_ID.NAME`` swapped (a cheap agent can use a cheap model);
+            ``None`` reuses the parent model.
     """
 
     name: str
@@ -51,6 +59,8 @@ class SubAgentType(NamedTuple):
     fallback_prompt: str
     inline_prompt: str = ""
     source: str = "built-in"
+    disallowed_tools: Optional[List[str]] = None
+    model: Optional[str] = None
 
 
 # Read-only tools an explore/plan agent may use (no writes, no exec, no git-write).
@@ -191,6 +201,30 @@ def _parse_tools(raw) -> Optional[List[str]]:
     return None
 
 
+def _parse_denylist(raw) -> Optional[List[str]]:
+    """Normalize a frontmatter ``disallowed-tools`` value to a denylist, or None.
+
+    Denylist semantics are the INVERSE of ``_parse_tools``: ``"*"``/``"all"``
+    means deny EVERYTHING (returned as the sentinel ``["*"]``), not "deny
+    nothing" — so a lockdown intent isn't silently inverted. Absent/empty → None.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if raw == "":
+            return None
+        if raw in ("*", "all"):
+            return ["*"]
+        return [t.strip() for t in raw.split(",") if t.strip()]
+    if isinstance(raw, list):
+        names = [str(t).strip() for t in raw if str(t).strip()]
+        if not names:
+            return None
+        return ["*"] if "*" in names or "all" in names else names
+    return None
+
+
 def _load_custom_subagents(root: Optional[Path] = None) -> List[SubAgentType]:
     """Load custom sub-agent types from ``~/.mnemoai/agents/*.md``.
 
@@ -231,6 +265,12 @@ def _load_custom_subagents(root: Optional[Path] = None) -> List[SubAgentType]:
             print_error(f"Agent '{entry.name}': empty body (no system prompt); skipping.")
             continue
         name = str(front.get("name", "") or entry.stem).strip().lower()
+        # Optional per-agent denylist (accept hyphen or underscore) and model
+        # override; both tolerant (absent -> None). Denylist reuses _parse_tools.
+        disallowed = _parse_denylist(
+            front.get("disallowed_tools") or front.get("disallowed-tools")
+        )
+        model_override = str(front.get("model", "") or "").strip() or None
         agents.append(
             SubAgentType(
                 name=name,
@@ -240,6 +280,8 @@ def _load_custom_subagents(root: Optional[Path] = None) -> List[SubAgentType]:
                 fallback_prompt="",
                 inline_prompt=body,
                 source="custom",
+                disallowed_tools=disallowed,
+                model=model_override,
             )
         )
     if agents:

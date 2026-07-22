@@ -9,6 +9,127 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.6.0] — 2026-07-22
+
+Tool-quality pass: sharpen the built-in MCP tools where they lagged,
+**without removing any capability mnemoai's tools already offer** (multi-mode
+`fs_read`, multi-command `fs_write`, the server-side
+catastrophic-command/path floor, `git_safe`, RAG offload, structured search
+JSON, glob's no-ripgrep fallback, etc. all preserved). Adds read-before-write
+safety, line-numbered reads, richer search (context/paging/width-cap), web
+recency/region + crawl timeout, per-instance todos, per-agent sub-agent
+tool-denylist + model overrides, line-numbered + streamed file reads,
+encoding/BOM/line-ending-preserving edits, and skill argument substitution —
+plus several latent-bug fixes surfaced along the way (two `grep_search` modes
+that silently returned nothing, unbounded `execute_bash` output, orphaned
+background children, a footgun path-relocation, whole-file read OOM).
+
+### Added
+
+- **Read-before-write / staleness gate (server-side).** A new in-process
+  read-state registry (`server/tools/read_state.py`) records the on-disk mtime of
+  every file the model reads via `fs_read`, and `fs_write`/`file_edit` now refuse
+  to modify an **existing** file that was never read, or that **changed on disk
+  since it was last read** — the model would otherwise clobber content it never
+  saw. Creating a brand-new file needs no prior read; a successful write
+  re-baselines the file so a chained edit in the same turn isn't flagged. This is
+  a separate layer from the client confirmation gate and the `path_policy` floor,
+  never prompts (returns a normal tool error).
+- **Line-numbered file reads.** `fs_read` Line mode now prefixes each line with a
+  `cat -n` style number gutter so the model can cite lines precisely. `file_edit`
+  is resilient to it: if `old_string` isn't found it strips a pasted gutter and
+  retries against the raw content (a raw `new_string` is written verbatim, so a
+  legitimate leading `digits<TAB>` — e.g. TSV — is never mangled).
+- **`grep_search`: asymmetric context + pagination + long-line cap.** New
+  `context_before`/`context_after` (with `context_lines` as the symmetric
+  shorthand) — and context lines are now actually **returned** (flagged
+  `is_context`), each owned by exactly one match so nothing leaks or duplicates
+  across pages. New `offset` for paging (counts matches only). Over-long matching
+  lines are capped (`MAX_LINE_CHARS`) so a minified/base64 line can't blow up the
+  result.
+- **`glob_search`: skips noise dirs + honest newest-first.** Excludes common
+  vendored/build dirs by default (`.git`, `node_modules`, `.venv`, `__pycache__`,
+  `build`, `dist`, …; opt out with `include_ignored=True`) — kept on stdlib glob
+  so it still works with **no ripgrep installed** (glob's differentiator).
+- **`web_search`: recency + region.** Optional `freshness` (pd/pw/pm/py or a date
+  range), `country`, and `ui_lang` (forwarded only when set); a citation +
+  current-year instruction in the tool description; applied filters + current year
+  echoed in the result.
+- **`web_crawler`: explicit page timeout.** Configurable via
+  `WEB_CRAWL.PAGE_TIMEOUT_MS` (code default 60 s), so a slow site can't hang the
+  crawl.
+- **Per-agent sub-agent `disallowed-tools` + `model`.** A custom
+  `~/.mnemoai/agents/*.md` can now declare a tool **denylist** (`disallowed-tools`,
+  applied after the allowlist; `*`/`all` = deny everything) and a per-agent
+  **model** override (a same-provider model with only the name swapped — a cheap
+  agent can run a cheaper model). Fixes a latent gap where the loader advertised
+  `model` but ignored it.
+- **Skill argument substitution.** `use_skill(name, arguments=…)` now substitutes
+  `$ARGUMENTS` and `${SKILL_DIR}`/`${CLAUDE_SKILL_DIR}` (and the unbraced forms) in
+  the skill body — so a skill can take input and reference its own bundled scripts
+  by absolute path. Substitution is a single word-bounded pass (a value that
+  contains a `${SKILL_DIR}` literal, or a `$SKILL_DIRECTORY` token, is left intact).
+- **Encoding-aware editing.** `file_edit` and `fs_write` (str_replace/insert/append)
+  now detect and **preserve a file's encoding, BOM, and line ending** on an
+  in-place edit — a CRLF file stays CRLF, a UTF-16/BOM file keeps its BOM (and is
+  now editable at all, where it previously bounced to binary-steering). Creating a
+  brand-new file still writes plain UTF-8 LF.
+
+### Fixed
+
+- **`grep_search` was silently broken in two of its three modes.** Passing
+  `--files-with-matches` / `--count` **overrides** ripgrep's `--json`, so those
+  modes emitted plain text the parser couldn't read and returned **empty results**
+  (and `files_with_matches` is the default mode). `grep_search` now always runs
+  `--json` and derives every mode from the parsed match events.
+- **`grep_search` `max_results` was a PER-FILE cap, not a total.** It mapped to
+  ripgrep `--max-count` (N matches _per file_); `files_with_matches`/`count` had no
+  total limit at all. It is now a true **total** cap across all files in every
+  mode, applied after parsing, with a `truncated` flag (`max_results=0` =
+  unlimited, matching `glob_search`).
+- **`grep_search` crashed on a non-UTF-8 matching line.** A match on a line (or
+  path) ripgrep couldn't decode carries `bytes` (base64), not `text`, which raised
+  `KeyError` and **aborted the entire search** in all modes. Such lines are now
+  decoded leniently (replacement chars) so one bad byte can't kill the search.
+- **`grep_search` reported an invalid regex as "0 matches".** ripgrep exits 2 on a
+  malformed pattern; the tool ignored the exit code and returned success/empty.
+  Exit 2 now surfaces as an error — but **only when no matches were parsed**, so
+  an unreadable file among readable ones (which also exits 2) keeps its valid
+  matches and reports the problem non-fatally in a `warnings` field.
+- **`glob_search` truncated before sorting.** With a result cap it returned the
+  first N files glob happened to yield (arbitrary order) then sorted only those,
+  so "newest first" was false when capped. It now collects, sorts, then slices —
+  the returned N really are the newest (bounded by a scan ceiling on huge trees).
+- **`execute_bash` returned unbounded output.** A chatty command's full
+  stdout/stderr went into the tool result verbatim (token/OOM risk). Output is now
+  middle-truncated to a 30 KB ceiling (head + tail kept, with a truncation
+  marker), at the source — ahead of the client's downstream compaction.
+- **`cancel_background_task` orphaned grandchild processes.** It sent
+  `os.kill(pid, 9)` to the shell only; background tasks now spawn with
+  `start_new_session=True` and cancel kills the whole **process group** (`killpg`),
+  matching `execute_bash`.
+- **A cancelled background task was reported as `failed`.** After the reliable
+  group-kill, the reader thread's terminal-status write clobbered the `cancelled`
+  status with `failed` (return code −9); the worker now leaves an
+  already-`cancelled` task alone. Also: `get_task_output`'s `total_lines` (a
+  `"lines" in dir()` bug that returned 0) is fixed, and cancelling a task in its
+  brief startup window returns a clear "still starting, retry" message instead of
+  "No PID found".
+- **`fs_write` silently relocated relative paths into `~`.** `_resolve_path`
+  moved a relative path (e.g. `notes.txt`) into the home directory based on its
+  extension — a surprise-overwrite footgun. Relative paths now resolve against the
+  current working directory (like any normal tool); only an absolute path or an
+  explicit `~` goes elsewhere.
+- **`fs_read` loaded the whole file into memory.** Line mode did `readlines()`
+  before slicing, so reading a few lines of a multi-hundred-MB file could OOM. It
+  now streams — one pass to count lines (for `total_lines` + negative-index
+  resolution), a second that materializes only the requested range and stops
+  early — with byte-identical results. All token-budgeting/truncation preserved.
+- **Skill listing re-scanned + re-parsed every turn.** `SkillStore` now memoizes
+  the scan, invalidated by a cheap per-skill `SKILL.md` mtime signature (edits
+  still apply next turn), and the always-on `<available_skills>` block is bounded
+  by a token budget (with the char cap as a hard secondary), not chars alone.
+
 ## [1.5.9] — 2026-07-21
 
 ### Added

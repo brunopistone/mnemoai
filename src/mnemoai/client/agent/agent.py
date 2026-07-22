@@ -2291,10 +2291,14 @@ class LangGraphAgent:
             allowed = None  # all tools
         else:
             allowed = set(agent.tools) | meta
+        denied = set(getattr(agent, "disallowed_tools", None) or [])
+        deny_all = "*" in denied  # the deny-everything sentinel
         subset = []
         for t in self.tools:
             if t.name == "spawn_agent":
                 continue  # no nested spawning
+            if deny_all or t.name in denied:
+                continue  # per-agent denylist, applied AFTER the allowlist
             if allowed is None or t.name in allowed:
                 subset.append(t)
         return subset
@@ -2559,6 +2563,22 @@ class LangGraphAgent:
         except Exception:
             return model
 
+    def _subagent_base_model(self, agent):
+        """Callback-free base model for a spawned sub-agent, honoring a custom
+        type's per-agent ``model`` override (a same-provider model with the NAME
+        swapped, built by the client-set factory). Falls back to the parent model
+        when there's no override, no factory, or the build fails — so built-in
+        types and the default path are unchanged. The factory builds with
+        callbacks=None, so the override is already callback-free (safe for the
+        quiet/parallel/background sub-agent loops)."""
+        override = getattr(agent, "model", None)
+        factory = getattr(self, "_subagent_model_factory", None)
+        if override and factory:
+            model = factory(override)
+            if model is not None:
+                return model
+        return self._callback_free_model()
+
     def _run_one_subagent(
         self, agent, prompt: str, label: str, drive_spinner: bool = True
     ) -> str:
@@ -2575,7 +2595,7 @@ class LangGraphAgent:
         # shared "N running…" spinner (and racing siblings). A per-instance copy
         # (not mutating the shared self.model) is concurrency-safe.
         sub_tools = self._subagent_tools(agent)
-        base = self._callback_free_model()
+        base = self._subagent_base_model(agent)
         sub_model = base.bind_tools(sub_tools) if sub_tools else base
         sys_prompt = subagents.subagent_system_prompt(agent)
         # A spawned sub-agent is handed a whole self-contained task (esp. the

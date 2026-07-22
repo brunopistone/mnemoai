@@ -186,6 +186,130 @@ class TestSubagentTools:
         assert "fs_read" in subset and "describe_image" in subset
 
 
+class TestCustomLoaderDenylistModel:
+    def _write(self, root, name, text):
+        (root / name).write_text(text)
+
+    def test_loads_disallowed_tools_and_model(self, tmp_path):
+        self._write(
+            tmp_path, "safe.md",
+            "---\ndescription: safe agent\ntools: fs_read, grep_search, execute_bash\n"
+            "disallowed-tools: execute_bash, fs_write\nmodel: haiku-cheap\n---\nbody\n",
+        )
+        a = subagents._load_custom_subagents(tmp_path)[0]
+        assert a.disallowed_tools == ["execute_bash", "fs_write"]
+        assert a.model == "haiku-cheap"
+
+    def test_disallowed_tools_underscore_variant(self, tmp_path):
+        self._write(
+            tmp_path, "u.md",
+            "---\ndescription: d\ndisallowed_tools: fs_write\n---\nbody\n",
+        )
+        a = subagents._load_custom_subagents(tmp_path)[0]
+        assert a.disallowed_tools == ["fs_write"]
+
+    def test_absent_denylist_and_model_are_none(self, tmp_path):
+        self._write(tmp_path, "p.md", "---\ndescription: d\n---\nbody\n")
+        a = subagents._load_custom_subagents(tmp_path)[0]
+        assert a.disallowed_tools is None
+        assert a.model is None
+
+
+class TestSubagentDenylist:
+    def test_denylist_removes_tool_after_allowlist(self):
+        a = _agent(["fs_read", "grep_search", "execute_bash"])
+        agent_type = subagents.SubAgentType(
+            name="x", description="d",
+            tools=["fs_read", "grep_search", "execute_bash"],
+            prompt_key="", fallback_prompt="", inline_prompt="p", source="custom",
+            disallowed_tools=["execute_bash"],
+        )
+        subset = {t.name for t in a._subagent_tools(agent_type)}
+        assert "grep_search" in subset and "execute_bash" not in subset
+
+    def test_denylist_can_remove_meta_tool(self):
+        a = _agent(["fs_read", "describe_image", "grep_search"])
+        agent_type = subagents.SubAgentType(
+            name="x", description="d", tools=["grep_search"],
+            prompt_key="", fallback_prompt="", inline_prompt="p", source="custom",
+            disallowed_tools=["describe_image"],
+        )
+        subset = {t.name for t in a._subagent_tools(agent_type)}
+        assert "describe_image" not in subset  # denylist wins over meta
+
+    def test_denylist_on_all_tools_type(self):
+        a = _agent(["fs_read", "fs_write", "execute_bash", "spawn_agent"])
+        agent_type = subagents.SubAgentType(
+            name="x", description="d", tools=None,  # all
+            prompt_key="", fallback_prompt="", inline_prompt="p", source="custom",
+            disallowed_tools=["fs_write"],
+        )
+        subset = {t.name for t in a._subagent_tools(agent_type)}
+        assert "fs_write" not in subset and "execute_bash" in subset
+        assert "spawn_agent" not in subset  # still no nested spawning
+
+    def test_deny_all_sentinel_removes_everything(self):
+        # disallowed-tools: "*" means deny EVERYTHING (lockdown), not "deny
+        # nothing" — _parse_denylist yields the ["*"] sentinel.
+        assert subagents._parse_denylist("*") == ["*"]
+        assert subagents._parse_denylist("all") == ["*"]
+        a = _agent(["fs_read", "grep_search", "execute_bash"])
+        agent_type = subagents.SubAgentType(
+            name="x", description="d", tools=None,
+            prompt_key="", fallback_prompt="", inline_prompt="p", source="custom",
+            disallowed_tools=["*"],
+        )
+        assert a._subagent_tools(agent_type) == []  # nothing survives
+
+    def test_parse_denylist_absent_is_none(self):
+        assert subagents._parse_denylist(None) is None
+        assert subagents._parse_denylist("") is None
+        assert subagents._parse_denylist(["fs_write", "execute_bash"]) == [
+            "fs_write", "execute_bash"
+        ]
+
+
+class TestSubagentModelOverride:
+    def _custom(self, model):
+        return subagents.SubAgentType(
+            name="x", description="d", tools=None,
+            prompt_key="", fallback_prompt="", inline_prompt="p", source="custom",
+            model=model,
+        )
+
+    def test_override_uses_factory(self):
+        a = _agent(["fs_read"])
+        requested = {}
+        sentinel = object()
+
+        def _factory(name):
+            requested["name"] = name
+            return sentinel
+
+        a._subagent_model_factory = _factory
+        assert a._subagent_base_model(self._custom("cheap")) is sentinel
+        assert requested["name"] == "cheap"
+
+    def test_no_override_uses_callback_free_model(self):
+        a = _agent(["fs_read"])
+        called = {"factory": False}
+
+        def _factory(name):
+            called["factory"] = True
+            return object()
+
+        a._subagent_model_factory = _factory
+        # A built-in type has model=None → factory must NOT be consulted.
+        a._subagent_base_model(subagents.get_subagent("explore"))
+        assert called["factory"] is False
+
+    def test_factory_failure_falls_back(self):
+        a = _agent(["fs_read"])
+        a._subagent_model_factory = lambda name: None  # build failed
+        # Falls back to the (callback-free) parent model, no crash.
+        assert a._subagent_base_model(self._custom("bad")) is a.model
+
+
 class TestHandleSpawnAgent:
     def _spawn_agent(self):
         a = _agent(["fs_read", "grep_search"])

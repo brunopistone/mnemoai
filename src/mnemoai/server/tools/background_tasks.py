@@ -9,6 +9,7 @@ Allows running long-running tasks in the background:
 
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -86,7 +87,9 @@ def run_background_command(task_id: str, command: str, cwd: str):
             _background_tasks[task_id]["status"] = "running"
             _background_tasks[task_id]["started_at"] = datetime.now().isoformat()
 
-        # Run the command
+        # start_new_session puts the shell (and its children) in their own
+        # process group so cancel_background_task can kill the whole tree via
+        # killpg, not just the shell — same discipline as execute_bash.
         process = subprocess.Popen(
             command,
             shell=True,
@@ -94,6 +97,7 @@ def run_background_command(task_id: str, command: str, cwd: str):
             stderr=subprocess.STDOUT,
             cwd=cwd,
             text=True,
+            start_new_session=True,
         )
 
         with _task_lock:
@@ -110,9 +114,13 @@ def run_background_command(task_id: str, command: str, cwd: str):
         process.wait()
 
         with _task_lock:
-            _background_tasks[task_id]["status"] = (
-                "completed" if process.returncode == 0 else "failed"
-            )
+            # A concurrent cancel_background_task already SIGKILLed the group and
+            # set "cancelled"; the reader loop then hit EOF and lands here with a
+            # -9 returncode. Don't clobber that terminal status with "failed".
+            if _background_tasks[task_id].get("status") != "cancelled":
+                _background_tasks[task_id]["status"] = (
+                    "completed" if process.returncode == 0 else "failed"
+                )
             _background_tasks[task_id]["return_code"] = process.returncode
             _background_tasks[task_id]["completed_at"] = datetime.now().isoformat()
             _background_tasks[task_id]["output_preview"] = "".join(
@@ -285,15 +293,17 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
 
         output_file = task["output_file"]
         output = ""
+        total_lines = 0
 
         if os.path.exists(output_file):
             try:
                 with open(output_file, "r") as f:
                     lines = f.readlines()
-                    if tail_lines > 0:
-                        output = "".join(lines[-tail_lines:])
-                    else:
-                        output = "".join(lines)
+                total_lines = len(lines)
+                if tail_lines > 0:
+                    output = "".join(lines[-tail_lines:])
+                else:
+                    output = "".join(lines)
             except Exception as e:
                 output = f"Error reading output: {e}"
 
@@ -304,7 +314,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
                 "status": task["status"],
                 "output": output,
                 "output_file": output_file,
-                "total_lines": len(lines) if "lines" in dir() else 0,
+                "total_lines": total_lines,
             },
             indent=2,
         )
@@ -384,7 +394,13 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         pid = task.get("pid")
         if pid:
             try:
-                os.kill(pid, 9)  # SIGKILL
+                # Kill the whole process group (the shell spawned with
+                # start_new_session leads its own group), so grandchildren don't
+                # orphan. Fall back to a bare kill if the group lookup fails.
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    os.kill(pid, signal.SIGKILL)
                 with _task_lock:
                     _background_tasks[task_id]["status"] = "cancelled"
                     _background_tasks[task_id][
@@ -407,7 +423,20 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
                     {"error": True, "message": f"Error cancelling task: {e}"}, indent=2
                 )
 
-        return json.dumps({"error": True, "message": "No PID found for task"}, indent=2)
+        # status is running/pending but the pid isn't recorded yet: the worker
+        # thread is in the brief window between Popen and storing the pid. Tell
+        # the caller to retry rather than the misleading "No PID found".
+        return json.dumps(
+            {
+                "error": True,
+                "message": (
+                    "Task is still starting (no PID yet). Retry cancel in a "
+                    "moment."
+                ),
+                "retry": True,
+            },
+            indent=2,
+        )
 
     @mcp.tool()
     async def wait_for_task(task_id: str, timeout_seconds: int = 300) -> str:

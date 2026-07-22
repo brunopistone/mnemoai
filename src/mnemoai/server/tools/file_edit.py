@@ -2,13 +2,26 @@
 
 import json
 import os
+import re
 
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import normalize_path
 
+from .file_encoding import decode_to_lf, encode_from_lf
+from .read_state import check_write_allowed, record_read
 from .safety import classify_write_path
+
+# A cat -n style line-number gutter ("    12\tcode"). fs_read (Line mode)
+# prefixes these; if the model copies a numbered block verbatim into old_string,
+# strip the gutters so the raw-content exact match below still finds it.
+_LINE_GUTTER_RE = re.compile(r"^\s*\d+\t")
+
+
+def _strip_line_gutters(text: str) -> str:
+    """Remove a leading line-number gutter from each line of text."""
+    return "\n".join(_LINE_GUTTER_RE.sub("", ln) for ln in text.split("\n"))
 
 
 def register_edit_tools(mcp: FastMCP) -> None:
@@ -122,10 +135,20 @@ def register_edit_tools(mcp: FastMCP) -> None:
                 }
             )
 
-        # Read file content
+        # Read-before-write gate (server-side, never prompts): refuse to edit a
+        # file the model never read, or that changed on disk since the last
+        # read. Runs above the exact-match validation below.
+        read_verdict = check_write_allowed(file_path)
+        if read_verdict is not None:
+            return json.dumps(read_verdict)
+
+        # Read the raw bytes, then decode to LF-normalized text while capturing
+        # the file's on-disk shape (encoding, BOM, dominant line ending). The
+        # write below re-applies that shape so editing a CRLF / UTF-16 / BOM file
+        # never silently converts it to UTF-8 LF.
         try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
+            with open(file_path, "rb") as f:
+                content, file_shape = decode_to_lf(f.read())
         except UnicodeDecodeError:
             return json.dumps(
                 {
@@ -143,7 +166,18 @@ def register_edit_tools(mcp: FastMCP) -> None:
                 {"error": True, "message": f"Error reading file: {str(e)}"}
             )
 
-        # Check if old_string exists
+        # Check if old_string exists. If not, the model may have pasted a
+        # line-numbered block copied from fs_read; strip the gutters from
+        # old_string ONLY (to relocate the match against raw content) and retry.
+        # new_string is deliberately left verbatim: it is the model's intended
+        # replacement text, which is normally authored raw — de-guttering it
+        # would silently delete a legitimate leading "digits<TAB>" (e.g. TSV).
+        # A stray gutter pasted into new_string surfaces as a visible wrong
+        # edit the model can fix, never silent data loss.
+        if old_string not in content:
+            destriped = _strip_line_gutters(old_string)
+            if destriped != old_string and destriped in content:
+                old_string = destriped
         if old_string not in content:
             # Provide helpful debugging info
             old_preview = old_string[:100] + ("..." if len(old_string) > 100 else "")
@@ -204,10 +238,12 @@ def register_edit_tools(mcp: FastMCP) -> None:
                 }
             )
 
-        # Write back to file
+        # Write back to file, restoring the original encoding, BOM, and line
+        # ending (new_content is LF; encode_from_lf re-applies the file's shape).
         try:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(new_content)
+            with open(file_path, "wb") as f:
+                f.write(encode_from_lf(new_content, file_shape))
+            record_read(file_path)  # our write is the new read baseline
         except Exception as e:
             logger.error(f"Error writing file {file_path}: {str(e)}", exc_info=True)
             return json.dumps(

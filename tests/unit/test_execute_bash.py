@@ -13,7 +13,11 @@ import time
 
 import pytest
 
-from mnemoai.server.tools.execute_bash import register_execute_bash_tools
+from mnemoai.server.tools.execute_bash import (
+    MAX_OUTPUT_CHARS,
+    _truncate_output,
+    register_execute_bash_tools,
+)
 
 
 class _CapturingMCP:
@@ -87,3 +91,37 @@ class TestExecuteBash:
         finally:
             if os.path.exists(marker):
                 os.remove(marker)
+
+
+class TestOutputCap:
+    """execute_bash caps the output it RETURNS (server-side, before the result
+    leaves the tool) so a chatty command can't blow up the token/context budget."""
+
+    def test_truncate_leaves_small_output_untouched(self):
+        small = "hello\nworld\n"
+        assert _truncate_output(small) == small
+
+    def test_truncate_caps_large_output_and_keeps_head_and_tail(self):
+        big = "A" * 20_000 + "B" * 20_000  # 40k > MAX_OUTPUT_CHARS (30k)
+        out = _truncate_output(big)
+        assert len(out) <= MAX_OUTPUT_CHARS  # true ceiling (marker counted in)
+        assert out.startswith("A")
+        assert out.endswith("B")  # tail preserved (often the status/error)
+        assert "output truncated" in out
+
+    def test_truncate_is_a_true_ceiling_for_small_overflow(self):
+        # Just-over-cap input must not GROW past the cap once the marker is added.
+        big = "x" * (MAX_OUTPUT_CHARS + 1)
+        out = _truncate_output(big)
+        assert len(out) <= MAX_OUTPUT_CHARS
+
+    def test_execute_bash_return_is_bounded(self, execute_bash):
+        # 100k of output must come back bounded at the cap, not verbatim.
+        result = json.loads(run(execute_bash("yes A | head -c 100000", timeout=10)))
+        assert len(result["stdout"]) <= MAX_OUTPUT_CHARS  # true ceiling
+        assert "output truncated" in result["stdout"]
+
+    def test_execute_bash_small_output_verbatim(self, execute_bash):
+        result = json.loads(run(execute_bash("echo hi", timeout=5)))
+        assert result["stdout"].strip() == "hi"
+        assert "truncated" not in result["stdout"]
