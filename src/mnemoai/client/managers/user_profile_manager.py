@@ -324,7 +324,6 @@ class UserProfileManager:
 
         # === VERBOSITY ===
         # Short messages (< 50 chars) = concise, long (> 200) = detailed
-        verbosity_signal = 0.0
         if len(content) < 50:
             verbosity_signal = 0.0
         elif len(content) > 200:

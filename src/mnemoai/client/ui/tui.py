@@ -568,16 +568,6 @@ class PinnedPromptReader:
         self._queue.put_nowait(text)
         return False
 
-    def _echo_steered(self, text: str) -> None:
-        """Echo a steered message to scrollback (dim), acknowledging it was folded
-        into the running turn rather than queued as a separate turn."""
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                lambda: run_in_terminal(
-                    lambda: print(f"\033[90m> {text}  (steering →)\033[0m")
-                )
-            )
-
     def run(self) -> None:
         """Run the pinned REPL (sync entry) under ``patch_stdout`` until dispatch
         exits or Ctrl+C/Ctrl+D; re-raises KeyboardInterrupt/EOFError to the caller."""
@@ -614,23 +604,23 @@ class PinnedPromptReader:
         finally:
             worker.cancel()
 
-    def confirm_ui(self, header: str, detail: str, category: str) -> str:
-        """In-app y/N/a confirmation (from the worker thread).
+    def _await_confirm(self, prompt: str, keys: str, echo, default: str = "no") -> str:
+        """Block the worker thread on a pinned confirm prompt until a key is set.
 
-        ``input()`` can't read while the app owns stdin in raw mode, so this
-        shows the prompt in the status region, arms the y/n/a bindings, and blocks
-        the worker on an ``Event`` until a key is pressed. Returns yes|no|all.
+        Owns the whole order-sensitive lifecycle shared by :meth:`confirm_ui` and
+        :meth:`plan_approval_ui`: build the Event/result, arm the pinned
+        prompt+keys and the ``_answer`` callback, marshal the ``echo`` callable to
+        scrollback (wrapped in ``run_in_terminal`` on the app loop) + invalidate,
+        wait, then tear down the pending state. Returns the key that was pressed
+        (or ``default`` if the app/loop is gone before arming).
         """
         import threading
 
-        if self._app is None or self._loop is None:
-            return "no"
-
         done = threading.Event()
-        result = {"value": "no"}
+        result = {"value": default}
 
-        self._confirm_prompt = header
-        self._confirm_keys = "[y = yes · n = no · a = allow all]"
+        self._confirm_prompt = prompt
+        self._confirm_keys = keys
 
         def _answer(value: str) -> None:
             result["value"] = value
@@ -641,19 +631,31 @@ class PinnedPromptReader:
 
         self._confirm_answer = _answer
         self._confirm_pending = True
-        # Echo only the header + detail (the command/content) to scrollback; the
-        # options hint lives in the pinned line, so don't duplicate it here.
-        self._loop.call_soon_threadsafe(
-            lambda: run_in_terminal(
-                lambda: print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
-            )
-        )
+        self._loop.call_soon_threadsafe(lambda: run_in_terminal(echo))
         self._loop.call_soon_threadsafe(self._app.invalidate)
 
         done.wait()
         self._confirm_pending = False
         self._confirm_answer = None
         return result["value"]
+
+    def confirm_ui(self, header: str, detail: str, category: str) -> str:
+        """In-app y/N/a confirmation (from the worker thread).
+
+        ``input()`` can't read while the app owns stdin in raw mode, so this
+        shows the prompt in the status region, arms the y/n/a bindings, and blocks
+        the worker on an ``Event`` until a key is pressed. Returns yes|no|all.
+        """
+        if self._app is None or self._loop is None:
+            return "no"
+
+        # Echo only the header + detail (the command/content) to scrollback; the
+        # options hint lives in the pinned line, so don't duplicate it here.
+        return self._await_confirm(
+            header,
+            "[y = yes · n = no · a = allow all]",
+            lambda: print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m"),
+        )
 
     def plan_approval_ui(self, plan: str) -> tuple:
         """Present a finished plan and capture the user's decision (worker thread).
@@ -665,27 +667,10 @@ class PinnedPromptReader:
         (via :meth:`run_dialog`), then re-prompts with the edited text. Returns
         ``(verdict, plan)`` where verdict is ``"approve"|"keep_planning"`` and
         plan is the (possibly edited) text to use."""
-        import threading
-
         if self._app is None or self._loop is None:
             return ("approve", plan)
 
         while True:
-            done = threading.Event()
-            result = {"value": "approve"}
-
-            self._confirm_prompt = "▶ Approve this plan?"
-            self._confirm_keys = "[y = approve & run · e = edit · n = keep planning]"
-
-            def _answer(value: str) -> None:
-                result["value"] = value
-                self._confirm_prompt = None
-                self._confirm_keys = None
-                done.set()
-                self._app.invalidate()
-
-            self._confirm_answer = _answer
-            self._confirm_pending = True
             try:
                 cols = max(40, min(100, shutil.get_terminal_size().columns - 4))
             except Exception:
@@ -693,15 +678,12 @@ class PinnedPromptReader:
             # Echo only the plan block to scrollback; the actionable prompt +
             # options live in the pinned line (no duplicate hint).
             block = turn_view.render_plan(plan, width=cols)
-            self._loop.call_soon_threadsafe(
-                lambda b=block: run_in_terminal(lambda: print(f"\n{b}\n"))
+            verdict = self._await_confirm(
+                "▶ Approve this plan?",
+                "[y = approve & run · e = edit · n = keep planning]",
+                lambda b=block: print(f"\n{b}\n"),
+                default="approve",
             )
-            self._loop.call_soon_threadsafe(self._app.invalidate)
-
-            done.wait()
-            self._confirm_pending = False
-            self._confirm_answer = None
-            verdict = result["value"]
 
             if verdict == "edit":
                 # Drop the app, edit the plan in $EDITOR, then re-prompt.

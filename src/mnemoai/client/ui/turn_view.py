@@ -185,10 +185,17 @@ def _diff_lines(old: str, new: str) -> list:
     return out
 
 
+def _update_block(path: str, summary: str, old: str, new: str) -> str:
+    """``Update(path)`` header + gray summary line + red/green old→new diff."""
+    header = f"{_HEADER}{_BOLD}Update{_RESET}{_HEADER}({path}){_RESET}"
+    lines = [header, f"  {_GRAY}{summary}{_RESET}"]
+    lines.extend(_diff_lines(old, new))
+    return "\n".join(lines)
+
+
 def render_file_edit(args: dict) -> str:
     """``Update(path)`` block with a red/green old→new diff."""
     path = _short_path(args.get("file_path", ""))
-    header = f"{_HEADER}{_BOLD}Update{_RESET}{_HEADER}({path}){_RESET}"
     old = str(args.get("old_string", ""))
     new = str(args.get("new_string", ""))
     if not old and new:
@@ -197,9 +204,7 @@ def render_file_edit(args: dict) -> str:
         summary = "deleted text"
     else:
         summary = "replaced text"
-    lines = [header, f"  {_GRAY}{summary}{_RESET}"]
-    lines.extend(_diff_lines(old, new))
-    return "\n".join(lines)
+    return _update_block(path, summary, old, new)
 
 
 def render_fs_write(args: dict) -> str:
@@ -222,10 +227,12 @@ def render_fs_write(args: dict) -> str:
         return "\n".join(lines)
 
     if command == "str_replace":
-        header = f"{_HEADER}{_BOLD}Update{_RESET}{_HEADER}({path}){_RESET}"
-        lines = [header, f"  {_GRAY}replaced text{_RESET}"]
-        lines.extend(_diff_lines(str(args.get("old_str", "")), str(args.get("new_str", ""))))
-        return "\n".join(lines)
+        return _update_block(
+            path,
+            "replaced text",
+            str(args.get("old_str", "")),
+            str(args.get("new_str", "")),
+        )
 
     # insert / append: show the added text as green lines.
     verb = "Insert" if command == "insert" else "Append"

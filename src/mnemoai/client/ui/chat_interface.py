@@ -20,6 +20,7 @@ from mnemoai.client.memory.skill_store import SkillStore
 from mnemoai.client.ui.tui import (
     _DELETE,
     PinnedPromptReader,
+    _dialog_is_tty,
     _ExitRepl,
     confirm_dialog,
     confirm_inline,
@@ -180,6 +181,21 @@ class ChatInterface:
         row(f"{C['dim']}Ctrl+J{C['reset']} for new lines · {C['dim']}Enter{C['reset']} to submit")
         print(bot + "\n")
 
+    def _store_success_episode(self, task: str, tools_used: list) -> None:
+        """Persist a successful episode and record the profiling outcome.
+
+        The shared tail of both storage paths (legacy-delayed + immediate): store
+        the episode, then, when profiling is on, classify the task's intent and
+        record the tool outcome. ``task`` is the same value used for both.
+        """
+        self.client.episodic_memory.store_episode(
+            task=task, tools_used=tools_used, outcome="success"
+        )
+        logger.debug("✓ Episode stored successfully")
+        if config.get("PROFILE", {}).get("USE_PROFILING", False):
+            intent = self.client.profile_manager.classify_intent(task)
+            self.client.profile_manager.record_tool_outcome(intent, tools_used, True)
+
     def __store_episode_in_episodic_memory(self, query: str) -> None:
         """Store the PREVIOUS interaction in episodic memory if successful (legacy
         delayed mode — evaluated when the next query arrives)."""
@@ -227,18 +243,7 @@ class ChatInterface:
                     f"Conversation length: {len(self.client.previous_messages)} messages"
                 )
 
-                self.client.episodic_memory.store_episode(
-                    task=initial_query,
-                    tools_used=tools_used,
-                    outcome="success",
-                )
-                logger.debug("✓ Episode stored successfully")
-
-                if config.get("PROFILE", {}).get("USE_PROFILING", False):
-                    intent = self.client.profile_manager.classify_intent(initial_query)
-                    self.client.profile_manager.record_tool_outcome(
-                        intent, tools_used, True
-                    )
+                self._store_success_episode(initial_query, tools_used)
             else:
                 logger.debug(
                     "✗ Previous task not marked as successful - skipping storage"
@@ -273,16 +278,7 @@ class ChatInterface:
             logger.debug("✓ Task marked as successful - storing immediately")
             logger.debug(f"Tools used: {[t.get('name') for t in tools_used]}")
 
-            self.client.episodic_memory.store_episode(
-                task=query, tools_used=tools_used, outcome="success"
-            )
-            logger.debug("✓ Episode stored successfully (immediate mode)")
-
-            if config.get("PROFILE", {}).get("USE_PROFILING", False):
-                intent = self.client.profile_manager.classify_intent(query)
-                self.client.profile_manager.record_tool_outcome(
-                    intent, tools_used, True
-                )
+            self._store_success_episode(query, tools_used)
         else:
             logger.debug("✗ Task not marked as successful - skipping storage")
 
@@ -464,11 +460,8 @@ class ChatInterface:
         (:meth:`_plain_loop`); both dispatch via :meth:`_dispatch`."""
         self.__welcome_message()
 
-        is_tty = (
-            hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
-            and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
-        )
-        if is_tty:
+        # Same "real interactive terminal" predicate the dialogs use.
+        if _dialog_is_tty():
             self._run_pinned_loop()
         else:
             self._plain_loop()
@@ -483,16 +476,10 @@ class ChatInterface:
                 query = input("> ")
                 interrupt_count = 0
             except (KeyboardInterrupt, EOFError):
-                current_time = time.time()
-                if current_time - last_interrupt_time > 2:
-                    interrupt_count = 0
-                interrupt_count += 1
-                last_interrupt_time = current_time
-                if interrupt_count == 1:
-                    print(
-                        "\n\033[97m(To exit, press Ctrl+C or Ctrl+D again or type "
-                        "\033[92m/quit\033[97m)\033[0m"
-                    )
+                interrupt_count, last_interrupt_time, should_exit = (
+                    self._note_interrupt(interrupt_count, last_interrupt_time)
+                )
+                if not should_exit:
                     continue
                 print("\nExiting...")
                 try:
@@ -515,8 +502,6 @@ class ChatInterface:
         instead of writing ``\\r`` (which would fight the pinned redraw).
         Ctrl+C / Ctrl+D twice exits.
         """
-        import time
-
         from mnemoai.client.ui.spinner import (
             Spinner,
             SpinnerStatus,
@@ -612,16 +597,10 @@ class ChatInterface:
                 reader.run()
                 break  # dispatch returned _ExitRepl
             except (KeyboardInterrupt, EOFError):
-                current_time = time.time()
-                if current_time - last_interrupt_time > 2:
-                    interrupt_count = 0
-                interrupt_count += 1
-                last_interrupt_time = current_time
-                if interrupt_count == 1:
-                    print(
-                        "\n\033[97m(To exit, press Ctrl+C or Ctrl+D again or type "
-                        "\033[92m/quit\033[97m)\033[0m"
-                    )
+                interrupt_count, last_interrupt_time, should_exit = (
+                    self._note_interrupt(interrupt_count, last_interrupt_time)
+                )
+                if not should_exit:
                     continue
                 print("\nExiting...")
                 break
@@ -629,6 +608,26 @@ class ChatInterface:
             self.client.clear_context()
         except KeyboardInterrupt:
             pass
+
+    @staticmethod
+    def _note_interrupt(count: int, last_time: float) -> tuple:
+        """Advance the double-tap exit counter on a Ctrl+C/Ctrl+D.
+
+        Returns ``(new_count, now, should_exit)``: the first press within the
+        2-second window prints the hint and does NOT exit; a second press does.
+        Shared by both REPL loops so the hint text lives once.
+        """
+        now = time.time()
+        if now - last_time > 2:
+            count = 0
+        count += 1
+        if count == 1:
+            print(
+                "\n\033[97m(To exit, press Ctrl+C or Ctrl+D again or type "
+                "\033[92m/quit\033[97m)\033[0m"
+            )
+            return count, now, False
+        return count, now, True
 
     def _dispatch(self, query: str):
         """Handle one submitted line (slash command or query); returns

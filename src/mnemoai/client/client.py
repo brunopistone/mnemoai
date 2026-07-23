@@ -216,21 +216,17 @@ class LangGraphClient:
             if profile_summary:
                 system_prompt = f"{system_prompt}\n\n{profile_summary}"
 
-        # Curated persistent memory (MEMORY.md), injected whole at session start.
-        memory_context = self._inject_memory_context()
-        if memory_context:
-            system_prompt = f"{system_prompt}\n\n{memory_context}"
-
-        # Tier-1 skill metadata (name+description) for the use_skill tool.
-        skills_context = self._inject_skills_context()
-        if skills_context:
-            system_prompt = f"{system_prompt}\n\n{skills_context}"
-
-        # Available sub-agent types (built-in + custom) for the spawn_agent tool,
-        # so the model can discover custom agents from ~/.mnemoai/agents/.
-        subagents_context = self._inject_subagents_context()
-        if subagents_context:
-            system_prompt = f"{system_prompt}\n\n{subagents_context}"
+        # Optional leading blocks, appended in order when non-empty:
+        #   MEMORY.md (curated persistent memory, injected whole at session start),
+        #   skill metadata (name+description for use_skill),
+        #   sub-agent types (built-in + custom, for spawn_agent discovery).
+        for block in (
+            self._inject_memory_context(),
+            self._inject_skills_context(),
+            self._inject_subagents_context(),
+        ):
+            if block:
+                system_prompt = f"{system_prompt}\n\n{block}"
 
         return system_prompt
 
@@ -781,20 +777,6 @@ class LangGraphClient:
 
         return self.playbook.format_for_prompt(entries) if entries else ""
 
-    def _inject_playbook_context(self, prompt: str) -> str:
-        """Prepend task-specific playbook strategies to the prompt."""
-        relevant_entries = self.playbook.get_relevant_entries(
-            task=prompt,
-            top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
-            include_failures=True,
-        )
-
-        if relevant_entries:
-            playbook_text = self.playbook.format_for_prompt(relevant_entries)
-            return f"{playbook_text}\n\n{prompt}"
-
-        return prompt
-
     def _get_conversation_context(self) -> str:
         """Concatenated text from the recent conversation messages."""
         if not self.agent or not self.agent.messages:
@@ -1078,6 +1060,18 @@ class LangGraphClient:
             pass
         return None
 
+    def _repoint_session(self, pointer_path, flush_fn) -> None:
+        """Sweep this instance's own prior-session artifact, then claim the pointer.
+
+        Sweeps BEFORE repointing (safe: ``session_id`` is instance-unique, so the
+        swept artifact is never a concurrent sibling's), then writes the current
+        ``session_id`` so the next run can find and sweep this one.
+        """
+        prev = self._prev_session_from_pointer(pointer_path)
+        if prev is not None:
+            flush_fn(prev)
+        pointer_path.write_text(self.session_id)
+
     def _initialize_rag_session(self) -> None:
         """Initialize RAG session at application startup.
 
@@ -1088,13 +1082,7 @@ class LangGraphClient:
             profile_dir()  # ensure the dir exists
 
             # Per-instance pointer so concurrent tabs don't overwrite each other.
-            session_file = rag_session_pointer_path()
-            # Sweep this instance's own prior-session store BEFORE repointing
-            # (safe: session_id is instance-unique, so this is never a sibling's).
-            prev = self._prev_session_from_pointer(session_file)
-            if prev is not None:
-                self._flush_rag_store(prev)
-            session_file.write_text(self.session_id)
+            self._repoint_session(rag_session_pointer_path(), self._flush_rag_store)
 
             logger.debug(f"RAG session initialized: {self.session_id}")
         except Exception as e:
@@ -1111,13 +1099,9 @@ class LangGraphClient:
             rag_dir = str(profile_dir())
 
             # Per-instance pointer so concurrent tabs don't overwrite each other.
-            pointer = chunk_session_pointer_path()
-            # Sweep this instance's own prior-session cache BEFORE repointing
-            # (safe: session_id is instance-unique, so this is never a sibling's).
-            prev = self._prev_session_from_pointer(pointer)
-            if prev is not None:
-                self._flush_chunk_cache_store(prev)
-            pointer.write_text(self.session_id)
+            self._repoint_session(
+                chunk_session_pointer_path(), self._flush_chunk_cache_store
+            )
 
             db_path = os.path.join(rag_dir, f"chunk_cache_{self.session_id}.db")
             conn = sqlite3.connect(db_path)

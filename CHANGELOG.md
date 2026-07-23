@@ -9,6 +9,49 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.6.4] — 2026-07-23
+
+Internal cleanup of the `client/` tree (no public-surface change): a verified
+dead-code sweep + behavior-preserving simplifications, net ≈ −120 LOC. Every
+change was adversarially verified to preserve behavior.
+
+### Fixed
+
+- **Episodic ChromaDB lost its embedding-model fingerprint on clear/reconnect.**
+  `ChromaEpisodicStore.clear()` and the moved-DB `_reconnect()` recreated the
+  collection with only a description, dropping the `embed_fingerprint` stamp that
+  the normal create path adds — so a cleared or reconnected store silently
+  reverted to the legacy un-fingerprinted path on the next open. Both now recreate
+  through `_create_collection()`, keeping the stamp consistent.
+
+### Removed
+
+- **Dead methods with no remaining callers** (verified against dynamic dispatch,
+  framework contracts, tests, and prompts): `LangGraphAgent.get_thinking` /
+  `has_pending_background`; `LangGraphClient._inject_playbook_context` (superseded
+  by `_get_playbook_context`); `PinnedPromptReader._echo_steered` (orphaned by the
+  retired UI-steering path); `MCPClientWrapper.get_tools` / `MultiMCPClient.get_tools`
+  (superseded by `list_tools_sync`); `Reflector.get_metrics` /
+  `PlaybookEntry.to_prompt_text` / `Reflector._extract_tool_results`; and the
+  write-only `_context_depth` counter in `MCPClientWrapper`.
+
+### Changed
+
+- **De-duplicated client-side code without changing behavior.** The client-side
+  tool-interception (`exit_plan_mode`/`spawn_agent`/`resume_agent`) was copy-pasted
+  across both tool chokepoints — now one `_client_side_tool_message` helper (the
+  `_execute_tools` path still reuses a batched parallel-spawn result; the worker
+  path still runs inline). The last-HumanMessage-query scan (3 copies), the
+  sub-agent result footer (2 copies), the block-on-Event confirm state machine
+  (`confirm_ui`/`plan_approval_ui` → `_await_confirm`), the double-Ctrl+C exit
+  counter (both REPL loops → `_note_interrupt`), the episodic-store success tail
+  (`_store_success_episode`), the compaction per-message loop (`_summary_texts`),
+  the prior-session sweep (`_repoint_session`), the system-prompt block append,
+  the TTY-detection predicate, the spinner frames, and the `turn_view` Update-diff
+  header were each consolidated to a single source. Also corrected a misleading
+  comment in `subagents.py` (the denylist uses `_parse_denylist` with inverse
+  `*`/`all` semantics, not `_parse_tools`).
+
 ## [1.6.3] — 2026-07-23
 
 ### Fixed

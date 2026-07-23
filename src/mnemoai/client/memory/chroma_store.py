@@ -216,10 +216,9 @@ class ChromaEpisodicStore:
             try:
                 self.collection = self.client.get_collection(name="episodic_memory")
             except Exception:
-                self.collection = self.client.create_collection(
-                    name="episodic_memory",
-                    metadata={"description": "Task solutions with tool usage patterns"},
-                )
+                # Stamp the fingerprint like the normal create path (else the next
+                # open takes the legacy un-fingerprinted branch).
+                self.collection = self._create_collection()
             logger.info("Reconnected episodic ChromaDB after a moved-DB error")
             return True
         except Exception as e:
@@ -357,10 +356,9 @@ class ChromaEpisodicStore:
     def clear(self) -> None:
         """Clear all episodes."""
         self.client.delete_collection("episodic_memory")
-        self.collection = self.client.create_collection(
-            name="episodic_memory",
-            metadata={"description": "Task solutions with tool usage patterns"},
-        )
+        # Recreate through _create_collection so the fingerprint stamp is kept
+        # (a bare create would leave the collection on the legacy un-stamped path).
+        self.collection = self._create_collection()
         self.metadatas = []
         self.bm25 = None
         logger.info("Cleared episodic memory collection")

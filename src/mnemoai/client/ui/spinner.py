@@ -2,6 +2,10 @@ import sys
 import threading
 import time
 
+# Braille frames shared by the stdout animation (Spinner._spin) and the
+# pinned-toolbar renderer (spinner_toolbar_text).
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
 
 class SpinnerStatus:
     """Thread-safe status shared between the ``Spinner`` (worker thread) and the
@@ -72,19 +76,15 @@ class Spinner:
 
     def _spin(self) -> None:
         """Spinner animation (stdout mode only)."""
-        chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         i = 0
         while self.spinning:
             dots = "." * ((i // 3) % 4)
+            frame = _SPINNER_FRAMES[i % len(_SPINNER_FRAMES)]
             # Clear the line first so a shorter label doesn't leave stale chars.
-            sys.stdout.write(f"\r\033[K{chars[i % len(chars)]} {self.label}{dots}")
+            sys.stdout.write(f"\r\033[K{frame} {self.label}{dots}")
             sys.stdout.flush()
             time.sleep(0.1)
             i += 1
-
-
-# Braille frames shared by the stdout animation and the pinned-toolbar renderer.
-_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 
 def spinner_toolbar_text(status: SpinnerStatus) -> str:

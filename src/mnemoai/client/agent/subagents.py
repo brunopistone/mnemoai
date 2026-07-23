@@ -266,7 +266,9 @@ def _load_custom_subagents(root: Optional[Path] = None) -> List[SubAgentType]:
             continue
         name = str(front.get("name", "") or entry.stem).strip().lower()
         # Optional per-agent denylist (accept hyphen or underscore) and model
-        # override; both tolerant (absent -> None). Denylist reuses _parse_tools.
+        # override; both tolerant (absent -> None). The denylist uses its own
+        # _parse_denylist with INVERSE '*'/'all' semantics (deny-everything, not
+        # deny-nothing) — not _parse_tools.
         disallowed = _parse_denylist(
             front.get("disallowed_tools") or front.get("disallowed-tools")
         )
