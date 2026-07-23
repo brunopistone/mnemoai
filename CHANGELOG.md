@@ -9,6 +9,43 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.6.3] — 2026-07-23
+
+### Fixed
+
+- **Orchestrated tasks lost the conversation history.** A task routed to the
+  orchestrator (decompose → workers) only ever saw the current query — the prior
+  conversation was discarded. So a context-dependent follow-up ("write the issue
+  to a file", "fix it") was decomposed and executed with no idea what "the
+  issue"/"it" referred to, and the worker fabricated content (e.g. a placeholder
+  file instead of the just-drafted GitHub issue). The decomposer and every worker
+  now receive the **real prior messages** — the same conversation the main agent
+  sees — inserted between their system prompt and the current subtask. The
+  history is **uncapped** (it's already bounded to the model window by the
+  compaction layer, so an extra cap would be redundant and could drop the very
+  turn a follow-up refers to) and tool-pair-repaired so strict providers don't
+  reject it. Spawned sub-agents (`spawn_agent`/`resume_agent`) keep their
+  deliberate context isolation — only the orchestrator threads history in.
+
+### Changed
+
+- **The orchestrator no longer runs a degenerate single-subtask worker.**
+  Decomposition now happens in its own graph node (`decompose`) placed between
+  the classifier and the agent-vs-orchestrator branch, and the route is chosen on
+  the **actual subtask count**: a task that decomposes to one atomic step (the
+  old "Step 1/1") falls back to the normal streaming `agent` — full toolset,
+  native conversation history, live token stream — instead of a hidden quiet
+  worker whose output only surfaced at the end. Only a genuine multi-step plan
+  (≥2 subtasks) is owned by the orchestrator. Trivial and plan-execution turns
+  skip decomposition entirely (no extra LLM call), and direct `_orchestrate`
+  callers still decompose internally, so nothing that reaches the orchestrator
+  another way changes.
+- **Clarified in the system prompt that decomposition is framework-driven.** The
+  model is now told that multi-part requests are split into steps automatically
+  before its turn — there is no "orchestrator" tool to call — so `spawn_agent`
+  stays clearly framed as the model's own delegation/parallelism tool, distinct
+  from the framework's task decomposition.
+
 ## [1.6.2] — 2026-07-22
 
 Compaction was firing far too early and taking minutes on a large-window,
