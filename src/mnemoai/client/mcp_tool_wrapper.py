@@ -148,7 +148,6 @@ class MCPClientWrapper:
         self.server_params = server_params
         self._tools: List[MCPToolWrapper] = []
         self._connected = False
-        self._context_depth = 0
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
@@ -163,12 +162,11 @@ class MCPClientWrapper:
         if not self._connected:
             self._start_background_loop()
             self._run_coroutine(self._connect())
-        self._context_depth += 1
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Sync context manager exit."""
-        self._context_depth -= 1
+        """Sync context manager exit (teardown deferred to atexit shutdown)."""
+        return False
 
     def _start_background_loop(self) -> None:
         """Start a background thread with its own event loop."""
@@ -361,14 +359,6 @@ class MCPClientWrapper:
             json.dumps(result, default=str) if not isinstance(result, str) else result
         )
 
-    def get_tools(self) -> List[MCPToolWrapper]:
-        """Get the cached list of tools.
-
-        Returns:
-            List of LangChain-compatible tool wrappers
-        """
-        return self._tools
-
     def shutdown(self) -> None:
         """Shutdown the background loop and disconnect.
 
@@ -475,10 +465,6 @@ class MultiMCPClient:
                 seen.add(display)
                 merged.append(tool)
         self._tools = merged
-        return self._tools
-
-    def get_tools(self) -> List[MCPToolWrapper]:
-        """Return the cached merged tool list."""
         return self._tools
 
     def shutdown(self) -> None:

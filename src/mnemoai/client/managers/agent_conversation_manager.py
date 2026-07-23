@@ -366,6 +366,19 @@ class AgentConversationManager:
         tail = text[-cap // 2:]
         return f"{head}\n…[{len(text) - cap} chars elided]…\n{tail}"
 
+    def _summary_texts(self, messages: List[Dict]):
+        """Yield ``(role, text)`` for each summarizable message.
+
+        Shared by both :meth:`_summarize_batch` branches: extracts the text,
+        truncates it (head+tail so one giant message can't overflow), and skips
+        empties. ``_truncate_msg_text`` returns "" unchanged and non-empty input
+        unchanged, so pre- vs post-truncate empty checks select the same messages.
+        """
+        for msg in messages:
+            text = self._truncate_msg_text(self._message_text_for_summary(msg))
+            if text:
+                yield msg.get("role", "user"), text
+
     async def _summarize_batch(
         self,
         messages: List[Dict],
@@ -389,12 +402,7 @@ class AgentConversationManager:
             if prior_summary:
                 lc_messages.append(SystemMessage(content=prior_summary))
 
-            for msg in messages:
-                role = msg.get("role")
-                content = self._message_text_for_summary(msg)
-                if not content:
-                    continue
-                content = self._truncate_msg_text(content)
+            for role, content in self._summary_texts(messages):
                 if role == "assistant":
                     lc_messages.append(AIMessage(content=content))
                 else:
@@ -404,13 +412,10 @@ class AgentConversationManager:
             response = await model.ainvoke(lc_messages)
             summary_response = str(response.content)
         else:
-            # Truncate oversized message text so one giant message can't overflow.
-            batch = []
-            for msg in messages:
-                text = self._truncate_msg_text(self._message_text_for_summary(msg))
-                if text:
-                    batch.append({"role": msg.get("role", "user"),
-                                  "content": [{"text": text}]})
+            batch = [
+                {"role": role, "content": [{"text": text}]}
+                for role, text in self._summary_texts(messages)
+            ]
             batch.append({"role": "user", "content": [{"text": summary_prompt}]})
             think_param = config.get("LLM", {}).get("SUMMARIZATION_THINK", False)
             system_prompt = self._SUMMARY_SYSTEM_PROMPT

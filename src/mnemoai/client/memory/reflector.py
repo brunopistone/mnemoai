@@ -39,11 +39,6 @@ class PlaybookEntry:
             "timestamp": self.timestamp,
         }
 
-    def to_prompt_text(self) -> str:
-        """Format for injection into system prompt."""
-        prefix = "✓" if self.outcome == "success" else "✗"
-        return f"{prefix} [{self.context}]: {self.strategy}"
-
 
 class Reflector:
     """Analyzes execution trajectories and extracts strategies."""
@@ -83,18 +78,6 @@ class Reflector:
                     json.dump(self.metrics, f, indent=2)
             except Exception as e:
                 logger.error(f"Failed to save metrics: {e}")
-
-    def get_metrics(self) -> Dict[str, Any]:
-        """Get current metrics with success rate."""
-        success_rate = 0.0
-        if self.metrics["total_tool_calls"] > 0:
-            success_rate = (
-                self.metrics["successful_calls"] / self.metrics["total_tool_calls"]
-            )
-        return {
-            **self.metrics,
-            "success_rate": round(success_rate, 3),
-        }
 
     # Patterns that indicate specific failure types
     FAILURE_PATTERNS = {
@@ -424,13 +407,6 @@ class Reflector:
                 }
                 for tc in msg.tool_calls
             ]
-        return []
-
-    def _extract_tool_results(self, msg: Any) -> List[str]:
-        """Extract tool results from a message."""
-        if hasattr(msg, "type") and msg.type == "tool":
-            content = getattr(msg, "content", "")
-            return [content] if content else []
         return []
 
     def _find_tool_result(

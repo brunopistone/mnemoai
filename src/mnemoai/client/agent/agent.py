@@ -519,6 +519,14 @@ class LangGraphAgent:
         workflow.add_edge("tools", "agent")
         return workflow.compile()
 
+    @staticmethod
+    def _last_human_query(messages: Sequence[BaseMessage]) -> str:
+        """The content of the most recent HumanMessage, or "" if there is none."""
+        for msg in reversed(messages or []):
+            if isinstance(msg, HumanMessage):
+                return str(msg.content)
+        return ""
+
     def _route_after_classify(self, state: AgentState) -> str:
         """Send a non-trivial 'full' task to the ``decompose`` node; everything
         else straight to the streaming agent.
@@ -535,11 +543,7 @@ class LangGraphAgent:
         if getattr(self, "_execute_plan_route", False):
             return "agent"
         if state.get("route") == "full":
-            query = ""
-            for msg in reversed(state.get("messages", [])):
-                if isinstance(msg, HumanMessage):
-                    query = str(msg.content)
-                    break
+            query = self._last_human_query(state.get("messages", []))
             if not is_trivial_query(query):
                 return "decompose"
         return "agent"
@@ -616,11 +620,7 @@ class LangGraphAgent:
         conversation history stays pristine if the turn falls back to ``agent``.
         """
         messages = state["messages"]
-        query = ""
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                query = str(msg.content)
-                break
+        query = self._last_human_query(messages)
         if not query:
             return {"subtasks": []}
         # Same real prior history the workers get, so references resolve.
@@ -638,12 +638,7 @@ class LangGraphAgent:
         """Decompose the task into subtasks, run a worker per subtask, aggregate."""
         messages = state["messages"]
         # Extract user query (skip system prompt).
-        query = ""
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                query = str(msg.content)
-                break
-
+        query = self._last_human_query(messages)
         if not query:
             return {"messages": [AIMessage(content="No query found.")]}
 
@@ -1064,56 +1059,13 @@ class LangGraphAgent:
                 tool_id = tc["id"]
                 tool_args = self._normalize_tool_args(tc["args"])
 
-                # exit_plan_mode is handled client-side (approval), not via MCP.
-                if tool_name == "exit_plan_mode":
-                    worker_messages.append(
-                        ToolMessage(
-                            content=self._handle_exit_plan_mode(
-                                str(tool_args.get("plan", "")),
-                                tool_args.get("allowed_bash"),
-                            ),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-                    continue
-
-                # spawn_agent handled client-side (a nested sub-agent's tool set
-                # excludes it, so this only fires for a top-level orchestrator
-                # worker).
-                if tool_name == "spawn_agent":
-                    worker_messages.append(
-                        ToolMessage(
-                            content=self._handle_spawn_agent(
-                                str(tool_args.get("agent_type", "")),
-                                str(tool_args.get("prompt", "")),
-                                str(tool_args.get("description", "")),
-                                run_in_background=tool_args.get(
-                                    "run_in_background", True
-                                ),
-                            ),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-                    continue
-
-                # resume_agent is client-side too (a stub tool); handle it here so
-                # the orchestrator/worker path can resume, not just _execute_tools.
-                if tool_name == "resume_agent":
-                    worker_messages.append(
-                        ToolMessage(
-                            content=self._handle_resume_agent(
-                                str(tool_args.get("agent_id", "")),
-                                str(tool_args.get("prompt", "")),
-                                run_in_background=tool_args.get(
-                                    "run_in_background", True
-                                ),
-                            ),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
+                # exit_plan_mode / spawn_agent / resume_agent are client-side stubs
+                # (no batch here — a worker runs any spawn inline).
+                client_msg = self._client_side_tool_message(
+                    tool_name, tool_args, tool_id
+                )
+                if client_msg is not None:
+                    worker_messages.append(client_msg)
                     continue
 
                 tool = next((t for t in worker_tools if t.name == tool_name), None)
@@ -2540,8 +2492,16 @@ class LangGraphAgent:
         # sub-agent must NOT drive its own per-tool spinner (it would race the
         # others and clobber the aggregate label). Solo spawns own the spinner.
         result = self._run_one_subagent(agent, prompt, label, drive_spinner=not in_batch)
+        return self._wrap_subagent_result(agent.name, result)
+
+    @staticmethod
+    def _wrap_subagent_result(
+        agent_name: str, result: str, resumed: bool = False
+    ) -> str:
+        """Wrap a sub-agent's report with the header + not-shown-to-user footer."""
+        header = f"[{agent_name} sub-agent result{' — resumed' if resumed else ''}]"
         return (
-            f"[{agent.name} sub-agent result]\n{result}\n\n"
+            f"{header}\n{result}\n\n"
             "(This result is not shown to the user — summarize what matters for "
             "them yourself.)"
         )
@@ -2644,11 +2604,7 @@ class LangGraphAgent:
                 flush=True,
             )
         result = self._run_one_subagent(agent, resume_prompt, label)
-        return (
-            f"[{agent.name} sub-agent result — resumed]\n{result}\n\n"
-            "(This result is not shown to the user — summarize what matters for "
-            "them yourself.)"
-        )
+        return self._wrap_subagent_result(agent.name, result, resumed=True)
 
 
     def drain_background_completions(self) -> List[BaseMessage]:
@@ -2676,11 +2632,6 @@ class LangGraphAgent:
                 )
             )
         return msgs
-
-    def has_pending_background(self) -> bool:
-        """True if any background sub-agent is still running (for UI status)."""
-        registry = getattr(self, "_bg_agents", None)
-        return registry.any_running() if registry is not None else False
 
     def has_undelivered_background(self) -> bool:
         """True if a finished background sub-agent's report hasn't been surfaced
@@ -2933,6 +2884,47 @@ class LangGraphAgent:
             return getattr(sp, "spinning", False), getattr(sp, "label", "Thinking")
         return False, "Thinking"
 
+    def _client_side_tool_message(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        tool_id: str,
+        spawn_results: Optional[Dict[str, str]] = None,
+    ) -> Optional[ToolMessage]:
+        """Dispatch the three client-side stub tools (exit_plan_mode / spawn_agent
+        / resume_agent) that are intercepted here rather than routed via MCP.
+
+        Returns the ToolMessage to append for one of those, or None if ``tool_name``
+        isn't client-side (the caller then runs it as a normal tool). When
+        ``spawn_results`` holds ``tool_id`` (a batched, possibly parallel spawn),
+        that precomputed result is used instead of spawning inline.
+        """
+        if tool_name == "exit_plan_mode":
+            content = self._handle_exit_plan_mode(
+                str(tool_args.get("plan", "")),
+                tool_args.get("allowed_bash"),
+            )
+        elif tool_name == "spawn_agent":
+            content = (
+                spawn_results[tool_id]
+                if spawn_results and tool_id in spawn_results
+                else self._handle_spawn_agent(
+                    str(tool_args.get("agent_type", "")),
+                    str(tool_args.get("prompt", "")),
+                    str(tool_args.get("description", "")),
+                    run_in_background=tool_args.get("run_in_background", True),
+                )
+            )
+        elif tool_name == "resume_agent":
+            content = self._handle_resume_agent(
+                str(tool_args.get("agent_id", "")),
+                str(tool_args.get("prompt", "")),
+                run_in_background=tool_args.get("run_in_background", True),
+            )
+        else:
+            return None
+        return ToolMessage(content=content, tool_call_id=tool_id, name=tool_name)
+
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
         """Execute the tool calls on the last AI message."""
         last_message = state["messages"][-1]
@@ -2961,59 +2953,13 @@ class LangGraphAgent:
             tool_args = self._normalize_tool_args(tool_call["args"])
             tool_id = tool_call["id"]
 
-            # exit_plan_mode is handled entirely client-side (approval prompt +
-            # flip plan mode off), not invoked through MCP.
-            if tool_name == "exit_plan_mode":
-                tool_results.append(
-                    ToolMessage(
-                        content=self._handle_exit_plan_mode(
-                            str(tool_args.get("plan", "")),
-                            tool_args.get("allowed_bash"),
-                        ),
-                        tool_call_id=tool_id,
-                        name=tool_name,
-                    )
-                )
-                continue
-
-            # spawn_agent runs a sub-agent client-side (isolated context loop),
-            # not via MCP. Use the pre-computed (possibly parallel) result if the
-            # batch ran it; else run it inline now.
-            if tool_name == "spawn_agent":
-                content = (
-                    spawn_results[tool_id]
-                    if tool_id in spawn_results
-                    else self._handle_spawn_agent(
-                        str(tool_args.get("agent_type", "")),
-                        str(tool_args.get("prompt", "")),
-                        str(tool_args.get("description", "")),
-                        run_in_background=tool_args.get("run_in_background", True),
-                    )
-                )
-                tool_results.append(
-                    ToolMessage(
-                        content=content,
-                        tool_call_id=tool_id,
-                        name=tool_name,
-                    )
-                )
-                continue
-
-            # resume_agent continues a prior sub-agent client-side.
-            if tool_name == "resume_agent":
-                tool_results.append(
-                    ToolMessage(
-                        content=self._handle_resume_agent(
-                            str(tool_args.get("agent_id", "")),
-                            str(tool_args.get("prompt", "")),
-                            run_in_background=tool_args.get(
-                                "run_in_background", True
-                            ),
-                        ),
-                        tool_call_id=tool_id,
-                        name=tool_name,
-                    )
-                )
+            # exit_plan_mode / spawn_agent / resume_agent are handled client-side
+            # (not via MCP); spawn_agent may reuse a batched parallel result.
+            client_msg = self._client_side_tool_message(
+                tool_name, tool_args, tool_id, spawn_results
+            )
+            if client_msg is not None:
+                tool_results.append(client_msg)
                 continue
 
             # Route tools first, then fall back to all tools.
@@ -3267,10 +3213,6 @@ class LangGraphAgent:
                 if text:
                     return text[:500]
         return ""
-
-    def get_thinking(self) -> Optional[str]:
-        """The thinking content from the last response, or None."""
-        return self._thinking
 
     def clear_messages(self) -> None:
         """Clear the message history."""
