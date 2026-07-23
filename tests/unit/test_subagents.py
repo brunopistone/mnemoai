@@ -714,6 +714,151 @@ class TestOrchestratorScheduling:
             "Context from completed steps" not in p for p in captured
         )
 
+    def test_history_threaded_into_each_worker(self):
+        # The real prior-message LIST is passed to each worker via history=.
+        a = self._agent()
+        seen = []
+
+        def _loop(model, tools, prompt, **kw):
+            seen.append(kw.get("history"))
+            return "R", []
+
+        a._run_worker_loop = _loop
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        hist = [HumanMessage(content="draft"), AIMessage(content="THE ISSUE")]
+        subtasks = [
+            {"description": "s0", "category": "full", "depends_on": []},
+            {"description": "s1", "category": "full", "depends_on": []},
+        ]
+        a._run_subtasks_scheduled(subtasks, hist)
+        # Every worker received the SAME real message list (not a text block).
+        assert all(h == hist for h in seen)
+
+    def test_history_default_none_no_change(self):
+        # Default None (existing callers) → workers get history=None (isolation).
+        a = self._agent()
+        seen = []
+        a._run_worker_loop = lambda model, tools, prompt, **kw: (
+            seen.append(kw.get("history")), ("R", [])
+        )[1]
+        subtasks = [{"description": "solo", "category": "full", "depends_on": []}]
+        a._run_subtasks_scheduled(subtasks)  # no history arg
+        assert seen == [None]
+
+
+class TestPriorHistory:
+    """_prior_history returns the REAL prior message list (uncapped): drops the
+    leading system prompt(s) + the trailing current-query HumanMessage, and
+    repairs tool-pairing. No text rendering, no count/token cap."""
+
+    def _agent(self):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        return a
+
+    def test_single_turn_returns_empty(self):
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        a = self._agent()
+        msgs = [SystemMessage(content="SYS"), HumanMessage(content="hi")]
+        assert a._prior_history(msgs) == []
+
+    def test_drops_system_and_current_query_keeps_prior_turns(self):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        a = self._agent()
+        prior_ai = AIMessage(content="# Title\nheterogeneous ModelTrainer bug — full issue")
+        msgs = [
+            SystemMessage(content="SYS"),
+            HumanMessage(content="draft a github issue"),
+            prior_ai,
+            HumanMessage(content="write in a .md file under ~/Desktop"),  # current
+        ]
+        hist = a._prior_history(msgs)
+        # System prompt dropped; current query dropped; prior turns kept as REAL
+        # messages (the drafted artifact survives verbatim, not truncated text).
+        assert not any(isinstance(m, SystemMessage) for m in hist)
+        assert prior_ai in hist
+        assert all(getattr(m, "content", "") != "write in a .md file under ~/Desktop" for m in hist)
+        assert "heterogeneous ModelTrainer bug" in hist[-1].content  # full, uncapped
+
+    def test_empty_messages(self):
+        a = self._agent()
+        assert a._prior_history([]) == []
+
+    def test_sanitizes_orphaned_tool_pair(self):
+        # An assistant tool_call with no matching ToolMessage (orphan from a
+        # compaction slice) must be repaired so a strict provider won't 400.
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        a = self._agent()
+        orphan = AIMessage(content="", tool_calls=[{"name": "grep", "args": {}, "id": "x"}])
+        msgs = [
+            SystemMessage(content="SYS"),
+            HumanMessage(content="do a thing"),
+            orphan,  # tool_call with no following ToolMessage
+            HumanMessage(content="current"),
+        ]
+        hist = a._prior_history(msgs)
+        # sanitize_tool_pairs drops the orphaned tool-call turn (no result).
+        assert orphan not in hist
+
+
+class TestWorkerLoopHistory:
+    """_run_worker_loop inserts history BETWEEN the system prompt and the
+    subtask, and excludes injected context from the saved messages."""
+
+    def _agent(self):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a.system_prompt = "WORKER_SYS"
+        a.callbacks = []
+        a._start_spinner = lambda *x, **k: None
+        a._stop_spinner = lambda *x, **k: None
+        return a
+
+    def test_history_inserted_between_system_and_subtask(self):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        a = self._agent()
+        captured = {}
+
+        def _stream_response(messages, config, **kw):
+            captured["messages"] = list(messages)
+            return AIMessage(content="done"), None
+
+        a._stream_response = _stream_response
+        a._extract_visible = lambda c: c if isinstance(c, str) else ""
+        a._extract_thinking = lambda r: None
+        hist = [HumanMessage(content="draft"), AIMessage(content="THE ISSUE")]
+        result, saveable = a._run_worker_loop(
+            object(), [], "write it to a file", quiet=True, history=hist
+        )
+        msgs = captured["messages"]
+        # [System(WORKER_SYS), Human(draft), AI(THE ISSUE), Human(subtask)]
+        assert isinstance(msgs[0], SystemMessage)
+        assert msgs[1] == hist[0] and msgs[2] == hist[1]
+        assert isinstance(msgs[3], HumanMessage) and "write it to a file" in msgs[3].content
+        # saveable EXCLUDES the system prompt AND the injected history (only this
+        # worker's own turns are saved — no per-worker history duplication).
+        assert hist[0] not in saveable and hist[1] not in saveable
+        assert not any(isinstance(m, SystemMessage) for m in saveable)
+
+    def test_no_history_is_byte_equivalent(self):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        a = self._agent()
+        captured = {}
+        a._stream_response = lambda messages, config, **kw: (
+            captured.update(messages=list(messages)), (AIMessage(content="done"), None)
+        )[1]
+        a._extract_visible = lambda c: c if isinstance(c, str) else ""
+        a._extract_thinking = lambda r: None
+        a._run_worker_loop(object(), [], "solo task", quiet=True)  # history=None
+        msgs = captured["messages"]
+        # Old shape preserved: [System, Human(subtask)] exactly — isolation intact.
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], SystemMessage) and isinstance(msgs[1], HumanMessage)
+
 
 class TestOrchestrateEndToEnd:
     """_orchestrate assembles the final answer. Regression: a MULTI-subtask run
@@ -734,7 +879,7 @@ class TestOrchestrateEndToEnd:
         a._steer_queue = []
         a._steer_lock = None
         a._external_tools_prompt_block = lambda: ""
-        a._decompose_task = lambda q, p, cats: subtasks
+        a._decompose_task = lambda q, p, cats, history=None: subtasks
         a._run_worker_loop = (
             lambda model, tools, prompt, **kw: (f"RESULT[{prompt[:20]}]", [])
         )
@@ -778,3 +923,158 @@ class TestOrchestrateEndToEnd:
         out = a._orchestrate(a._state)  # must not crash — concatenates instead
         content = out["messages"][-1].content
         assert "### s0" in content and "### s1" in content
+
+    def test_orchestrate_uses_pre_decomposed_subtasks(self):
+        # When the ``decompose`` node already produced subtasks (they're in
+        # state), _orchestrate reuses them and NEVER re-decomposes.
+        subtasks = [
+            {"description": "s0", "category": "full", "depends_on": []},
+            {"description": "s1", "category": "full", "depends_on": []},
+        ]
+        a = self._agent(subtasks)
+        a._decompose_task = lambda *x, **k: (_ for _ in ()).throw(
+            AssertionError("must not re-decompose when subtasks are in state")
+        )
+        state = dict(a._state)
+        state["subtasks"] = subtasks
+        out = a._orchestrate(state)  # must not call _decompose_task
+        assert "AGGREGATED(" in out["messages"][-1].content
+
+
+class TestDecomposeNode:
+    """The `decompose` graph node stashes subtasks into state and adds no
+    messages (so a fallback to the streaming agent keeps history pristine)."""
+
+    def _agent(self, subtasks):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a._external_tools_prompt_block = lambda: ""
+        self._captured = {}
+
+        def _decompose_task(q, p, cats, history=None):
+            self._captured["query"] = q
+            self._captured["history"] = history
+            return subtasks
+
+        a._decompose_task = _decompose_task
+        return a
+
+    def test_stashes_subtasks_and_adds_no_messages(self):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+        subtasks = [
+            {"description": "s0", "category": "full", "depends_on": []},
+            {"description": "s1", "category": "full", "depends_on": []},
+        ]
+        a = self._agent(subtasks)
+        prior_ai = AIMessage(content="prior artifact")
+        state = {
+            "messages": [
+                SystemMessage(content="SYS"),
+                HumanMessage(content="first ask"),
+                prior_ai,
+                HumanMessage(content="the current multi-part request"),
+            ]
+        }
+        out = a._decompose(state)
+        assert out == {"subtasks": subtasks}
+        assert "messages" not in out  # agent history stays pristine on fallback
+        # Decomposed against the current query with the REAL prior history.
+        assert self._captured["query"] == "the current multi-part request"
+        assert prior_ai in self._captured["history"]
+
+    def test_no_human_message_returns_empty_subtasks(self):
+        from langchain_core.messages import SystemMessage
+
+        a = self._agent([{"description": "x", "category": "full", "depends_on": []}])
+        out = a._decompose({"messages": [SystemMessage(content="SYS")]})
+        assert out == {"subtasks": []}  # -> routes to agent
+
+
+class TestRouteAfterDecompose:
+    """_route_after_decompose sends only a genuine multi-step plan (>=2
+    subtasks) to the orchestrator; everything else streams via the agent."""
+
+    def _agent(self):
+        return LangGraphAgent.__new__(LangGraphAgent)
+
+    def test_two_subtasks_go_to_orchestrator(self):
+        a = self._agent()
+        assert a._route_after_decompose({"subtasks": [{}, {}]}) == "orchestrator"
+
+    def test_single_subtask_goes_to_agent(self):
+        # The core user decision: the old "Step 1/1" now streams via the agent.
+        a = self._agent()
+        assert a._route_after_decompose({"subtasks": [{}]}) == "agent"
+
+    def test_zero_or_missing_goes_to_agent(self):
+        a = self._agent()
+        assert a._route_after_decompose({"subtasks": []}) == "agent"
+        assert a._route_after_decompose({}) == "agent"
+
+
+class TestRouteAfterClassify:
+    """_route_after_classify sends a non-trivial 'full' task to the decompose
+    node (not straight to the orchestrator); trivial/plan turns skip it."""
+
+    def _agent(self):
+        return LangGraphAgent.__new__(LangGraphAgent)
+
+    def test_nontrivial_full_goes_to_decompose(self):
+        from langchain_core.messages import HumanMessage
+
+        a = self._agent()
+        a._execute_plan_route = False
+        state = {
+            "route": "full",
+            "messages": [
+                HumanMessage(
+                    content="refactor the auth module across all files and update the tests"
+                )
+            ],
+        }
+        assert a._route_after_classify(state) == "decompose"
+
+    def test_trivial_full_goes_to_agent(self):
+        from langchain_core.messages import HumanMessage
+
+        a = self._agent()
+        a._execute_plan_route = False
+        state = {"route": "full", "messages": [HumanMessage(content="hi")]}
+        assert a._route_after_classify(state) == "agent"  # no decompose LLM call
+
+    def test_plan_exec_pinned_goes_to_agent(self):
+        from langchain_core.messages import HumanMessage
+
+        a = self._agent()
+        a._execute_plan_route = True  # approved-plan execution pins the full route
+        state = {
+            "route": "full",
+            "messages": [
+                HumanMessage(
+                    content="refactor the auth module across all files and update the tests"
+                )
+            ],
+        }
+        assert a._route_after_classify(state) == "agent"
+
+
+class TestGraphShape:
+    """The compiled graph gains a `decompose` node between classifier and the
+    agent-vs-orchestrator branch when orchestration is on."""
+
+    def test_decompose_node_present_when_orchestration_enabled(self):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a.router = object()  # any truthy router
+        a.orchestrator_enabled = True
+        graph = a._build_graph()
+        nodes = set(graph.get_graph().nodes)
+        assert "decompose" in nodes
+        assert "orchestrator" in nodes and "agent" in nodes
+
+    def test_no_decompose_node_without_orchestration(self):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a.router = object()
+        a.orchestrator_enabled = False
+        graph = a._build_graph()
+        nodes = set(graph.get_graph().nodes)
+        assert "decompose" not in nodes and "orchestrator" not in nodes

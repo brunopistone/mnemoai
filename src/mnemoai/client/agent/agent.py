@@ -60,6 +60,12 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
     thinking: Optional[str]
     route: Optional[str]
+    # Subtasks the `decompose` node produced, read by `_route_after_decompose`
+    # (route on count) and `_orchestrate` (execute). Plain LastValue channel — no
+    # reducer, so it never touches the `messages` operator.add. Absent for
+    # trivial/plan turns and for direct `_orchestrate` callers (which decompose
+    # internally); readers use `state.get("subtasks")` so a missing key is safe.
+    subtasks: Optional[List[Dict[str, Any]]]
 
 
 class LangGraphAgent:
@@ -478,10 +484,23 @@ class LangGraphAgent:
             workflow.set_entry_point("classifier")
 
             if self.orchestrator_enabled:
+                workflow.add_node("decompose", self._decompose)
                 workflow.add_node("orchestrator", self._orchestrate)
+                # The classifier decides WHETHER to decompose (a non-trivial
+                # 'full' task); trivial/plan turns skip straight to the streaming
+                # agent and never pay the decompose LLM call.
                 workflow.add_conditional_edges(
                     "classifier",
                     self._route_after_classify,
+                    {"agent": "agent", "decompose": "decompose"},
+                )
+                # decompose then routes on the ACTUAL subtask count: an atomic
+                # task (<=1 subtask) runs through the normal streaming agent (full
+                # tools, native history), a genuine multi-step plan (>=2) is owned
+                # by the orchestrator. No more degenerate "step 1/1" worker.
+                workflow.add_conditional_edges(
+                    "decompose",
+                    self._route_after_decompose,
                     {"agent": "agent", "orchestrator": "orchestrator"},
                 )
                 workflow.add_edge("orchestrator", END)
@@ -501,13 +520,17 @@ class LangGraphAgent:
         return workflow.compile()
 
     def _route_after_classify(self, state: AgentState) -> str:
-        """Route 'full' tasks to the orchestrator, others to the agent.
+        """Send a non-trivial 'full' task to the ``decompose`` node; everything
+        else straight to the streaming agent.
 
-        A trivial 'full' query (short/signal-free) still goes to ``agent`` —
-        decomposing it adds overhead for no gain. Only substantive 'full' tasks
-        are decomposed. During plan execution we skip the orchestrator entirely
-        (the approved plan IS the decomposition — re-decomposing it would spawn
-        read-only workers that can't apply the plan's edits).
+        Decomposition runs BEFORE the agent-vs-orchestrator choice, which is then
+        made on the ACTUAL subtask count (``_route_after_decompose``): an atomic
+        task falls back to the normal streaming agent rather than a degenerate
+        single-subtask worker. A trivial 'full' query (short/signal-free) skips
+        decomposition — it goes to ``agent`` directly, paying no decompose LLM
+        call. During plan execution we also skip decomposition entirely (the
+        approved plan IS the decomposition — re-decomposing would spawn read-only
+        workers that can't apply the plan's edits).
         """
         if getattr(self, "_execute_plan_route", False):
             return "agent"
@@ -518,8 +541,19 @@ class LangGraphAgent:
                     query = str(msg.content)
                     break
             if not is_trivial_query(query):
-                return "orchestrator"
+                return "decompose"
         return "agent"
+
+    def _route_after_decompose(self, state: AgentState) -> str:
+        """After decomposition, own the turn only for a genuine multi-step plan.
+
+        >=2 subtasks → the orchestrator executes + aggregates. <=1 (atomic task,
+        a parse/decompose fallback, or no query) → the normal streaming agent,
+        which has the full toolset and native conversation history — so an atomic
+        'full' task streams normally instead of running a hidden quiet worker.
+        """
+        subtasks = state.get("subtasks") or []
+        return "orchestrator" if len(subtasks) >= 2 else "agent"
 
     def _classify(self, state: AgentState) -> Dict[str, Any]:
         """Classify the query and set the route in state."""
@@ -542,6 +576,64 @@ class LangGraphAgent:
         logger.debug(f"Query routed to: {route}")
         return {"route": route}
 
+    def _prior_history(self, messages: List[BaseMessage]) -> List[BaseMessage]:
+        """The REAL prior-conversation messages for the decomposer + every worker.
+
+        The orchestrator route otherwise sees ONLY the current query, so a
+        context-dependent follow-up ("write the issue to a file", "fix it") is
+        decomposed and executed with no idea what "the issue"/"it" refers to and
+        the worker fabricates content. We hand the decomposer and each worker the
+        SAME messages the main agent sees — the actual Human/AI/Tool turns, not a
+        re-rendered text block. ``state["messages"]`` is ALREADY bounded to the
+        model window by the compaction layer, so NO extra count/token cap is
+        applied here (that would be redundant and could truncate the very turn a
+        follow-up refers to). Drops the leading system prompt(s) (the
+        worker/decomposer carry their own) and the trailing current-query
+        HumanMessage (passed separately as the subtask/decomposition prompt), then
+        repairs orphaned tool-call/result pairs so strict providers don't 400.
+        Returns [] on a first turn — every single-turn path is unchanged.
+        """
+        if not messages:
+            return []
+        history = list(messages)
+        # Drop the trailing current-query HumanMessage (passed separately).
+        for i in range(len(history) - 1, -1, -1):
+            if isinstance(history[i], HumanMessage):
+                del history[i]
+                break
+        # Drop the leading system prompt(s) / any stray SystemMessage.
+        history = [m for m in history if not isinstance(m, SystemMessage)]
+        return self._sanitize_tool_pairs(history)
+
+    def _decompose(self, state: AgentState) -> Dict[str, Any]:
+        """Graph node: decompose a non-trivial 'full' task into subtasks.
+
+        Runs between the classifier and the agent-vs-orchestrator branch so the
+        route decision (``_route_after_decompose``) can be made on the ACTUAL
+        subtask count — an atomic task (<=1 subtask) then falls back to the
+        normal streaming ``agent`` instead of a degenerate single-subtask worker.
+        Writes ONLY the ``subtasks`` channel (no ``messages`` key) so the agent's
+        conversation history stays pristine if the turn falls back to ``agent``.
+        """
+        messages = state["messages"]
+        query = ""
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                query = str(msg.content)
+                break
+        if not query:
+            return {"subtasks": []}
+        # Same real prior history the workers get, so references resolve.
+        history = self._prior_history(messages)
+        orchestrator_prompt = get_orchestrator_prompt()
+        orchestrator_prompt += self._external_tools_prompt_block()
+        logger.debug("Decompose: decomposing task")
+        subtasks = self._decompose_task(
+            query, orchestrator_prompt, set(ROUTE_TOOLS.keys()), history=history
+        )
+        logger.debug(f"Decompose: {len(subtasks)} subtasks")
+        return {"subtasks": subtasks}
+
     def _orchestrate(self, state: AgentState) -> Dict[str, Any]:
         """Decompose the task into subtasks, run a worker per subtask, aggregate."""
         messages = state["messages"]
@@ -555,19 +647,29 @@ class LangGraphAgent:
         if not query:
             return {"messages": [AIMessage(content="No query found.")]}
 
-        # Step 1: decompose into subtasks. External tools are described to the
-        # decomposer so it can route subtasks needing them to 'full'.
-        orchestrator_prompt = get_orchestrator_prompt()
-        orchestrator_prompt += self._external_tools_prompt_block()
-        logger.debug("Orchestrator: decomposing task")
-        subtasks = self._decompose_task(
-            query, orchestrator_prompt, set(ROUTE_TOOLS.keys())
-        )
+        # The REAL prior-conversation messages (empty on a first turn), threaded
+        # into BOTH the decomposer and every worker so a context-dependent
+        # follow-up ("write the issue to a file") resolves its references against
+        # the same conversation the main agent sees, instead of fabricating.
+        history = self._prior_history(messages)
+
+        # Step 1: reuse the subtasks the ``decompose`` node already produced. A
+        # direct caller (tests, or any path that reaches _orchestrate without the
+        # graph's decompose node) leaves the channel unset — decompose here so
+        # those callers stay backward-compatible.
+        subtasks = state.get("subtasks")
+        if not subtasks:
+            orchestrator_prompt = get_orchestrator_prompt()
+            orchestrator_prompt += self._external_tools_prompt_block()
+            logger.debug("Orchestrator: decomposing task")
+            subtasks = self._decompose_task(
+                query, orchestrator_prompt, set(ROUTE_TOOLS.keys()), history=history
+            )
         logger.debug(f"Orchestrator: {len(subtasks)} subtasks")
 
         # Step 2: execute subtasks, scheduling by their ``depends_on`` graph —
         # independent subtasks run concurrently (bounded pool), dependents wait.
-        results_by_index = self._run_subtasks_scheduled(subtasks)
+        results_by_index = self._run_subtasks_scheduled(subtasks, history)
         worker_results = [results_by_index[i] for i in range(len(subtasks))]
 
         # Collect all intermediate worker messages for conversation saving.
@@ -614,7 +716,11 @@ class LangGraphAgent:
 
         return {"messages": all_worker_messages + [AIMessage(content=final_content)]}
 
-    def _run_subtasks_scheduled(self, subtasks: List[Dict[str, Any]]) -> Dict[int, dict]:
+    def _run_subtasks_scheduled(
+        self,
+        subtasks: List[Dict[str, Any]],
+        history: Optional[List[BaseMessage]] = None,
+    ) -> Dict[int, dict]:
         """Run subtasks respecting their ``depends_on`` graph.
 
         Repeatedly runs every not-yet-done subtask whose dependencies are all
@@ -651,7 +757,9 @@ class LangGraphAgent:
                     label = desc[:40] + ("…" if len(desc) > 40 else "")
                     self._start_spinner(f"step {i + 1}/{total}: {label}")
                     try:
-                        results[i] = self._run_subtask(i, subtasks, results)
+                        results[i] = self._run_subtask(
+                            i, subtasks, results, history
+                        )
                     finally:
                         self._stop_spinner()
             else:
@@ -670,7 +778,9 @@ class LangGraphAgent:
                 def _run_headless(idx):
                     self._set_headless(True)
                     try:
-                        return idx, self._run_subtask(idx, subtasks, results)
+                        return idx, self._run_subtask(
+                            idx, subtasks, results, history
+                        )
                     finally:
                         self._set_headless(False)
 
@@ -686,14 +796,21 @@ class LangGraphAgent:
         return results
 
     def _run_subtask(
-        self, i: int, subtasks: List[Dict[str, Any]], done: Dict[int, dict]
+        self,
+        i: int,
+        subtasks: List[Dict[str, Any]],
+        done: Dict[int, dict],
+        history: Optional[List[BaseMessage]] = None,
     ) -> dict:
         """Run one orchestrator subtask and return its result dict.
 
         Binds the subtask's category tools, prepends the results of the subtasks
-        it ``depends_on`` (only those — not every prior step), and runs the worker
-        loop ``quiet`` (silent, concurrency-safe) so a parallel wave doesn't
-        interleave output. A failure is captured, never aborting the wave."""
+        it ``depends_on`` (only those — not every prior step), passes the real
+        prior-conversation ``history`` to the worker loop (so a context-dependent
+        subtask like "write the issue to a file" resolves its references), and
+        runs the loop ``quiet`` (silent, concurrency-safe) so a parallel wave
+        doesn't interleave output. A failure
+        is captured, never aborting the wave."""
         desc = subtasks[i]["description"]
         category = subtasks[i]["category"]
         deps = subtasks[i].get("depends_on", [])
@@ -739,8 +856,12 @@ class LangGraphAgent:
                 )
 
         try:
+            # The real prior conversation (uncapped; only via this orchestrator
+            # path) is inserted between the worker's system prompt and this
+            # subtask, so a context-dependent subtask resolves its references.
             result, worker_msgs = self._run_worker_loop(
-                worker_model, worker_tools, worker_prompt, quiet=True
+                worker_model, worker_tools, worker_prompt, quiet=True,
+                history=history,
             )
         except Exception as e:
             logger.error(f"Worker for subtask {i + 1} failed: {e}")
@@ -781,13 +902,23 @@ class LangGraphAgent:
         )
 
     def _decompose_task(
-        self, query: str, orchestrator_prompt: str, valid_categories: set
+        self,
+        query: str,
+        orchestrator_prompt: str,
+        valid_categories: set,
+        history: Optional[List[BaseMessage]] = None,
     ) -> List[Dict[str, Any]]:
-        """Call the LLM to decompose a task into subtask dicts."""
-        messages = [
-            SystemMessage(content=orchestrator_prompt),
-            HumanMessage(content=query),
-        ]
+        """Call the LLM to decompose a task into subtask dicts.
+
+        ``history`` (the real prior conversation) is inserted between the
+        orchestrator system prompt and the query so the decomposer can split a
+        context-dependent request against the same conversation the main agent
+        sees. None (the default) keeps the old system-prompt+query shape.
+        """
+        messages = [SystemMessage(content=orchestrator_prompt)]
+        if history:
+            messages.extend(history)
+        messages.append(HumanMessage(content=query))
 
         # Suppress callbacks (keeps the spinner up) and disable reasoning so the
         # JSON subtask list lands in response.content (reasoning models else
@@ -818,6 +949,7 @@ class LangGraphAgent:
         system_prompt: Optional[str] = None,
         quiet: bool = False,
         progress: Optional[Callable[[str], None]] = None,
+        history: Optional[List[BaseMessage]] = None,
     ) -> tuple:
         """Run a worker agent loop until completion.
 
@@ -843,6 +975,18 @@ class LangGraphAgent:
         sys_prompt = system_prompt if system_prompt is not None else self.system_prompt
         if sys_prompt:
             worker_messages.append(SystemMessage(content=sys_prompt))
+        # Real prior-conversation messages (uncapped; passed ONLY by the
+        # orchestrator via _run_subtask — spawn/resume sub-agents pass None, so
+        # their context isolation is preserved) sit BETWEEN the system prompt and
+        # this worker's own turn, so a context-dependent subtask resolves its
+        # references. Everything up to here is injected CONTEXT, not this worker's
+        # output: `_seed_len` marks the boundary so it's excluded from `saveable`
+        # (else the whole prior conversation would be re-appended, once per
+        # worker, into the saved history). When history is None/empty and a
+        # system prompt is present this is byte-equivalent to the old behavior.
+        if history:
+            worker_messages.extend(history)
+        _seed_len = len(worker_messages)
         worker_messages.append(HumanMessage(content=prompt))
 
         # A quiet sub-agent must NOT pass the parent's callbacks: those drive the
@@ -870,9 +1014,7 @@ class LangGraphAgent:
                 logger.warning(f"Worker context overflow: {overflow}; ending worker")
                 if not quiet:
                     self._stop_spinner()
-                saveable = [
-                    m for m in worker_messages if not isinstance(m, SystemMessage)
-                ]
+                saveable = worker_messages[_seed_len:]  # exclude system + history
                 partial = self._last_visible_from(worker_messages)
                 return (
                     partial
@@ -902,9 +1044,7 @@ class LangGraphAgent:
                         )
                 if not quiet:
                     self._stop_spinner()
-                saveable = [
-                    m for m in worker_messages if not isinstance(m, SystemMessage)
-                ]
+                saveable = worker_messages[_seed_len:]  # exclude system + history
                 return visible or str(response.content), saveable
 
             if not quiet:
@@ -1030,7 +1170,7 @@ class LangGraphAgent:
 
         if not quiet:
             self._stop_spinner()
-        saveable = [m for m in worker_messages if not isinstance(m, SystemMessage)]
+        saveable = worker_messages[_seed_len:]  # exclude system + injected history
         # Salvage the last visible output and flag the step as truncated.
         partial = self._last_visible_from(worker_messages)
         truncated_note = (
@@ -3030,6 +3170,7 @@ class LangGraphAgent:
             "messages": model_messages,
             "thinking": None,
             "route": None,
+            "subtasks": None,
         }
 
         if self.system_prompt:
