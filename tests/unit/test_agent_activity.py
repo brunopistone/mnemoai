@@ -54,6 +54,28 @@ class TestActivityBasics:
         e2 = r.elapsed(now=r.end + 200)
         assert e1 == e2  # end is set, so `now` is ignored
 
+    def test_finish_ok_records_final_and_marks_done(self):
+        # The shared success-path transition used by every hidden run: a run that
+        # returned normally records its final answer and flips to "done".
+        store = AgentActivityStore()
+        sink = store.open_run("explore", "d", "spawn")
+        sink.finish_ok("the final report")
+        r = store.snapshot()[0]
+        assert r.status == "done"
+        assert r.end is not None
+        assert any(e.kind == "final" and e.text == "the final report" for e in r.events)
+
+    def test_finish_ok_marks_stopped_when_cancelled(self):
+        # If the run was cancelled mid-flight (x / stop-all), finish_ok must mark
+        # it "stopped" (NOT "done") and must NOT record a final-answer event.
+        store = AgentActivityStore()
+        sink = store.open_run("explore", "d", "spawn")
+        store.request_stop(store.snapshot()[0].run_id)  # UI asked it to stop
+        sink.finish_ok("partial work")
+        r = store.snapshot()[0]
+        assert r.status == "stopped"
+        assert not any(e.kind == "final" for e in r.events)
+
     def test_finish_if_running_is_idempotent(self):
         # Backstop for abnormal exit (e.g. a KeyboardInterrupt cancel): marks a
         # still-running run stopped WITHOUT clobbering a real done/failed status,

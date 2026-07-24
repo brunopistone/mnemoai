@@ -3,7 +3,7 @@
 import operator
 import queue
 import re
-import sys
+import sys  # noqa: F401  — tests patch agent_mod.sys.stdin.isatty (the confirm gate reads the same sys.stdin)
 import threading
 import time
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
@@ -21,9 +21,13 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
 from mnemoai.client.agent import (
+    confirmation_gate,
     message_sanitizer,
     plan_policy,
-    subagents,
+    response_parsing,
+    steering,
+    stream_policy,
+    subagent_runner,
     tool_formatting,
 )
 from mnemoai.client.agent.agent_activity import ActivitySink, AgentActivityStore
@@ -91,9 +95,11 @@ class LangGraphAgent:
     _BASH_MUTATING_FLAGS = plan_policy.BASH_MUTATING_FLAGS
 
     # --- Destructive-tool confirmation categories (gated by _confirm_tool) ---
-    _CONFIRM_BASH_TOOLS = {"execute_bash"}
-    _CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
-    _CONFIRM_MEMORY_TOOLS = {"memory"}
+    # Aliases keeping the class-attribute surface pointing at the single source
+    # in confirmation_gate (the plan_policy alias pattern).
+    _CONFIRM_BASH_TOOLS = confirmation_gate.CONFIRM_BASH_TOOLS
+    _CONFIRM_WRITE_TOOLS = confirmation_gate.CONFIRM_WRITE_TOOLS
+    _CONFIRM_MEMORY_TOOLS = confirmation_gate.CONFIRM_MEMORY_TOOLS
 
     # Tools that print their OWN live progress to the terminal, so animating our
     # spinner over them would collide on the same lines — for these we keep the
@@ -103,49 +109,10 @@ class LangGraphAgent:
     _SELF_REPORTING_TOOLS: set = set()
 
     # --- Streaming error classification (used by _stream_response's retry) ---
-    # Provider phrasings for "the prompt exceeded the model's context window".
-    _CONTEXT_OVERFLOW_MARKERS = (
-        "prompt is too long",              # Anthropic / Bedrock Mantle
-        "context length",                  # OpenAI-compatible
-        "maximum context",
-        "context window",
-        "too many tokens",
-        "model_context_window_exceeded",   # Bedrock/Converse stop reason
-        "input is too long",
-        "exceeds the maximum",
-    )
-    # Substrings marking a transient connection failure — a dropped/dead socket
-    # (laptop sleep), a reset, or a server-side 5xx/overload — that a fresh retry
-    # can recover, as opposed to a deterministic 4xx the same request would repeat.
-    _TRANSIENT_NETWORK_MARKERS = (
-        "connection reset",
-        "connection aborted",
-        "connection error",
-        "econnreset",
-        "epipe",
-        "broken pipe",
-        "etimedout",
-        "timed out",
-        "timeout",
-        "read timed out",
-        "server disconnected",
-        "connection closed",
-        "peer closed connection",
-        "remotedisconnected",
-        "incomplete read",
-        "temporarily unavailable",
-        "service unavailable",
-        "bad gateway",
-        "gateway timeout",
-        "overloaded",
-        "overloaded_error",
-        "internal server error",
-        "api_error",
-        "502",
-        "503",
-        "504",
-        "529",
-    )
+    # Aliases keeping the historical class-attribute surface pointing at the
+    # single source in stream_policy (the plan_policy alias pattern).
+    _CONTEXT_OVERFLOW_MARKERS = stream_policy.CONTEXT_OVERFLOW_MARKERS
+    _TRANSIENT_NETWORK_MARKERS = stream_policy.TRANSIENT_NETWORK_MARKERS
     # Sentinel the stream reader thread enqueues to signal a clean end of stream.
     _STREAM_DONE = object()
     # How often the idle-timeout stream wait re-checks the cancel event (seconds),
@@ -365,66 +332,21 @@ class LangGraphAgent:
         Called by the UI (event-loop thread) when the user submits a line while a
         turn is in flight. Thread-safe; drained at the next tool-round boundary by
         :meth:`_drain_steering`. Never aborts the turn — the current tool batch
-        finishes, then the message is folded in.
-        """
-        text = (text or "").strip()
-        if not text:
-            return
-        lock = getattr(self, "_steer_lock", None)
-        if lock is None:
-            self._steer_queue.append(text)
-            return
-        with lock:
-            self._steer_queue.append(text)
+        finishes, then the message is folded in. Delegates to
+        :func:`steering.enqueue`."""
+        steering.enqueue(self, text)
 
     def _drain_steering(self) -> List[BaseMessage]:
-        """Pop all pending steering messages as wrapped ``HumanMessage``s (or []).
-
-        The model treats it as a new user request to address after the current work rather
-        than as narration. Consumed atomically so a concurrent enqueue isn't lost.
-        """
-        lock = getattr(self, "_steer_lock", None)
-        pending = getattr(self, "_steer_queue", None)
-        if not pending:
-            return []
-        if lock is not None:
-            with lock:
-                if not self._steer_queue:
-                    return []
-                texts = self._steer_queue[:]
-                self._steer_queue = []
-        else:
-            texts = pending[:]
-            self._steer_queue = []
-        return [
-            HumanMessage(
-                content=(
-                    "The user sent a new message while you were working:\n"
-                    f"{t}\n\n"
-                    "IMPORTANT: After finishing your current step, address the "
-                    "user's message above. Do not ignore it."
-                )
-            )
-            for t in texts
-        ]
+        """Delegates to :func:`steering.drain`."""
+        return steering.drain(self)
 
     def _has_steering(self) -> bool:
-        """True if any mid-turn steering message is pending."""
-        return bool(getattr(self, "_steer_queue", None))
+        """Delegates to :func:`steering.has_pending`."""
+        return steering.has_pending(self)
 
     def clear_steering(self) -> None:
-        """Discard all pending steering messages.
-
-        Called when a turn is cancelled: a message steered into the cancelled
-        turn must NOT leak into the next one (else the model answers a question
-        the user meant for an aborted turn). Thread-safe.
-        """
-        lock = getattr(self, "_steer_lock", None)
-        if lock is not None:
-            with lock:
-                self._steer_queue = []
-        else:
-            self._steer_queue = []
+        """Delegates to :func:`steering.clear`."""
+        steering.clear(self)
 
     def request_cancel(self) -> None:
         """Signal a cooperative cancel of the running turn (called from the UI
@@ -436,15 +358,12 @@ class LangGraphAgent:
         (up to `STREAM_IDLE_TIMEOUT`/30s later), which is the "cancel takes ages"
         bug. This event is the mnemoai analog of an ``AbortSignal``: the blocking
         waits ``.wait()`` on it (waking instantly) and check it at each retry, so
-        the turn tears down immediately. Idempotent; no-op on a bare object."""
-        ev = getattr(self, "_cancel_event", None)
-        if ev is not None:
-            ev.set()
+        the turn tears down immediately. Delegates to :func:`steering.request_cancel`."""
+        steering.request_cancel(self)
 
     def _cancelled(self) -> bool:
-        """True if a cooperative cancel was requested for this turn."""
-        ev = getattr(self, "_cancel_event", None)
-        return ev is not None and ev.is_set()
+        """Delegates to :func:`steering.is_cancelled`."""
+        return steering.is_cancelled(self)
 
     def _is_headless(self) -> bool:
         """True on a background sub-agent's thread (no TTY → can't prompt)."""
@@ -867,11 +786,7 @@ class LangGraphAgent:
                 worker_model, worker_tools, worker_prompt, quiet=True,
                 history=history, activity=sink,
             )
-            if sink.is_cancelled():
-                sink.finish("stopped")
-            else:
-                sink.final(result)
-                sink.finish("done")
+            sink.finish_ok(result)
         except Exception as e:
             logger.error(f"Worker for subtask {i + 1} failed: {e}")
             result = f"(This step could not be completed: {e})"
@@ -1763,46 +1678,30 @@ class LangGraphAgent:
 
     def _network_retry_delay(self, attempt: int) -> float:
         """Exponential backoff (seconds) for a network-error stream retry, using
-        the same LLM.RETRY_DELAY / RETRY_BACKOFF knobs as the rest of the app,
-        capped so a sleep-recovery retry never waits absurdly long."""
+        the same LLM.RETRY_DELAY / RETRY_BACKOFF knobs as the rest of the app.
+
+        The config read stays here (tests patch this module's ``config``); the
+        capped-exponential math delegates to :func:`stream_policy.network_retry_delay`.
+        """
         llm = config.get("LLM", {})
         base = float(llm.get("RETRY_DELAY", 1.0))
         factor = float(llm.get("RETRY_BACKOFF", 2.0))
-        return min(base * (factor ** attempt), 30.0)
+        return stream_policy.network_retry_delay(attempt, base, factor)
 
     def _sleep_or_cancel(self, delay: float) -> bool:
-        """Sleep up to ``delay`` seconds, waking early if a cancel is requested.
+        """Delegates to :func:`stream_policy.sleep_or_cancel` with this agent's
+        cancel event (``None`` on a bare object → a plain short sleep)."""
+        return stream_policy.sleep_or_cancel(getattr(self, "_cancel_event", None), delay)
 
-        Returns True if cancelled during the wait, False if the full delay
-        elapsed. Uses the cancel event's ``wait`` (interruptible) instead of
-        ``time.sleep`` (a C-level block the async KeyboardInterrupt can't
-        preempt). Falls back to ``time.sleep`` on a bare object with no event."""
-        ev = getattr(self, "_cancel_event", None)
-        if ev is None:
-            time.sleep(delay)
-            return False
-        return ev.wait(delay)
+    @staticmethod
+    def _is_context_overflow_error(exc: Exception) -> bool:
+        """Delegates to :func:`stream_policy.is_context_overflow_error`."""
+        return stream_policy.is_context_overflow_error(exc)
 
-    @classmethod
-    def _is_context_overflow_error(cls, exc: Exception) -> bool:
-        """True if ``exc`` is a context-window-exceeded error (not a generic 400).
-
-        Matches the provider phrasings so the backstop can compact + terminate
-        instead of retrying the same oversized prompt in a loop.
-        """
-        text = str(exc).lower()
-        return any(m in text for m in cls._CONTEXT_OVERFLOW_MARKERS)
-
-    @classmethod
-    def _is_transient_network_error(cls, exc: Exception) -> bool:
-        """True if ``exc`` looks like a transient connection/network failure worth
-        retrying on a fresh connection (dead socket, reset, timeout, 5xx/overload).
-
-        Kept provider-agnostic (matches the exception text) so it works for every
-        LangChain provider — a dead socket surfaces differently per httpx/requests/
-        boto3 stack but the phrasings above cover them."""
-        text = str(exc).lower()
-        return any(m in text for m in cls._TRANSIENT_NETWORK_MARKERS)
+    @staticmethod
+    def _is_transient_network_error(exc: Exception) -> bool:
+        """Delegates to :func:`stream_policy.is_transient_network_error`."""
+        return stream_policy.is_transient_network_error(exc)
 
     def _is_empty_response(self, response) -> bool:
         """True if a response carries no content, no reasoning, no tool calls."""
@@ -2167,101 +2066,26 @@ class LangGraphAgent:
 
     @staticmethod
     def _reasoning_content_text(block: dict) -> str:
-        """Text from a Bedrock Converse ``reasoning_content`` block.
-
-        Shape: ``{"type":"reasoning_content","reasoning_content":{"text":…}}``.
-        """
-        rc = block.get("reasoning_content")
-        if isinstance(rc, dict):
-            return rc.get("text", "")
-        return rc if isinstance(rc, str) else ""
+        """Delegates to :func:`response_parsing.reasoning_content_text`."""
+        return response_parsing.reasoning_content_text(block)
 
     @staticmethod
     def _reasoning_summary_text(block: dict) -> str:
-        """Concatenate an OpenAI Responses ``reasoning`` summary block's text.
-
-        Shape: ``{"type":"reasoning","summary":[{"type":"summary_text","text":…}]}``.
-        """
-        summary = block.get("summary")
-        if not isinstance(summary, list):
-            return ""
-        return "".join(
-            part.get("text", "")
-            for part in summary
-            if isinstance(part, dict) and part.get("type") == "summary_text"
-        )
+        """Delegates to :func:`response_parsing.reasoning_summary_text`."""
+        return response_parsing.reasoning_summary_text(block)
 
     def _extract_thinking(self, response) -> Optional[str]:
-        """Extract thinking/reasoning from a response, or None.
-
-        Checks additional_kwargs, Bedrock content blocks, OpenAI Responses
-        reasoning-summary blocks, and <think>/<thinking> tags.
-        """
-        # 1. additional_kwargs (Ollama via wrapper, LiteLLM).
-        if hasattr(response, "additional_kwargs"):
-            thinking = response.additional_kwargs.get("reasoning_content")
-            if thinking:
-                return thinking
-
-        # 2. Content blocks: Bedrock {"type":"thinking"} and OpenAI Responses
-        #    {"type":"reasoning","summary":[…]}.
-        if isinstance(response.content, list):
-            parts = []
-            for block in response.content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "thinking":
-                    parts.append(block.get("thinking", ""))
-                elif block.get("type") == "reasoning_content":
-                    parts.append(self._reasoning_content_text(block))
-                elif block.get("type") == "reasoning":
-                    parts.append(self._reasoning_summary_text(block))
-            parts = [p for p in parts if p]
-            if parts:
-                return "".join(parts)
-
-        # 3. <think>/<thinking> tags in string content (Ollama raw).
-        if isinstance(response.content, str):
-            match = re.search(
-                r"<think(?:ing)?>(.*?)</think(?:ing)?>",
-                response.content,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-            if match:
-                return match.group(1).strip()
-
-        return None
+        """Delegates to :func:`response_parsing.extract_thinking`."""
+        return response_parsing.extract_thinking(response)
 
     @staticmethod
     def _was_truncated_by_tokens(response) -> bool:
-        """True if the turn was cut short by the output-token limit.
-
-        Responses API reports ``incomplete_details.reason == "max_output_tokens"``;
-        Chat/Converse providers signal a ``length`` finish reason.
-        """
-        meta = getattr(response, "response_metadata", None) or {}
-        details = meta.get("incomplete_details") or {}
-        if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
-            return True
-        finish = meta.get("finish_reason") or meta.get("stop_reason")
-        return finish in ("length", "max_tokens")
+        """Delegates to :func:`response_parsing.was_truncated_by_tokens`."""
+        return response_parsing.was_truncated_by_tokens(response)
 
     def _extract_visible(self, content) -> str:
-        """Extract visible text, stripping <think>/<thinking> tags."""
-        if isinstance(content, str):
-            return re.sub(
-                r"<think(?:ing)?>.*?</think(?:ing)?>",
-                "",
-                content,
-                flags=re.DOTALL | re.IGNORECASE,
-            ).strip()
-        if isinstance(content, list):
-            return "".join(
-                block.get("text", "")
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text"
-            )
-        return ""
+        """Delegates to :func:`response_parsing.extract_visible`."""
+        return response_parsing.extract_visible(content)
 
     def _disable_reasoning(self) -> dict:
         """Temporarily disable reasoning; returns saved state for _restore."""
@@ -2272,40 +2096,8 @@ class LangGraphAgent:
         restore_reasoning(self.model, saved)
 
     def _extract_content(self, chunk) -> tuple[str, str]:
-        """Extract ``(content, reasoning_content)`` from a streaming chunk."""
-        raw_content = chunk.content if chunk.content else ""
-        chunk_content = ""
-        reasoning_content = ""
-
-        if isinstance(raw_content, list):
-            # Bedrock / Responses content blocks.
-            for block in raw_content:
-                if isinstance(block, dict):
-                    block_type = block.get("type", "")
-                    if block_type == "thinking":
-                        reasoning_content += block.get("thinking", "")
-                    elif block_type == "reasoning_content":
-                        reasoning_content += self._reasoning_content_text(block)
-                    elif block_type == "reasoning":
-                        reasoning_content += self._reasoning_summary_text(block)
-                    elif block_type == "text":
-                        chunk_content += block.get("text", "")
-                    elif "text" in block:
-                        chunk_content += block["text"]
-        else:
-            chunk_content = str(raw_content) if raw_content else ""
-
-        # Reasoning in additional_kwargs (Ollama, LiteLLM).
-        if hasattr(chunk, "additional_kwargs") and chunk.additional_kwargs:
-            reasoning = chunk.additional_kwargs.get("reasoning_content", "")
-            if reasoning:
-                reasoning_content = reasoning
-
-        # Strip a stray </think> tag some models include.
-        if "</think>" in chunk_content:
-            chunk_content = chunk_content.replace("</think>", "").strip()
-
-        return chunk_content, reasoning_content
+        """Delegates to :func:`response_parsing.extract_content`."""
+        return response_parsing.extract_content(chunk)
 
     @staticmethod
     def _elide_middle(text: str, limit: int = 72) -> str:
@@ -2434,377 +2226,70 @@ class LangGraphAgent:
         )
 
     def _subagent_tools(self, agent) -> List[BaseTool]:
-        """Resolve a spawned sub-agent's tool objects from its type's allowlist.
-
-        ``agent.tools`` is a name allowlist (or None = all). Meta tools (fs_read,
-        describe_image) are always included, and ``spawn_agent`` is always removed
-        so a sub-agent can't spawn its own sub-agents. Mirrors the route/worker
-        tool-subset selection in ``_orchestrate``."""
-        meta = {"fs_read", "describe_image"}
-        if agent.tools is None:
-            allowed = None  # all tools
-        else:
-            allowed = set(agent.tools) | meta
-        denied = set(getattr(agent, "disallowed_tools", None) or [])
-        deny_all = "*" in denied  # the deny-everything sentinel
-        subset = []
-        for t in self.tools:
-            if t.name == "spawn_agent":
-                continue  # no nested spawning
-            if deny_all or t.name in denied:
-                continue  # per-agent denylist, applied AFTER the allowlist
-            if allowed is None or t.name in allowed:
-                subset.append(t)
-        return subset
+        """Delegates to :func:`subagent_runner.subagent_tools` (``agent`` here is
+        the sub-agent type definition)."""
+        return subagent_runner.subagent_tools(self, agent)
 
     def _run_spawn_batch(self, tool_calls: list) -> Dict[str, str]:
-        """Run multiple ``spawn_agent`` calls from one turn concurrently.
-
-        Returns ``{tool_id: result_text}`` for the spawns run here. Returns ``{}``
-        when there are 0 or 1 spawn calls — the caller then handles a lone spawn
-        inline (no pool overhead). Bounded by ``_max_subagent_concurrency`` (a
-        failing sub-agent yields an error string, never aborting its siblings).
-        The sub-agent loops are ``quiet`` (they stream but suppress display and
-        touch no shared display state), so running them on pool threads is safe."""
-        from concurrent.futures import ThreadPoolExecutor
-
-        # Background spawns return immediately (they don't block), so they're not
-        # part of the concurrent-wait batch — the inline path launches them. Only
-        # explicit run_in_background=false spawns wait here (background is now the
-        # default, so an omitted arg means background → excluded from the batch).
-        spawns = [
-            tc for tc in tool_calls
-            if tc.get("name") == "spawn_agent"
-            and (tc.get("args") or {}).get("run_in_background", True) is False
-        ]
-        max_workers = getattr(self, "_max_subagent_concurrency", 1)
-        if len(spawns) <= 1 or max_workers <= 1:
-            return {}  # inline path handles a single (or forced-sequential) spawn
-
-        def _one(tc) -> tuple:
-            args = self._normalize_tool_args(tc["args"])
-            content = self._handle_spawn_agent(
-                str(args.get("agent_type", "")),
-                str(args.get("prompt", "")),
-                str(args.get("description", "")),
-                in_batch=True,
-            )
-            return tc["id"], content
-
-        if self.verbose:
-            print(
-                f"\n\033[90m[↳ running {len(spawns)} sub-agents in parallel]\033[0m",
-                flush=True,
-            )
-        self._start_spinner(f"{len(spawns)} sub-agents running…")
-        results: Dict[str, str] = {}
-        try:
-            with ThreadPoolExecutor(
-                max_workers=min(max_workers, len(spawns))
-            ) as pool:
-                for tool_id, content in pool.map(_one, spawns):
-                    results[tool_id] = content
-        finally:
-            self._stop_spinner()
-        return results
+        """Delegates to :func:`subagent_runner.run_spawn_batch`."""
+        return subagent_runner.run_spawn_batch(self, tool_calls)
 
     def _handle_spawn_agent(
         self, agent_type: str, prompt: str, description: str = "",
         in_batch: bool = False, run_in_background: bool = False,
     ) -> str:
-        """Run a spawned sub-agent to completion and return only its final report.
-
-        The sub-agent runs on an isolated context (its own message list, via
-        ``_run_worker_loop``) with its type's system prompt + tool allowlist; the
-        parent sees only the returned text, never the sub-agent's tool calls.
-        Nested spawning is blocked (a sub-agent's tool set drops ``spawn_agent``,
-        and ``_spawn_depth`` guards against it regardless).
-
-        ``run_in_background=True`` launches it on a daemon thread and returns
-        IMMEDIATELY with an agent id; the parent turn continues, and the result is
-        delivered later (see ``_run_background_subagent`` + ``drain_background_*``)."""
-        if getattr(self, "_spawn_depth", 0) > 0:
-            return (
-                "A sub-agent cannot spawn its own sub-agents. Do the work directly "
-                "with your tools."
-            )
-        agent = subagents.get_subagent(agent_type)
-        if agent is None:
-            available = ", ".join(a.name for a in subagents.list_subagents())
-            return (
-                f"Unknown agent_type '{agent_type}'. Available types: {available}."
-            )
-        prompt = (prompt or "").strip()
-        if not prompt:
-            return "spawn_agent needs a non-empty prompt describing the task."
-
-        label = description.strip() or agent.name
-
-        if run_in_background:
-            return self._launch_background_subagent(agent, prompt, label)
-
-        if self.verbose:
-            print(
-                f"\n\033[90m[↳ spawn_agent: {agent.name} — {label}]\033[0m\n",
-                flush=True,
-            )
-
-        # In a parallel batch the aggregate "N sub-agents running…" spinner is
-        # owned by _run_spawn_batch and shared across pool threads, so a single
-        # sub-agent must NOT drive its own per-tool spinner (it would race the
-        # others and clobber the aggregate label). Solo spawns own the spinner.
-        result = self._run_one_subagent(agent, prompt, label, drive_spinner=not in_batch)
-        return self._wrap_subagent_result(agent.name, result)
+        """Delegates to :func:`subagent_runner.handle_spawn_agent`."""
+        return subagent_runner.handle_spawn_agent(
+            self, agent_type, prompt, description,
+            in_batch=in_batch, run_in_background=run_in_background,
+        )
 
     @staticmethod
     def _wrap_subagent_result(
         agent_name: str, result: str, resumed: bool = False
     ) -> str:
-        """Wrap a sub-agent's report with the header + not-shown-to-user footer."""
-        header = f"[{agent_name} sub-agent result{' — resumed' if resumed else ''}]"
-        return (
-            f"{header}\n{result}\n\n"
-            "(This result is not shown to the user — summarize what matters for "
-            "them yourself.)"
-        )
+        """Delegates to :func:`subagent_runner.wrap_subagent_result`."""
+        return subagent_runner.wrap_subagent_result(agent_name, result, resumed=resumed)
 
     def _launch_background_subagent(self, agent, prompt: str, label: str) -> str:
-        """Start a sub-agent on a daemon thread and return immediately.
-
-        The thread runs the quiet loop in HEADLESS mode (untrusted destructive
-        tools auto-deny — no TTY to prompt on), records the result in the registry
-        on completion, and never raises into the parent. Returns an ack string
-        with the agent id the parent can reference."""
-        rec = self._bg_agents.register(agent.name, label, prompt)
-
-        def _run() -> None:
-            self._set_headless(True)
-            try:
-                result = self._run_one_subagent(
-                    agent, prompt, label, drive_spinner=False, kind="background"
-                )
-                self._bg_agents.complete(rec.agent_id, result)
-            except Exception as e:  # never crash the daemon
-                logger.error(f"Background sub-agent {rec.agent_id} failed: {e}")
-                self._bg_agents.complete(
-                    rec.agent_id, f"The {agent.name} sub-agent failed: {e}",
-                    failed=True,
-                )
-            # Wake the UI so it can auto-deliver this completion when idle (or
-            # let a running turn pick it up at its next boundary). Best-effort:
-            # absent hook (plain loop/tests) → delivered on the user's next turn.
-            hook = getattr(self, "_on_background_complete", None)
-            if hook is not None:
-                try:
-                    hook(rec.agent_id)
-                except Exception as e:
-                    logger.debug(f"background-complete hook failed: {e}")
-
-        threading.Thread(target=_run, daemon=True).start()
-        return (
-            f"Started background sub-agent '{rec.agent_id}' ({agent.name}: {label}). "
-            "It runs while you continue; you'll be notified when it finishes, and "
-            "its result will be delivered then. Do not wait for it — carry on."
-        )
+        """Delegates to :func:`subagent_runner.launch_background_subagent`
+        (``agent`` here is the sub-agent type definition)."""
+        return subagent_runner.launch_background_subagent(self, agent, prompt, label)
 
     def _handle_resume_agent(
         self, agent_id: str, prompt: str, run_in_background: bool = True
     ) -> str:
-        """Resume a prior sub-agent with a follow-up, using its saved record.
-
-        Reconstructs a brief from the recorded run's original task + prior report
-        and runs the same type's quiet loop with the new prompt. Defaults to
-        **background** (the original background sub-agent's mode): returns
-        immediately and delivers the report on completion; ``run_in_background=
-        False`` waits for the report inline."""
-        agent_id = (agent_id or "").strip()
-        prompt = (prompt or "").strip()
-        if not prompt:
-            return "resume_agent needs a non-empty follow-up prompt."
-        rec = self._bg_agents.get(agent_id)
-        if rec is None:
-            # Not in this session's registry — fall back to the persisted record
-            # on disk, so a finished sub-agent stays resumable after a restart /
-            # on a loaded conversation (the in-memory registry doesn't survive).
-            rec = self._bg_agents.load_from_disk(agent_id)
-        if rec is None:
-            known = ", ".join(r.agent_id for r in self._bg_agents.list_all()) or "none"
-            return (
-                f"Unknown agent_id '{agent_id}' (no live or persisted record). "
-                f"Known sub-agents this session: {known}."
-            )
-        if rec.status == "running":
-            return (
-                f"Sub-agent '{agent_id}' is still running — wait for it to finish "
-                "before resuming it."
-            )
-        agent = subagents.get_subagent(rec.agent_type)
-        if agent is None:
-            return f"The '{rec.agent_type}' agent type no longer exists."
-
-        # Re-brief: original task + prior report as context, then the follow-up.
-        # Omit empty sections (a disk-loaded record from before prompts were
-        # persisted may lack the original task).
-        parts = []
-        if rec.prompt:
-            parts.append(f"You previously worked on this task:\n{rec.prompt}")
-        if rec.result:
-            parts.append(f"Your prior report was:\n{rec.result}")
-        parts.append(f"Follow-up instruction:\n{prompt}")
-        resume_prompt = "\n\n".join(parts)
-        label = f"{rec.description} (resumed)" if rec.description else "resumed"
-
-        if run_in_background:
-            # Launch detached — same as a background spawn (returns immediately,
-            # report delivered on completion). This is the default so resuming a
-            # background sub-agent stays background.
-            return self._launch_background_subagent(agent, resume_prompt, label)
-
-        if self.verbose:
-            print(
-                f"\n\033[90m[↳ resume_agent: {agent.name} — {label}]\033[0m\n",
-                flush=True,
-            )
-        result = self._run_one_subagent(agent, resume_prompt, label)
-        return self._wrap_subagent_result(agent.name, result, resumed=True)
-
+        """Delegates to :func:`subagent_runner.handle_resume_agent`."""
+        return subagent_runner.handle_resume_agent(
+            self, agent_id, prompt, run_in_background=run_in_background
+        )
 
     def drain_background_completions(self) -> List[BaseMessage]:
-        """Pop newly-finished background sub-agents as wrapped user messages.
-
-        Called by the chat loop at the start of a turn: each just-completed
-        background agent becomes a HumanMessage carrying its report, so the model
-        addresses it as new input (reusing the steering framing). Returns [] when
-        nothing finished since the last drain."""
-        registry = getattr(self, "_bg_agents", None)
-        if registry is None:
-            return []
-        ready = registry.drain_completed_unnotified()
-        msgs: List[BaseMessage] = []
-        for rec in ready:
-            verb = "failed" if rec.status == "failed" else "finished"
-            msgs.append(
-                HumanMessage(
-                    content=(
-                        f"Your background sub-agent '{rec.agent_id}' "
-                        f"({rec.agent_type}: {rec.description}) {verb} while you "
-                        f"were working. Its report:\n\n{rec.result}\n\n"
-                        "Address this now: summarize what matters for the user."
-                    )
-                )
-            )
-        return msgs
+        """Delegates to :func:`subagent_runner.drain_background_completions`."""
+        return subagent_runner.drain_background_completions(self)
 
     def has_undelivered_background(self) -> bool:
-        """True if a finished background sub-agent's report hasn't been surfaced
-        yet (drives the UI's auto-delivery / delivery-only turn)."""
-        registry = getattr(self, "_bg_agents", None)
-        return registry.any_undelivered() if registry is not None else False
+        """Delegates to :func:`subagent_runner.has_undelivered_background`."""
+        return subagent_runner.has_undelivered_background(self)
 
     def _callback_free_model(self):
-        """A copy of the base chat model with instance-level callbacks stripped.
-
-        The streaming callback handler is bound to ``self.model`` at init and
-        drives the shared spinner; a quiet sub-agent must not fire it. Returns an
-        independent copy (never mutating ``self.model`` — that would race parallel
-        sub-agents) via pydantic ``model_copy``; falls back to the shared model if
-        copying isn't supported (then the quiet stream's empty config is the only
-        guard, acceptable for a single sub-agent)."""
-        model = self.model
-        try:
-            return model.model_copy(update={"callbacks": None})
-        except Exception:
-            return model
+        """Delegates to :func:`subagent_runner.callback_free_model`."""
+        return subagent_runner.callback_free_model(self)
 
     def _subagent_base_model(self, agent):
-        """Callback-free base model for a spawned sub-agent, honoring a custom
-        type's per-agent ``model`` override (a same-provider model with the NAME
-        swapped, built by the client-set factory). Falls back to the parent model
-        when there's no override, no factory, or the build fails — so built-in
-        types and the default path are unchanged. The factory builds with
-        callbacks=None, so the override is already callback-free (safe for the
-        quiet/parallel/background sub-agent loops)."""
-        override = getattr(agent, "model", None)
-        factory = getattr(self, "_subagent_model_factory", None)
-        if override and factory:
-            model = factory(override)
-            if model is not None:
-                return model
-        return self._callback_free_model()
+        """Delegates to :func:`subagent_runner.subagent_base_model` (``agent``
+        here is the sub-agent type definition)."""
+        return subagent_runner.subagent_base_model(self, agent)
 
     def _run_one_subagent(
         self, agent, prompt: str, label: str, drive_spinner: bool = True,
         kind: str = "spawn",
     ) -> str:
-        """Run a single spawned sub-agent to completion (quiet) and return its
-        final report text. Used both for a lone spawn and inside the parallel
-        pool. Increments the (thread-local) spawn depth so a nested spawn from
-        THIS thread is refused; restores it on the way out. ``drive_spinner`` is
-        False inside a parallel batch (the batch owns one shared spinner).
-        ``kind`` ("spawn"|"background") tags the activity-panel row."""
-        # Bind tools onto a CALLBACK-FREE copy of the base model: the chat model
-        # carries the streaming callback handler at the instance level (bound at
-        # init), which LangChain MERGES with per-call config — so an empty config
-        # can't silence it. A quiet sub-agent's stream would otherwise fire
-        # on_llm_new_token/on_tool_start → spinner.stop(), tearing down the batch's
-        # shared "N running…" spinner (and racing siblings). A per-instance copy
-        # (not mutating the shared self.model) is concurrency-safe.
-        sub_tools = self._subagent_tools(agent)
-        base = self._subagent_base_model(agent)
-        sub_model = base.bind_tools(sub_tools) if sub_tools else base
-        sys_prompt = subagents.subagent_system_prompt(agent)
-        # A spawned sub-agent is handed a whole self-contained task (esp. the
-        # search-heavy explore/plan types), so it needs the same generous turn
-        # budget as the main agent loop — NOT the orchestrator-worker default of
-        # 10, which starves exploration. Reuse RECURSION_LIMIT (default 200):
-        # the main loop's own bound, and the same value as a fresh full agent.
-        sub_max_iterations = getattr(self, "recursion_limit", None) or 200
-
-        if drive_spinner:
-            self._start_spinner(f"{agent.name}: starting…")
-
-            def _progress(note: str) -> None:
-                self._start_spinner(f"{agent.name} ({label}): {note}")
-        else:
-            _progress = None  # batch owns the shared "N running…" spinner
-
-        # Live activity run for the agents panel/detail view (covers foreground
-        # solo + batch spawns, background spawns, and inline resume).
-        sink = self._activity.open_run(agent.name, label, kind)
-
-        self._spawn_depth += 1
-        try:
-            result, _ = self._run_worker_loop(
-                sub_model,
-                sub_tools,
-                prompt,
-                max_iterations=sub_max_iterations,
-                system_prompt=sys_prompt,
-                quiet=True,
-                progress=_progress,
-                activity=sink,
-            )
-            # A stopped agent returns cleanly via the loop's cancel path; show it
-            # as "stopped", not "done".
-            if sink.is_cancelled():
-                sink.finish("stopped")
-            else:
-                sink.final(result)
-                sink.finish("done")
-            return result
-        except Exception as e:
-            logger.error(f"spawn_agent ({agent.name}) failed: {e}")
-            sink.finish("failed")
-            return f"The {agent.name} sub-agent failed: {e}"
-        finally:
-            self._spawn_depth -= 1
-            if drive_spinner:
-                self._stop_spinner()
-            # Backstop: if the run exited WITHOUT a normal finish (e.g. a
-            # KeyboardInterrupt cancel, which is BaseException — not caught by
-            # `except Exception` above), mark it stopped so the panel doesn't
-            # show it "running" forever with the timer ticking.
-            sink.finish_if_running("failed")
+        """Delegates to :func:`subagent_runner.run_one_subagent` (``agent`` here
+        is the sub-agent type definition)."""
+        return subagent_runner.run_one_subagent(
+            self, agent, prompt, label, drive_spinner=drive_spinner, kind=kind
+        )
 
     @staticmethod
     def _tool_error_message(tool_name: str, exc: Exception) -> str:
@@ -2812,143 +2297,16 @@ class LangGraphAgent:
         return tool_formatting.tool_error_message(tool_name, exc)
 
     def _is_preapproved_bash(self, command: str) -> bool:
-        """True if ``command`` was pre-approved via a plan's ``allowed_bash``.
-
-        A command matches when it equals, or begins with, one of the pre-approved
-        entries (so ``pytest`` pre-approves ``pytest tests/unit``). Set only after
-        the user approves a plan that declared commands; empty otherwise.
-        """
-        approved = getattr(self, "_preapproved_bash", None)
-        if not approved:
-            return False
-        cmd = (command or "").strip()
-        if not cmd:
-            return False
-        return any(cmd == a or cmd.startswith(a + " ") for a in approved)
+        """Delegates to :func:`confirmation_gate.is_preapproved_bash`."""
+        return confirmation_gate.is_preapproved_bash(self, command)
 
     def _confirm_tool(self, tool_name: str, tool_args: dict) -> bool:
-        """Ask the user to approve a destructive tool before it runs.
-
-        Returns True to proceed. Gates shell (``execute_bash``), file writes
-        (``fs_write``/``file_edit``), and memory writes, each behind its
-        ``REQUIRE_*`` toggle; every other tool proceeds. Enforced client-side (the
-        MCP subprocess can't prompt); non-TTY runs auto-proceed.
-        """
-        if tool_name in self._CONFIRM_BASH_TOOLS:
-            # A command the plan pre-declared (via exit_plan_mode allowed_bash)
-            # runs without a prompt — approving the plan approved these.
-            if self._is_preapproved_bash(tool_args.get("command", "")):
-                return True
-            category, toggle, toggle_default, header, detail = (
-                "bash",
-                "REQUIRE_BASH_CONFIRMATION",
-                True,
-                "▶ Run shell command?",
-                tool_args.get("command", ""),
-            )
-        elif tool_name in self._CONFIRM_WRITE_TOOLS:
-            path = tool_args.get("path", "")
-            op = tool_args.get("command", "edit")  # fs_write: create/str_replace/…
-            category, toggle, toggle_default, header, detail = (
-                "write",
-                "REQUIRE_WRITE_CONFIRMATION",
-                True,
-                "▶ Write to file?",
-                f"{op} {path}".strip(),
-            )
-        elif tool_name in self._CONFIRM_MEMORY_TOOLS:
-            # Only the write actions touch the file; a bad/read action proceeds.
-            action = (tool_args.get("action") or "").strip().lower()
-            if action not in ("add", "replace", "remove"):
-                return True
-            text = tool_args.get("text") or tool_args.get("old_text") or ""
-            category, toggle, toggle_default, header, detail = (
-                "memory",
-                "REQUIRE_MEMORY_CONFIRMATION",
-                False,
-                "▶ Update memory?",
-                f"{action}: {text[:60]}",
-            )
-        else:
-            return True
-
-        if not config.get(toggle, toggle_default):
-            return True
-        # Already trusted this session (user answered "a" earlier). A background
-        # sub-agent inherits these — a category the user pre-approved runs.
-        trusted = getattr(self, "_trusted_confirm_categories", None)
-        if trusted is not None and category in trusted:
-            return True
-        # Background sub-agent (no TTY of its own): it CANNOT prompt, so an
-        # untrusted destructive tool auto-DENIES (the safe direction — never
-        # silently run something unattended). It proceeds only via a pre-trusted
-        # category above. Keyed thread-local so only the background daemon thread
-        # is headless; the foreground turn still prompts normally.
-        if self._is_headless():
-            return False
-        if not sys.stdin.isatty():
-            return True  # non-interactive: can't prompt, don't block
-
-        # Serialize the actual prompt across threads: with concurrent sub-agents
-        # two tool calls could otherwise fight for the terminal at once. The lock
-        # is absent on bare test objects (built via __new__) — degrade to no lock.
-        lock = getattr(self, "_confirm_lock", None)
-        if lock is None:
-            return self._prompt_confirm(header, detail, category)
-        with lock:
-            # Re-check trust inside the lock: while we waited, a concurrent
-            # sub-agent's "a" may have trusted this category — don't re-prompt.
-            if category in getattr(self, "_trusted_confirm_categories", set()):
-                return True
-            return self._prompt_confirm(header, detail, category)
+        """Delegates to :func:`confirmation_gate.confirm`."""
+        return confirmation_gate.confirm(self, tool_name, tool_args)
 
     def _prompt_confirm(self, header: str, detail: str, category: str) -> bool:
-        """Show the actual confirmation prompt and return True to proceed.
-
-        Split out of :meth:`_confirm_tool` so the interactive part can run under
-        the confirm lock (serializing concurrent sub-agent prompts)."""
-        # We borrow the terminal for the prompt, so stop the spinner — but
-        # remember whether it was running (and its label) so we can put it back
-        # afterward. This matters for a QUIET worker that can prompt (a sequential
-        # orchestrator step / a foreground sub-agent): nothing else restarts the
-        # spinner in that path, so without restoring it here it would stay dead
-        # for the rest of the subtask after the first confirmation (the terminal
-        # then looks frozen at a bare `>` while work continues). In the foreground
-        # `_execute_tools` path the spinner is already stopped before the tool
-        # loop, so `was_active` is False and `_invoke_tool` restarts it as before.
-        was_active, prev_label = self._spinner_snapshot()
-        self._stop_spinner()
-
-        def _finish(proceed: bool) -> bool:
-            # Hand the spinner back exactly as it was (label preserved).
-            if was_active:
-                self._start_spinner(prev_label)
-            return proceed
-
-        # The pinned-input UI installs a `_confirm_ui` hook (in-app y/N/a keypress
-        # → yes|no|all) since a plain input() would fight the live app for stdin.
-        # Absent (plain loop / unit-test bare object) → legacy print()+input().
-        confirm_ui = getattr(self, "_confirm_ui", None)
-        if confirm_ui is not None:
-            answer = confirm_ui(header, detail, category)
-            if answer == "all":
-                self._trusted_confirm_categories.add(category)
-                return _finish(True)
-            return _finish(answer == "yes")
-
-        # "a" = allow this whole category for the rest of the session.
-        print(f"\n\033[93m{header}\033[0m\n  \033[1m{detail}\033[0m")
-        try:
-            answer = input("  Proceed? (y/N/a=allow all this session): ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            answer = ""
-        if answer in ("a", "all", "always"):
-            if not hasattr(self, "_trusted_confirm_categories"):
-                self._trusted_confirm_categories = set()
-            self._trusted_confirm_categories.add(category)
-            return _finish(True)
-        return _finish(answer in ("y", "yes"))
+        """Delegates to :func:`confirmation_gate.prompt_confirm`."""
+        return confirmation_gate.prompt_confirm(self, header, detail, category)
 
     def _spinner_snapshot(self) -> tuple:
         """Return ``(active, label)`` for the shared spinner, or ``(False, …)``.

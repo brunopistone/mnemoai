@@ -9,6 +9,39 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-07-24
+
+Internal structural refactor of the `client/` package — no behavior change, no
+public-surface change. The two largest modules were decomposed into cohesive,
+individually-testable collaborators behind thin delegators, paying down the
+long-standing "God object" debt in the agent loop and the client facade.
+
+### Changed
+
+- **`client/agent/agent.py` shrank 3314 → 2672 lines** by extracting five sibling
+  modules of pure/near-pure logic, each with the class keeping thin delegating
+  methods (and class-attribute aliases for the marker/category constants) so the
+  full method surface is preserved: `response_parsing.py` (provider-agnostic
+  thinking/visible-text extraction), `stream_policy.py` (network/overflow/empty
+  classifiers + backoff), `steering.py` (mid-turn steer queue + cancel token),
+  `confirmation_gate.py` (the destructive-tool confirm gate), and
+  `subagent_runner.py` (the `spawn_agent`/`resume_agent`/background envelope
+  around the stationary worker loop).
+- **`client/client.py` shrank 1373 → 933 lines** by extracting `context_injection.py`
+  (system-prompt assembly + episodic/steering/plan-mode injection + similarity +
+  context-token count) and `session_artifacts.py` (per-instance session-id minting
+  - RAG/chunk-cache init/flush), and relocating `StreamingCallbackHandler` to
+    `client/ui/streaming_callback.py` (re-exported from `client.py`).
+- **Deduplicated the sub-agent run lifecycle.** The identical "finish a run that
+  returned normally — mark _stopped_ if cancelled mid-flight, else record the
+  final answer and mark _done_" transition, previously repeated across the
+  foreground/background spawn and orchestrator-subtask paths, is now a single
+  `ActivitySink.finish_ok()`.
+
+All 1376 unit tests pass, the import-sort gate is clean, and the extractions were
+verified behavior-identical against the prior code (AST-level equivalence plus a
+live end-to-end run of the agent + sub-agent paths).
+
 ## [1.7.0] — 2026-07-24
 
 Live visibility and control over sub-agents in the pinned TUI, a provider-

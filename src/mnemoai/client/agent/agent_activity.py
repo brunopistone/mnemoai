@@ -126,6 +126,19 @@ class ActivitySink:
             return
         self._store._finish(self._run_id, status)
 
+    def finish_ok(self, final_text: str) -> None:
+        """Finish a run that returned normally: mark 'stopped' if it was cancelled
+        mid-run (x / stop-all), else record ``final_text`` and mark 'done'.
+
+        Encapsulates the identical success-path transition every hidden run does
+        (foreground/background spawns, orchestrator subtasks). The except/finally
+        failure paths stay explicit at each call site (they differ per caller)."""
+        if self.is_cancelled():
+            self.finish("stopped")
+        else:
+            self.final(final_text)
+            self.finish("done")
+
     def finish_if_running(self, status: str) -> None:
         """Finish the run ONLY if it's still 'running' — an idempotent backstop
         for abnormal exits (e.g. a KeyboardInterrupt cancel) that never leaves a
