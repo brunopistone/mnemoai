@@ -149,12 +149,15 @@ class _Tool:
 
 
 def _agent(tools):
+    from mnemoai.client.agent.agent_activity import AgentActivityStore
+
     a = LangGraphAgent.__new__(LangGraphAgent)
     a.tools = [_Tool(n) for n in tools]
     a._spawn_depth = 0
     a.verbose = False
     a.model = _FakeModel()
     a.callbacks = []  # spinner start/stop become harmless no-ops
+    a._activity = AgentActivityStore()  # _run_one_subagent opens an activity run
     return a
 
 
@@ -463,6 +466,61 @@ class TestQuietWorkerLoop:
         # The loop streamed with quiet=True (keeps idle-timeout+retry, no display).
         assert a._quiet_state["quiet_seen"] == [True]
 
+    def test_cancel_stops_worker_loop_before_streaming(self):
+        # A cancelled turn must abort a sub-agent worker at the top of the loop
+        # (pool/daemon threads can't receive the injected KeyboardInterrupt, so
+        # they must poll _cancelled()) — else it keeps looping after "Stopped".
+        import threading
+
+        a = self._agent_for_quiet([AIMessage(content="should-not-run")])
+        a._cancel_event = threading.Event()
+        a._cancel_event.set()  # already cancelled
+        a._last_visible_from = lambda msgs: ""
+        text, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+        assert text == "(cancelled)"
+        # It bailed at the top of the loop — never called _stream_response.
+        assert a._quiet_state["quiet_seen"] == []
+
+    def test_no_cancel_event_runs_normally(self):
+        # A bare agent without a _cancel_event attr must not crash (_cancelled
+        # guards with getattr) and runs as usual.
+        a = self._agent_for_quiet([AIMessage(content="done")])
+        text, _ = a._run_worker_loop(object(), [], "task", quiet=True)
+        assert text == "done"
+
+    def test_per_run_stop_aborts_even_when_turn_not_cancelled(self):
+        # x / stop-all set a PER-RUN cancel (via the activity sink) — the worker
+        # must stop even though the global turn cancel is NOT set (this is what
+        # lets a BACKGROUND agent be stopped across turns).
+        import threading
+
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        a = self._agent_for_quiet([AIMessage(content="should-not-run")])
+        a._cancel_event = threading.Event()  # global NOT set
+        a._last_visible_from = lambda msgs: ""
+        store = AgentActivityStore()
+        sink = store.open_run("explore", "d", "background")
+        store.request_stop(sink._run_id)  # per-run stop only
+        text, _ = a._run_worker_loop(object(), [], "task", quiet=True, activity=sink)
+        assert text == "(cancelled)"
+        assert a._quiet_state["quiet_seen"] == []  # never streamed
+
+    def test_should_continue_ends_the_graph_when_cancelled(self):
+        # "Stop all" cancels the turn; the graph must END even with pending tool
+        # calls, else it loops into another model call after tools return and the
+        # turn keeps going (the model resumes with the stopped agents' partials).
+        import threading
+
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a._cancel_event = threading.Event()
+        ai = AIMessage(content="")
+        ai.tool_calls = [{"name": "x", "args": {}, "id": "c0", "type": "tool_call"}]
+        state = {"messages": [ai]}
+        assert a._should_continue(state) == "continue"  # not cancelled → loop
+        a._cancel_event.set()
+        assert a._should_continue(state) == "end"  # cancelled → stop the turn
+
     def test_quiet_progress_counts_tool_calls(self):
         turns = [
             AIMessage(
@@ -592,6 +650,8 @@ class TestOrchestratorScheduling:
     for declared dependencies, threading only depended-on results into a subtask."""
 
     def _agent(self):
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
         a = LangGraphAgent.__new__(LangGraphAgent)
         a._max_subagent_concurrency = 4
         a.verbose = False
@@ -600,6 +660,7 @@ class TestOrchestratorScheduling:
         a.tools_by_route = None  # → every subtask uses the full toolset
         a.model = object()
         a.model_with_tools = object()
+        a._activity = AgentActivityStore()  # orchestrator opens an activity run
         # Record the prompt each subtask received + return a marker result.
         seen = {}
 
@@ -868,6 +929,8 @@ class TestOrchestrateEndToEnd:
     def _agent(self, subtasks):
         from langchain_core.messages import HumanMessage
 
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
         a = LangGraphAgent.__new__(LangGraphAgent)
         a._max_subagent_concurrency = 4
         a.verbose = False
@@ -876,6 +939,7 @@ class TestOrchestrateEndToEnd:
         a.tools_by_route = None
         a.model = object()
         a.model_with_tools = object()
+        a._activity = AgentActivityStore()
         a._steer_queue = []
         a._steer_lock = None
         a._external_tools_prompt_block = lambda: ""

@@ -107,7 +107,10 @@ def test_multiple_orphans_mixed_with_valid():
 # a block can enter history via a cut-short stream or a mid-session model switch;
 # the sanitizer drops only the invalid block, leaving healthy content intact.
 
-def test_malformed_thinking_block_dropped():
+def test_signed_empty_thinking_block_normalized_not_dropped():
+    # A signature-bearing block whose inner text was lost in accumulation is
+    # NORMALIZED (thinking:"") and KEPT — dropping it would strip the signature
+    # and (on a tool-use turn) break Anthropic's thinking-first ordering.
     bad = AIMessage(content=[
         {"type": "thinking", "thinking": "", "signature": "sig"},  # empty inner
         {"type": "text", "text": "the answer"},
@@ -115,7 +118,9 @@ def test_malformed_thinking_block_dropped():
     out = S([bad])
     blocks = out[0].content
     assert {"type": "text", "text": "the answer"} in blocks
-    assert not any(b.get("type") == "thinking" for b in blocks)  # dropped
+    thinking = [b for b in blocks if b.get("type") == "thinking"]
+    assert len(thinking) == 1  # kept
+    assert thinking[0].get("thinking") == "" and thinking[0]["signature"] == "sig"
 
 
 def test_valid_thinking_block_preserved():
@@ -127,13 +132,28 @@ def test_valid_thinking_block_preserved():
     assert out[0] is good  # unchanged object (no rebuild when nothing dropped)
 
 
-def test_missing_inner_thinking_key_dropped():
+def test_missing_inner_thinking_key_normalized():
+    # Signature present, no `thinking` key at all → inject thinking:"" and keep
+    # the signed block (Anthropic needs the signature to replay the turn).
     bad = AIMessage(content=[
         {"type": "thinking", "signature": "sig"},  # no `thinking` key at all
         {"type": "text", "text": "answer"},
     ])
     out = S([bad])
+    thinking = [b for b in out[0].content if b.get("type") == "thinking"]
+    assert len(thinking) == 1
+    assert thinking[0].get("thinking") == "" and thinking[0]["signature"] == "sig"
+
+
+def test_unsignable_thinking_stub_dropped():
+    # NEITHER text NOR signature → an unsendable stub → dropped.
+    bad = AIMessage(content=[
+        {"type": "thinking"},
+        {"type": "text", "text": "answer"},
+    ])
+    out = S([bad])
     assert not any(b.get("type") == "thinking" for b in out[0].content)
+    assert any(b.get("type") == "text" for b in out[0].content)
 
 
 def test_plain_string_content_untouched():

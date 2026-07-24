@@ -9,6 +9,7 @@ text and tool args survive verbatim and that empty inputs collapse to nothing.
 from mnemoai.client.ui.turn_view import (
     ReasoningStatus,
     format_duration,
+    render_agent_detail,
     render_conversation,
     render_live_reasoning,
     render_plan,
@@ -28,6 +29,12 @@ class TestFormatDuration:
         assert format_duration(60) == "1m0s"
         assert format_duration(90) == "1m30s"
         assert format_duration(125) == "2m5s"
+        assert format_duration(173) == "2m53s"
+
+    def test_hours(self):
+        assert format_duration(3600) == "1h0m0s"
+        assert format_duration(3725) == "1h2m5s"
+        assert format_duration(7384) == "2h3m4s"
 
 
 class TestReasoningBlock:
@@ -286,3 +293,49 @@ class TestRenderConversation:
     def test_empty_messages_render_nothing(self):
         assert render_conversation([]) == ""
         assert render_conversation([_ai(content="")]) == ""
+
+
+class TestRenderAgentDetail:
+    """render_agent_detail replays a captured ActivityRun as a main-thread-style
+    transcript (tool blocks + result/error lines + markdown final answer)."""
+
+    def _run(self):
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        store = AgentActivityStore()
+        sink = store.open_run("explore", "Find Ray script", "spawn")
+        sink.tool_call("grep_search", {"pattern": "fully_shard"})
+        sink.tool_result("grep_search", "3 matches")
+        sink.tool_error("glob_search", "error executing tool")
+        sink.final("# Found it\n\nThe script is at **train.py**.")
+        sink.finish("done")
+        return store.get(store.snapshot()[0].run_id)
+
+    def test_renders_header_tools_and_answer(self):
+        out = render_agent_detail(self._run())
+        assert "explore" in out and "spawn" in out
+        assert "Find Ray script" in out          # description
+        assert "grep_search" in out              # tool call block
+        assert "pattern=fully_shard" in out      # tool arg
+        assert "3 matches" in out                # result line
+        assert "glob_search" in out and "error executing tool" in out  # error line
+        assert "Found it" in out                 # final answer text
+        assert "**train.py**" not in out         # markdown consumed, not raw
+        assert "\033[" in out                    # ANSI styling applied
+
+    def test_running_run_shows_running_marker(self):
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        store = AgentActivityStore()
+        store.open_run("plan", "still working", "orchestrator")
+        out = render_agent_detail(store.snapshot()[0])
+        assert "running" in out.lower()
+
+    def test_failed_and_no_events_does_not_crash(self):
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        store = AgentActivityStore()
+        sink = store.open_run("explore", "d", "background")
+        sink.finish("failed")
+        out = render_agent_detail(store.snapshot()[0])
+        assert "failed" in out.lower()

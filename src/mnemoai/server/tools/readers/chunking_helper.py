@@ -15,7 +15,6 @@ from datetime import datetime
 
 import tiktoken
 
-from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import chunk_session_pointer_path, profile_dir
@@ -236,6 +235,11 @@ async def __summarize_with_model(text: str, context: str = "") -> str:
         Summarized text
     """
     try:
+        # Deferred: importing the controller pulls BaseChatModel→transformers/
+        # torch (+litellm), ~3s — kept off the server's tool-registration path
+        # (fs_read always registers this module). Summarization is rare.
+        from mnemoai.models.controllers.llm_controller import LangChainLLMController
+
         llm_controller = LangChainLLMController()
         llm_controller.initialize_model()
         model = llm_controller.get_model()

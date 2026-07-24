@@ -562,6 +562,26 @@ class ChatInterface:
             if req is not None:
                 req()
 
+        def _agents_snapshot():
+            agent = getattr(self.client, "agent", None)
+            store = getattr(agent, "_activity", None) if agent else None
+            return store.snapshot() if store is not None else []
+
+        def _agents_get(run_id):
+            agent = getattr(self.client, "agent", None)
+            store = getattr(agent, "_activity", None) if agent else None
+            return store.get(run_id) if store is not None else None
+
+        def _agents_stop(run_id):
+            agent = getattr(self.client, "agent", None)
+            store = getattr(agent, "_activity", None) if agent else None
+            return store.request_stop(run_id) if store is not None else False
+
+        def _agents_stop_all():
+            agent = getattr(self.client, "agent", None)
+            store = getattr(agent, "_activity", None) if agent else None
+            return store.request_stop_all() if store is not None else 0
+
         reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
             commands=self._COMMANDS,
@@ -572,6 +592,10 @@ class ChatInterface:
             on_cancel=_on_cancel,
             steer=_steer,
             clear_steering=_clear_steering,
+            agents_provider=_agents_snapshot,
+            agents_get=_agents_get,
+            agents_stop=_agents_stop,
+            agents_stop_all=_agents_stop_all,
         )
 
         # Route the worker-thread confirmation gate through the app (a plain
@@ -587,6 +611,9 @@ class ChatInterface:
             self.client.agent._on_background_complete = (
                 lambda agent_id: reader.notify_background_complete()
             )
+            # Repaint the live agents panel immediately when a sub-agent records
+            # activity (else it only updates on the 10Hz tick). TTY-only.
+            self.client.agent._activity.on_change = reader.request_repaint
         # Exposed so _dispatch can route dialog commands through the reader.
         self._pinned_reader = reader
 

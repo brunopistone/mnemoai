@@ -928,9 +928,10 @@ class TestReasoningEffortFirstClass:
         assert patch_mantle["reasoning_effort"] == "xhigh"
 
     def test_litellm_reasoning_effort_in_model_kwargs(self, patch_mantle, monkeypatch):
-        # ChatLiteLLM is imported at module top into the controller's namespace,
-        # so patch the bound name on the controller module (not langchain_litellm).
-        import mnemoai.models.controllers.llm_controller as ctrl_mod
+        # ChatLiteLLM is imported lazily (function-local) inside
+        # _initialize_litellm_model, so patch it at the SOURCE (langchain_litellm)
+        # where the deferred import looks it up — not on the controller module.
+        import langchain_litellm
 
         cap = {}
 
@@ -939,7 +940,7 @@ class TestReasoningEffortFirstClass:
             cap.update(kwargs)
             return MagicMock()
 
-        monkeypatch.setattr(ctrl_mod, "ChatLiteLLM", rec)
+        monkeypatch.setattr(langchain_litellm, "ChatLiteLLM", rec)
         ctrl = _make_llm_controller(
             monkeypatch,
             {

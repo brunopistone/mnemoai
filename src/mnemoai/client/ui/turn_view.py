@@ -4,8 +4,6 @@ Pure string builders (no I/O, no prompt_toolkit) written into native scrollback
 above the pinned input; colors degrade harmlessly where unsupported.
 """
 
-import contextlib
-import io
 import re
 import threading
 
@@ -26,11 +24,14 @@ _CONNECTOR = "↳"
 
 
 def format_duration(seconds: float) -> str:
-    """Compact duration for the header: 0.4→"0s", 90→"1m30s"."""
+    """Compact duration: 0.4→"0s", 90→"1m30s", 3725→"1h2m5s"."""
     total = int(round(seconds))
     if total < 60:
         return f"{total}s"
-    minutes, secs = divmod(total, 60)
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h{minutes}m{secs}s"
     return f"{minutes}m{secs}s"
 
 
@@ -282,21 +283,64 @@ def render_markdown(text: str) -> str:
     """Render Markdown text to an ANSI string using the SAME formatter a live
     turn streams through, so a replayed answer looks identical to a fresh one.
 
-    ``CodeFormatter`` prints to stdout as it renders; we run a fresh instance
-    with stdout captured so the replay path can embed the result in the
-    transcript string instead of streaming it.
+    Uses ``CodeFormatter.render_to_string`` (a per-call sink + its own parser),
+    so it is safe to call on the UI thread even while a live turn is streaming to
+    stdout on the worker thread — no process-global ``redirect_stdout`` and no
+    shared-parser race.
     """
     if not text:
         return ""
-    buf = io.StringIO()
     try:
-        with contextlib.redirect_stdout(buf):
-            fmt = CodeFormatter()
-            fmt.process_chunk(text)
-            fmt.flush()
+        return CodeFormatter.render_to_string(text).rstrip("\n")
     except Exception:
         return text  # never let rendering break a load
-    return buf.getvalue().rstrip("\n")
+
+
+def render_agent_detail(run) -> str:
+    """Full transcript for the agent-detail view, from a captured ActivityRun.
+
+    Reproduces the main-thread look: each tool call as a ``ToolName``/``↳ arg``
+    block, each result/error as a dimmed line, and the final answer through the
+    same markdown renderer. ``run`` is an ``agent_activity.ActivityRun`` (or any
+    object exposing ``agent_type``/``description``/``origin``/``status``/
+    ``events`` where each event has ``kind``/``name``/``args``/``text``). Pure:
+    returns a string, no I/O — safe to build on the UI thread.
+    """
+    status = getattr(run, "status", "?")
+    dot = {
+        "running": "\033[33m●",
+        "done": "\033[32m✓",
+        "failed": "\033[31m✗",
+        "stopped": "\033[31m✗",
+    }.get(status, "○")
+    head = (
+        f"{_HEADER}{_BOLD}{getattr(run, 'agent_type', 'agent')}{_RESET} "
+        f"{_GRAY}[{getattr(run, 'origin', '')}]{_RESET}  {dot} {status}{_RESET}"
+    )
+    desc = getattr(run, "description", "")
+    out = [head]
+    if desc:
+        out.append(f"{_GRAY}{desc}{_RESET}")
+    out.append("")
+    final_text = ""
+    for ev in getattr(run, "events", []) or []:
+        kind = getattr(ev, "kind", "")
+        if kind == "tool_call":
+            out.append(render_tool_call(getattr(ev, "name", "") or "tool", getattr(ev, "args", None) or {}))
+        elif kind == "tool_result":
+            out.append(f"  {_GRAY}{_CONNECTOR} {getattr(ev, 'text', '')}{_RESET}")
+        elif kind == "tool_error":
+            out.append(f"  {_DEL}✗ {getattr(ev, 'name', '')}: {getattr(ev, 'text', '')}{_RESET}")
+        elif kind == "final":
+            final_text = getattr(ev, "text", "") or ""
+    if final_text:
+        out.append("")
+        out.append(f"{_ANSWER_MARKER}{render_markdown(final_text)}")
+    if status == "running":
+        cancelling = hasattr(run, "is_cancelling") and run.is_cancelling()
+        out.append("")
+        out.append(f"{_GRAY}({'cancelling…' if cancelling else 'running…'}){_RESET}")
+    return "\n".join(out)
 
 
 def render_conversation(messages: list) -> str:

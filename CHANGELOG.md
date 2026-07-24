@@ -9,6 +9,66 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-07-24
+
+Live visibility and control over sub-agents in the pinned TUI, a provider-
+agnostic reasoning-block replay fix, and a faster/less-frozen startup.
+
+### Added
+
+- **Live "agents" panel + navigation (pinned TUI).** While hidden sub-agents run
+  — foreground `spawn_agent` batches, background spawns, AND orchestrator subtask
+  workers (all previously invisible) — a panel pins below the input showing each
+  agent's status dot (● running / ✓ done / ✗ stopped-or-failed), type,
+  description, tool count, and live elapsed time. **Ctrl+A** enters nav-mode
+  (↑/↓ select, **Enter** opens a full-screen scrollable detail view of that
+  agent's tool calls / results / errors / final answer rendered like the main
+  thread, **Esc** exits). The panel shows while any agent runs and hides once all
+  finish. A new thread-safe `AgentActivityStore` (`client/agent/agent_activity.py`)
+  captures the per-agent activity feed the panel reads.
+- **Per-agent stop, foreground OR background.** In nav-mode, **`x`** stops the
+  selected agent; **Ctrl+X Ctrl+K** stops all running agents from anywhere
+  (not just nav-mode). Stopping is cooperative (a per-run cancel the worker loop
+  polls each iteration), so a background agent can be stopped across turns.
+  Stopping _all_ also cancels the turn (a foreground batch blocks the turn, so
+  the turn must stop too — otherwise it resumed with the agents' partial
+  reports). A stopping agent shows an animated `cancelling…` label until it
+  actually finishes.
+- **Startup progress spinner.** Typing `mnemoai` now shows an animated
+  `⠦ Loading libraries… → Starting tools server… → Connecting model…` line
+  (dependency-free `utils/startup_loader.py`) instead of a frozen terminal during
+  the multi-second boot, clearing before the welcome banner.
+
+### Fixed
+
+- **Reasoning-block replay 400s in sub-agents (provider-agnostic).** A sub-agent
+  re-feeding its accumulated assistant messages could send a malformed reasoning
+  block the provider rejects on a later turn — most visibly Anthropic extended
+  thinking's `messages.N.content.0.thinking.thinking: Field required` (a
+  streamed `signature_delta` accumulates a `thinking` block that keeps its
+  signature but loses the inner text). The main agent was immune (it scrubs every
+  turn); the quiet worker/sub-agent path was not. Now a shared egress guard
+  (`message_sanitizer.strip_malformed_reasoning`, wired into `_stream_response`
+  and the invoke fallbacks) **normalizes** the block (re-injects the empty inner
+  field, keeping the signature and block ordering) rather than dropping it —
+  dropping would break Anthropic's thinking-first ordering on a tool-use turn.
+  Provider-aware: preserves OpenAI Responses `reasoning` items carrying
+  `id`/`encrypted_content` and Bedrock signed `reasoning_content`, so no provider
+  regresses. Sub-agent tool errors are now attributed to the specific agent
+  instead of surfacing as anonymous log lines.
+
+### Changed
+
+- **Faster, less-frozen startup.** Deferred `langchain_litellm` (which pulls
+  litellm→transformers→torch, ~1.5s of dead weight for every non-litellm
+  provider) to a lazy import in `llm_controller`, and moved the server's
+  `VisionModelController` / summarization `LangChainLLMController` imports off the
+  unconditional tool-registration path — trimming seconds from both the client
+  and the MCP server subprocess. The heavy client stack now imports under the
+  startup spinner rather than blocking a blank terminal.
+- The agent-detail viewer scrolls with ↑/↓ · PgUp/PgDn · g/G and shows a
+  scrollbar; `format_duration` now renders hours (`1h2m5s`).
+
 ## [1.6.4] — 2026-07-23
 
 Internal cleanup of the `client/` tree (no public-surface change): a verified

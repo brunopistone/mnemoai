@@ -5,7 +5,6 @@ from typing import Any, Optional
 
 import tiktoken
 
-from mnemoai.models.controllers.vision_model_controller import VisionModelController
 from mnemoai.utils.config import config
 from mnemoai.utils.path_utils import normalize_path
 from mnemoai.utils.tokenization import count_tokens
@@ -29,6 +28,12 @@ class ToolManager:
         self.vision_model_controller = None
         self.vision_model = None
         if self.model_id:
+            # Deferred: the import pulls BaseChatModel→transformers/torch (~3s);
+            # only paid when a vision model is actually configured.
+            from mnemoai.models.controllers.vision_model_controller import (
+                VisionModelController,
+            )
+
             self.vision_model_controller = VisionModelController()
             self.vision_model_controller.initialize_model()
             self.vision_model = self.vision_model_controller.get_model()

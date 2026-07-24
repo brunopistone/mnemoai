@@ -51,6 +51,9 @@ _TUI_STYLE = Style(
         ("pinned-confirm", "noreverse bg:default fg:ansiyellow bold"),
         ("pinned-confirm-keys", "noreverse bg:default fg:#888888"),
         ("pinned-queued", "noreverse bg:default fg:#888888"),
+        ("pinned-panel", "noreverse bg:default fg:#888888"),
+        ("pinned-panel-hint", "noreverse bg:default fg:#5f5fff"),
+        ("pinned-panel-sel", "noreverse bg:default fg:#ffffff bold"),
     ]
 )
 
@@ -178,6 +181,10 @@ class PinnedPromptReader:
         on_cancel: Optional[Callable[[], None]] = None,
         steer: Optional[Callable[[str], bool]] = None,
         clear_steering: Optional[Callable[[], None]] = None,
+        agents_provider: Optional[Callable[[], list]] = None,
+        agents_get: Optional[Callable[[str], Any]] = None,
+        agents_stop: Optional[Callable[[str], bool]] = None,
+        agents_stop_all: Optional[Callable[[], int]] = None,
     ) -> None:
         """Build the pinned app.
 
@@ -200,6 +207,11 @@ class PinnedPromptReader:
                 Kept wired so re-enabling steering is a small change, not a rebuild.
             clear_steering: Called on cancel to purge any pending steer messages;
                 a harmless no-op now that nothing is steered.
+            agents_provider: Returns the current list of hidden sub-agent activity
+                runs (ActivityRun snapshots) for the live bottom "agents" panel.
+            agents_get: ``get(run_id)`` -> one run's frozen copy for the detail view.
+            agents_stop: ``stop(run_id)`` -> ask that agent to stop (x); True if it
+                was running. agents_stop_all: stop every running agent (ctrl+x ctrl+k).
         """
         self._prompt_text = prompt_text
         self._dispatch = dispatch
@@ -208,6 +220,15 @@ class PinnedPromptReader:
         self._on_cancel = on_cancel
         self._steer = steer
         self._clear_steering = clear_steering
+        # Live sub-agent activity: provider() -> list of ActivityRun snapshots for
+        # the bottom "agents" panel; get(run_id) -> one run for the detail view;
+        # stop(run_id)/stop_all() -> ask a running agent (or all) to stop.
+        self._agents_provider = agents_provider or (lambda: [])
+        self._agents_get = agents_get or (lambda rid: None)
+        self._agents_stop = agents_stop or (lambda rid: False)
+        self._agents_stop_all = agents_stop_all or (lambda: 0)
+        self._nav_mode = False  # Ctrl+A: navigate the agents panel
+        self._nav_index = 0     # highlighted row in the panel
         self._busy = False
         self._pending = 0  # queued-but-not-started lines (for the status line)
         self._queued_lines = []  # queued text, shown live in the pinned region
@@ -268,6 +289,108 @@ class PinnedPromptReader:
             lines.append(("class:pinned-queued", f"{prefix}> {q}  (queued)"))
         return lines
 
+    # --- live agents panel ----------------------------------------------------
+
+    _PANEL_MAX_ROWS = 6  # cap so the panel can't eat scrollback
+
+    def _panel_showable(self) -> bool:
+        """When the agents panel should be visible.
+
+        Shown while ANY agent is still running (finished ones stay listed with a
+        ✓ so a multi-agent run reads as "2 done, 1 still going"), or while the
+        user is actively navigating it. Hidden once ALL agents have finished —
+        the whole panel (incl. the "Ctrl+A: agents" line) disappears.
+        """
+        if self._nav_mode:
+            return True
+        try:
+            rows = self._agents_provider() or []
+        except Exception:
+            return False
+        return any(getattr(r, "status", "") == "running" for r in rows)
+
+    def request_repaint(self) -> None:
+        """Force an immediate repaint from a writer thread (activity on_change).
+
+        Tolerant: no-ops if the loop/app is gone or the loop is closed, so a
+        sub-agent daemon thread can never crash on a late/shutdown repaint."""
+        loop, app = self._loop, self._app
+        if loop is None or app is None:
+            return
+        try:
+            loop.call_soon_threadsafe(app.invalidate)
+        except RuntimeError:
+            pass  # loop closed / mid-teardown
+
+    def _agents_any_running(self) -> bool:
+        """True if any hidden agent is still running (gates the global stop-all
+        chord so it only fires when there's something to stop)."""
+        try:
+            return any(
+                getattr(r, "status", "") == "running"
+                for r in (self._agents_provider() or [])
+            )
+        except Exception:
+            return False
+
+    def _agent_rows(self) -> list:
+        """Snapshot rows for the panel (bounded), newest last. Each is the
+        ActivityRun snapshot; the UI reads only immutable copied fields."""
+        try:
+            rows = list(self._agents_provider() or [])
+        except Exception:
+            rows = []
+        # Keep the most recent _PANEL_MAX_ROWS so a long session doesn't overflow.
+        return rows[-self._PANEL_MAX_ROWS:]
+
+    def _agents_text(self):
+        """FormattedText for the bottom agents panel: a header hint + one row per
+        hidden sub-agent (dot + type + description + tool-count + elapsed),
+        highlighting the nav cursor. Painted at 10 Hz, so elapsed advances live."""
+        import time
+
+        rows = self._agent_rows()
+        if not rows and not self._nav_mode:
+            return []
+        # Clamp the nav cursor to the current row set.
+        if self._nav_index >= len(rows):
+            self._nav_index = max(0, len(rows) - 1)
+        now = time.monotonic()
+        hint = (
+            "↑↓ select · Enter view · x stop · Ctrl+X Ctrl+K stop all · Esc exit"
+            if self._nav_mode
+            else "Ctrl+A: agents"
+        )
+        out = [("class:pinned-panel-hint", f"{hint}\n")]
+        dot = {"running": "●", "done": "✓", "failed": "✗", "stopped": "✗"}
+        # Animated dots for a stop-in-progress row (matches the spinner cadence:
+        # 10 Hz tick, dots cycle 0→3 every ~0.3s).
+        cancel_dots = "." * ((int(time.time() * 10) // 3) % 4)
+        for i, r in enumerate(rows):
+            status = getattr(r, "status", "?")
+            cancelling = hasattr(r, "is_cancelling") and r.is_cancelling()
+            glyph = dot.get(status, "○")
+            elapsed = turn_view.format_duration(r.elapsed(now)) if hasattr(r, "elapsed") else "0s"
+            calls = r.tool_call_count() if hasattr(r, "tool_call_count") else 0
+            desc = (getattr(r, "description", "") or "")[:48]
+            # A stop that's been requested but not yet completed shows a live
+            # "cancelling…" suffix instead of the tool/elapsed counters.
+            suffix = (
+                f"cancelling{cancel_dots}"
+                if cancelling
+                else f"{calls} tool{'s' if calls != 1 else ''} · {elapsed}"
+            )
+            line = (
+                f" {glyph} {getattr(r, 'agent_type', '?')}  {desc}"
+                f"  ({suffix})"
+            )
+            selected = self._nav_mode and i == self._nav_index
+            cls = "class:pinned-panel-sel" if selected else "class:pinned-panel"
+            cursor = "›" if selected else " "
+            nl = "" if i == len(rows) - 1 else "\n"
+            out.append((cls, f"{cursor}{line}{nl}"))
+        return out
+
     # Rows reserved below the input for the completion menu when it's expected.
     _MENU_RESERVE = 8
 
@@ -320,10 +443,28 @@ class PinnedPromptReader:
             ),
             filter=Condition(lambda: bool(self._reasoning_text())),
         )
+        # Live "agents" panel pinned BELOW the input (Claude-Code style): one row
+        # per hidden sub-agent. Height-capped (_PANEL_MAX_ROWS + hint) so it can't
+        # eat scrollback; shown while any run exists or the user is navigating.
+        agents_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._agents_text),
+                dont_extend_height=True,
+                height=Dimension(max=self._PANEL_MAX_ROWS + 1),
+                style="class:pinned-panel",
+            ),
+            filter=Condition(self._panel_showable),
+        )
 
         root = FloatContainer(
             content=HSplit(
-                [queued_window, reasoning_window, status_window, input_window]
+                [
+                    queued_window,
+                    reasoning_window,
+                    status_window,
+                    input_window,
+                    agents_window,
+                ]
             ),
             floats=[
                 Float(
@@ -468,6 +609,59 @@ class PinnedPromptReader:
         def _(event) -> None:
             if self._confirm_answer:
                 self._confirm_answer("all")
+
+        # --- agents-panel navigation ---------------------------------------
+        # Ctrl+A toggles nav-mode, but ONLY when the panel is showable and no
+        # confirm/dialog is pending — otherwise it falls through to the default
+        # emacs beginning-of-line. Nav keys are gated on _nav_mode + eager so they
+        # win over history/menu/self-insert only while navigating.
+        nav_toggle_ok = Condition(
+            lambda: self._panel_showable()
+            and not self._confirm_pending
+            and self._pending_dialog is None
+        )
+        navigating = Condition(lambda: self._nav_mode and not self._confirm_pending)
+
+        @kb.add("c-a", filter=nav_toggle_ok)
+        def _(event) -> None:
+            self._nav_mode = not self._nav_mode
+            if self._nav_mode:
+                self._nav_index = 0
+
+        @kb.add("up", filter=navigating, eager=True)
+        def _(event) -> None:
+            if self._nav_index > 0:
+                self._nav_index -= 1
+
+        @kb.add("down", filter=navigating, eager=True)
+        def _(event) -> None:
+            self._nav_index += 1  # clamped in _agents_text against the live rows
+
+        @kb.add("escape", filter=navigating, eager=True)
+        def _(event) -> None:
+            self._nav_mode = False
+
+        @kb.add("enter", filter=navigating, eager=True)
+        def _(event) -> None:
+            self._open_detail()
+
+        @kb.add("x", filter=navigating, eager=True)
+        @kb.add("X", filter=navigating, eager=True)
+        def _(event) -> None:
+            """Stop the selected agent (foreground or background)."""
+            self._stop_selected_agent()
+
+        # Ctrl+X Ctrl+K stops ALL running agents — GLOBAL (not nav-mode gated):
+        # fire it from the normal prompt whenever any agent is running, matching
+        # the documented chord. Gated only on "there's something to stop" so it
+        # falls through to default emacs behavior otherwise.
+        stop_all_ok = Condition(
+            lambda: self._agents_any_running() and not self._confirm_pending
+        )
+
+        @kb.add("c-x", "c-k", filter=stop_all_ok, eager=True)
+        def _(event) -> None:
+            self._stop_all_agents()
 
         return kb
 
@@ -718,6 +912,62 @@ class PinnedPromptReader:
             raise box["error"]
         return box.get("value")
 
+    def _stop_selected_agent(self) -> None:
+        """Ask the highlighted agent to stop (x). Works for any origin — the
+        worker polls its per-run cancel flag and returns cleanly."""
+        rows = self._agent_rows()
+        if not rows:
+            return
+        idx = min(self._nav_index, len(rows) - 1)
+        run_id = getattr(rows[idx], "run_id", None)
+        if run_id is not None:
+            self._agents_stop(run_id)
+
+    def _stop_all_agents(self) -> None:
+        """Stop every running agent (ctrl+x ctrl+k) AND cancel the turn.
+
+        Stopping *all* agents means stopping the work. For a FOREGROUND spawn
+        batch (or orchestrator wave) the main turn is blocked waiting on those
+        agents, so it must be cancelled too — otherwise the turn resumes with the
+        agents' partial reports and keeps going (the model starts doing the work
+        itself). ``_request_cancel`` is a no-op when idle, so for a BACKGROUND
+        stop-all (turn already ended) this cleanly stops just the agents."""
+        self._agents_stop_all()
+        self._request_cancel()
+
+    def _open_detail(self) -> None:
+        """Open the selected agent's activity in a full-screen scrollable view.
+
+        Runs ENTIRELY on the UI/event-loop thread (the nav-Enter handler), so it
+        must NOT block on run_dialog's ``done.wait()`` (that would deadlock the
+        loop that has to process the app exit). Instead it PRE-RENDERS the run to
+        a string HERE (on the UI thread — safe for the global-stdout formatter
+        since no live stream is concurrent with a key handler), stashes a
+        _pending_dialog whose func only DISPLAYS that string, and exits the app
+        with _RESTART; the existing _run_async branch runs it and relaunches.
+        """
+        if self._pending_dialog is not None or self._confirm_pending:
+            return
+        rows = self._agent_rows()
+        if not rows:
+            self._nav_mode = False
+            return
+        idx = min(self._nav_index, len(rows) - 1)
+        run_id = getattr(rows[idx], "run_id", None)
+        # Re-fetch a fresh frozen copy (the panel row may be a stale snapshot).
+        run = self._agents_get(run_id) if run_id is not None else rows[idx]
+        if run is None:
+            run = rows[idx]
+        try:
+            from mnemoai.client.ui import turn_view
+            body = turn_view.render_agent_detail(run)
+        except Exception as e:  # never let a render error wedge the UI
+            body = f"(could not render agent activity: {e})"
+        self._nav_mode = False  # leave nav-mode; the detail view takes over
+        done = __import__("threading").Event()
+        self._pending_dialog = (lambda b=body: _run_detail_app(b), {}, done)
+        self._app.exit(result=_RESTART)
+
     async def _worker(self) -> None:
         """Drain the input queue one line at a time, dispatching on a thread."""
         import asyncio
@@ -960,6 +1210,115 @@ def select_from_list(
     if not (1 <= idx <= len(options)):
         return None
     return options[idx - 1][0]
+
+
+def _run_detail_app(ansi_text: str) -> None:
+    """Full-screen scrollable viewer for one sub-agent's activity transcript.
+
+    Displays a PRE-RENDERED ANSI string (built on the UI thread by
+    :meth:`PinnedPromptReader._open_detail`, so no rendering happens here). ↑/↓
+    /PgUp/PgDn scroll; Esc/q/Ctrl+C close. Off-TTY it just prints and returns."""
+    if not _dialog_is_tty():
+        print(ansi_text)
+        return
+
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.formatted_text import to_formatted_text
+    from prompt_toolkit.layout.controls import UIContent
+    from prompt_toolkit.layout.margins import ScrollbarMargin
+
+    # A FormattedTextControl has no cursor, so scroll bindings alone don't move
+    # the viewport. We drive the window's vertical_scroll DIRECTLY (via
+    # get_vertical_scroll) and pin the reported cursor to the top-of-viewport so
+    # prompt_toolkit's keep-cursor-visible pass can't fight it — a single ↓
+    # scrolls immediately, no dead zone. A ScrollbarMargin gives a VISIBLE
+    # position indicator (the missing feedback that made scroll look broken).
+    fragment_lines = [
+        to_formatted_text(ANSI(line)) for line in ansi_text.split("\n")
+    ]
+    total = len(fragment_lines)
+    state = {"top": 0}  # index of the first visible line
+
+    def _get_content(width, height):
+        return UIContent(
+            get_line=lambda i: fragment_lines[i],
+            line_count=total,
+            cursor_position=Point(x=0, y=state["top"]),  # pin cursor to viewport top
+            show_cursor=False,
+        )
+
+    control = FormattedTextControl(focusable=True)
+    control.create_content = _get_content  # supply our line-addressable content
+    body = Window(
+        control,
+        wrap_lines=False,
+        always_hide_cursor=True,
+        get_vertical_scroll=lambda w: state["top"],  # WE own the scroll position
+        right_margins=[ScrollbarMargin(display_arrows=True)],  # visible indicator
+    )
+    hint = Window(
+        FormattedTextControl(
+            ANSI("\033[90m ↑/↓ PgUp/PgDn scroll · g/G top/bottom · Esc/q close\033[0m")
+        ),
+        height=1,
+    )
+    kb = KeyBindings()
+
+    def _win() -> int:
+        info = body.render_info
+        return max(1, info.window_height if info else 20)
+
+    def _max_top() -> int:
+        # Last position that still fills the window (don't scroll past the end).
+        return max(0, total - _win())
+
+    def _scroll(delta: int) -> None:
+        state["top"] = max(0, min(_max_top(), state["top"] + delta))
+
+    @kb.add("up")
+    @kb.add("k")
+    def _(event) -> None:
+        _scroll(-1)
+
+    @kb.add("down")
+    @kb.add("j")
+    def _(event) -> None:
+        _scroll(1)
+
+    @kb.add("pageup")
+    @kb.add("c-u")
+    def _(event) -> None:
+        _scroll(-(_win() - 1))
+
+    @kb.add("pagedown")
+    @kb.add("c-d")
+    @kb.add("space")
+    def _(event) -> None:
+        _scroll(_win() - 1)
+
+    @kb.add("home")
+    @kb.add("g")
+    def _(event) -> None:
+        state["top"] = 0
+
+    @kb.add("end")
+    @kb.add("G")
+    def _(event) -> None:
+        state["top"] = _max_top()
+
+    @kb.add("escape")
+    @kb.add("q")
+    @kb.add("c-c")
+    def _(event) -> None:
+        get_app().exit()
+
+    app = Application(
+        layout=Layout(HSplit([body, hint]), focused_element=body),
+        key_bindings=kb,
+        mouse_support=True,
+        full_screen=True,
+    )
+    app.run()
 
 
 def _radio_pick(title: str, options: List[tuple], *, allow_delete: bool = False):

@@ -4,7 +4,6 @@ from typing import Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_litellm import ChatLiteLLM
 
 from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
 from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
@@ -128,6 +127,10 @@ class LangChainLLMController(BaseModelController):
 
     def _initialize_litellm_model(self, callbacks: list = None) -> None:
         """Initialize LiteLLM model using langchain-litellm."""
+        # Deferred: langchain_litellm pulls litellm→transformers→torch (~1.5s),
+        # dead weight for every non-litellm provider (kept off the startup path).
+        from langchain_litellm import ChatLiteLLM
+
         logger.info("Initializing LiteLLM model...")
 
         passthrough, model_kwargs = build_kwargs("MODEL_ID", "litellm", self)
