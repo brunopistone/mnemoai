@@ -2,16 +2,20 @@
 
 import argparse
 import sys
-from typing import Optional
+from typing import Any, Optional
 
-from mnemoai.client.client import LangGraphClient
-from mnemoai.client.ui.chat_interface import ChatInterface
+# Only LIGHTWEIGHT modules at top level. The heavy LLM/agent stack
+# (LangGraphClient/ChatInterface → langchain-core → transformers, multi-second)
+# is imported INSIDE main() so the startup spinner can animate during that cost
+# instead of the terminal sitting frozen. configurator/console/paths/
+# startup_loader are all dependency-free.
 from mnemoai.utils.configurator import config_exists, run_first_run_setup
 from mnemoai.utils.console import print_error
 from mnemoai.utils.paths import seed_example_files
+from mnemoai.utils.startup_loader import StartupLoader
 
-# Global client reference for cleanup
-_client: Optional[LangGraphClient] = None
+# Global client reference for cleanup (typed loosely to avoid a heavy top import).
+_client: Optional[Any] = None
 
 
 def main(verbose: bool = False) -> None:
@@ -25,15 +29,24 @@ def main(verbose: bool = False) -> None:
     """
     global _client
 
-    # Initialize LangGraph client (it launches the MCP server subprocess via
-    # `python -m mnemoai.server.server`).
-    _client = LangGraphClient(verbose=verbose)
+    loader = StartupLoader().start("Loading libraries")
+    try:
+        # Heavy imports (the multi-second cost) happen here, under the spinner.
+        from mnemoai.client.client import LangGraphClient
+        from mnemoai.client.ui.chat_interface import ChatInterface
 
-    # Start client
-    _client.start(verbose)
+        # LangGraphClient() spawns the MCP server subprocess (its own cold import
+        # of the tool stack); start() connects it, builds the model, inits memory.
+        loader.set_phase("Starting tools server")
+        _client = LangGraphClient(verbose=verbose)
 
-    # Create and run chat interface
-    chat_interface = ChatInterface(_client)
+        loader.set_phase("Connecting model")
+        _client.start(verbose)
+
+        chat_interface = ChatInterface(_client)
+    finally:
+        # Clear the spinner line before the welcome banner prints (or on error).
+        loader.stop()
 
     # Register cleanup function using chat interface method. Enable if you need to save conversation automatically on closure
     # atexit.register(lambda: chat_interface.client.save_conversation(chat_interface.chat_timestamp))

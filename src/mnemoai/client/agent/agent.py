@@ -26,6 +26,7 @@ from mnemoai.client.agent import (
     subagents,
     tool_formatting,
 )
+from mnemoai.client.agent.agent_activity import ActivitySink, AgentActivityStore
 from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
 from mnemoai.client.agent.orchestrator import (
     get_aggregator_prompt,
@@ -220,6 +221,11 @@ class LangGraphAgent:
         # threads while the parent turn continues; their completions are drained
         # and injected into a later turn via the steering path.
         self._bg_agents = BackgroundAgentRegistry()
+        # Live activity feed for ALL hidden sub-agent runs (foreground spawns,
+        # background spawns, orchestrator subtask workers) — the pinned-TUI
+        # "agents" panel + detail view read it. Always created (writers open a run
+        # regardless of TTY); the on_change repaint hook is wired only on a TTY.
+        self._activity = AgentActivityStore()
         # Mid-turn steering: messages the user types WHILE a turn is running are
         # pushed here by the UI and drained at tool-round boundaries (the top of
         # _execute_tools / between orchestrator waves), injected as user messages
@@ -850,18 +856,31 @@ class LangGraphAgent:
                     + f"\n\nCurrent task: {desc}"
                 )
 
+        # Live activity run for the agents panel (orchestrator path bypasses
+        # _run_one_subagent, so open/close the run here).
+        sink = self._activity.open_run(category, short_desc, "orchestrator")
         try:
             # The real prior conversation (uncapped; only via this orchestrator
             # path) is inserted between the worker's system prompt and this
             # subtask, so a context-dependent subtask resolves its references.
             result, worker_msgs = self._run_worker_loop(
                 worker_model, worker_tools, worker_prompt, quiet=True,
-                history=history,
+                history=history, activity=sink,
             )
+            if sink.is_cancelled():
+                sink.finish("stopped")
+            else:
+                sink.final(result)
+                sink.finish("done")
         except Exception as e:
             logger.error(f"Worker for subtask {i + 1} failed: {e}")
             result = f"(This step could not be completed: {e})"
             worker_msgs = []
+            sink.finish("failed")
+        finally:
+            # Backstop for a cancel (KeyboardInterrupt is BaseException, not
+            # caught above) so a stopped subtask isn't shown "running" forever.
+            sink.finish_if_running("failed")
         return {
             "task": desc,
             "category": category,
@@ -945,6 +964,7 @@ class LangGraphAgent:
         quiet: bool = False,
         progress: Optional[Callable[[str], None]] = None,
         history: Optional[List[BaseMessage]] = None,
+        activity: Optional[ActivitySink] = None,
     ) -> tuple:
         """Run a worker agent loop until completion.
 
@@ -992,6 +1012,19 @@ class LangGraphAgent:
         tool_calls_made = 0
 
         for _ in range(max_iterations):
+            # Cooperative cancel: either the whole turn was cancelled (Esc/Ctrl+C
+            # → global _cancel_event) OR this specific agent was stopped from the
+            # panel (x / stop-all → its per-run cancel Event). Sub-agents run on
+            # pool/daemon threads the injected KeyboardInterrupt can't reach, so
+            # they must poll — else a stopped agent keeps looping (tools climbing,
+            # timer ticking) after the UI said it stopped.
+            if self._cancelled() or (activity is not None and activity.is_cancelled()):
+                if not quiet:
+                    self._stop_spinner()
+                saveable = worker_messages[_seed_len:]
+                partial = self._last_visible_from(worker_messages)
+                return (partial or "(cancelled)", saveable)
+
             if not quiet:
                 self._start_spinner()
 
@@ -1018,7 +1051,10 @@ class LangGraphAgent:
                 )
 
             if response is None:
-                response = worker_model.invoke(worker_messages, config=config)
+                # Fallback invoke bypasses _stream_response, so scrub here too.
+                response = worker_model.invoke(
+                    self._strip_malformed_reasoning(worker_messages), config=config
+                )
 
             worker_messages.append(response)
 
@@ -1068,6 +1104,10 @@ class LangGraphAgent:
                     worker_messages.append(client_msg)
                     continue
 
+                # Feed the live activity panel (no-op when activity is None).
+                if activity is not None:
+                    activity.tool_call(tool_name, tool_args)
+
                 tool = next((t for t in worker_tools if t.name == tool_name), None)
                 # Fall back to all tools if not in the worker subset.
                 if not tool:
@@ -1102,8 +1142,12 @@ class LangGraphAgent:
                                 name=tool_name,
                             )
                         )
+                        if activity is not None:
+                            activity.tool_result(tool_name, str(result))
                     except Exception as e:
                         logger.error(f"Worker tool error: {e}")
+                        if activity is not None:
+                            activity.tool_error(tool_name, str(e))
                         worker_messages.append(
                             ToolMessage(
                                 content=self._tool_error_message(tool_name, e),
@@ -1260,7 +1304,10 @@ class LangGraphAgent:
                     response = None
 
         if response is None:
-            response = self.model.invoke(messages, config=config)
+            # Fallback invoke bypasses _stream_response's reasoning scrub.
+            response = self.model.invoke(
+                self._strip_malformed_reasoning(messages), config=config
+            )
 
         self._stop_spinner()
         return self._extract_visible(response.content) or str(response.content)
@@ -1295,6 +1342,13 @@ class LangGraphAgent:
     def _sanitize_tool_pairs(messages: List[BaseMessage]) -> List[BaseMessage]:
         """Delegates to :func:`message_sanitizer.sanitize_tool_pairs`."""
         return message_sanitizer.sanitize_tool_pairs(messages)
+
+    @staticmethod
+    def _strip_malformed_reasoning(messages: List[BaseMessage]) -> List[BaseMessage]:
+        """Delegates to :func:`message_sanitizer.strip_malformed_reasoning` — the
+        provider-agnostic egress guard against re-feeding an invalid reasoning
+        block (thinking-only scrub, no tool-pair repair)."""
+        return message_sanitizer.strip_malformed_reasoning(messages)
 
     def _capture_input_tokens(self, response: Any) -> None:
         """Record the provider's exact prompt-token count from a response's
@@ -1655,6 +1709,14 @@ class LangGraphAgent:
         Returns ``(response, had_reasoning)``.
         """
         active_model = model or self.model_with_tools
+        # Provider-agnostic egress guard: repair any invalid reasoning block before
+        # it's re-fed (see message_sanitizer.strip_malformed_reasoning). This is
+        # the single chokepoint for the streamed paths — main, quiet sub-agent,
+        # salvage, continue-truncated, aggregate — so no path replays a block the
+        # provider would reject (e.g. Anthropic's thinking.thinking: Field
+        # required). Thinking-only: unlike sanitize_tool_pairs it does NOT drop
+        # orphan tool pairs, which mid-continuation are legitimately in flight.
+        messages = self._strip_malformed_reasoning(messages)
         attempts = getattr(self, "_empty_response_retries", 0) + 1
         for attempt in range(attempts):
             try:
@@ -2519,7 +2581,7 @@ class LangGraphAgent:
             self._set_headless(True)
             try:
                 result = self._run_one_subagent(
-                    agent, prompt, label, drive_spinner=False
+                    agent, prompt, label, drive_spinner=False, kind="background"
                 )
                 self._bg_agents.complete(rec.agent_id, result)
             except Exception as e:  # never crash the daemon
@@ -2671,13 +2733,15 @@ class LangGraphAgent:
         return self._callback_free_model()
 
     def _run_one_subagent(
-        self, agent, prompt: str, label: str, drive_spinner: bool = True
+        self, agent, prompt: str, label: str, drive_spinner: bool = True,
+        kind: str = "spawn",
     ) -> str:
         """Run a single spawned sub-agent to completion (quiet) and return its
         final report text. Used both for a lone spawn and inside the parallel
         pool. Increments the (thread-local) spawn depth so a nested spawn from
         THIS thread is refused; restores it on the way out. ``drive_spinner`` is
-        False inside a parallel batch (the batch owns one shared spinner)."""
+        False inside a parallel batch (the batch owns one shared spinner).
+        ``kind`` ("spawn"|"background") tags the activity-panel row."""
         # Bind tools onto a CALLBACK-FREE copy of the base model: the chat model
         # carries the streaming callback handler at the instance level (bound at
         # init), which LangChain MERGES with per-call config — so an empty config
@@ -2704,6 +2768,10 @@ class LangGraphAgent:
         else:
             _progress = None  # batch owns the shared "N running…" spinner
 
+        # Live activity run for the agents panel/detail view (covers foreground
+        # solo + batch spawns, background spawns, and inline resume).
+        sink = self._activity.open_run(agent.name, label, kind)
+
         self._spawn_depth += 1
         try:
             result, _ = self._run_worker_loop(
@@ -2714,15 +2782,29 @@ class LangGraphAgent:
                 system_prompt=sys_prompt,
                 quiet=True,
                 progress=_progress,
+                activity=sink,
             )
+            # A stopped agent returns cleanly via the loop's cancel path; show it
+            # as "stopped", not "done".
+            if sink.is_cancelled():
+                sink.finish("stopped")
+            else:
+                sink.final(result)
+                sink.finish("done")
             return result
         except Exception as e:
             logger.error(f"spawn_agent ({agent.name}) failed: {e}")
+            sink.finish("failed")
             return f"The {agent.name} sub-agent failed: {e}"
         finally:
             self._spawn_depth -= 1
             if drive_spinner:
                 self._stop_spinner()
+            # Backstop: if the run exited WITHOUT a normal finish (e.g. a
+            # KeyboardInterrupt cancel, which is BaseException — not caught by
+            # `except Exception` above), mark it stopped so the panel doesn't
+            # show it "running" forever with the timer ticking.
+            sink.finish_if_running("failed")
 
     @staticmethod
     def _tool_error_message(tool_name: str, exc: Exception) -> str:
@@ -3035,7 +3117,14 @@ class LangGraphAgent:
         return {"messages": tool_results + steering}
 
     def _should_continue(self, state: AgentState) -> str:
-        """"continue" if the last AI message has tool calls, else "end"."""
+        """"continue" if the last AI message has tool calls, else "end".
+
+        A cancelled turn ends immediately even with pending tool calls — else the
+        graph loops back into another model call after the tools (or a stopped
+        spawn batch) return, so "stop all" wouldn't actually stop the turn. The
+        worker/stream loops already honor the cancel; this closes the graph loop."""
+        if self._cancelled():
+            return "end"
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             return "continue"
@@ -3221,4 +3310,5 @@ class LangGraphAgent:
         self._last_input_tokens = None  # context is small again
         self._preapproved_bash = []  # plan-scoped approvals don't outlive a clear
         self._execute_plan_route = False  # plan-execution route pin is plan-scoped
+        self._activity.clear()  # drop the agents-panel feed for a fresh context
 

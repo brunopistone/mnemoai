@@ -10,26 +10,115 @@ from typing import List
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 
-def _strip_malformed_thinking(content: object) -> object:
-    """Drop provably-invalid thinking blocks from an assistant message's content.
+def _reasoning_block_fix(block: dict):
+    """Repair (or drop) one provably-invalid reasoning content block; provider-
+    agnostic. Returns the (possibly new) block, or ``None`` to drop it. Returns
+    the SAME object when nothing needed changing.
 
-    Anthropic (extended thinking) requires each ``thinking`` block to carry a
-    non-empty inner ``thinking`` text field; a block missing it makes the API
-    reject the WHOLE request with ``messages.N.content.M.thinking.thinking:
-    Field required``. Such a block can end up in history via a cut-short stream,
-    an accumulation edge, or a mid-session model switch — it is never valid to
-    resend, so we drop only those blocks and leave healthy content untouched.
-    Non-list content (a plain string) passes through unchanged.
+    The three providers that put reasoning in the CONTENT LIST each have a
+    distinct replay constraint, so "malformed" is defined per shape:
+
+    - **Anthropic** ``{type: "thinking"}`` — the API requires the inner
+      ``thinking`` field to be PRESENT (``messages.N.content.M.thinking.thinking:
+      Field required``). With summarized/omitted thinking, langchain-anthropic's
+      streaming accumulates a ``signature_delta`` into a ``thinking`` block that
+      has the (load-bearing, server-validated) ``signature`` but LOSES the inner
+      text, yielding ``{type:thinking, signature:…}`` with no ``thinking`` key.
+      A thinking-enabled assistant turn carrying ``tool_use`` MUST also LEAD with
+      its thinking block, so DROPPING it (promoting tool_use to first) trades one
+      400 for another. So we **normalize, not drop**: re-inject ``thinking: ""``
+      (what Anthropic originally sent), keeping the signature and block order.
+      Only DROP a thinking block with NEITHER text NOR signature (an unsignable
+      stub Anthropic never actually emits).
+    - **Bedrock** ``{type: "reasoning_content"}`` — drop only when the inner text
+      is empty AND there's no signature (Bedrock needs the signature; keep it).
+    - **OpenAI Responses** ``{type: "reasoning"}`` — may legitimately carry no
+      summary while holding ``id``/``encrypted_content`` needed for the reasoning
+      chain; NEVER drop those. Drop only a bare ``{type:"reasoning"}`` stub.
+    """
+    btype = block.get("type")
+    if btype == "thinking":
+        has_text = bool(str(block.get("thinking", "")).strip())
+        has_sig = bool(block.get("signature"))
+        if has_text:
+            return block  # healthy
+        if has_sig:
+            # Signature present but text lost in accumulation → restore the
+            # empty inner field so the schema is satisfied and order preserved.
+            if "thinking" in block and block["thinking"] == "":
+                return block  # already normalized
+            return {**block, "thinking": ""}
+        return None  # no text, no signature → unsendable stub, drop
+    if btype == "reasoning_content":  # Bedrock
+        rc = block.get("reasoning_content")
+        text = rc.get("text", "") if isinstance(rc, dict) else ""
+        sig = (rc.get("signature") if isinstance(rc, dict) else None) or block.get(
+            "signature"
+        )
+        if str(text).strip() or sig:
+            return block
+        return None
+    if btype == "reasoning":  # OpenAI Responses
+        summary = block.get("summary")
+        has_summary = isinstance(summary, list) and any(
+            str((s or {}).get("text", "")).strip()
+            for s in summary
+            if isinstance(s, dict)
+        )
+        if has_summary or block.get("id") or block.get("encrypted_content"):
+            return block
+        return None
+    return block  # not a reasoning block
+
+
+def strip_malformed_reasoning(messages: List[BaseMessage]) -> List[BaseMessage]:
+    """Repair provably-invalid reasoning blocks in assistant messages (pure).
+
+    Provider-agnostic egress guard: an assistant turn re-fed to the model can
+    carry a reasoning block that the provider rejects on replay (see
+    :func:`_reasoning_block_fix` for the per-provider rules). Normalizes or drops
+    only those blocks, leaving everything else — and any message whose content is
+    a plain string or whose reasoning lives in ``additional_kwargs`` (Ollama,
+    LiteLLM) — untouched. Returns a new list; a clean history passes through with
+    the SAME message objects (no needless copies). Never mutates inputs.
+    """
+    out: List[BaseMessage] = []
+    for msg in messages:
+        if isinstance(msg, AIMessage) and isinstance(msg.content, list):
+            fixed = _strip_malformed_thinking(msg.content)
+            if fixed is not msg.content:
+                msg = msg.model_copy(update={"content": fixed})
+        out.append(msg)
+    return out
+
+
+def _strip_malformed_thinking(content: object) -> object:
+    """Normalize/drop provably-invalid reasoning blocks in one message's content.
+
+    Delegates each block to :func:`_reasoning_block_fix` (Anthropic ``thinking``,
+    Bedrock ``reasoning_content``, OpenAI ``reasoning``). Non-list content passes
+    through unchanged. Returns the SAME object when nothing changed (so callers
+    can cheaply skip a ``model_copy``). Kept as the shared helper both
+    :func:`sanitize_tool_pairs` and :func:`strip_malformed_reasoning` use, so the
+    main path and the worker/egress path agree exactly.
     """
     if not isinstance(content, list):
         return content
     cleaned = []
     changed = False
     for block in content:
-        if isinstance(block, dict) and block.get("type") == "thinking":
-            # Valid only with non-empty inner thinking text; else drop it.
-            if not str(block.get("thinking", "")).strip():
+        if isinstance(block, dict) and block.get("type") in (
+            "thinking",
+            "reasoning_content",
+            "reasoning",
+        ):
+            fixed = _reasoning_block_fix(block)
+            if fixed is None:
                 changed = True
+                continue
+            if fixed is not block:
+                changed = True
+                cleaned.append(fixed)
                 continue
         cleaned.append(block)
     return cleaned if changed else content

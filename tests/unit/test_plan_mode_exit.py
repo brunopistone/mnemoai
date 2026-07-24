@@ -188,12 +188,15 @@ class TestExecutePlanRoutePin:
         assert a._route_after_classify({"route": "full", "messages": []}) == "agent"
 
     def test_clear_messages_resets_pin(self):
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
         a = _agent()
         a._messages = []
         a._thinking = None
         a._last_input_tokens = None
         a._preapproved_bash = ["pytest"]
         a._execute_plan_route = True
+        a._activity = AgentActivityStore()  # clear_messages() clears it too
         a.clear_messages()
         assert a._execute_plan_route is False
         assert a._preapproved_bash == []

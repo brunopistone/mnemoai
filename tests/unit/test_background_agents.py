@@ -84,9 +84,12 @@ class TestRegistry:
 
 
 def _agent(tmp_path):
+    from mnemoai.client.agent.agent_activity import AgentActivityStore
+
     a = LangGraphAgent.__new__(LangGraphAgent)
     a._headless_tl = threading.local()
     a._bg_agents = BackgroundAgentRegistry()
+    a._activity = AgentActivityStore()  # background run opens an activity run
     a._spawn_depth_tl = threading.local()
     a.verbose = False
     a.tools = []
@@ -155,7 +158,7 @@ class TestBackgroundLaunchAndDrain:
         done = threading.Event()
 
         # Stub the runner so the daemon finishes deterministically.
-        def _run_one(agent, prompt, label, drive_spinner=True):
+        def _run_one(agent, prompt, label, drive_spinner=True, kind="spawn"):
             done.set()
             return "BG REPORT"
 
@@ -186,7 +189,7 @@ class TestBackgroundLaunchAndDrain:
         captured = {}
         done = threading.Event()
 
-        def _run_one(agent, prompt, label, drive_spinner=True):
+        def _run_one(agent, prompt, label, drive_spinner=True, kind="spawn"):
             captured["headless"] = a._is_headless()
             done.set()
             return "R"

@@ -41,8 +41,20 @@ class CodeFormatter:
     # for "approximately", so leave it literal). block+inline tokens, no HTML.
     _md = MarkdownIt("commonmark").enable("table")
 
-    def __init__(self) -> None:
-        """Initialize the formatter."""
+    def __init__(self, out=None, own_parser: bool = False) -> None:
+        """Initialize the formatter.
+
+        ``out`` is the sink (defaults to the builtin ``print``, i.e. live stdout
+        streaming). ``own_parser`` gives this instance its OWN ``MarkdownIt``
+        rather than the class-shared one. Both default to the streaming behavior;
+        :meth:`render_to_string` sets them so an off-stream caller (e.g. the
+        agent-detail view) can render to a string on the UI thread WITHOUT the
+        process-global ``redirect_stdout`` + shared-parser race.
+        """
+        self._out = out if out is not None else print
+        self._md_inst = (
+            MarkdownIt("commonmark").enable("table") if own_parser else self._md
+        )
         # Full accumulated response text.
         self._buffer = ""
         # Number of source LINES already finalized+rendered (their blocks are
@@ -70,7 +82,30 @@ class CodeFormatter:
         terminal styling so the prompt is never left mid-color.
         """
         self._render_pending(final=True)
-        print(self._RESET, end="", flush=True)
+        self._out(self._RESET, end="", flush=True)
+
+    @classmethod
+    def render_to_string(cls, text: str) -> str:
+        """Render a complete markdown string to ANSI and RETURN it.
+
+        Thread-safe alternative to the module-level ``render_markdown`` helper:
+        uses a per-call sink (no process-global ``redirect_stdout``) AND this
+        instance's OWN ``MarkdownIt`` (not the class-shared ``_md``), so it can
+        run on the UI thread while a live turn streams to stdout on the worker
+        thread without racing either. Used by the agent-detail view.
+        """
+        parts: list = []
+
+        def _sink(*args, **kwargs) -> None:
+            # Mimic print(): join args, honor end= (default "\n"), ignore flush.
+            sep = kwargs.get("sep", " ")
+            end = kwargs.get("end", "\n")
+            parts.append(sep.join(str(a) for a in args) + end)
+
+        fmt = cls(out=_sink, own_parser=True)
+        fmt.process_chunk(text)
+        fmt.flush()
+        return "".join(parts)
 
     # --- core: re-parse the buffer, render newly-finalized blocks ------------
 
@@ -88,7 +123,7 @@ class CodeFormatter:
         lines = text.split("\n")
 
         try:
-            tokens = [t for t in self._md.parse(text) if t.level == 0 and t.map]
+            tokens = [t for t in self._md_inst.parse(text) if t.level == 0 and t.map]
         except Exception:
             tokens = []
 
@@ -118,7 +153,7 @@ class CodeFormatter:
             # (preserves paragraph spacing) then render the block.
             if l0 > self._rendered_lines:
                 for _ in range(l0 - self._rendered_lines):
-                    print(flush=True)
+                    self._out(flush=True)
             self._render_token(tok, lines)
             self._rendered_lines = l1
 
@@ -143,12 +178,12 @@ class CodeFormatter:
             self._print_code("", tok.content)
             return
         if tok.type == "hr":
-            print(f"{self._DIM}────────────────────{self._RESET}", flush=True)
+            self._out(f"{self._DIM}────────────────────{self._RESET}", flush=True)
             return
         # Heading / paragraph / list / blockquote / table → render source lines.
         l0, l1 = tok.map
         for line in lines[l0:l1]:
-            print(self._render_line(line), flush=True)
+            self._out(self._render_line(line), flush=True)
 
     def _print_code(self, lang: str, body: str) -> None:
         """Print a code body syntax-highlighted (language already separated out by
@@ -171,10 +206,10 @@ class CodeFormatter:
             highlighted = highlight(
                 body, lexer, Terminal256Formatter(style="monokai")
             )
-            print(highlighted, end="", flush=True)
+            self._out(highlighted, end="", flush=True)
         except Exception:
             # Highlighter failure: plain cyan so the code still shows.
-            print(f"\033[36m{body}\033[0m", end="", flush=True)
+            self._out(f"\033[36m{body}\033[0m", end="", flush=True)
 
     # --- Markdown line rendering (block prefix + inline spans) ---------------
 
