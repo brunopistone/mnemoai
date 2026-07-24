@@ -1,29 +1,24 @@
 """LangGraph-based client implementation."""
 
-import ast
 import asyncio
 import json
 import os
-import shutil
-import sqlite3
 import sys
 import threading
 import traceback
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
-from langchain_core.callbacks import BaseCallbackHandler
 from mcp import StdioServerParameters
 
+from mnemoai.client import context_injection, session_artifacts
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
     convert_strands_messages_to_langchain,
 )
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
-from mnemoai.client.agent.subagents import available_subagents_block
 from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
     messages_to_dict_list,
@@ -36,88 +31,19 @@ from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector
 from mnemoai.client.ui import turn_view
 from mnemoai.client.ui.spinner import Spinner
+from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import (
-    chunk_session_pointer_path,
     conversations_dir,
     instance_id,
     model_dir,
     plans_dir,
-    profile_dir,
-    rag_session_pointer_path,
     sanitize_model_name,
     sweep_old_plans,
     sweep_old_rag_artifacts,
 )
-from mnemoai.utils.tokenization import count_tokens
-
-
-class StreamingCallbackHandler(BaseCallbackHandler):
-    """Callback handler for spinner control during streaming."""
-
-    def __init__(
-        self,
-        spinner: Optional[Spinner] = None,
-        spinner_lock: Optional[threading.Lock] = None,
-    ) -> None:
-        self.spinner = spinner
-        self.spinner_lock = spinner_lock or threading.Lock()
-        self.first_token_received = False
-
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
-        """Stop the spinner on the first VISIBLE ANSWER token, keeping it up
-        through reasoning and tool-call building (both silent stretches)."""
-        chunk = kwargs.get("chunk")
-        message = getattr(chunk, "message", None)
-        # Tool-call argument fragments aren't answer text.
-        if message is not None and getattr(message, "tool_call_chunks", None):
-            return
-        if not self._chunk_has_visible_text(message, token):
-            return
-        if not self.first_token_received and self.spinner:
-            with self.spinner_lock:
-                if not self.first_token_received:
-                    self.spinner.stop()
-                    self.first_token_received = True
-
-    @staticmethod
-    def _chunk_has_visible_text(message, token: str) -> bool:
-        """True if this chunk carries visible answer text (not reasoning/empty).
-
-        Responses/Bedrock stream content-block LISTS; a reasoning block or `[]`
-        is a truthy `token` string but not answer text, so check the blocks for a
-        non-empty `text`. Plain-string providers (Ollama) fall back to the token.
-        """
-        content = getattr(message, "content", None)
-        if isinstance(content, list):
-            return any(
-                isinstance(b, dict)
-                and (b.get("type") == "text" or "text" in b)
-                and str(b.get("text", "")).strip()
-                for b in content
-            )
-        if isinstance(content, str):
-            return bool(content.strip())
-        return bool(token and str(token).strip())
-
-    def on_tool_start(self, serialized, input_str, **kwargs) -> None:
-        """Stop the spinner when a tool starts."""
-        if self.spinner:
-            with self.spinner_lock:
-                self.spinner.stop()
-
-    def on_tool_end(self, output, **kwargs) -> None:
-        """Restart the spinner when a tool finishes."""
-        if self.spinner:
-            with self.spinner_lock:
-                self.first_token_received = False
-                self.spinner.start()
-
-    def reset(self) -> None:
-        """Reset the callback handler state."""
-        self.first_token_received = False
 
 
 class LangGraphClient:
@@ -204,31 +130,8 @@ class LangGraphClient:
         self.current_conversation_path = None
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt (SYSTEM_PROMPT + profile/memory/skills)."""
-        # config.system_prompt reads SYSTEM_PROMPT from prompts.yaml (fail-fast if
-        # missing).
-        system_prompt = config.system_prompt
-        current_date = date.today().strftime("%Y-%m-%d")
-        system_prompt = system_prompt.format(current_date=current_date)
-
-        if config.get("PROFILE", {}).get("USE_PROFILING", False):
-            profile_summary = self.profile_manager.get_profile_summary()
-            if profile_summary:
-                system_prompt = f"{system_prompt}\n\n{profile_summary}"
-
-        # Optional leading blocks, appended in order when non-empty:
-        #   MEMORY.md (curated persistent memory, injected whole at session start),
-        #   skill metadata (name+description for use_skill),
-        #   sub-agent types (built-in + custom, for spawn_agent discovery).
-        for block in (
-            self._inject_memory_context(),
-            self._inject_skills_context(),
-            self._inject_subagents_context(),
-        ):
-            if block:
-                system_prompt = f"{system_prompt}\n\n{block}"
-
-        return system_prompt
+        """Delegates to :func:`context_injection.build_system_prompt`."""
+        return context_injection.build_system_prompt(self)
 
     @staticmethod
     def _sanitize_for_path(name: str) -> str:
@@ -735,152 +638,36 @@ class LangGraphClient:
         return [op for op in ops if isinstance(op, dict)] if isinstance(ops, list) else []
 
     def _inject_memory_context(self) -> str:
-        """Curated MEMORY.md contents wrapped for the system prompt (a frozen
-        snapshot injected once at session start); "" when disabled or empty."""
-        if not config.get("ENABLE_MEMORY", True):
-            return ""
-        from mnemoai.client.memory.memory_store import MemoryStore
-
-        contents = MemoryStore().read().strip()
-        if not contents:
-            return ""
-        return f"[Persistent Memory]\n{contents}"
+        """Delegates to :func:`context_injection.inject_memory_context`."""
+        return context_injection.inject_memory_context(self)
 
     def _inject_skills_context(self) -> str:
-        """Tier-1 ``<available_skills>`` block (each skill's name+description) for
-        the system prompt; "" when disabled or none installed."""
-        if not config.get("ENABLE_SKILLS", True):
-            return ""
-        from mnemoai.client.memory.skill_store import (
-            SkillStore,
-            format_available_skills,
-        )
-
-        return format_available_skills(SkillStore().list_skills())
+        """Delegates to :func:`context_injection.inject_skills_context`."""
+        return context_injection.inject_skills_context(self)
 
     def _inject_subagents_context(self) -> str:
-        """``<available_subagents>`` block for the spawn_agent tool (built-in +
-        custom types), so the model can discover custom ~/.mnemoai/agents/ types."""
-        return available_subagents_block()
+        """Delegates to :func:`context_injection.inject_subagents_context`."""
+        return context_injection.inject_subagents_context(self)
 
     def _get_playbook_context(self) -> str:
-        """Formatted general playbook strategies for the system prompt, or ""."""
-        if not self.playbook:
-            return ""
-
-        # Empty task → general (not task-specific) strategies.
-        entries = self.playbook.get_relevant_entries(
-            task="",
-            top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
-            include_failures=True,
-        )
-
-        return self.playbook.format_for_prompt(entries) if entries else ""
+        """Delegates to :func:`context_injection.get_playbook_context`."""
+        return context_injection.get_playbook_context(self)
 
     def _get_conversation_context(self) -> str:
-        """Concatenated text from the recent conversation messages."""
-        if not self.agent or not self.agent.messages:
-            return ""
-
-        context_parts = []
-        for msg in self.agent.messages[-6:]:
-            content = getattr(msg, "content", "")
-            if isinstance(content, str) and content:
-                context_parts.append(content[:1000])
-            elif isinstance(content, list):
-                for item in content:
-                    if isinstance(item, dict) and "text" in item:
-                        context_parts.append(item["text"][:1000])
-
-        return " ".join(context_parts)
+        """Delegates to :func:`context_injection.get_conversation_context`."""
+        return context_injection.get_conversation_context(self)
 
     def _compute_similarity(self, text1: str, text2: str) -> float:
-        """Similarity (0-1) between two texts: embeddings if available, else
-        Jaccard on word sets."""
-        if not text1 or not text2:
-            return 0.0
-
-        # Semantic similarity via embeddings.
-        if config.get("RAG", {}).get("EMBED_MODEL_ID"):
-            try:
-                from mnemoai.models.controllers.embeddings_controller import (
-                    EmbeddingsController,
-                )
-
-                embeddings = EmbeddingsController()
-                emb = embeddings.embed([text1, text2])
-                emb1, emb2 = emb[0], emb[1]
-                similarity = np.dot(emb1, emb2) / (
-                    np.linalg.norm(emb1) * np.linalg.norm(emb2)
-                )
-                return float(similarity)
-            except Exception:
-                pass
-
-        words1 = set(text1.lower().split())
-        words2 = set(text2.lower().split())
-        if not words1 or not words2:
-            return 0.0
-        intersection = len(words1 & words2)
-        union = len(words1 | words2)
-        return intersection / union if union > 0 else 0.0
+        """Delegates to :func:`context_injection.compute_similarity`."""
+        return context_injection.compute_similarity(self, text1, text2)
 
     def _plan_mode_reminder(self) -> str:
-        """The read-only plan-mode reminder prepended to every prompt while on
-        (the system prompt is frozen at session start, so it's injected per-turn)."""
-        try:
-            plan_hint = str(plans_dir())
-        except Exception:
-            plan_hint = "the plans directory"
-        return (
-            "<plan-mode-active>\n"
-            "Plan mode is active. You are in READ-ONLY planning mode. You MUST "
-            "NOT make any edits, run any mutating shell commands, or otherwise "
-            "change the system — file edits, writes, git-write and background "
-            "tasks are hard-blocked. This supersedes any other instructions you "
-            "have received (including the task itself): do not act on them yet, "
-            "plan first.\n"
-            "You MAY: read files, search the codebase and web, and run READ-ONLY "
-            "shell commands (ls, cat, grep, git status/log/diff, etc.).\n"
-            "Investigate the task thoroughly with these read-only tools. When "
-            "your plan is ready, call the exit_plan_mode tool with the full plan "
-            "(as markdown) in its `plan` argument — this presents it to the user "
-            "for approval. Do NOT just write the plan as a normal message. If the "
-            "plan will run specific shell commands during execution (tests, "
-            "builds, installs), list them in the `allowed_bash` argument so the "
-            "user pre-approves them and they don't prompt one-by-one. If "
-            "anything is ambiguous, ASK clarifying questions rather than "
-            "guessing.\n"
-            "On approval, plan mode turns off and you execute the approved plan. "
-            "If the user keeps planning, refine it and call exit_plan_mode "
-            "again.\n"
-            f"If you want to draft the plan to disk first, the ONLY writable path "
-            f"is a Markdown (.md) file under {plan_hint}; no other writes are "
-            "allowed.\n"
-            "</plan-mode-active>\n\n"
-        )
+        """Delegates to :func:`context_injection.plan_mode_reminder`."""
+        return context_injection.plan_mode_reminder(self)
 
     def _steering_reminder(self) -> str:
-        """User-authored STEERING.md, prepended to every prompt as a leading
-        ``<steering>`` block.
-
-        Re-read from disk each turn (edits apply immediately) and stripped before
-        storage, so it never enters history and is never summarized by
-        compaction — it always reaches the model verbatim. "" when no STEERING.md
-        exists (its absence is the off switch — no config toggle needed)."""
-        from mnemoai.client.memory.steering_store import SteeringStore
-
-        contents = SteeringStore().read().strip()
-        if not contents:
-            return ""
-        return (
-            "<steering>\n"
-            "The user's steering instructions are shown below. Adhere to them. "
-            "IMPORTANT: these instructions OVERRIDE any default behavior and you "
-            "MUST follow them exactly as written.\n\n"
-            f"{contents}\n"
-            "</steering>\n\n"
-        )
+        """Delegates to :func:`context_injection.steering_reminder`."""
+        return context_injection.steering_reminder(self)
 
     def _approve_plan(self, plan: str) -> None:
         """Approve the current plan (the agent's _exit_plan_mode_provider): turn
@@ -900,107 +687,12 @@ class LangGraphClient:
             print("\n\033[92m🔓 Plan approved\033[0m — executing now.\n")
 
     def _inject_episodic_context(self, prompt: str) -> str:
-        """Prepend relevant, non-redundant episodic memory to the prompt.
-
-        Uses similarity to skip injection when the query is a follow-up to the
-        current conversation, and to drop episodes redundant with it.
-        """
-        conversation_context = self._get_conversation_context()
-
-        # Skip for short follow-ups ("yes", "tell me more") mid-conversation —
-        # they only make sense in the current context.
-        if conversation_context:
-            query_words = prompt.strip().split()
-            short_query_threshold = config.get("EPISODIC_MEMORY", {}).get(
-                "SHORT_QUERY_WORDS", 8
-            )
-            if len(query_words) <= short_query_threshold:
-                logger.debug(
-                    f"Skipping episodic injection: short follow-up query "
-                    f"({len(query_words)} words <= {short_query_threshold})"
-                )
-                return prompt
-
-        # Skip if the query clearly relates to the ongoing conversation.
-        if conversation_context:
-            query_to_conv_similarity = self._compute_similarity(
-                prompt, conversation_context
-            )
-            follow_up_threshold = config.get("EPISODIC_MEMORY", {}).get(
-                "FOLLOW_UP_THRESHOLD", 0.4  # Lower for Jaccard fallback
-            )
-            if query_to_conv_similarity > follow_up_threshold:
-                return prompt
-
-        similar_episodes = self.episodic_memory.retrieve_similar_episodes(
-            prompt, top_k=5
-        )
-        retrieval_threshold = config.get("EPISODIC_MEMORY", {}).get(
-            "RETRIEVAL_THRESHOLD", 0.7
-        )
-        relevant_episodes = [
-            ep
-            for ep in similar_episodes
-            if ep.get("similarity", 0) > retrieval_threshold
-        ]
-
-        if not relevant_episodes:
-            return prompt
-
-        # Drop episodes redundant with the current conversation.
-        if conversation_context:
-            redundancy_threshold = config.get("EPISODIC_MEMORY", {}).get(
-                "REDUNDANCY_THRESHOLD", 0.5
-            )
-            filtered_episodes = []
-            for ep in relevant_episodes:
-                ep_task = ep.get("task", "")
-                ep_to_conv_similarity = self._compute_similarity(
-                    ep_task, conversation_context
-                )
-                if ep_to_conv_similarity < redundancy_threshold:
-                    filtered_episodes.append(ep)
-            relevant_episodes = filtered_episodes
-
-        if not relevant_episodes:
-            return prompt
-
-        context = "[Episodic Memory - Similar Past Tasks]\n"
-        for i, ep in enumerate(relevant_episodes, 1):
-            task = ep.get("task", "Unknown task")[:70]
-            tools = ep.get("tools", "")
-            tool_names = []
-            if isinstance(tools, str):
-                try:
-                    tools_list = ast.literal_eval(tools)
-                    tool_names = [
-                        t.get("name", "") for t in tools_list if isinstance(t, dict)
-                    ]
-                except:
-                    pass
-            tools_str = ", ".join(tool_names) if tool_names else "no tools"
-            similarity = ep.get("similarity", 0)
-            context += f'{i}. "{task}" → {tools_str} (similarity: {similarity:.2f})\n'
-
-        return f"{context}\n\n{prompt}"
+        """Delegates to :func:`context_injection.inject_episodic_context`."""
+        return context_injection.inject_episodic_context(self, prompt)
 
     def _count_context_tokens(self) -> int:
-        """Total tokens in the current context. Prefers the provider's exact
-        ``input_tokens`` from the last turn (ground truth — includes system
-        prompt, tool calls, everything the API saw); falls back to the
-        conservative estimate when no turn has run yet."""
-        actual = getattr(self.agent, "_last_input_tokens", None) if self.agent else None
-        if actual:
-            return int(actual)
-        total_tokens = 0
-        if self.system_prompt:
-            total_tokens += count_tokens(self.system_prompt)
-        if self.agent and self.agent.messages:
-            messages_str = json.dumps(
-                [{"content": str(m.content)} for m in self.agent.messages], default=str
-            )
-            total_tokens += count_tokens(messages_str)
-        return total_tokens
+        """Delegates to :func:`context_injection.count_context_tokens`."""
+        return context_injection.count_context_tokens(self)
 
     def clear_context(self) -> None:
         """Clear conversation history but keep system prompt."""
@@ -1024,164 +716,32 @@ class LangGraphClient:
         self.current_conversation_path = None
 
     def _new_session_id(self) -> str:
-        """A session id unique to THIS instance: ``{profile}_{ts}_{instance_id}``.
-
-        The timestamp alone is second-granular, so two instances (terminal tabs)
-        on the same profile started in the SAME second would otherwise mint an
-        IDENTICAL session id — and since the per-session artifact filenames
-        (``chunk_cache_{id}.db``, ``rag_store_{id}``) key off it with no other
-        namespacing, they'd share the SAME files on disk and clobber/delete each
-        other's data. Appending the instance id (unique per live process; see
-        ``paths.instance_id``) makes every instance's artifacts physically
-        distinct, which also makes this instance's own restart-orphan cleanup safe
-        (a session id belongs to exactly one instance)."""
-        profile_name = config.get("PROFILE", {}).get("NAME", "default")
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{profile_name}_{ts}_{instance_id()}"
+        """Delegates to :func:`session_artifacts.new_session_id`."""
+        return session_artifacts.new_session_id(self)
 
     def _prev_session_from_pointer(self, pointer_path) -> Optional[str]:
-        """This instance's PREVIOUS session_id, read from its own per-instance
-        pointer file, or None. A ``/model``/``/params`` restart re-execs in place
-        (``os.execv`` preserves ``MNEMOAI_INSTANCE_ID``), so the pointer still
-        names THIS instance's id — but the fresh startup mints a NEW ``session_id``.
-        The old one identifies this instance's now-orphaned store/cache.
-
-        Safe to delete ONLY because ``session_id`` embeds the instance id (see its
-        generation), so it is unique per instance: a concurrent tab can never share
-        this session_id, hence never share the artifact we remove. Returns None if
-        the pointer is absent, empty/whitespace, or already equals the current id.
-        """
-        try:
-            if pointer_path.is_file():
-                prev = pointer_path.read_text().strip()
-                if prev and prev != self.session_id:
-                    return prev
-        except OSError:
-            pass
-        return None
+        """Delegates to :func:`session_artifacts.prev_session_from_pointer`."""
+        return session_artifacts.prev_session_from_pointer(self, pointer_path)
 
     def _repoint_session(self, pointer_path, flush_fn) -> None:
-        """Sweep this instance's own prior-session artifact, then claim the pointer.
-
-        Sweeps BEFORE repointing (safe: ``session_id`` is instance-unique, so the
-        swept artifact is never a concurrent sibling's), then writes the current
-        ``session_id`` so the next run can find and sweep this one.
-        """
-        prev = self._prev_session_from_pointer(pointer_path)
-        if prev is not None:
-            flush_fn(prev)
-        pointer_path.write_text(self.session_id)
+        """Delegates to :func:`session_artifacts.repoint_session`."""
+        session_artifacts.repoint_session(self, pointer_path, flush_fn)
 
     def _initialize_rag_session(self) -> None:
-        """Initialize RAG session at application startup.
-
-        Also cleans up THIS instance's own store left by a prior run (e.g. after a
-        ``/model`` restart), so stale ``rag_store_*`` don't accumulate.
-        """
-        try:
-            profile_dir()  # ensure the dir exists
-
-            # Per-instance pointer so concurrent tabs don't overwrite each other.
-            self._repoint_session(rag_session_pointer_path(), self._flush_rag_store)
-
-            logger.debug(f"RAG session initialized: {self.session_id}")
-        except Exception as e:
-            logger.warning(f"Failed to initialize RAG session: {e}")
+        """Delegates to :func:`session_artifacts.initialize_rag_session`."""
+        session_artifacts.initialize_rag_session(self)
 
     def _initialize_chunk_cache(self) -> None:
-        """Initialize chunk cache DB at application startup.
-
-        Also deletes THIS instance's own chunk cache left by a prior run (e.g.
-        after a ``/model`` restart re-execs and mints a new session_id), so stale
-        ``chunk_cache_*.db`` don't accumulate.
-        """
-        try:
-            rag_dir = str(profile_dir())
-
-            # Per-instance pointer so concurrent tabs don't overwrite each other.
-            self._repoint_session(
-                chunk_session_pointer_path(), self._flush_chunk_cache_store
-            )
-
-            db_path = os.path.join(rag_dir, f"chunk_cache_{self.session_id}.db")
-            conn = sqlite3.connect(db_path)
-            try:
-                cur = conn.cursor()
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS chunk_cache (
-                        key TEXT PRIMARY KEY,
-                        summary TEXT,
-                        updated_at TEXT
-                    )
-                    """
-                )
-                conn.commit()
-                logger.debug(f"Chunk cache initialized: {os.path.basename(db_path)}")
-            finally:
-                conn.close()
-        except Exception as e:
-            logger.warning(f"Failed to initialize chunk cache: {e}")
+        """Delegates to :func:`session_artifacts.initialize_chunk_cache`."""
+        session_artifacts.initialize_chunk_cache(self)
 
     def _flush_chunk_cache_store(self, session_id: str = None) -> None:
-        """Flush THIS instance's chunk cache — its own DB + pointer only.
-
-        Scoped to ``session_id`` (defaults to the current one) so a concurrent
-        instance's ``chunk_cache_*.db`` is never touched.
-        """
-        session_id = session_id or self.session_id
-        try:
-            from mnemoai.server.tools.readers.chunking_helper import (
-                reset_session_chunk_cache,
-            )
-
-            reset_session_chunk_cache()  # removes this instance's pointer file
-
-            db_path = os.path.join(
-                str(profile_dir()), f"chunk_cache_{session_id}.db"
-            )
-            if os.path.exists(db_path):
-                try:
-                    os.remove(db_path)
-                    logger.debug(f"Deleted chunk cache: {os.path.basename(db_path)}")
-                except OSError as e:
-                    logger.debug(f"Failed to delete {db_path}: {e}")
-
-            logger.debug("Chunk cache store cleared")
-        except Exception as e:
-            logger.warning(f"Failed to reset chunk cache: {e}")
+        """Delegates to :func:`session_artifacts.flush_chunk_cache_store`."""
+        session_artifacts.flush_chunk_cache_store(self, session_id)
 
     def _flush_rag_store(self, session_id: str = None) -> None:
-        """Flush THIS instance's RAG store — its own store dir/file + pointer only.
-
-        Scoped to ``session_id`` (defaults to the current one) so a concurrent
-        instance's ``rag_store_*`` is never touched.
-        """
-        session_id = session_id or self.session_id
-        try:
-            from mnemoai.server.tools.rag import reset_session_rag
-
-            reset_session_rag()  # removes this instance's pointer file
-
-            rag_dir = str(profile_dir())
-            # Both backends key the store by session_id: FAISS → a
-            # ``rag_store_<id>.faiss`` file, ChromaDB → a ``rag_store_<id>`` dir.
-            for name in (f"rag_store_{session_id}.faiss", f"rag_store_{session_id}"):
-                path = os.path.join(rag_dir, name)
-                if not os.path.exists(path):
-                    continue
-                try:
-                    if os.path.isdir(path):
-                        shutil.rmtree(path)
-                    else:
-                        os.remove(path)
-                    logger.debug(f"Deleted RAG store: {name}")
-                except OSError as e:
-                    logger.debug(f"Failed to delete {name}: {e}")
-
-            logger.debug("RAG store cleared")
-        except Exception as e:
-            logger.warning(f"Failed to reset RAG store: {e}")
+        """Delegates to :func:`session_artifacts.flush_rag_store`."""
+        session_artifacts.flush_rag_store(self, session_id)
 
     def save_conversation(self, timestamp: str = None, path: str = None) -> None:
         """Save the conversation to a JSON file.
