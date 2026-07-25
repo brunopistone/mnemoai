@@ -6,7 +6,6 @@ import os
 
 from mcp.server.fastmcp import FastMCP
 
-from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import clean_path_syntax
 

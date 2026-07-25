@@ -7,7 +7,6 @@ import tempfile
 
 from mcp.server.fastmcp import FastMCP
 
-from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import instance_id, profile_dir
 

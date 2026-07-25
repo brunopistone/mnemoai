@@ -7,7 +7,7 @@ the shrunken prompt so the in-flight task continues. Only if compaction can't
 shrink history (or it still overflows) does it return a terminal message.
 """
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from mnemoai.client.agent.agent import LangGraphAgent, _ContextOverflow
 

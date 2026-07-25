@@ -3,7 +3,7 @@
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from mnemoai.client.memory.reflector import PlaybookEntry
 from mnemoai.utils.logger import logger

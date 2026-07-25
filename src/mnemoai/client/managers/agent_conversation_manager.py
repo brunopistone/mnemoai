@@ -5,7 +5,7 @@ import json
 import re
 import textwrap
 from datetime import date
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List
 
 from mnemoai.client.agent.subagents import available_subagents_block
 from mnemoai.client.memory.skill_store import (
@@ -18,7 +18,7 @@ from mnemoai.utils.tokenization import count_tokens as _count_text_tokens
 
 # Try to import LangChain message types for compatibility
 try:
-    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+    from langchain_core.messages import AIMessage, BaseMessage
     LANGCHAIN_AVAILABLE = True
 except ImportError:
     LANGCHAIN_AVAILABLE = False

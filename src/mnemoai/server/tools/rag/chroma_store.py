@@ -5,7 +5,7 @@ import logging
 logging.getLogger("chromadb").setLevel(logging.WARNING)
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import chromadb
 import numpy as np

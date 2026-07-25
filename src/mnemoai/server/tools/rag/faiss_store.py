@@ -9,7 +9,7 @@ import pickle
 import sys
 import threading
 import traceback
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import faiss
 import numpy as np

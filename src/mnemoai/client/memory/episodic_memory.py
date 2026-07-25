@@ -1,6 +1,5 @@
 """Episodic memory manager for storing and retrieving task solutions."""
 
-import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -329,9 +328,10 @@ def extract_tools_from_messages(messages: List[Any]) -> List[Dict[str, Any]]:
     Returns:
         List of tool usage records
     """
-    # Try to import LangChain types
+    # Availability probe only — the message shapes below are duck-typed via
+    # hasattr, so no concrete class is needed, just whether langchain is present.
     try:
-        from langchain_core.messages import AIMessage, ToolMessage
+        import langchain_core.messages  # noqa: F401
 
         LANGCHAIN_AVAILABLE = True
     except ImportError:

@@ -56,7 +56,7 @@ _LLM = {
             _p("STOP", "stop", "stop"),
         ],
         "connection": {"REGION", "ENDPOINT_URL"},
-        "special": {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS"},
+        "special": {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM"},
     },
     "mantle": {
         # Delegates to mantle_factory (temperature/max_tokens/top_p/streaming +

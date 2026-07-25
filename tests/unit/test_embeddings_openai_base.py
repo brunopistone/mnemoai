@@ -5,7 +5,6 @@ provide embeddings via TYPE: openai + API_BASE — matching the chat controller.
 These tests capture the OpenAI client kwargs without any network call.
 """
 
-import numpy as np
 import pytest
 
 import mnemoai.models.controllers.embeddings_controller as ec
