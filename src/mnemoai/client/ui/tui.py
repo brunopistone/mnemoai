@@ -807,6 +807,17 @@ class PinnedPromptReader:
         scrollback (wrapped in ``run_in_terminal`` on the app loop) + invalidate,
         wait, then tear down the pending state. Returns the key that was pressed
         (or ``default`` if the app/loop is gone before arming).
+
+        The scrollback echo is best-effort and must NEVER gate the prompt:
+        ``run_in_terminal`` returns an awaitable that suspends the app and chains
+        on any previous in-terminal write, so a stalled/never-awaited earlier one
+        could otherwise keep this echo from completing and the pinned prompt from
+        painting — leaving the worker blocked on a prompt the user never sees (a
+        hard hang: a bare cursor, no ``Proceed?``, and cancel can't reach a thread
+        parked in ``Event.wait()``). So the echo is awaited on the app loop with
+        its own error trap, and the wait polls the cancel token instead of
+        blocking forever: an un-paintable prompt now degrades to the safe default
+        (deny) and an Esc/Ctrl+C is honored.
         """
         import threading
 
@@ -825,13 +836,45 @@ class PinnedPromptReader:
 
         self._confirm_answer = _answer
         self._confirm_pending = True
-        self._loop.call_soon_threadsafe(lambda: run_in_terminal(echo))
-        self._loop.call_soon_threadsafe(self._app.invalidate)
 
-        done.wait()
+        async def _echo_then_paint() -> None:
+            # Await the terminal write (dropping the awaitable makes a failure
+            # silent), but never let it stop the prompt from being painted.
+            try:
+                await run_in_terminal(echo)
+            except Exception:
+                pass
+            finally:
+                if self._app is not None:
+                    self._app.invalidate()
+
+        self._loop.call_soon_threadsafe(
+            lambda: self._loop.create_task(_echo_then_paint())
+        )
+
+        # Poll so a cancel (Esc / Ctrl+C) can break out even if the prompt never
+        # painted; without this the worker thread is unreachable forever. A
+        # cancelled wait always DENIES — never `default`, which is "approve" for
+        # plan approval and must not be granted for a prompt nobody answered.
+        while not done.wait(0.25):
+            if self._cancel_requested():
+                result["value"] = "no"
+                break
         self._confirm_pending = False
+        self._confirm_prompt = None
+        self._confirm_keys = None
         self._confirm_answer = None
+        if self._app is not None:
+            self._app.invalidate()
         return result["value"]
+
+    def _cancel_requested(self) -> bool:
+        """True once the user asked to cancel the running turn (Esc / Ctrl+C).
+
+        Lets the blocking confirm wait bail out instead of parking forever when
+        the pinned prompt could not be rendered.
+        """
+        return bool(getattr(self, "_cancelled", False))
 
     def confirm_ui(self, header: str, detail: str, category: str) -> str:
         """In-app y/N/a confirmation (from the worker thread).
