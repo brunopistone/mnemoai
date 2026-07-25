@@ -9,6 +9,29 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.5] — 2026-07-25
+
+### Fixed
+
+- **The app could freeze permanently at a bare cursor when a tool asked for
+  confirmation.** The confirmation prompt is painted by the pinned app while the
+  worker thread blocks on an `Event`, and two defects combined into an
+  unrecoverable hang: the scrollback echo was dispatched **fire-and-forget**
+  (`call_soon_threadsafe(lambda: run_in_terminal(echo))` discarded the returned
+  awaitable), so an echo that failed or never completed was entirely silent and
+  could leave the pinned prompt unpainted — and the wait itself was an unbounded
+  `done.wait()`, so with no prompt on screen there was nothing to press and
+  **Esc/Ctrl+C cannot reach a thread parked in `Event.wait()`**. The result was a
+  turn stuck with no `▶ Run shell command?` visible and no way out. The echo is
+  now awaited as a real task with its own error trap and always invalidates the
+  app in a `finally` (a broken echo can no longer block the prompt), and the wait
+  polls the cancel token so Esc/Ctrl+C always releases the worker. A cancelled
+  wait **always denies** rather than returning the caller's `default` — plan
+  approval passes `default="approve"`, and a prompt nobody saw must never count
+  as approval (it maps to "keep planning" instead). Pending confirm state is now
+  fully torn down, so no stale, unanswerable question lingers in the status line.
+  Covered by regression tests that **hang against the previous code**.
+
 ## [1.7.4] — 2026-07-25
 
 ### Fixed
