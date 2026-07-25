@@ -139,6 +139,56 @@ class TestEchoIsAwaited:
         assert r._loop.tasks  # via a real task (awaitable not dropped)
 
 
+class TestNotice:
+    """Scrollback notices ("(cancelling…)", the force-quit hint) are best-effort:
+    a failed terminal write must never raise into a key handler, and the
+    awaitable must not be dropped (a dropped one hides the failure and can chain-
+    stall a later in-terminal write)."""
+
+    def test_writes_the_text(self, monkeypatch):
+        r = _reader(monkeypatch)
+        seen = []
+        monkeypatch.setattr(
+            "mnemoai.client.ui.tui.run_in_terminal",
+            lambda fn: (fn(), _Awaited())[1],
+        )
+        monkeypatch.setattr("builtins.print", lambda *a, **k: seen.append(a))
+        r._notice("(cancelling…)")
+        assert seen and "(cancelling…)" in seen[0][0]
+
+    def test_failing_write_does_not_raise(self, monkeypatch):
+        r = _reader(monkeypatch)
+
+        def boom(fn):
+            raise RuntimeError("terminal gone")
+
+        monkeypatch.setattr("mnemoai.client.ui.tui.run_in_terminal", boom)
+        r._notice("(cancelling…)")  # must not propagate
+
+    def test_no_loop_is_a_noop(self):
+        r = PinnedPromptReader.__new__(PinnedPromptReader)
+        r._loop = None
+        r._notice("x")  # must not raise
+
+    def test_closing_loop_is_a_noop(self, monkeypatch):
+        r = _reader(monkeypatch)
+
+        class _Closing:
+            def create_task(self, coro):
+                coro.close()
+                raise RuntimeError("Event loop is closed")
+
+        r._loop = _Closing()
+        r._notice("x")  # must not raise
+
+
+class _Awaited:
+    def __await__(self):
+        if False:
+            yield
+        return None
+
+
 class TestCancelRequested:
     def test_missing_attribute_is_not_cancelled(self):
         r = PinnedPromptReader.__new__(PinnedPromptReader)
