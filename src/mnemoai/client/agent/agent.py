@@ -843,10 +843,16 @@ class LangGraphAgent:
         orchestrator system prompt and the query so the decomposer can split a
         context-dependent request against the same conversation the main agent
         sees. None (the default) keeps the old system-prompt+query shape.
+
+        This call binds NO tools, so any tool_use/tool_result block in ``history``
+        has no matching schema — Bedrock Converse then warns and rewrites them
+        (leaking a RuntimeWarning into the TUI) and a strict provider can 400. The
+        decomposer only needs to know what ran, so tool blocks are flattened to
+        text first.
         """
         messages = [SystemMessage(content=orchestrator_prompt)]
         if history:
-            messages.extend(history)
+            messages.extend(message_sanitizer.flatten_tool_blocks(history))
         messages.append(HumanMessage(content=query))
 
         # Suppress callbacks (keeps the spinner up) and disable reasoning so the

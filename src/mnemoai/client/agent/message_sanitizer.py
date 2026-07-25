@@ -7,7 +7,69 @@ tests and by ``AgentConversationManager`` via ``getattr``) is unchanged.
 
 from typing import List
 
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+
+
+def flatten_tool_blocks(messages: List[BaseMessage]) -> List[BaseMessage]:
+    """Render tool calls/results as plain TEXT for an auxiliary, tool-less call.
+
+    The router/decomposer/summarizer call the model WITHOUT binding tools, so a
+    replayable ``tool_use``/``tool_result`` block in the history has no matching
+    tool schema. Providers reject or mangle that: Bedrock Converse logs
+    ``Tool messages (toolUse/toolResult) detected without toolConfig. Converting
+    tool blocks to text format…`` + a ``RuntimeWarning`` (leaking into the TUI),
+    and a strict provider can 400 outright. These auxiliary calls only need to
+    KNOW what ran, not to replay it — so each tool call/result becomes a short
+    text line on a plain message and no tool block survives.
+
+    Returns a new list (never mutates the input); non-tool messages pass through
+    as the same object.
+    """
+    out: List[BaseMessage] = []
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            name = getattr(msg, "name", None) or "tool"
+            out.append(
+                HumanMessage(content=f"[tool result from {name}]: {_as_text(msg.content)}")
+            )
+            continue
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
+            text = _as_text(msg.content)
+            calls = "; ".join(
+                f"{tc.get('name')}({tc.get('args', {})})" for tc in msg.tool_calls
+            )
+            joined = f"{text}\n[called tools: {calls}]".strip() if text else (
+                f"[called tools: {calls}]"
+            )
+            out.append(AIMessage(content=joined))
+            continue
+        # A tool_use/tool_result block can also ride inside block-list content
+        # (Bedrock/Anthropic shapes) on a message with no `tool_calls` attribute.
+        if isinstance(msg.content, list) and any(
+            isinstance(b, dict)
+            and b.get("type") in ("tool_use", "tool_result", "toolUse", "toolResult")
+            for b in msg.content
+        ):
+            out.append(msg.model_copy(update={"content": _as_text(msg.content)}))
+            continue
+        out.append(msg)
+    return out
+
+
+def _as_text(content: object) -> str:
+    """Best-effort plain text from string or block-list message content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                if b.get("type") == "text" or "text" in b:
+                    parts.append(str(b.get("text", "")))
+            elif isinstance(b, str):
+                parts.append(b)
+        return "".join(parts)
+    return "" if content is None else str(content)
 
 
 def _reasoning_block_fix(block: dict):

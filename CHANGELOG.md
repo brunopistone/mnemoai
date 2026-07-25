@@ -9,6 +9,30 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.4] — 2026-07-25
+
+### Fixed
+
+- **A `RuntimeWarning` about `toolConfig` leaked into the terminal after a
+  cancelled turn, and the conversation history was silently rewritten.** The
+  orchestrator's task-decomposition call (`_decompose_task`) binds **no tools** —
+  it uses the raw model, not the tool-bound one — but it was handed the *real*
+  prior conversation, including replayable `tool_use`/`tool_result` blocks. With no
+  matching tool schema, Bedrock Converse logged `Tool messages (toolUse/toolResult)
+  detected without toolConfig. Converting tool blocks to text format…`, raised a
+  `RuntimeWarning` that printed over the pinned UI, and **rewrote the messages
+  itself**; a stricter provider can reject the request outright. It surfaced most
+  visibly right after cancelling a turn, because a cancelled turn leaves tool
+  blocks in history that the next turn's decomposer then replays. Tool blocks are
+  now flattened to plain text before that call via a new pure
+  `message_sanitizer.flatten_tool_blocks()` — an assistant tool call becomes
+  `[called tools: name(args)]` and a result becomes `[tool result from name]: …`,
+  so the decomposer still knows what ran without replaying it. Tool-block-free
+  messages pass through untouched (same object) and the input is never mutated.
+  The other tool-less auxiliary calls were audited and were already safe: the
+  router sends a rendered text context block, compaction rebuilds clean
+  string-content messages, and the aggregator builds fresh messages.
+
 ## [1.7.3] — 2026-07-25
 
 Streaming was silently off on the standard Bedrock (Converse) path for newer
