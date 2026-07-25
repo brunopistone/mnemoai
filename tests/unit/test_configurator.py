@@ -412,6 +412,15 @@ def test_provider_params_registry_shape():
         "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
         "EXTRA_PARAMS",
     }
+    # Bedrock must offer STREAM like the other streaming providers, so /params can
+    # tune it — the controller translates it to ChatBedrockConverse's inverted
+    # `disable_streaming` (it has no passthrough spec, hence "special").
+    assert supported_keys("MODEL_ID", "bedrock") == {
+        "TEMPERATURE", "TOP_P", "MAX_TOKENS", "STOP",
+        "REGION", "ENDPOINT_URL",
+        "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+        "EXTRA_PARAMS",
+    }
     assert supported_keys("VISION_MODEL_ID", "litellm") == {
         "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P", "EXTRA_PARAMS"
     }

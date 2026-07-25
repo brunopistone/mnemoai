@@ -93,6 +93,57 @@ def _make_vision_controller(monkeypatch, model_id: dict):
     return mod.VisionModelController(verbose=False)
 
 
+class TestBedrockStreaming:
+    """STREAM must reach ChatBedrockConverse as `disable_streaming`.
+
+    ChatBedrockConverse auto-derives `disable_streaming` from a hardcoded model-id
+    allowlist that lags new releases (langchain-aws 1.6.0 knows claude-3/-sonnet-4/
+    -opus-4/-haiku-4 but NOT claude-opus-5 / claude-sonnet-5), and LangChain's
+    `stream()` silently defers to `invoke()` when it's True — so a newer Claude
+    produced ONE non-streaming chunk with no error. Setting it explicitly wins over
+    that validator (it only auto-sets when the key is absent).
+    """
+
+    def test_newer_claude_still_streams(self, patch_bedrock, monkeypatch):
+        # The regression: an id outside langchain-aws's allowlist must still stream.
+        for name in (
+            "global.anthropic.claude-opus-5",
+            "anthropic.claude-opus-5",
+            "global.anthropic.claude-sonnet-5",
+        ):
+            ctrl = _make_llm_controller(monkeypatch, {"NAME": name, "TYPE": "bedrock"})
+            ctrl.initialize_model()
+            assert (
+                patch_bedrock["ChatBedrockConverse"]["disable_streaming"] is False
+            ), name
+
+    def test_stream_false_is_honored(self, patch_bedrock, monkeypatch):
+        # STREAM was previously ignored entirely on the Converse path.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock",
+             "STREAM": False},
+        )
+        ctrl.initialize_model()
+        assert patch_bedrock["ChatBedrockConverse"]["disable_streaming"] is True
+
+    def test_extra_params_can_override_streaming(self, patch_bedrock, monkeypatch):
+        # EXTRA_PARAMS is applied last, so a deliberate override still wins.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "global.anthropic.claude-opus-5",
+                "TYPE": "bedrock",
+                "STREAM": True,
+                "EXTRA_PARAMS": {"disable_streaming": "tool_calling"},
+            },
+        )
+        ctrl.initialize_model()
+        assert (
+            patch_bedrock["ChatBedrockConverse"]["disable_streaming"] == "tool_calling"
+        )
+
+
 class TestStandardBedrockEndpoint:
     def test_endpoint_url_passed_when_configured(self, patch_bedrock, monkeypatch):
         ctrl = _make_llm_controller(

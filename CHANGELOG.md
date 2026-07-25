@@ -9,6 +9,40 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.3] — 2026-07-25
+
+Streaming was silently off on the standard Bedrock (Converse) path for newer
+Claude models, and `STREAM` wasn't tunable there at all.
+
+### Fixed
+
+- **Newer Claude on `TYPE: bedrock` streamed nothing — one blob after the full
+  generation.** `ChatBedrockConverse` auto-derives `disable_streaming` from a
+  **hardcoded model-id allowlist** that lags new releases (langchain-aws 1.6.0
+  matches `claude-3`/`claude-sonnet-4`/`claude-opus-4`/`claude-haiku-4` but NOT
+  `claude-opus-5` / `claude-sonnet-5`), and LangChain's `stream()` **silently
+  defers to `invoke()`** when that flag is set — so a newer Claude produced a
+  single chunk with no error and no warning. The Bedrock path now sets
+  `disable_streaming` explicitly from `STREAM` (the library's validator only
+  auto-derives it when the key is absent, so an explicit value wins). Verified
+  against live Bedrock: `global.anthropic.claude-opus-5` went from 1 chunk to
+  **22 chunks with a ~1.3 s first token**, including with tools bound and adaptive
+  thinking. `EXTRA_PARAMS` is still applied last, so a deliberate override wins.
+- **`STREAM` is now tunable for Bedrock via `/params`.** It was missing from the
+  provider registry, so it was both ignored by the Converse path and never offered
+  by `/params` (every other streaming provider already exposed it). Also documents
+  `STREAM` in the Bedrock config example and adds the `xhigh` effort level to that
+  example's `REASONING_EFFORT` comment.
+
+### Changed
+
+- **Removed every unused import across `src/` and `tests/`** (25 in total; the
+  repo-wide `ruff --select I,F401` check is now clean). Two were deliberate and
+  were preserved rather than deleted: the `make_urls_clickable` package
+  re-export (documented + imported from the package) is kept with an explicit
+  `noqa`, and the two `try: import langchain … except ImportError` availability
+  probes keep working (one now imports the module rather than unused classes).
+
 ## [1.7.2] — 2026-07-25
 
 Reasoning-effort fixes on the Bedrock / Mantle Anthropic paths — no

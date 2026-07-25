@@ -8,8 +8,6 @@ TTY and a config that enables the gate.
 
 import builtins
 
-import pytest
-
 from mnemoai.client.agent.agent import LangGraphAgent
 
 

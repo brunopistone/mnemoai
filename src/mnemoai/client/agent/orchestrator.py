@@ -2,7 +2,7 @@
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger

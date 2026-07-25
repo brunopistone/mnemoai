@@ -1,6 +1,5 @@
 """Unit tests for URL and code formatters (utils/formatting/)."""
 
-import re
 
 import pytest
 

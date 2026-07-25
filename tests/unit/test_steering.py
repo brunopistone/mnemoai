@@ -5,7 +5,6 @@ concatenation (SteeringStore), and the ephemeral-strip that keeps the injected
 block out of stored history (so compaction never summarizes it).
 """
 
-from pathlib import Path
 
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.memory.steering_store import SteeringStore

@@ -5,7 +5,6 @@ import glob
 import json
 import os
 import subprocess
-from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 

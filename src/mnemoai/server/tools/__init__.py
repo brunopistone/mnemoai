@@ -15,8 +15,6 @@ def looks_like_binary(path: str) -> bool:
     bytes / a high ratio of non-text bytes. Used by the text readers to fail
     fast with a helpful message rather than a raw UnicodeDecodeError.
     """
-    import os
-
     from .file_encoding import bom_encoding
 
     if path.lower().endswith(IMAGE_EXTENSIONS):

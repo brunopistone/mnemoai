@@ -5,9 +5,10 @@ MODEL_ID:
   NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock
   MAX_TOKENS: 128000
+  STREAM: true                 # stream tokens as they generate (default true)
   # Omit TEMPERATURE for newer Claude models that reject it as deprecated.
   # REASONING: true            # enable extended thinking
-  # REASONING_EFFORT: medium   # low | medium | high | max
+  # REASONING_EFFORT: medium   # low | medium | high | xhigh | max
 VISION_MODEL_ID:
   NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock

@@ -8,7 +8,6 @@ Covers the pure-logic pieces that don't need a live model:
 
 import asyncio
 
-import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from mnemoai.client.managers.agent_conversation_manager import (

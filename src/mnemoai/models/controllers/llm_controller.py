@@ -80,6 +80,17 @@ class LangChainLLMController(BaseModelController):
             kwargs["endpoint_url"] = self.endpoint_url
             logger.info(f"Using custom Bedrock endpoint: {self.endpoint_url}")
 
+        # Honor STREAM on Converse. ChatBedrockConverse auto-derives
+        # `disable_streaming` from a HARDCODED model-id allowlist that lags new
+        # releases (langchain-aws 1.6.0 matches claude-3/-sonnet-4/-opus-4/-haiku-4
+        # but NOT claude-opus-5 / claude-sonnet-5), so a newer Claude silently fell
+        # back to one non-streaming call — no token-by-token output, no error. Its
+        # validator only auto-sets the flag when the key is ABSENT, so setting it
+        # explicitly wins. Verified against live Bedrock: opus-5 streams fine
+        # (incl. with tools bound + adaptive thinking). EXTRA_PARAMS is applied
+        # after this, so an explicit user override still takes precedence.
+        kwargs["disable_streaming"] = not self.stream
+
         # Extended thinking (REASONING or REASONING_EFFORT). The Converse endpoint
         # fans in EVERY Bedrock family (nova/mistral/llama/deepseek/qwen/…), so
         # gate the Anthropic-only `thinking` fields on the model actually being

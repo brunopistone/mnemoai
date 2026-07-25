@@ -6,7 +6,6 @@ bundled package prompts.yaml underneath the user's file (user keys win), so a
 missing key falls back to the bundled default while customizations are preserved.
 """
 
-import mnemoai.utils.config as config_mod
 from mnemoai.utils.config import Config
 
 
@@ -60,7 +59,6 @@ def test_memory_extraction_prompt_has_format_placeholders():
     c = _bare_config()
 
     # Force the bundled-only path.
-    import types
 
     def _none():
         return None

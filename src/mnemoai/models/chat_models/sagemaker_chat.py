@@ -16,7 +16,6 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
-from pydantic import Field
 
 from mnemoai.utils.logger import logger
 

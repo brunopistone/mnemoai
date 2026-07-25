@@ -7,7 +7,6 @@ legitimate paths; clean_path_syntax does the syntactic-only cleanup for write
 targets that may not exist yet.
 """
 
-import os
 
 from mnemoai.utils.path_utils import clean_path_syntax, normalize_path
 
