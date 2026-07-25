@@ -169,3 +169,100 @@ class TestSanitizeAgreement:
         orphan = ToolMessage(content="x", tool_call_id="missing")
         out = sanitize_tool_pairs([HumanMessage(content="hi"), orphan])
         assert not any(isinstance(m, ToolMessage) for m in out)
+
+
+class TestFlattenToolBlocks:
+    """Auxiliary calls (router / decomposer / summarizer) bind NO tools, so a
+    replayable tool_use/tool_result block in the history has no matching schema.
+    Bedrock Converse then logs "Tool messages … detected without toolConfig" and
+    raises a RuntimeWarning that leaks into the TUI (and a strict provider can
+    400). flatten_tool_blocks renders them as text instead.
+    """
+
+    def _history(self):
+        ai = AIMessage(content="")
+        ai.tool_calls = [
+            {"name": "fs_read", "args": {"path": "/tmp/x"}, "id": "t1",
+             "type": "tool_call"}
+        ]
+        return [
+            HumanMessage(content="read it"),
+            ai,
+            ToolMessage(content="file contents", tool_call_id="t1", name="fs_read"),
+        ]
+
+    def test_no_tool_blocks_survive(self):
+        from mnemoai.client.agent.message_sanitizer import flatten_tool_blocks
+
+        out = flatten_tool_blocks(self._history())
+        assert not any(getattr(m, "tool_calls", None) for m in out)
+        assert not any(isinstance(m, ToolMessage) for m in out)
+
+    def test_content_is_preserved_as_text(self):
+        from mnemoai.client.agent.message_sanitizer import flatten_tool_blocks
+
+        out = flatten_tool_blocks(self._history())
+        joined = "\n".join(str(m.content) for m in out)
+        assert "fs_read" in joined            # the call is still described
+        assert "file contents" in joined      # the result text survives
+        assert "read it" in joined            # the user turn is untouched
+
+    def test_tool_blocks_inside_block_list_content_flattened(self):
+        # Bedrock/Anthropic can carry tool_use inside block-list content on a
+        # message with no `tool_calls` attribute.
+        from mnemoai.client.agent.message_sanitizer import flatten_tool_blocks
+
+        msg = AIMessage(content=[
+            {"type": "text", "text": "done"},
+            {"type": "tool_use", "id": "t2", "name": "x", "input": {}},
+        ])
+        out = flatten_tool_blocks([msg])
+        assert out[0].content == "done"
+        assert not isinstance(out[0].content, list)
+
+    def test_plain_messages_pass_through_unchanged(self):
+        from mnemoai.client.agent.message_sanitizer import flatten_tool_blocks
+
+        msgs = [HumanMessage(content="hi"), AIMessage(content="hello")]
+        out = flatten_tool_blocks(msgs)
+        assert out[0] is msgs[0] and out[1] is msgs[1]  # same objects, no copy
+
+    def test_does_not_mutate_input(self):
+        from mnemoai.client.agent.message_sanitizer import flatten_tool_blocks
+
+        hist = self._history()
+        flatten_tool_blocks(hist)
+        assert hist[1].tool_calls[0]["id"] == "t1"  # original still has its call
+        assert isinstance(hist[2], ToolMessage)
+
+    def test_decomposer_sends_no_tool_blocks(self):
+        # End-to-end guard on the actual regression path: _decompose_task binds no
+        # tools, so whatever it hands the model must be tool-block free.
+        from mnemoai.client.agent.agent import LangGraphAgent
+
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        seen = {}
+
+        class _M:
+            callbacks = None
+
+            def invoke(self, messages, config=None):
+                seen["messages"] = messages
+                return AIMessage(content="[]")
+
+        a.model = _M()
+        a._disable_reasoning = lambda: {}
+        a._restore_reasoning = lambda saved: None
+        a._decompose_task("now what?", "decompose", {"full"}, history=self._history())
+
+        msgs = seen["messages"]
+        assert not any(getattr(m, "tool_calls", None) for m in msgs)
+        assert not any(isinstance(m, ToolMessage) for m in msgs)
+        assert not any(
+            isinstance(m.content, list)
+            and any(
+                isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result")
+                for b in m.content
+            )
+            for m in msgs
+        )
