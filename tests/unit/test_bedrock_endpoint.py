@@ -5,7 +5,6 @@ replaced with capturing mocks. Live end-to-end verification of Mantle is done
 separately (it requires AWS credentials + a reachable Mantle endpoint).
 """
 
-import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -159,6 +158,82 @@ class TestStandardBedrockEndpoint:
             "additional_model_request_fields"
             not in patch_bedrock["ChatBedrockConverse"]
         )
+
+    def test_non_claude_bedrock_reasoning_effort_injects_nothing(
+        self, patch_bedrock, monkeypatch
+    ):
+        # A non-Claude Bedrock model (Nova) with REASONING_EFFORT must NOT be sent
+        # Anthropic-only thinking fields — Converse would reject them.
+        for name in (
+            "amazon.nova-pro-v1:0",
+            "us.deepseek.r1-v1:0",
+            "mistral.mistral-large-2407-v1:0",
+            "meta.llama3-1-405b-instruct-v1:0",
+            "qwen.qwen3-32b-v1:0",
+        ):
+            ctrl = _make_llm_controller(
+                monkeypatch,
+                {"NAME": name, "TYPE": "bedrock", "REASONING_EFFORT": "high"},
+            )
+            ctrl.initialize_model()
+            assert (
+                "additional_model_request_fields"
+                not in patch_bedrock["ChatBedrockConverse"]
+            ), name
+
+    def test_non_claude_bedrock_reasoning_flag_injects_nothing(
+        self, patch_bedrock, monkeypatch
+    ):
+        # Bare REASONING: true on a non-Claude Bedrock model also injects nothing.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {"NAME": "amazon.nova-pro-v1:0", "TYPE": "bedrock", "REASONING": True},
+        )
+        ctrl.initialize_model()
+        assert (
+            "additional_model_request_fields"
+            not in patch_bedrock["ChatBedrockConverse"]
+        )
+
+    def test_claude_bedrock_still_injects_thinking(self, patch_bedrock, monkeypatch):
+        # Regression guard: every Claude id shape still gets the per-effort budget
+        # logic (the differentiator that must be preserved for Claude).
+        for name in (
+            "anthropic.claude-opus-4-8",
+            "us.anthropic.claude-opus-5",
+            "global.anthropic.claude-sonnet-5",
+        ):
+            ctrl = _make_llm_controller(
+                monkeypatch,
+                {"NAME": name, "TYPE": "bedrock", "REASONING_EFFORT": "high"},
+            )
+            ctrl.initialize_model()
+            fields = patch_bedrock["ChatBedrockConverse"][
+                "additional_model_request_fields"
+            ]
+            assert fields["thinking"]["type"] == "adaptive", name
+            assert fields["output_config"] == {"effort": "high"}, name
+
+    def test_non_claude_bedrock_extra_params_still_injected(
+        self, patch_bedrock, monkeypatch
+    ):
+        # EXTRA_PARAMS escape hatch survives: an advanced user can still hand-inject
+        # a provider-specific reasoning field on a non-Claude Bedrock model.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "amazon.nova-pro-v1:0",
+                "TYPE": "bedrock",
+                "REASONING_EFFORT": "high",
+                "EXTRA_PARAMS": {
+                    "additional_model_request_fields": {"reasoning_config": "x"}
+                },
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_bedrock["ChatBedrockConverse"][
+            "additional_model_request_fields"
+        ] == {"reasoning_config": "x"}
 
     def test_build_non_reasoning_model_disables_thinking(self, patch_bedrock, monkeypatch):
         # Config has reasoning ON, but build_non_reasoning_model() (used for
@@ -779,6 +854,67 @@ class TestReasoningEffortFirstClass:
         assert patch_mantle["_class"] == "ChatOpenAI"
         # responses protocol: effort + auto summary so reasoning is visible.
         assert patch_mantle["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    def test_is_anthropic_model_predicate(self):
+        # The is-Anthropic gate: every Claude id shape true, every non-Claude
+        # Bedrock/Mantle family false. Not derived from _claude_version.
+        from mnemoai.models.mantle_factory import is_anthropic_model
+
+        for name in (
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "claude-fable-5",
+            "claude-mythos-5",
+            "claude-opus-4-5-20250929",
+            "claude-3-7-sonnet",
+            "anthropic.claude-opus-4-8",
+            "anthropic.claude-opus-4-5-20250929-v1:0",
+            "us.anthropic.claude-opus-5",
+            "eu.anthropic.claude-opus-5",
+            "apac.anthropic.claude-opus-5",
+            "global.anthropic.claude-sonnet-5",
+        ):
+            assert is_anthropic_model(name) is True, name
+
+        for name in (
+            "amazon.nova-pro-v1:0",
+            "amazon.nova-premier-v1:0",
+            "deepseek.r1-v1:0",
+            "us.deepseek.r1-v1:0",
+            "mistral.large-latest",
+            "meta.llama3-1-405b-instruct-v1:0",
+            "qwen.qwen3-32b",
+            "zhipu.glm-4-9b-chat",
+            "nvidia.nemotron-nano-12b-v2-vl-bf16",
+            "amazon.titan-text-express-v1",
+            "cohere.command-r-plus-v1:0",
+            "ai21.j2-ultra",
+            "",
+        ):
+            assert is_anthropic_model(name) is False, name
+
+    def test_mantle_anthropic_non_claude_injects_no_thinking(
+        self, patch_mantle, monkeypatch
+    ):
+        # A non-Claude on the Mantle anthropic protocol is a misconfig — guard
+        # defensively and inject no thinking block.
+        ctrl = _make_llm_controller(
+            monkeypatch,
+            {
+                "NAME": "qwen.qwen3-32b",
+                "TYPE": "mantle",
+                "REGION": "us-east-1",
+                "API_PROTOCOL": "anthropic",
+                "REASONING_EFFORT": "high",
+                "MAX_TOKENS": 4096,
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_mantle["_class"] == "ChatAnthropic"
+        assert "thinking" not in patch_mantle
+        assert "output_config" not in patch_mantle
 
     def test_anthropic_thinking_form_by_version(self):
         # The helper picks the request form by model version.

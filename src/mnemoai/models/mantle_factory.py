@@ -28,9 +28,30 @@ VALID_PROTOCOLS = ("chat_completions", "responses", "anthropic")
 # REASONING_EFFORT -> thinking budget_tokens, used on OLDER Claude models on the
 # anthropic protocol (which take a token budget, not an effort enum). Newer
 # models (Opus 4.6+) use the `adaptive` form with `output_config.effort` — see
-# _anthropic_thinking_kwargs. The responses/chat_completions protocols take the
-# effort string directly.
-_EFFORT_TO_TOKENS = {"low": 1024, "medium": 8192, "high": 16384, "max": 32768}
+# _anthropic_thinking_kwargs — where this map only sizes the max_tokens headroom
+# bump (the effort STRING is passed through verbatim). The responses/
+# chat_completions protocols take the effort string directly. `xhigh` (added with
+# Opus 4.7, between `high` and `max`) is the recommended coding/agentic effort on
+# Opus 4.7+/Sonnet 5/Fable 5.
+_EFFORT_TO_TOKENS = {
+    "low": 1024, "medium": 8192, "high": 16384, "xhigh": 24576, "max": 32768,
+}
+
+
+def is_anthropic_model(name: str) -> bool:
+    """True if the model id names a Claude / Anthropic model.
+
+    Substring-based so it's robust to Bedrock inference-profile prefixes
+    (``us.``/``eu.``/``apac.``/``global.``), the ``anthropic.`` provider prefix,
+    and the bare ``claude-`` API id (e.g. ``anthropic.claude-opus-4-8``,
+    ``us.anthropic.claude-opus-5``, ``claude-3-7-sonnet``). Deliberately NOT
+    derived from ``_claude_version`` — a Claude id whose version doesn't parse
+    still counts. This is the is-Anthropic gate for extended-thinking injection;
+    non-Anthropic families (nova/mistral/llama/deepseek/qwen/glm/nemotron/titan/
+    cohere/ai21) must never be sent Anthropic-only fields.
+    """
+    n = (name or "").lower()
+    return "claude" in n or "anthropic." in n
 
 
 def _claude_version(name: str) -> Optional[Tuple[int, int]]:
@@ -38,6 +59,10 @@ def _claude_version(name: str) -> Optional[Tuple[int, int]]:
 
     Matches e.g. ``claude-opus-4-8`` / ``anthropic.claude-opus-4-8`` -> (4, 8),
     ``claude-3-7-sonnet`` -> (3, 7). Returns None when no version is present.
+    NOTE: this is a VERSION probe only, NOT an is-Claude signal — callers must
+    already have confirmed the model is Anthropic (via ``is_anthropic_model``);
+    None here means "Claude of unknown version, assume current", never "not a
+    Claude".
     """
     m = re.search(r"(\d+)[.\-](\d+)", name or "")
     return (int(m.group(1)), int(m.group(2))) if m else None
@@ -46,10 +71,12 @@ def _claude_version(name: str) -> Optional[Tuple[int, int]]:
 def _anthropic_thinking_kwargs(name: str, effort: Optional[str], budget: int) -> dict:
     """Pick the extended-thinking request form Claude's API expects per version.
 
-    Opus 4.7+: ``thinking={"type":"adaptive","display":"summarized"}`` +
+    Assumes ``name`` is already known to be a Claude id (gate with
+    ``is_anthropic_model`` first). Opus 4.7+:
+    ``thinking={"type":"adaptive","display":"summarized"}`` +
     ``output_config.effort``. Opus 4.6: adaptive without ``display``. ≤4.5/3.x:
     ``thinking={"type":"enabled","budget_tokens": …}`` (reject adaptive). Unknown
-    version assumes adaptive. Returns kwargs to merge.
+    version (an unusual/newer Claude id) assumes adaptive. Returns kwargs to merge.
     """
     version = _claude_version(name)
     use_adaptive = version is None or version >= (4, 6)
@@ -141,19 +168,32 @@ def build_mantle_model(
             kwargs["callbacks"] = callbacks
         # Enable thinking only when opted in (reasoning_effort / reasoning_model),
         # so a non-thinking Claude isn't sent a block it rejects.
-        # _anthropic_thinking_kwargs picks the version-specific form.
+        # _anthropic_thinking_kwargs picks the version-specific form. The
+        # anthropic protocol is Claude-only, so a non-Claude name here is a
+        # misconfig; guard defensively and never inject Anthropic fields for it
+        # (EXTRA_PARAMS below stays available for a deliberate hand-injection).
         if reasoning_effort or reasoning_model:
-            budget = (
-                _EFFORT_TO_TOKENS.get(reasoning_effort, thinking_tokens or 2048)
-                if reasoning_effort
-                else (thinking_tokens or 2048)
-            )
-            if kwargs["max_tokens"] <= budget:
-                kwargs["max_tokens"] = budget + 1024
-            kwargs.update(_anthropic_thinking_kwargs(name, reasoning_effort, budget))
-            # Anthropic rejects temperature/top_p/top_k when thinking is on.
-            kwargs.pop("temperature", None)
-            kwargs.pop("top_p", None)
+            if not is_anthropic_model(name):
+                logger.debug(
+                    "Skipping Anthropic thinking fields for non-Claude model '%s' "
+                    "on the Mantle anthropic protocol (misconfig); use EXTRA_PARAMS "
+                    "to hand-inject provider-specific reasoning.",
+                    name,
+                )
+            else:
+                budget = (
+                    _EFFORT_TO_TOKENS.get(reasoning_effort, thinking_tokens or 2048)
+                    if reasoning_effort
+                    else (thinking_tokens or 2048)
+                )
+                if kwargs["max_tokens"] <= budget:
+                    kwargs["max_tokens"] = budget + 1024
+                kwargs.update(
+                    _anthropic_thinking_kwargs(name, reasoning_effort, budget)
+                )
+                # Anthropic rejects temperature/top_p/top_k when thinking is on.
+                kwargs.pop("temperature", None)
+                kwargs.pop("top_p", None)
         # EXTRA_PARAMS applied last so an explicit override wins.
         kwargs.update(extra)
         return ChatAnthropic(**kwargs)

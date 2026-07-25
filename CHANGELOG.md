@@ -9,6 +9,41 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.2] — 2026-07-25
+
+Reasoning-effort fixes on the Bedrock / Mantle Anthropic paths — no
+public-surface change (the fix is behavioral: correct requests per provider).
+
+### Fixed
+
+- **Non-Anthropic Bedrock/Mantle models no longer get Anthropic-only thinking
+  fields.** The extended-thinking injection was gated only on
+  `_claude_version(name)` returning `None`/`≥(4,6)`, but `None` also means "not a
+  Claude model at all" — so a standard-Bedrock (`ChatBedrockConverse`) model like
+  `amazon.nova-pro-v1:0`, `mistral.*`, `meta.llama*`, `us.deepseek.r1-v1:0`, or
+  `qwen.*` with `REASONING_EFFORT`/`REASONING` set had Anthropic's
+  `{thinking:{type:adaptive}, output_config:{effort}}` (or the legacy
+  `budget_tokens` form) injected into its request, which the Converse API rejects.
+  A new `is_anthropic_model(name)` predicate (substring-based, robust to the
+  `anthropic.` provider prefix and `us./eu./apac./global.` inference-profile
+  prefixes and the bare `claude-` id) now gates every Anthropic-thinking injection
+  site (standard Bedrock, Mantle `anthropic` protocol, direct Anthropic). A
+  non-Claude model gets no injection (many families — e.g. DeepSeek-R1 — reason
+  automatically); `EXTRA_PARAMS` stays the escape hatch for a deliberate
+  provider-specific reasoning field. Claude behavior is unchanged (all id shapes
+  still get adaptive thinking + `output_config.effort`). `_claude_version` is now a
+  version probe only, never the is-Claude signal.
+
+### Added
+
+- **`xhigh` reasoning-effort support** (added by Anthropic with Opus 4.7; between
+  `high` and `max`, the recommended coding/agentic effort on Opus 4.7+/Sonnet 5/
+  Fable 5). It already passed through to `output_config.effort` on the adaptive
+  path; `_EFFORT_TO_TOKENS` now includes it (`xhigh: 24576`) so the `max_tokens`
+  headroom bump is consistent, and the two duplicated per-effort maps in
+  `llm_controller` (standard Bedrock + SageMaker) were de-duplicated onto the
+  single `mantle_factory._EFFORT_TO_TOKENS`.
+
 ## [1.7.1] — 2026-07-24
 
 Internal structural refactor of the `client/` package — no behavior change, no

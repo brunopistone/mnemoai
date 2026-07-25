@@ -80,28 +80,40 @@ class LangChainLLMController(BaseModelController):
             kwargs["endpoint_url"] = self.endpoint_url
             logger.info(f"Using custom Bedrock endpoint: {self.endpoint_url}")
 
-        # Extended thinking (REASONING or REASONING_EFFORT). Newer Claude rejects
-        # the old {"type":"enabled",…} form, so use the version-aware builder.
+        # Extended thinking (REASONING or REASONING_EFFORT). The Converse endpoint
+        # fans in EVERY Bedrock family (nova/mistral/llama/deepseek/qwen/…), so
+        # gate the Anthropic-only `thinking` fields on the model actually being
+        # Claude. A non-Claude with reasoning enabled gets NO injection here — many
+        # families reason automatically (DeepSeek-R1) or don't take an effort field
+        # on Converse; EXTRA_PARAMS (applied below) stays the escape hatch for a
+        # deliberate provider-specific reasoning field.
         if self.reasoning_model or self.reasoning_effort:
-            from mnemoai.models.mantle_factory import _anthropic_thinking_kwargs
+            from mnemoai.models.mantle_factory import (
+                _EFFORT_TO_TOKENS,
+                _anthropic_thinking_kwargs,
+                is_anthropic_model,
+            )
 
-            effort_to_tokens = {
-                "low": 1024,
-                "medium": 8192,
-                "high": 16384,
-                "max": 32768,
-            }
-            budget = (
-                effort_to_tokens.get(self.reasoning_effort, self.thinking_tokens)
-                if self.reasoning_effort
-                else self.thinking_tokens
-            )
-            kwargs["additional_model_request_fields"] = _anthropic_thinking_kwargs(
-                self.model_name, self.reasoning_effort, budget
-            )
-            # Older Claude requires temperature=1 with thinking (newer rejects it).
-            if self.temperature is not None:
-                kwargs["temperature"] = 1.0
+            if is_anthropic_model(self.model_name):
+                budget = (
+                    _EFFORT_TO_TOKENS.get(self.reasoning_effort, self.thinking_tokens)
+                    if self.reasoning_effort
+                    else self.thinking_tokens
+                )
+                kwargs["additional_model_request_fields"] = _anthropic_thinking_kwargs(
+                    self.model_name, self.reasoning_effort, budget
+                )
+                # Older Claude requires temperature=1 with thinking (newer rejects).
+                if self.temperature is not None:
+                    kwargs["temperature"] = 1.0
+            else:
+                logger.debug(
+                    "Skipping Anthropic thinking fields for non-Claude Bedrock "
+                    "model '%s'; reasoning is provider-specific (many families "
+                    "reason automatically). Use EXTRA_PARAMS to hand-inject "
+                    "provider reasoning fields.",
+                    self.model_name,
+                )
 
         kwargs.update(extra_params(self.model_id))
 
@@ -263,30 +275,38 @@ class LangChainLLMController(BaseModelController):
         # Extended thinking (REASONING or REASONING_EFFORT). Budget must be
         # < max_tokens (bump if needed) and temperature/top_p/top_k are dropped.
         # _anthropic_thinking_kwargs picks the version-specific request form.
+        # TYPE=anthropic only reaches Claude, but gate defensively for symmetry so
+        # a non-Claude id behind an OpenAI-shaped proxy isn't sent Anthropic fields
+        # (EXTRA_PARAMS below stays the escape hatch).
         if self.reasoning_model or self.reasoning_effort:
-            from mnemoai.models.mantle_factory import _anthropic_thinking_kwargs
+            from mnemoai.models.mantle_factory import (
+                _EFFORT_TO_TOKENS,
+                _anthropic_thinking_kwargs,
+                is_anthropic_model,
+            )
 
-            effort_to_tokens = {
-                "low": 1024,
-                "medium": 8192,
-                "high": 16384,
-                "max": 32768,
-            }
-            budget = (
-                effort_to_tokens.get(self.reasoning_effort, self.thinking_tokens)
-                if self.reasoning_effort
-                else self.thinking_tokens
-            )
-            if kwargs["max_tokens"] <= budget:
-                kwargs["max_tokens"] = budget + 1024
-            kwargs.update(
-                _anthropic_thinking_kwargs(
-                    self.model_name, self.reasoning_effort, budget
+            if is_anthropic_model(self.model_name):
+                budget = (
+                    _EFFORT_TO_TOKENS.get(self.reasoning_effort, self.thinking_tokens)
+                    if self.reasoning_effort
+                    else self.thinking_tokens
                 )
-            )
-            kwargs.pop("temperature", None)
-            kwargs.pop("top_p", None)
-            kwargs.pop("top_k", None)
+                if kwargs["max_tokens"] <= budget:
+                    kwargs["max_tokens"] = budget + 1024
+                kwargs.update(
+                    _anthropic_thinking_kwargs(
+                        self.model_name, self.reasoning_effort, budget
+                    )
+                )
+                kwargs.pop("temperature", None)
+                kwargs.pop("top_p", None)
+                kwargs.pop("top_k", None)
+            else:
+                logger.debug(
+                    "Skipping Anthropic thinking fields for non-Claude model '%s' "
+                    "on the direct-anthropic path.",
+                    self.model_name,
+                )
 
         # EXTRA_PARAMS applied last so an explicit override wins.
         kwargs.update(extra_params(self.model_id))
