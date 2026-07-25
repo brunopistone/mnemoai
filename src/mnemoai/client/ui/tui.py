@@ -562,11 +562,7 @@ class PinnedPromptReader:
                     # First Ctrl+C on this turn: request cancel and arm force-quit.
                     self._ctrl_c_while_busy = True
                     self._request_cancel()
-                    run_in_terminal(
-                        lambda: print(
-                            "\033[90m(press Ctrl+C again to force-quit)\033[0m"
-                        )
-                    )
+                    self._notice("(press Ctrl+C again to force-quit)")
             elif event.current_buffer.text:
                 event.current_buffer.reset()  # clear the line, don't exit
             else:
@@ -876,6 +872,30 @@ class PinnedPromptReader:
         """
         return bool(getattr(self, "_cancelled", False))
 
+    def _notice(self, text: str) -> None:
+        """Write a one-line dim notice to scrollback from the UI thread.
+
+        ``run_in_terminal`` returns an awaitable; DROPPING it makes a failed
+        terminal write silent (the notice just never appears, and the exception
+        surfaces only as an unretrieved-task warning). It also chains on
+        ``app._running_in_terminal_f``, so an un-awaited call is the kind of thing
+        that can stall a LATER in-terminal write. So await it in a task with its
+        own error trap. Best-effort: a notice must never affect control flow.
+        """
+        async def _write() -> None:
+            try:
+                await run_in_terminal(lambda: print(f"\033[90m{text}\033[0m"))
+            except Exception:
+                pass
+
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            return
+        try:
+            loop.create_task(_write())
+        except RuntimeError:
+            pass  # loop already closing — the notice is not worth raising over
+
     def confirm_ui(self, header: str, detail: str, category: str) -> str:
         """In-app y/N/a confirmation (from the worker thread).
 
@@ -1105,7 +1125,7 @@ class PinnedPromptReader:
                 self._on_cancel()
             except Exception:
                 pass
-        run_in_terminal(lambda: print("\033[90m(cancelling…)\033[0m"))
+        self._notice("(cancelling…)")
         ctypes.pythonapi.PyThreadState_SetAsyncExc(
             ctypes.c_long(tid), ctypes.py_object(KeyboardInterrupt)
         )

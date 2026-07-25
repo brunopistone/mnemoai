@@ -9,6 +9,25 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.6] — 2026-07-25
+
+### Fixed
+
+- **A failed scrollback notice on the cancel path was silent, and its awaitable
+  was dropped.** The two remaining fire-and-forget `run_in_terminal` calls — the
+  `(cancelling…)` line in `_request_cancel` and the
+  `(press Ctrl+C again to force-quit)` hint — discarded the returned awaitable, so
+  a failed terminal write produced no notice and surfaced only as an unretrieved-
+  task warning. `run_in_terminal` also chains on `app._running_in_terminal_f`, so
+  an un-awaited call is exactly the shape that can stall a *later* in-terminal
+  write. Both now go through a shared `_notice()` helper that awaits the write in
+  a task with its own error trap (best-effort: a notice can never raise into a key
+  handler or affect control flow), and is a no-op when the loop is missing or
+  closing. No `run_in_terminal` call in the UI is un-awaited any more. This is the
+  hardening companion to the 1.7.5 confirm-prompt hang fix — these were the prime
+  suspects for that hang, and although the mechanism was never reproduced, they
+  are no longer able to hide a failure or stall the terminal chain.
+
 ## [1.7.5] — 2026-07-25
 
 ### Fixed
