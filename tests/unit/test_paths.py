@@ -214,6 +214,34 @@ class TestSubdirs:
             "_PRISTINE_BUNDLED_PROMPTS_HASHES is empty — prompt refresh won't apply"
         )
 
+    def test_previously_shipped_prompts_hashes_are_tracked(self):
+        # The non-empty check above is too weak: it passed all through 1.6.3–1.7.6
+        # while the hash of the THEN-shipped prompts.yaml was missing from the set,
+        # so an edit to an existing prompt key would silently never reach those
+        # installs (the bundled-fallback loader only fills MISSING keys). Every
+        # version we have shipped must be recognized as pristine.
+        import subprocess
+
+        tags = ["v1.6.3", "v1.7.0", "v1.7.4", "v1.7.6"]
+        import hashlib
+
+        missing = []
+        for tag in tags:
+            out = subprocess.run(
+                ["git", "show", f"{tag}:src/mnemoai/utils/prompts.yaml"],
+                capture_output=True,
+            )
+            if out.returncode != 0 or not out.stdout:
+                continue  # tag not present in a shallow/exported checkout
+            digest = hashlib.sha256(out.stdout).hexdigest()
+            if digest not in paths._PRISTINE_BUNDLED_PROMPTS_HASHES:
+                missing.append(f"{tag} ({digest[:12]}…)")
+        assert not missing, (
+            "prompts.yaml shipped in these versions is not in "
+            f"_PRISTINE_BUNDLED_PROMPTS_HASHES, so a prompt edit will NOT reach "
+            f"those installs: {missing}"
+        )
+
     def test_plans_and_tasks_created(self, tmp_home):
         assert paths.plans_dir() == tmp_home / "plans"
         assert paths.tasks_dir() == tmp_home / "tasks"

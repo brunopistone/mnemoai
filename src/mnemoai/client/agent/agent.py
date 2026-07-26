@@ -44,6 +44,8 @@ from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
 
+INTERRUPTED_MARKER = "[Turn interrupted by the user before it completed.]"
+
 
 class _ContextOverflow(Exception):
     """Raised when a model call exceeds the context window, so the caller can
@@ -2511,13 +2513,6 @@ class LangGraphAgent:
         turn's input and the model addresses them with no user message. This is
         how a background completion auto-triggers a turn while the user is idle.
         """
-        # Snapshot the history length BEFORE this turn appends anything, so a
-        # cancel (KeyboardInterrupt) mid-turn can roll the whole turn back — the
-        # user message and any partial assistant/tool work — leaving history as if
-        # the turn never happened. Otherwise a cancelled user turn lingers with no
-        # answer and the model addresses it (out of context) on the NEXT turn.
-        turn_start_len = len(self._messages)
-
         # Fresh cancel token for this turn (see request_cancel): a stale set flag
         # from a prior cancelled turn must not abort this one.
         cancel_ev = getattr(self, "_cancel_event", None)
@@ -2584,11 +2579,10 @@ class LangGraphAgent:
             )
         except KeyboardInterrupt:
             # User cancelled mid-turn (the UI injects KeyboardInterrupt into this
-            # worker thread): roll the WHOLE turn out of history — the user message
-            # + any partial tool/assistant work appended so far — so the cancelled
-            # request doesn't linger and get answered on the NEXT turn.
-            del self._messages[turn_start_len:]
-            self._last_input_tokens = None  # stale after the rollback
+            # worker thread). CLOSE the turn out rather than deleting it: keep the
+            # user message and append an explicit interrupted marker.
+            self._messages.append(AIMessage(content=INTERRUPTED_MARKER))
+            self._last_input_tokens = None  # stale after the appended marker
             raise
         except GraphRecursionError:
             logger.warning(
@@ -2653,7 +2647,9 @@ class LangGraphAgent:
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 visible = self._extract_visible(msg.content)
-                if visible:
+                # The interrupted marker is bookkeeping, not an answer — never
+                # surface it to the user as "the work so far".
+                if visible and visible.strip() != INTERRUPTED_MARKER:
                     return visible
         return ""
 
