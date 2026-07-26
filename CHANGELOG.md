@@ -9,6 +9,38 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.7] — 2026-07-26
+
+### Changed
+
+- **Cancelling a turn no longer erases what you asked.** Since 1.5.1 a cancel
+  (Esc/Ctrl+C) rolled the **whole** turn out of history — the user message plus any
+  partial work. That fixed a dangling *unanswered* question being picked up out of
+  context on the next turn, but it over-corrected: the cancelled request vanished
+  entirely, so following a cancel with "sorry, continue" left the model with no
+  idea what it had been asked (it replied that there was no pending work), and any
+  partial result it had already reported was lost. The user message now **stays**
+  and an explicit `[Turn interrupted by the user before it completed.]` assistant
+  marker is appended instead, which fixes both failure modes at once: the turn
+  reads as explicitly terminated (so the model doesn't silently resume it or
+  re-run the tool calls it was making), while a follow-up "continue" still has the
+  original request in context. `SYSTEM_PROMPT` gains matching guidance for how to
+  read the marker (resume on "continue"; otherwise answer the new question and
+  leave the interrupted work alone). The marker is bookkeeping, never surfaced as
+  an answer — `_last_visible_from` skips it when salvaging a cut-short reply.
+
+### Fixed
+
+- **A prompt change could silently never reach installs from 1.6.3–1.7.6.**
+  `prompts.yaml` changed in 1.6.3 but that version's hash was never appended to
+  `_PRISTINE_BUNDLED_PROMPTS_HASHES`, so an otherwise-pristine installed copy was
+  treated as user-customized and left untouched — and since the bundled-fallback
+  loader only fills **missing** keys, an edit to an EXISTING prompt key (like the
+  interruption guidance above) would never have arrived. The missing hash is now
+  tracked, and the guard test was strengthened: it previously only asserted the set
+  was non-empty (which is why this slipped), and now verifies each shipped
+  version's actual hash is recognized.
+
 ## [1.7.6] — 2026-07-25
 
 ### Fixed
