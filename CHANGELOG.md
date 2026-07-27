@@ -9,6 +9,64 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.9] — 2026-07-27
+
+### Added
+
+- **Resume a previous session from the directory you launched in
+  (`--resume` / `--continue`).** Every session is now recorded automatically to an
+  append-only transcript, scoped to the launch directory, so resuming inside a
+  project only ever offers that project's sessions:
+  `mnemoai --resume` (pick from a list showing how long ago each ran, its turn
+  count, and its opening prompt), `mnemoai --resume <session-id>` (restore one
+  directly; a partial id suffix resolves), `mnemoai --continue` (most recent, no
+  prompt). Picking one replays the conversation into the terminal and continues
+  where you left off, reusing the same decode + render path as `/load` so a
+  resumed chat looks identical to a loaded one.
+  - **`/save` and `/load` are untouched and unaffected.** They remain the
+    user-curated path — a conversation you deliberately keep, under a name you
+    choose, in `conversations/` — and are **never** expired or deleted by session
+    cleanup. Resuming never adopts a saved file either: `resume_session`
+    deliberately does not set `current_conversation_path`, so a bare `/save`
+    after a resume writes a new file rather than overwriting one of yours.
+  - Storage: `~/.mnemoai/{profile}/sessions/{sanitized-cwd}/session_<ts>_<pid>_<rand>.jsonl`,
+    one JSON object per line (`meta` / `turn` / `compact`). Deep sibling paths
+    can't collide — a long directory name is truncated with a hash of the full
+    path. **Expiry is age-based**: `SESSION_MAX_AGE_DAYS` (root-level key,
+    default **30**; `0` disables recording entirely), swept across every project
+    directory at startup. The picker's 20-entry cap bounds only what is
+    *offered*, never what is kept, so a cap can't silently drop a session.
+  - **Append-only by design, not a mirror of the live history.** Compaction
+    *replaces* `agent.messages` wholesale, so a mirror would lose the
+    summarized-away turns and resume a stub; each turn is buffered and flushed
+    once, and a `compact` marker records that the live context shrank without
+    discarding the transcript. Sub-agent runs are deliberately excluded (they run
+    on their own isolated message list; logging them would interleave a second
+    conversation). A **cancelled** turn is recorded too, including its
+    interrupted marker, so a resumed session shows exactly what the live one did.
+    Every write is best-effort — a transcript can never break the turn you're
+    waiting on.
+
+### Fixed
+
+- **Cancelling the resume picker started a fresh session instead of exiting.**
+  Pressing `Esc` fell through into a brand-new conversation — surprising, since
+  the app was launched purely to resume, and it left another empty session behind.
+  Cancelling (or naming a session that doesn't exist) now exits cleanly.
+  Relatedly, a single available session no longer auto-resumes without showing the
+  picker, which had denied any chance to back out.
+- **A resumed transcript rendered above the logo instead of above the prompt.**
+  The welcome banner was printed by the chat loop *after* the restore, pushing the
+  entire replayed conversation off the top. The banner is now shown before the
+  replay, so it reads top-to-bottom: logo → commands → your conversation → prompt.
+- **Turn-less session files accumulated on disk.** The `meta` record is written at
+  startup, before we know whether you'll type anything, so a launch you
+  immediately quit (or a cancelled `--resume`) left a file with no turns. Those
+  were already hidden from the picker — which is why a directory could show three
+  files but only two entries — and are now removed at exit, after confirming the
+  file really has zero turns so it can never delete a session another process
+  wrote.
+
 ## [1.7.8] — 2026-07-27
 
 ### Fixed

@@ -454,11 +454,21 @@ class ChatInterface:
     # Sentinel returned by _dispatch to signal the loop should exit.
     _EXIT = object()
 
-    def run_chat_loop(self) -> None:
+    def show_welcome(self) -> None:
+        """Print the launch banner + command list (public so `--resume` can show
+        it BEFORE replaying a transcript — the banner belongs at the top)."""
+        self.__welcome_message()
+
+    def run_chat_loop(self, welcome: bool = True) -> None:
         """Run the main chat loop: pinned-input UI on a TTY
         (:meth:`_run_pinned_loop`), else a plain ``input()`` loop
-        (:meth:`_plain_loop`); both dispatch via :meth:`_dispatch`."""
-        self.__welcome_message()
+        (:meth:`_plain_loop`); both dispatch via :meth:`_dispatch`.
+
+        ``welcome=False`` skips the banner for a caller that already printed it
+        (``--resume``, which must show the banner before the restored transcript
+        so the conversation reads bottom-most, nearest the prompt)."""
+        if welcome:
+            self.__welcome_message()
 
         # Same "real interactive terminal" predicate the dialogs use.
         if _dialog_is_tty():
