@@ -300,11 +300,31 @@ class TestDetailScroll:
             # Drive the app briefly and press Down; vertical_scroll must advance.
             app = holder["app"]
 
+            # POLL for each stage instead of racing fixed sleeps. Two fixed 0.1s
+            # sleeps (send-then-read) made this fail deterministically on some CI
+            # runners: the app hadn't finished its FIRST render when the key was
+            # sent, so the key was dropped and vertical_scroll stayed 0. Waiting
+            # on the observable state (render_info present, then scroll advanced)
+            # keeps the assertion strict while removing the timing dependence.
+            async def _until(pred, timeout=10.0, step=0.02):
+                waited = 0.0
+                while waited < timeout:
+                    if pred():
+                        return True
+                    await asyncio.sleep(step)
+                    waited += step
+                return False
+
             async def run():
                 async def feed():
-                    await asyncio.sleep(0.1)
+                    # 1. Wait for the first render, so the key can't be dropped.
+                    await _until(lambda: body.render_info is not None)
                     pipe.send_text("\x1b[B")  # Down
-                    await asyncio.sleep(0.1)
+                    # 2. Wait for the scroll to actually advance.
+                    await _until(
+                        lambda: body.render_info is not None
+                        and body.render_info.vertical_scroll >= 1
+                    )
                     holder["vscroll"] = (
                         body.render_info.vertical_scroll if body.render_info else -1
                     )
