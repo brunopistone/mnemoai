@@ -5,6 +5,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import faiss
 
+from mnemoai.client.memory.similarity import (
+    SCORING_VERSION,
+    cosine_to_unit,
+    l2_normalize,
+)
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
@@ -62,11 +67,19 @@ class FAISSEpisodicStore:
         self._rebuild_bm25()
 
     def _embed_fingerprint(self) -> str:
-        """Current embedding model's fingerprint (falls back to a dim string)."""
+        """Current embedding model's fingerprint (falls back to a dim string).
+
+        Includes ``SCORING_VERSION``: vectors are stored L2-normalized for the
+        shared cosine scale, so an index written under the old raw-inner-product
+        scoring is incompatible and must go through the same reset path as an
+        embedding-model change.
+        """
         fp = getattr(self.embeddings, "fingerprint", None)
         if callable(fp):
-            return fp()
-        return f"dim={getattr(self.embeddings, 'dim', '?')}"
+            base = fp()
+        else:
+            base = f"dim={getattr(self.embeddings, 'dim', '?')}"
+        return f"{base}|score={SCORING_VERSION}"
 
     def _migrate_if_model_changed(self) -> None:
         """Reset the index+metadata if the embedding-model fingerprint changed."""
@@ -159,8 +172,9 @@ class FAISSEpisodicStore:
         if not episode_id:
             episode_id = f"episode_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
-        # Generate embedding
-        embedding = self.embeddings.embed([text])
+        # Generate embedding. Normalized before indexing so IndexFlatIP's inner
+        # product IS the cosine similarity (see memory/similarity.py).
+        embedding = l2_normalize(self.embeddings.embed([text]))
 
         # Initialize index if needed
         if self.index is None:
@@ -227,7 +241,7 @@ class FAISSEpisodicStore:
         candidate_k = min(top_k * 3, len(self.metadata))
 
         # --- Semantic candidates ---
-        query_embedding = self.embeddings.embed([query])
+        query_embedding = l2_normalize(self.embeddings.embed([query]))
         scores, indices = self.index.search(query_embedding, candidate_k)
 
         # idx -> (semantic_score, metadata)
@@ -235,7 +249,13 @@ class FAISSEpisodicStore:
         for i, idx in enumerate(indices[0]):
             if idx < 0 or idx >= len(self.metadata):
                 continue
-            sem_candidates[idx] = (float(scores[0][i]), self.metadata[idx])
+            # Normalized vectors -> the inner product is a cosine; rescale it to
+            # [0,1] so it shares one scale with the Chroma backend and with the
+            # BM25 component below.
+            sem_candidates[idx] = (
+                cosine_to_unit(scores[0][i]),
+                self.metadata[idx],
+            )
 
         # --- BM25 candidates ---
         bm25_candidates: Dict[int, float] = {}

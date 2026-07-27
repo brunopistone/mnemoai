@@ -940,15 +940,13 @@ class TestOrchestrateEndToEnd:
         a.model = object()
         a.model_with_tools = object()
         a._activity = AgentActivityStore()
-        a._steer_queue = []
-        a._steer_lock = None
         a._external_tools_prompt_block = lambda: ""
         a._decompose_task = lambda q, p, cats, history=None: subtasks
         a._run_worker_loop = (
             lambda model, tools, prompt, **kw: (f"RESULT[{prompt[:20]}]", [])
         )
         a._aggregate_results = (
-            lambda query, results, prompt, steering=None:
+            lambda query, results, prompt:
             "AGGREGATED(" + "+".join(r["result"] for r in results) + ")"
         )
         a._state = {"messages": [HumanMessage(content="do a multi-part task")]}

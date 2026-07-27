@@ -179,8 +179,6 @@ class PinnedPromptReader:
         toolbar_text: Optional[Callable[[], Any]] = None,
         reasoning_text: Optional[Callable[[], str]] = None,
         on_cancel: Optional[Callable[[], None]] = None,
-        steer: Optional[Callable[[str], bool]] = None,
-        clear_steering: Optional[Callable[[], None]] = None,
         agents_provider: Optional[Callable[[], list]] = None,
         agents_get: Optional[Callable[[str], Any]] = None,
         agents_stop: Optional[Callable[[str], bool]] = None,
@@ -200,13 +198,6 @@ class PinnedPromptReader:
             on_cancel: Called (UI thread) on Esc/Ctrl+C during a turn — fires the
                 cooperative cancel so blocking stream/backoff waits wake at once
                 (the async KeyboardInterrupt alone can't preempt them).
-            steer: **Currently unused** (dormant). A hook that would fold a
-                mid-turn message into the running turn; retired as the default in
-                favor of pure FIFO queuing (a message submitted mid-turn runs as
-                its own turn after see :meth:`_on_accept`).
-                Kept wired so re-enabling steering is a small change, not a rebuild.
-            clear_steering: Called on cancel to purge any pending steer messages;
-                a harmless no-op now that nothing is steered.
             agents_provider: Returns the current list of hidden sub-agent activity
                 runs (ActivityRun snapshots) for the live bottom "agents" panel.
             agents_get: ``get(run_id)`` -> one run's frozen copy for the detail view.
@@ -218,8 +209,6 @@ class PinnedPromptReader:
         self._toolbar_text = toolbar_text or (lambda: "")
         self._reasoning_text = reasoning_text or (lambda: "")
         self._on_cancel = on_cancel
-        self._steer = steer
-        self._clear_steering = clear_steering
         # Live sub-agent activity: provider() -> list of ActivityRun snapshots for
         # the bottom "agents" panel; get(run_id) -> one run for the detail view;
         # stop(run_id)/stop_all() -> ask a running agent (or all) to stop.
@@ -744,10 +733,10 @@ class PinnedPromptReader:
         prompt_toolkit clears the input.
 
         (Mid-turn *steering* — folding the message into the running turn — was
-        retired here as the default: it could strand a message steered during the
-        final, tool-call-free model call [it was never drained at turn end] into
-        the NEXT turn. The agent-side steering machinery [``agent.steer`` /
-        ``_drain_steering``] is left intact but unused by this UI.)
+        retired as the default and its machinery DELETED in 1.8.0: draining only
+        at tool-round boundaries stranded a message typed during the final,
+        tool-call-free model call into the NEXT turn. Reviving it needs a drain
+        point that also covers turn end; see ``_execute_tools`` in agent.py.)
         """
         text = buff.text
         if not text.strip() or self._queue is None:
@@ -1108,14 +1097,6 @@ class PinnedPromptReader:
         if not self._busy or tid is None or self._cancelled:
             return
         self._cancelled = True
-        # Discard anything steered into the turn being cancelled — otherwise a
-        # mid-turn message tied to this (aborted) turn would leak into the next
-        # one and get answered out of context.
-        if self._clear_steering is not None:
-            try:
-                self._clear_steering()
-            except Exception:
-                pass
         # Cooperative cancel FIRST: wake any blocking stream/backoff wait instantly
         # (the async KeyboardInterrupt below can't preempt those C-level waits, so
         # on its own a stalled-stream cancel stalls for the whole idle/backoff).

@@ -5,7 +5,30 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
+
+
+def current_turn_messages(messages: List[Any]) -> List[Any]:
+    """The tail of ``messages`` belonging to the current turn.
+
+    The turn starts at the LAST human message, so everything after it is what
+    this turn actually did (assistant messages + tool calls/results). Used to
+    keep per-turn reflection from re-analyzing the whole session every time.
+
+    Falls back to the full list when no human message is present (e.g. history
+    was compacted away), which is the old behavior.
+    """
+    last_human = -1
+    for i, msg in enumerate(messages):
+        if getattr(msg, "type", None) == "human":
+            last_human = i
+        elif isinstance(msg, dict) and msg.get("role") == "user":
+            last_human = i
+
+    if last_human < 0:
+        return list(messages)
+    return list(messages[last_human:])
 
 
 class PlaybookEntry:
@@ -70,12 +93,11 @@ class Reflector:
         return default
 
     def _save_metrics(self) -> None:
-        """Persist metrics to disk."""
+        """Persist metrics to disk (atomically -- see utils.atomic_write)."""
         if self.metrics_file:
             try:
                 os.makedirs(os.path.dirname(self.metrics_file), exist_ok=True)
-                with open(self.metrics_file, "w") as f:
-                    json.dump(self.metrics, f, indent=2)
+                atomic_write_json(self.metrics_file, self.metrics)
             except Exception as e:
                 logger.error(f"Failed to save metrics: {e}")
 
@@ -356,18 +378,26 @@ class Reflector:
         return tool_name in notable_tools
 
     def reflect_on_trajectory(
-        self, messages: List[Any], task: str
+        self, messages: List[Any], task: str, scope_to_last_turn: bool = True
     ) -> List[PlaybookEntry]:
-        """Analyze a full execution trajectory and extract all strategies.
+        """Analyze an execution trajectory and extract all strategies.
 
         Args:
-            messages: Full conversation messages including tool calls/results
+            messages: Conversation messages including tool calls/results
             task: The original user task
+            scope_to_last_turn: Analyze only the CURRENT turn (default). The
+                caller runs reflection after every turn while ``messages`` is
+                the whole session, so without this every earlier tool call is
+                re-analyzed on each turn: metrics inflate superlinearly and
+                duplicate strategies keep re-bumping their confidence.
 
         Returns:
             List of PlaybookEntry objects
         """
         entries = []
+
+        if scope_to_last_turn:
+            messages = current_turn_messages(messages)
 
         for msg in messages:
             # Extract tool calls and results from messages
@@ -412,14 +442,25 @@ class Reflector:
     def _find_tool_result(
         self, tool_call_id: str, tool_name: str, messages: List[Any]
     ) -> str:
-        """Find the result for a specific tool call."""
+        """Find the result for a specific tool call.
+
+        Matches on ``tool_call_id``. Name matching is only a last resort for
+        providers that don't return ids: when an id IS present, falling back to
+        the name would attribute the FIRST result of a repeated tool to every
+        later call of it.
+        """
         for msg in messages:
             if hasattr(msg, "type") and msg.type == "tool":
                 # Match by tool_call_id if available
                 msg_tool_call_id = getattr(msg, "tool_call_id", "")
                 if msg_tool_call_id and msg_tool_call_id == tool_call_id:
                     return getattr(msg, "content", "")
-                # Fallback: match by name
+
+        if tool_call_id:
+            return ""
+
+        for msg in messages:
+            if hasattr(msg, "type") and msg.type == "tool":
                 if hasattr(msg, "name") and msg.name == tool_name:
                     return getattr(msg, "content", "")
         return ""

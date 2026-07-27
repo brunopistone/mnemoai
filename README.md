@@ -7,7 +7,7 @@
 [![PyPI](https://img.shields.io/pypi/v/mnemoai-assistant.svg)](https://pypi.org/project/mnemoai-assistant/)
 [![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
 
@@ -18,11 +18,12 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 Full documentation is available at **https://brunopistone.github.io/mnemoai/**
 
 - [Getting Started](https://brunopistone.github.io/mnemoai/getting-started/)
-- [Usage](https://brunopistone.github.io/mnemoai/usage/)
+- [Usage & commands](https://brunopistone.github.io/mnemoai/guides/usage/)
 - [Configuration](https://brunopistone.github.io/mnemoai/configuration/)
-- [Advanced Features](https://brunopistone.github.io/mnemoai/advanced-features/)
-- [Productivity Tools](https://brunopistone.github.io/mnemoai/productivity/)
-- [Architecture](https://brunopistone.github.io/mnemoai/architecture-overview/)
+- [Orchestration & sub-agents](https://brunopistone.github.io/mnemoai/guides/orchestration/)
+- [Memory & learning](https://brunopistone.github.io/mnemoai/guides/memory/)
+- [Productivity Tools](https://brunopistone.github.io/mnemoai/guides/productivity-tools/)
+- [Architecture](https://brunopistone.github.io/mnemoai/getting-started/architecture/)
 - [Development](https://brunopistone.github.io/mnemoai/development/)
 
 ## 🚀 Quick Start
@@ -38,7 +39,7 @@ On first run, if no config is found, an interactive configurator launches and wa
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), Amazon SageMaker AI, LiteLLM (100+ providers)
+- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), Amazon SageMaker AI (chat only — no tool calling), LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG**: Automatic document indexing and semantic (hybrid) search
 - **🧠 User Profile Learning**: Personalized responses learned from interactions

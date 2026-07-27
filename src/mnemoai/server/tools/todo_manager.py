@@ -3,10 +3,10 @@
 import json
 import os
 import re
-import tempfile
 
 from mcp.server.fastmcp import FastMCP
 
+from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import instance_id, profile_dir
 
@@ -41,20 +41,10 @@ def _todo_file(scope: str = "default") -> str:
 
 
 def _atomic_write_json(path: str, data) -> None:
-    """Write JSON to ``path`` atomically (temp file + os.replace) so a concurrent
-    reader never sees a half-written list."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Write JSON to ``path`` atomically so a concurrent reader never sees a
+    half-written list. Delegates to the shared ``utils.atomic_write`` helper
+    (same guarantee is now used for the learned-state files)."""
+    atomic_write_json(path, data)
 
 
 def register_todo_tools(mcp: FastMCP) -> None:

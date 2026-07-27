@@ -131,3 +131,116 @@ class TestMarkerIsNotAnAnswer:
             AIMessage(content=INTERRUPTED_MARKER),
         ]
         assert a._last_visible_from(a._messages) == "here is the partial answer"
+
+
+class TestRecursionLimitKeepsTheWork:
+    """Hitting the safety step limit must PRESERVE the turn's work.
+
+    `GraphRecursionError` carries no state and `graph.invoke()` returns nothing,
+    so the turn used to be discarded entirely: every tool call and assistant
+    message vanished, and the user's follow-up ("continue", "run the tests")
+    arrived with no record that any of the work had happened. The graph is now
+    STREAMED (`stream_mode="values"`), so the last snapshot before the limit is
+    the work so far and gets committed exactly like a completed turn's.
+
+    Only a turn that produced NOTHING falls back to the interrupted marker.
+    """
+
+    def _looping_agent(self, limit=4):
+        import operator
+        from typing import Annotated, TypedDict
+
+        from langgraph.graph import StateGraph
+
+        class _S(TypedDict):
+            messages: Annotated[list, operator.add]
+            thinking: object
+
+        def _work(state):
+            n = sum(1 for m in state["messages"] if isinstance(m, AIMessage))
+            return {"messages": [AIMessage(content=f"work {n}")], "thinking": None}
+
+        g = StateGraph(_S)
+        g.add_node("a", _work)
+        g.set_entry_point("a")
+        g.add_conditional_edges("a", lambda s: "a", {"a": "a"})
+
+        a = _agent(g.compile())
+        a.recursion_limit = limit
+        a._emit_answer = lambda m: None
+        a._last_tool_result = lambda m: ""
+        return a
+
+    def test_work_done_before_the_limit_survives(self):
+        a = self._looping_agent()
+        a.invoke("big task")
+        produced = [
+            m.content for m in a._messages if isinstance(m, AIMessage)
+        ]
+        assert produced, "the turn's work was discarded"
+        assert any("work 0" in c for c in produced)
+
+    def test_user_message_survives(self):
+        a = self._looping_agent()
+        a.invoke("big task")
+        humans = [m.content for m in a._messages if isinstance(m, HumanMessage)]
+        assert humans == ["big task"]
+
+    def test_next_turn_sees_the_work(self):
+        # The whole point: "continue" must arrive with the pre-limit work visible.
+        a = self._looping_agent()
+        a.invoke("refactor everything")
+
+        seen = {}
+        a.graph = _OkGraph()
+        orig = a.graph.invoke
+
+        def _capture(state, config=None):
+            seen["contents"] = [str(m.content) for m in state["messages"]]
+            return orig(state, config)
+
+        a.graph.invoke = _capture
+        a.invoke("continue")
+        joined = "\n".join(seen["contents"])
+        assert "work 0" in joined and "refactor everything" in joined
+
+    def test_reply_explains_the_limit_was_hit(self):
+        a = self._looping_agent()
+        out = a.invoke("big task")
+        assert "step limit" in out and "RECURSION_LIMIT" in out
+
+    def test_previous_turns_answer_is_never_reused(self):
+        # With the work preserved this can't happen, but assert it directly:
+        # _last_visible_from must be scoped to THIS turn, not the whole history.
+        a = _agent(_OkGraph())
+        a.invoke("earlier question")  # leaves "done" in history
+        looping = self._looping_agent()
+        a.graph = looping.graph
+        a.recursion_limit = 4
+        a._emit_answer = lambda m: None
+        a._last_tool_result = lambda m: ""
+        out = a.invoke("the big task")
+        assert "done" not in out
+
+    def test_turn_with_no_output_is_closed_with_the_marker(self):
+        # A limit hit that produced nothing still must not leave a dangling
+        # user message, or the next turn re-answers it out of context.
+        from langgraph.errors import GraphRecursionError
+
+        class _Boom:
+            def invoke(self, state, config=None):
+                raise GraphRecursionError("limit")
+
+            def stream(self, state, config=None, stream_mode=None):
+                raise GraphRecursionError("limit")
+
+        a = _agent(_Boom())
+        a._emit_answer = lambda m: None
+        a.invoke("a task")
+        assert a._messages[-1].content == INTERRUPTED_MARKER
+
+    def test_stale_token_count_is_reset(self):
+        a = self._looping_agent()
+        a._last_input_tokens = 999
+        a.invoke("x")
+        assert a._last_input_tokens is None

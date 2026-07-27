@@ -7,6 +7,7 @@ import textwrap
 from datetime import datetime
 from typing import Any, Dict, List
 
+from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import profile_dir
@@ -191,8 +192,7 @@ class UserProfileManager:
                 self.profile["tool_patterns"][intent] = dict(sorted_tools)
 
         try:
-            with open(self.profile_path, "w") as f:
-                json.dump(self.profile, f, indent=2)
+            atomic_write_json(self.profile_path, self.profile)
         except Exception as e:
             logger.error(f"Failed to save profile: {e}")
 

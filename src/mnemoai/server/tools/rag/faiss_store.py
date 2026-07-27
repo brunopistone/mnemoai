@@ -1,20 +1,30 @@
-"""Simple FAISS-backed vector store with file persistence for session-scoped RAG."""
+"""Simple FAISS-backed vector store with file persistence for session-scoped RAG.
+
+Metadata is persisted as **JSON, not pickle**. Unpickling executes arbitrary
+code by design, and this file is read from a predictable path at startup, so a
+planted ``.meta`` was remote code execution in the app's own process. The
+metadata is plain chunk dicts (text + source + offsets), so JSON loses nothing.
+
+The persist path is always inside the app profile directory. It previously fell
+back to ``/tmp/rag_store*``, which is world-writable and shared between users --
+the exact place an attacker can pre-plant a file for the load path to pick up.
+"""
 
 import logging
 
 logging.getLogger("faiss").setLevel(logging.WARNING)
 
-import os
-import pickle
-import sys
-import threading
-import traceback
-from typing import Dict, List, Tuple
+import json  # noqa: E402  (see logging.setLevel above: it must precede faiss)
+import os  # noqa: E402
+import threading  # noqa: E402
+from typing import Dict, List, Tuple  # noqa: E402
 
-import faiss
-import numpy as np
+import faiss  # noqa: E402
+import numpy as np  # noqa: E402
 
-from mnemoai.utils.logger import logger
+from mnemoai.utils.atomic_write import atomic_write_json  # noqa: E402
+from mnemoai.utils.logger import logger  # noqa: E402
+from mnemoai.utils.paths import profile_dir  # noqa: E402
 
 
 class FaissStore:
@@ -34,36 +44,52 @@ class FaissStore:
 
         Args:
             dim: Embedding dimension
-            persist_path: Optional persistence path
+            persist_path: Optional explicit persistence path
             session_id: Optional session ID for persistence
-            rag_dir: Optional RAG directory path
+            rag_dir: Optional RAG directory path (defaults to the app profile dir)
         """
         self.dim = dim
 
-        # Use profile-specific path
-        if rag_dir and session_id:
-            self.persist_path = os.path.join(rag_dir, f"rag_store_{session_id}.faiss")
+        # Always land inside the app profile dir. No /tmp fallback: a shared,
+        # world-writable location is where a hostile metadata file would be
+        # planted, and it also leaks indexed document text to other users.
+        base_dir = rag_dir or str(profile_dir())
+        if persist_path:
+            self.persist_path = persist_path
         elif session_id:
-            self.persist_path = f"/tmp/rag_store_{session_id}.faiss"
+            self.persist_path = os.path.join(base_dir, f"rag_store_{session_id}.faiss")
         else:
-            self.persist_path = persist_path or "/tmp/rag_store.faiss"
+            self.persist_path = os.path.join(base_dir, "rag_store.faiss")
 
-        self.metadata_path = self.persist_path + ".meta"
+        # ".meta.json" (not the old ".meta") so a pickle written by a previous
+        # version is simply not found -- the store rebuilds instead of trying to
+        # interpret one format as the other, which would desync index/metadata.
+        self.metadata_path = self.persist_path + ".meta.json"
         self.lock = threading.Lock()
 
         # Try to load existing index
         if os.path.exists(self.persist_path) and os.path.exists(self.metadata_path):
             try:
                 self.index = faiss.read_index(self.persist_path)
-                with open(self.metadata_path, "rb") as f:
-                    self.metadatas = pickle.load(f)
-            except Exception:
-                # If load fails, create new
+                with open(self.metadata_path, "r", encoding="utf-8") as f:
+                    self.metadatas = json.load(f)
+                if not isinstance(self.metadatas, list):
+                    raise ValueError("metadata file is not a list")
+                # A truncated write (or a mismatched pair) would silently return
+                # the wrong chunk for a hit; rebuild instead.
+                if self.index.ntotal != len(self.metadatas):
+                    raise ValueError(
+                        f"index/metadata length mismatch: "
+                        f"{self.index.ntotal} vs {len(self.metadatas)}"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not load RAG store, starting fresh: {e}")
                 self.index = faiss.IndexFlatIP(dim)
                 self.metadatas = []
         else:
             self.index = faiss.IndexFlatIP(dim)
             self.metadatas = []
+
 
     def add(self, vectors: np.ndarray, metadatas: list[dict]) -> None:
         """Add vectors and metadata to FAISS index.
@@ -129,15 +155,19 @@ class FaissStore:
             self._persist()
 
     def _persist(self) -> None:
-        """Save index and metadata to disk."""
+        """Save index and metadata to disk.
+
+        The metadata write is atomic so a crash can't leave a half-written file
+        that the next start would reject (and rebuild from scratch).
+        """
         try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.persist_path)), exist_ok=True)
             faiss.write_index(self.index, self.persist_path)
-            with open(self.metadata_path, "wb") as f:
-                pickle.dump(self.metadatas, f)
+            atomic_write_json(self.metadata_path, self.metadatas)
         except Exception as e:
-            # Log the error so we can debug
-            logger.error(f"ERROR: Failed to persist RAG store: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
+            # exc_info, not file= : logger.error() takes no `file` kwarg, so the
+            # previous version raised TypeError from inside its own handler.
+            logger.error(f"Failed to persist RAG store: {e}", exc_info=True)
 
 
 def create_store(dim: int) -> "FaissStore":

@@ -9,7 +9,7 @@ Functions take the ``LangGraphClient`` as the first arg and reach its
 collaborators (``profile_manager``/``playbook``/``episodic_memory``/``agent``)
 and read-only ``system_prompt``/``agent.messages`` through it, reading the same
 ``config`` singleton the client uses. The client keeps thin delegating methods —
-the ``plan_policy``/``steering`` collaborator pattern. No import of the client
+the ``plan_policy``/``cancellation`` collaborator pattern. No import of the client
 class (functions receive the instance), so there is no import cycle.
 """
 
@@ -23,6 +23,46 @@ from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import plans_dir
 from mnemoai.utils.tokenization import count_tokens
 
+# Warn once per process when embedding similarity is unavailable (see
+# compute_similarity) instead of on every turn.
+_EMBED_SIMILARITY_WARNED = False
+
+
+def build_session_blocks(client, include_playbook: bool = False) -> list[str]:
+    """The ordered session-start context blocks, non-empty ones only.
+
+    SINGLE SOURCE OF TRUTH for "what accompanies the base system prompt".
+    Both assembly paths must use it:
+
+    * session start -- :func:`build_system_prompt` (playbook excluded here; the
+      client appends it separately so ``client.system_prompt`` stays
+      playbook-free for the session-log/replay paths),
+    * after compaction -- ``AgentConversationManager._build_system_with_summary``
+      rebuilds the prompt from scratch and MUST re-add every block, playbook
+      included, or the learned context silently vanishes mid-session.
+
+    Args:
+        client: The ``LangGraphClient`` (read for profile/playbook collaborators).
+        include_playbook: Append the ACE playbook block. The compaction rebuild
+            sets this because it replaces the client's own playbook append.
+
+    Returns:
+        Blocks in injection order: profile, MEMORY.md, skills, sub-agents
+        [, playbook].
+    """
+    blocks = [
+        inject_profile_context(client),
+        # MEMORY.md (curated persistent memory, injected whole),
+        inject_memory_context(client),
+        # skill metadata (name+description for use_skill),
+        inject_skills_context(client),
+        # sub-agent types (built-in + custom, for spawn_agent discovery).
+        inject_subagents_context(client),
+    ]
+    if include_playbook:
+        blocks.append(get_playbook_context(client))
+    return [block for block in blocks if block]
+
 
 def build_system_prompt(client) -> str:
     """Build the system prompt (SYSTEM_PROMPT + profile/memory/skills)."""
@@ -32,29 +72,22 @@ def build_system_prompt(client) -> str:
     current_date = date.today().strftime("%Y-%m-%d")
     system_prompt = system_prompt.format(current_date=current_date)
 
-    if config.get("PROFILE", {}).get("USE_PROFILING", False):
-        profile_summary = client.profile_manager.get_profile_summary()
-        if profile_summary:
-            system_prompt = f"{system_prompt}\n\n{profile_summary}"
-
-    # Optional leading blocks, appended in order when non-empty:
-    #   MEMORY.md (curated persistent memory, injected whole at session start),
-    #   skill metadata (name+description for use_skill),
-    #   sub-agent types (built-in + custom, for spawn_agent discovery).
-    for block in (
-        inject_memory_context(client),
-        inject_skills_context(client),
-        inject_subagents_context(client),
-    ):
-        if block:
-            system_prompt = f"{system_prompt}\n\n{block}"
+    for block in build_session_blocks(client):
+        system_prompt = f"{system_prompt}\n\n{block}"
 
     return system_prompt
 
 
+def inject_profile_context(client) -> str:
+    """The learned user-profile summary block; "" when profiling is disabled."""
+    if not config.get("PROFILE", {}).get("USE_PROFILING", False):
+        return ""
+    return client.profile_manager.get_profile_summary() or ""
+
+
 def inject_memory_context(client) -> str:
-    """Curated MEMORY.md contents wrapped for the system prompt (a frozen
-    snapshot injected once at session start); "" when disabled or empty."""
+    """Curated MEMORY.md contents wrapped for the system prompt (read at session
+    start and again on the compaction rebuild); "" when disabled or empty."""
     if not config.get("ENABLE_MEMORY", True):
         return ""
     from mnemoai.client.memory.memory_store import MemoryStore
@@ -139,8 +172,18 @@ def compute_similarity(client, text1: str, text2: str) -> float:
                 np.linalg.norm(emb1) * np.linalg.norm(emb2)
             )
             return float(similarity)
-        except Exception:
-            pass
+        except Exception as e:
+            # Falling through to Jaccard means the episodic thresholds are now
+            # being applied to word-overlap scores, which behave nothing like
+            # cosine. Say so once instead of degrading retrieval in silence.
+            global _EMBED_SIMILARITY_WARNED
+            if not _EMBED_SIMILARITY_WARNED:
+                _EMBED_SIMILARITY_WARNED = True
+                logger.warning(
+                    f"Embedding similarity unavailable ({e}); falling back to "
+                    "word-overlap (Jaccard) for episodic relevance. Recall will "
+                    "be noticeably worse until the embedding model works."
+                )
 
     words1 = set(text1.lower().split())
     words2 = set(text2.lower().split())

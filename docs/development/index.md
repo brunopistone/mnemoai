@@ -9,7 +9,7 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 | TodoWrite        | Standard library only           | None               |
 | Edit Tool        | Standard library only           | None               |
 | Glob Search      | Standard library (`glob`)       | None               |
-| Grep Search      | Standard library (`subprocess`) | ripgrep (optional) |
+| Grep Search      | Standard library (`subprocess`) | ripgrep (required) |
 | Error Handler    | Standard library (`functools`)  | None               |
 | Git Safety       | Standard library (`subprocess`) | git                |
 | Plan Mode        | Standard library (`json`, `os`) | None               |
@@ -17,7 +17,7 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 
 **External Tools:**
 
-- **ripgrep**: Used by the `grep_search` tool. Install via system package manager (see [Recommended optional tools](../getting-started/installation.md#7-recommended-optional-tools)). If not installed, the assistant automatically falls back to slower alternatives.
+- **ripgrep**: **Required** by the `grep_search` tool — there is no fallback. Install via system package manager (see [Recommended optional tools](../getting-started/installation.md#7-recommended-optional-tools)); without it `grep_search` returns an error telling you to install it. Every other tool works without it.
 
 **Core Python Packages:**
 
@@ -76,7 +76,7 @@ Mnemo AI follows [Semantic Versioning](https://semver.org/). The **public surfac
 - **Config keys** in `config.yaml` (the `MODEL_ID` / `VISION_MODEL_ID` / `RAG.EMBED_MODEL_ID` fields, the `ENABLE_*` / `REQUIRE_*` toggles, and the documented section keys).
 - **Prompt keys** in `prompts.yaml` (`SYSTEM_PROMPT`, `ROUTING_PROMPT`, `ORCHESTRATOR_PROMPT`, `AGGREGATOR_PROMPT`, `SUMMARY_SYSTEM_PROMPT`, `SUMMARY_TASK_PROMPT`). As of 0.8.16 these live in `prompts.yaml`, not `config.yaml` (keys left in `config.yaml` are ignored with a migration warning).
 - **The `mcp.json` schema** for external MCP servers (`mcpServers` with `command` / `args` / `env` / `disabled`).
-- **CLI commands** (`/config`, `/model`, `/params`, `/features`, `/mcp`, `/memory`, `/plan`, `/compact`, `/clear`, `/save`, `/load`) and the `mnemoai` console command + its `--no-verbose`, `--resume [SESSION_ID]`, and `--continue` flags.
+- **CLI commands** (`/config`, `/model`, `/params`, `/features`, `/mcp`, `/memory`, `/skills`, `/plan`, `/compact`, `/clear`, `/save`, `/load`) and the `mnemoai` console command + its `--no-verbose`, `--resume [SESSION_ID]`, and `--continue` flags.
 - **The distribution/import name** (`pip install mnemoai-assistant` → `import mnemoai`).
 
 Pre-1.0.0, minor releases may add features and occasionally adjust these. From **1.0.0** onward, a breaking change to any of the above bumps the **major** version; new backward-compatible features bump the minor; fixes bump the patch. Internal modules (anything under `client/`, `server/`, `models/`, `utils/` not listed above) are **not** part of the public contract and may change between any releases. All changes are recorded in [`CHANGELOG.md`](https://github.com/brunopistone/mnemoai/blob/main/CHANGELOG.md).

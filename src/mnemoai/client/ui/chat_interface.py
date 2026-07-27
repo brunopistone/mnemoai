@@ -543,25 +543,6 @@ class ChatInterface:
                 result = self._dispatch(line)
             return _ExitRepl if result is self._EXIT else None
 
-        def _steer(text: str) -> bool:
-            """Fold a mid-turn plain message into the running turn via the agent's
-            steering queue. Returns False (→ normal queuing) if the agent isn't
-            available, so nothing is lost."""
-            agent = getattr(self.client, "agent", None)
-            steer_fn = getattr(agent, "steer", None) if agent else None
-            if steer_fn is None:
-                return False
-            steer_fn(text)
-            return True
-
-        def _clear_steering() -> None:
-            """Drop steering queued into a turn being cancelled, so it doesn't
-            leak into the next turn."""
-            agent = getattr(self.client, "agent", None)
-            clear_fn = getattr(agent, "clear_steering", None) if agent else None
-            if clear_fn is not None:
-                clear_fn()
-
         def _on_cancel() -> None:
             """Cooperatively signal the agent to abort NOW. The reader also injects
             a KeyboardInterrupt, but that can't preempt a worker parked in a
@@ -600,8 +581,6 @@ class ChatInterface:
             toolbar_text=lambda: spinner_toolbar_text(status),
             reasoning_text=lambda: reasoning.render(time.monotonic()),
             on_cancel=_on_cancel,
-            steer=_steer,
-            clear_steering=_clear_steering,
             agents_provider=_agents_snapshot,
             agents_get=_agents_get,
             agents_stop=_agents_stop,

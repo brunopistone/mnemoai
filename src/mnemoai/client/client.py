@@ -136,6 +136,15 @@ class LangGraphClient:
         """Delegates to :func:`context_injection.build_system_prompt`."""
         return context_injection.build_system_prompt(self)
 
+    def _system_prompt_with_playbook(self) -> str:
+        """``system_prompt`` plus the playbook block, as handed to the agent."""
+        if not self.playbook:
+            return self.system_prompt
+        playbook_context = self._get_playbook_context()
+        if not playbook_context:
+            return self.system_prompt
+        return f"{self.system_prompt}\n\n{playbook_context}"
+
     @staticmethod
     def _sanitize_for_path(name: str) -> str:
         """Delegate to ``utils.paths.sanitize_model_name`` (kept for callers)."""
@@ -259,13 +268,7 @@ class LangGraphClient:
                 self.model = self.llm_controller.get_model()
 
                 # Append playbook context to the system prompt.
-                system_prompt_with_context = self.system_prompt
-                if self.playbook:
-                    playbook_context = self._get_playbook_context()
-                    if playbook_context:
-                        system_prompt_with_context = (
-                            f"{self.system_prompt}\n\n{playbook_context}"
-                        )
+                system_prompt_with_context = self._system_prompt_with_playbook()
 
                 router = None
                 tool_routes = None
@@ -724,7 +727,10 @@ class LangGraphClient:
         self.session_id = self._new_session_id()
         self.system_prompt = self._build_system_prompt()
         if self.agent:
-            self.agent.system_prompt = self.system_prompt
+            # Mirror start(): the AGENT's prompt carries the playbook, while
+            # self.system_prompt stays playbook-free (session-log replay uses it).
+            # Without this, /clear silently drops the playbook block.
+            self.agent.system_prompt = self._system_prompt_with_playbook()
 
         # Fresh conversation: the next /save makes a new file.
         self.current_conversation_path = None

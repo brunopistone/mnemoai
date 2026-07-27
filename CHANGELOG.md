@@ -9,6 +9,116 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-27
+
+A correctness + hardening release from a full codebase audit. **Minor bump, not a
+patch:** two changes are user-visible beyond a bugfix — existing episodic memory
+stores are reset once, and two internal agent methods were removed. Read
+"Upgrade notes" before installing.
+
+### Upgrade notes
+
+- **Episodic memory is reset once on first run.** Both backends now produce
+  cosine-in-[0,1] scores (see Fixed → retrieval thresholds), and the scoring
+  version rides in the embedding fingerprint, so an existing store is rebuilt
+  through the already-tested migration path rather than silently mixing two
+  incomparable scales. Learned episodes are re-learnable scratch, but they ARE
+  lost. The ACE playbook, `MEMORY.md`, saved conversations, and `--resume`
+  sessions are unaffected.
+- **Removed `agent.steer()` / `agent.clear_steering()`** and the mid-turn
+  steering queue (dead since the intake was retired in 1.7.x — the UI had no
+  producer, so the drain always returned empty). `client/agent/steering.py` is
+  now **`cancellation.py`**, holding only the cancel primitives it always
+  really provided. Recovery path: `git log -- src/mnemoai/client/agent/steering.py`.
+  (Unrelated to **STEERING.md**, the user-authored always-on instructions
+  feature, which is untouched and live — the two only ever shared a name.)
+
+### Fixed
+
+- **Long sessions silently lost their learned context.** The compaction rebuild
+  re-fetched the base system prompt and re-injected only skills + sub-agents, so
+  after the FIRST compaction `MEMORY.md`, the user-profile block, and the ACE
+  playbook were gone for the rest of the session — defeating "learns and
+  remembers" precisely in the long sessions where it matters. All session-start
+  blocks now come from one `context_injection.build_session_blocks()` used by
+  **both** the session-start and compaction paths, so they can't drift again (a
+  prior fix had patched only the skills instance of this same bug). A
+  memory-read failure degrades the prompt instead of aborting the compaction —
+  losing a block beats overflowing the window. **`/clear` had the same defect**
+  and is fixed with it.
+- **Hitting the safety step limit destroyed the whole turn.** `GraphRecursionError`
+  carries no state and `graph.invoke()` returns nothing, so every tool call and
+  assistant message the turn produced was discarded: the user's next message
+  ("continue", "run the tests") arrived with no record that the work had ever
+  happened, and the reply shown was the **previous** turn's answer — a confident
+  response to a different question. The graph is now streamed
+  (`stream_mode="values"`), so the last snapshot before the limit is committed
+  exactly like a completed turn's, and it reaches the `--resume` transcript too.
+  A turn that produced nothing is closed with the interrupted marker instead of
+  being left dangling.
+- **`git_safe` was broken for its own documented example, and injectable.** It
+  split the command with `str.split()`, so `commit -m 'Add feature'` — the
+  example in the tool's own docstring — committed with the message `Add`. The
+  same split let git-level options through: `-c core.pager=…`,
+  `-c alias.x='!sh …'`, `--exec-path`, `--upload-pack` are arbitrary-command
+  execution that no danger pattern inspected. Now parsed with `shlex` (quoted
+  arguments survive; unbalanced quotes are refused) and those option families
+  are rejected before anything runs. `git_commit_safe` also shlex-splits
+  `add_files`, so a quoted path with spaces stages as one file.
+- **Retrieval thresholds weren't comparable across backends.** One knob,
+  `EPISODIC_MEMORY.RETRIEVAL_THRESHOLD`, gated a `1/(1+L2)` mapping on ChromaDB
+  and a raw inner product on FAISS, so switching `VECTOR_STORE` silently changed
+  recall. Both now return cosine rescaled to [0, 1] (0.5 = orthogonal) with
+  vectors L2-normalized on write and query. Verified identical on both backends
+  for identical / orthogonal / opposite inputs.
+- **Reflection re-analyzed the whole session every turn.** The reflector received
+  all of `agent.messages` each turn, so earlier tool calls were re-counted:
+  `total_tool_calls` grew triangularly (1, 3, 6, 10, 15 over five turns instead
+  of 1, 2, 3, 4, 5) and duplicate strategies kept re-bumping their confidence.
+  It now analyzes only the current turn, falling back to the full list when
+  history was compacted away. Also fixed `_find_tool_result`, which could
+  attribute the first result of a repeated tool to every later call of it.
+- **SageMaker silently dropped every tool.** `bind_tools` was a no-op returning
+  `self`, so an agentic assistant ran with zero tools and no signal. It now logs
+  a loud one-time WARNING naming the endpoint and the consequence; the README no
+  longer advertises SageMaker without that caveat.
+- **A broken embedding model degraded retrieval silently.** The
+  embedding→Jaccard similarity fallback was an `except: pass`, so word-overlap
+  scoring replaced semantic search with no indication. It now warns once.
+- **Symlinks escaped the write policy.** `path_policy` normalized with
+  `abspath`, not `realpath`, so a symlink into a protected system directory
+  wrote straight through. Now resolved before classification, and the policy is
+  applied to `execute_bash` / `start_background_task` working directories too.
+- **`web_crawler` could reach internal services (SSRF).** It validated only the
+  URL scheme, so cloud metadata endpoints (`169.254.169.254`), `localhost`, and
+  RFC1918 addresses were crawlable — and fetched text becomes model input. A new
+  `safety/url_policy` resolves the host and refuses non-public addresses
+  (loopback, link-local, private, reserved) and non-http(s) schemes.
+- **The RAG store unpickled untrusted data.** `rag/faiss_store` used
+  `pickle.load` on a sidecar file, with a fallback to a world-writable
+  `/tmp/rag_store*` path — a planted file was code execution on a shared host.
+  Metadata is now JSON under a new `.meta.json` name (so an old pickle is never
+  read at all, rather than needing a migration), and the `/tmp` fallback is gone.
+- **Learned state could be corrupted by a crash or a second terminal tab.**
+  `MEMORY.md`, `playbook.json`, `metrics.json`, and the user profile were
+  truncate-then-write with no lock. All now use one shared
+  `utils/atomic_write` helper (temp file + `os.replace`); a failed serialize
+  leaves the previous file intact. `todo_manager` delegates to it instead of
+  keeping its own copy.
+
+### Changed
+
+- **CI installs once and enforces a coverage floor.** `requirements-dev.txt` is
+  now just `-e .[dev,docs]`, so `pyproject.toml` is the single source for
+  dependencies and the two can't drift; the workflow drops its duplicate
+  runtime install. Unit tests run with `--cov-fail-under=60` (measured 64%) as a
+  regression guard, not a target.
+- **Fixed four broken documentation links and a stale `black` badge** in the
+  README (the project uses ruff), plus stale claims in the development docs.
+  A new `test_doc_links.py` checks documented routes against the mkdocs nav, so
+  these can't rot silently again — root docs aren't in the nav, so `--strict`
+  never caught them.
+
 ## [1.7.9] — 2026-07-27
 
 ### Added
@@ -35,9 +145,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
     path. **Expiry is age-based**: `SESSION_MAX_AGE_DAYS` (root-level key,
     default **30**; `0` disables recording entirely), swept across every project
     directory at startup. The picker's 20-entry cap bounds only what is
-    *offered*, never what is kept, so a cap can't silently drop a session.
+    _offered_, never what is kept, so a cap can't silently drop a session.
   - **Append-only by design, not a mirror of the live history.** Compaction
-    *replaces* `agent.messages` wholesale, so a mirror would lose the
+    _replaces_ `agent.messages` wholesale, so a mirror would lose the
     summarized-away turns and resume a stub; each turn is buffered and flushed
     once, and a `compact` marker records that the live context shrank without
     discarding the transcript. Sub-agent runs are deliberately excluded (they run
@@ -56,7 +166,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   Relatedly, a single available session no longer auto-resumes without showing the
   picker, which had denied any chance to back out.
 - **A resumed transcript rendered above the logo instead of above the prompt.**
-  The welcome banner was printed by the chat loop *after* the restore, pushing the
+  The welcome banner was printed by the chat loop _after_ the restore, pushing the
   entire replayed conversation off the top. The banner is now shown before the
   replay, so it reads top-to-bottom: logo → commands → your conversation → prompt.
 - **Turn-less session files accumulated on disk.** The `meta` record is written at
@@ -103,7 +213,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 - **Cancelling a turn no longer erases what you asked.** Since 1.5.1 a cancel
   (Esc/Ctrl+C) rolled the **whole** turn out of history — the user message plus any
-  partial work. That fixed a dangling *unanswered* question being picked up out of
+  partial work. That fixed a dangling _unanswered_ question being picked up out of
   context on the next turn, but it over-corrected: the cancelled request vanished
   entirely, so following a cancel with "sorry, continue" left the model with no
   idea what it had been asked (it replied that there was no pending work), and any
@@ -139,7 +249,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   `(press Ctrl+C again to force-quit)` hint — discarded the returned awaitable, so
   a failed terminal write produced no notice and surfaced only as an unretrieved-
   task warning. `run_in_terminal` also chains on `app._running_in_terminal_f`, so
-  an un-awaited call is exactly the shape that can stall a *later* in-terminal
+  an un-awaited call is exactly the shape that can stall a _later_ in-terminal
   write. Both now go through a shared `_notice()` helper that awaits the write in
   a task with its own error trap (best-effort: a notice can never raise into a key
   handler or affect control flow), and is a no-op when the loop is missing or
@@ -178,10 +288,10 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 - **A `RuntimeWarning` about `toolConfig` leaked into the terminal after a
   cancelled turn, and the conversation history was silently rewritten.** The
   orchestrator's task-decomposition call (`_decompose_task`) binds **no tools** —
-  it uses the raw model, not the tool-bound one — but it was handed the *real*
+  it uses the raw model, not the tool-bound one — but it was handed the _real_
   prior conversation, including replayable `tool_use`/`tool_result` blocks. With no
   matching tool schema, Bedrock Converse logged `Tool messages (toolUse/toolResult)
-  detected without toolConfig. Converting tool blocks to text format…`, raised a
+detected without toolConfig. Converting tool blocks to text format…`, raised a
   `RuntimeWarning` that printed over the pinned UI, and **rewrote the messages
   itself**; a stricter provider can reject the request outright. It surfaced most
   visibly right after cancelling a turn, because a cancelled turn leaves tool

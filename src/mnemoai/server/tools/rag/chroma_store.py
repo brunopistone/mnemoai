@@ -11,6 +11,7 @@ import chromadb
 import numpy as np
 
 from mnemoai.utils.logger import logger
+from mnemoai.utils.paths import profile_dir
 
 
 class ChromaStore:
@@ -27,13 +28,14 @@ class ChromaStore:
         self.dim = dim
         self.session_id = session_id
 
-        # Set persistence path
-        if rag_dir and session_id:
-            self.persist_path = os.path.join(rag_dir, f"rag_store_{session_id}")
-        elif session_id:
-            self.persist_path = f"/tmp/rag_store_{session_id}"
+        # Always land inside the app profile dir. The previous /tmp fallback was
+        # world-writable and shared between users, which both leaks the indexed
+        # document text and lets someone else pre-plant a store we'd load.
+        base_dir = rag_dir or str(profile_dir())
+        if session_id:
+            self.persist_path = os.path.join(base_dir, f"rag_store_{session_id}")
         else:
-            self.persist_path = "/tmp/rag_store"
+            self.persist_path = os.path.join(base_dir, "rag_store")
 
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(path=self.persist_path)

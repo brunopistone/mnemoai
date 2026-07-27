@@ -21,11 +21,11 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
 from mnemoai.client.agent import (
+    cancellation,
     confirmation_gate,
     message_sanitizer,
     plan_policy,
     response_parsing,
-    steering,
     stream_policy,
     subagent_runner,
     tool_formatting,
@@ -188,19 +188,13 @@ class LangGraphAgent:
         self._headless_tl = threading.local()
         # Registry of background (run_in_background) sub-agents: they run on daemon
         # threads while the parent turn continues; their completions are drained
-        # and injected into a later turn via the steering path.
+        # and injected into a later turn (see drain_background_completions).
         self._bg_agents = BackgroundAgentRegistry()
         # Live activity feed for ALL hidden sub-agent runs (foreground spawns,
         # background spawns, orchestrator subtask workers) — the pinned-TUI
         # "agents" panel + detail view read it. Always created (writers open a run
         # regardless of TTY); the on_change repaint hook is wired only on a TTY.
         self._activity = AgentActivityStore()
-        # Mid-turn steering: messages the user types WHILE a turn is running are
-        # pushed here by the UI and drained at tool-round boundaries (the top of
-        # _execute_tools / between orchestrator waves), injected as user messages
-        # so the model addresses them without ending the turn
-        self._steer_queue: List[str] = []
-        self._steer_lock = threading.Lock()
         # Cooperative cancel: Esc/Ctrl+C sets this (via request_cancel) so the
         # blocking stream waits (idle-timeout queue get + network-retry backoff)
         # abort IMMEDIATELY, instead of waiting on an async KeyboardInterrupt that
@@ -328,28 +322,6 @@ class LangGraphAgent:
     def messages(self, value: List[BaseMessage]) -> None:
         self._messages = value
 
-    def steer(self, text: str) -> None:
-        """Queue a mid-turn user message to inject into the RUNNING turn.
-
-        Called by the UI (event-loop thread) when the user submits a line while a
-        turn is in flight. Thread-safe; drained at the next tool-round boundary by
-        :meth:`_drain_steering`. Never aborts the turn — the current tool batch
-        finishes, then the message is folded in. Delegates to
-        :func:`steering.enqueue`."""
-        steering.enqueue(self, text)
-
-    def _drain_steering(self) -> List[BaseMessage]:
-        """Delegates to :func:`steering.drain`."""
-        return steering.drain(self)
-
-    def _has_steering(self) -> bool:
-        """Delegates to :func:`steering.has_pending`."""
-        return steering.has_pending(self)
-
-    def clear_steering(self) -> None:
-        """Delegates to :func:`steering.clear`."""
-        steering.clear(self)
-
     def request_cancel(self) -> None:
         """Signal a cooperative cancel of the running turn (called from the UI
         thread on Esc/Ctrl+C, alongside the async-exc injection).
@@ -360,12 +332,13 @@ class LangGraphAgent:
         (up to `STREAM_IDLE_TIMEOUT`/30s later), which is the "cancel takes ages"
         bug. This event is the mnemoai analog of an ``AbortSignal``: the blocking
         waits ``.wait()`` on it (waking instantly) and check it at each retry, so
-        the turn tears down immediately. Delegates to :func:`steering.request_cancel`."""
-        steering.request_cancel(self)
+        the turn tears down immediately. Delegates to
+        :func:`cancellation.request_cancel`."""
+        cancellation.request_cancel(self)
 
     def _cancelled(self) -> bool:
-        """Delegates to :func:`steering.is_cancelled`."""
-        return steering.is_cancelled(self)
+        """Delegates to :func:`cancellation.is_cancelled`."""
+        return cancellation.is_cancelled(self)
 
     def _is_headless(self) -> bool:
         """True on a background sub-agent's thread (no TTY → can't prompt)."""
@@ -599,21 +572,10 @@ class LangGraphAgent:
         for wr in worker_results:
             all_worker_messages.extend(wr.get("messages", []))
 
-        # Mid-turn steering: any messages the user typed during the orchestration
-        # are folded into the aggregator (the orchestration turn's final model
-        # call) so they're addressed in THIS turn. A lone single-subtask orchestration 
-        # has no aggregator, so steering there falls through to the next turn 
-        # (it still lands in history below).
-        steering = self._drain_steering()
-
         # Step 3: aggregate.
         if len(subtasks) == 1:
-            # Single subtask: its result IS the answer — no aggregator call. There
-            # is no aggregator to fold steering into, so keep any steering message
-            # in history so the NEXT turn still addresses it (not dropped).
+            # Single subtask: its result IS the answer — no aggregator call.
             final_content = worker_results[0]["result"]
-            if steering:
-                all_worker_messages.extend(steering)
         else:
             print(
                 "\n\033[90m[Synthesizing results...]\033[0m",
@@ -621,7 +583,7 @@ class LangGraphAgent:
             )
             try:
                 final_content = self._aggregate_results(
-                    query, worker_results, get_aggregator_prompt(), steering=steering
+                    query, worker_results, get_aggregator_prompt()
                 )
             except Exception as e:
                 # If synthesis fails, fall back to concatenating the per-step
@@ -631,10 +593,6 @@ class LangGraphAgent:
                 final_content = "\n\n".join(
                     f"### {r['task']}\n{r['result']}" for r in worker_results
                 )
-                # Aggregation didn't consume the steering messages; keep them in
-                # history so the next turn addresses them.
-                if steering:
-                    all_worker_messages.extend(steering)
 
         return {"messages": all_worker_messages + [AIMessage(content=final_content)]}
 
@@ -1187,12 +1145,8 @@ class LangGraphAgent:
         original_query: str,
         worker_results: List[Dict[str, Any]],
         aggregator_prompt: str,
-        steering: Optional[List[BaseMessage]] = None,
     ) -> str:
-        """Aggregate worker results into a final response via the LLM.
-
-        ``steering`` (mid-turn messages the user typed during orchestration) is
-        appended after the results so the synthesis addresses them in this turn."""
+        """Aggregate worker results into a final response via the LLM."""
         results_text = "\n\n".join(
             f"## Subtask: {r['task']}\n{r['result']}" for r in worker_results
         )
@@ -1206,8 +1160,6 @@ class LangGraphAgent:
                 )
             ),
         ]
-        if steering:
-            messages.extend(steering)
 
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
@@ -2479,20 +2431,19 @@ class LangGraphAgent:
 
         self._start_spinner()
 
-        # Mid-turn steering: fold any messages the user typed while this tool
-        # batch ran in AFTER the tool results, so the next model call sees them
-        # and addresses them without the turn ending.
-        steering = self._drain_steering()
-        if steering and self.verbose:
-            self._stop_spinner()
-            for _ in steering:
-                print(
-                    "\n\033[90m[↳ steering: folding your message into this turn]\033[0m",
-                    flush=True,
-                )
-            self._start_spinner()
-
-        return {"messages": tool_results + steering}
+        # (Mid-turn steering was REMOVED here in 1.8.0. The UI enqueued a message
+        # typed during a running turn and this point drained it into the tool
+        # results, so the model addressed it without the turn ending. It was
+        # retired because draining at tool-round boundaries is structurally
+        # incomplete: a message typed during the FINAL, tool-call-free model call
+        # is never drained at all and leaked into the next turn. Re-enabling it
+        # needs a drain point that covers turn end -- not just this one -- so the
+        # queue, the agent API and its tests were deleted rather than left green
+        # over a path the UI could not reach. A mid-turn submission is QUEUED FIFO
+        # and runs as its own turn; see PinnedPromptReader._on_accept in ui/tui.py.
+        # The old code is at the pre-1.8.0 path:
+        # `git log -- src/mnemoai/client/agent/steering.py` (now cancellation.py).)
+        return {"messages": tool_results}
 
     def _should_continue(self, state: AgentState) -> str:
         """"continue" if the last AI message has tool calls, else "end".
@@ -2593,10 +2544,28 @@ class LangGraphAgent:
             ] + list(initial_state["messages"])
 
         # recursion_limit is a runaway guard; hitting it means a likely stuck loop.
+        #
+        # STREAM the graph instead of `invoke()`ing it, purely so hitting that
+        # limit doesn't destroy the turn: `GraphRecursionError` carries no state
+        # and `invoke()` returns nothing, so every tool call and assistant
+        # message the turn produced would be lost — the user's follow-up then
+        # arrives with no record that the work ever happened. `stream_mode=
+        # "values"` yields the full accumulated state after each step, so the
+        # last snapshot before the limit IS the work so far.
+        result = None
+        run_config = {"recursion_limit": self.recursion_limit}
+        # `stream` is the compiled-graph API; fall back to `invoke` for any
+        # graph-like object that only implements that (keeps a minimal stub or an
+        # embedded custom graph working — it just can't recover a limit hit).
+        streamer = getattr(self.graph, "stream", None)
         try:
-            result = self.graph.invoke(
-                initial_state, config={"recursion_limit": self.recursion_limit}
-            )
+            if streamer is None:
+                result = self.graph.invoke(initial_state, config=run_config)
+            else:
+                for snapshot in streamer(
+                    initial_state, config=run_config, stream_mode="values"
+                ):
+                    result = snapshot
         except KeyboardInterrupt:
             # User cancelled mid-turn (the UI injects KeyboardInterrupt into this
             # worker thread). CLOSE the turn out rather than deleting it: keep the
@@ -2612,36 +2581,49 @@ class LangGraphAgent:
         except GraphRecursionError:
             logger.warning(
                 "Agent stopped after the safety step limit (%d); the task may be "
-                "looping. Returning the work so far — raise LLM.RECURSION_LIMIT "
-                "if a legitimate task needs more steps.",
+                "looping. Raise LLM.RECURSION_LIMIT if a legitimate task needs "
+                "more steps.",
                 self.recursion_limit,
             )
             self._stop_spinner()
-            partial = self._last_visible_from(self._messages)
-            msg = partial or (
-                "I reached my safety step limit while working on that and "
-                "couldn't finish. Try narrowing the request, or raise "
-                "LLM.RECURSION_LIMIT in config if the task legitimately needs "
-                "more steps."
+            # KEEP the work: everything the turn produced before the limit is in
+            # the last streamed snapshot, so it goes into history exactly as a
+            # completed turn's would. Losing it meant the user's next message
+            # arrived with no record that any of the work had happened.
+            recovered = self._commit_turn(result, turn_log) if result else []
+            # Only fall back to salvaging text when the turn produced NOTHING —
+            # and then scan only this turn's messages, never the whole history
+            # (`_last_visible_from(self._messages)` would return the PREVIOUS
+            # turn's answer: a confident reply to a different question).
+            partial = self._last_visible_from(recovered) if recovered else ""
+            note = (
+                f"\n\n_(I stopped after the safety step limit of "
+                f"{self.recursion_limit} steps — the work above is what I "
+                "completed. Raise `LLM.RECURSION_LIMIT` in config if the task "
+                "legitimately needs more steps.)_"
             )
+            if partial:
+                msg = partial + note
+            else:
+                msg = (
+                    f"I hit my safety step limit ({self.recursion_limit} steps) "
+                    "before producing anything for that request. Raise "
+                    "LLM.RECURSION_LIMIT in config if the task legitimately "
+                    "needs more steps, or ask for a narrower slice of it."
+                )
+                # Nothing to show means the turn is otherwise unanswered; close
+                # it out so the next turn doesn't re-answer it out of context.
+                marker = AIMessage(content=INTERRUPTED_MARKER)
+                self._messages.append(marker)
+                turn_log.append(marker)
+                self._log_turn(turn_log)
+            self._last_input_tokens = None  # stale after this turn's rewrite
             self._emit_answer(msg)  # never streamed on this path — show it
             return msg
 
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
-
-        # Keep only the NEW assistant/tool messages. Skip System/Human — the user
-        # turn was already stored as the clean prompt, so the reminder-bearing
-        # HumanMessage the model ran on must not be re-added.
-        new_messages = [
-            m
-            for m in final_messages
-            if not isinstance(m, (SystemMessage, HumanMessage))
-            and m not in self._messages
-        ]
-        self._messages.extend(new_messages)
-        turn_log.extend(new_messages)
-        self._log_turn(turn_log)
+        self._commit_turn(result, turn_log)
 
         # Prefer the most recent AI turn with visible text. Emit it if the turn
         # produced it WITHOUT streaming (orchestrator single-subtask, aggregation
@@ -2668,6 +2650,31 @@ class LangGraphAgent:
         )
         self._emit_answer(fallback)
         return fallback
+
+    def _commit_turn(self, result: dict, turn_log: List[BaseMessage]) -> List[BaseMessage]:
+        """Move a graph run's NEW messages into history + the session log.
+
+        Shared by the normal path and the recursion-limit path — the latter
+        commits the work recovered from the last streamed snapshot, so hitting
+        the step limit keeps everything the turn produced instead of discarding
+        it. Returns the messages that were added.
+
+        Skips System/Human: the user turn was already stored as the clean prompt,
+        so the reminder-bearing ``HumanMessage`` the model ran on must not be
+        re-added.
+        """
+        new_messages = [
+            m
+            for m in (result or {}).get("messages", [])
+            if not isinstance(m, (SystemMessage, HumanMessage))
+            and m not in self._messages
+        ]
+        if not new_messages:
+            return []
+        self._messages.extend(new_messages)
+        turn_log.extend(new_messages)
+        self._log_turn(turn_log)
+        return new_messages
 
     def _log_turn(self, messages: List[BaseMessage]) -> None:
         """Append this turn to the session log, if one is attached (best-effort).
