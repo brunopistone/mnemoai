@@ -144,6 +144,17 @@ LLM:
   # fresh connection with backoff (the provider's request timeout only covers
   # getting response headers, not a stalled streaming body).
   STREAM_IDLE_TIMEOUT: 120
+  # Per-attempt request ceiling in seconds (Bedrock). This is the budget for the
+  # FIRST response byte, not an idle timeout — with a large context the model
+  # spends it on prefill + reasoning before emitting anything (a ~440k-token
+  # turn at REASONING_EFFORT: max measured ~123s to first byte). botocore's own
+  # default is only 60s, which made big-context turns time out on every retry,
+  # so this is set well above it. Raise further if you run very long
+  # conversations at high effort.
+  REQUEST_TIMEOUT: 600
+  # TCP connect timeout in seconds (Bedrock) — connecting is fast, so this stays
+  # short; it does NOT bound how long the model may take to respond.
+  CONNECT_TIMEOUT: 30
   # Token Counting (Model-specific)
   TOKEN_COUNTING:
     OLLAMA_APPROXIMATION: 1.3 # Multiplier for Ollama (chars to tokens)

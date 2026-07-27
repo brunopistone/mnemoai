@@ -1376,6 +1376,18 @@ class LangGraphAgent:
                     "network drops). Your conversation is intact — just send your "
                     "message again and I'll continue."
                 )
+                # A read timeout on a LARGE context is not a flaky network: the
+                # first response byte simply takes longer than the per-request
+                # ceiling (prefill + reasoning scale with prompt size), so every
+                # retry re-pays the same doomed wait. Name the knob instead of
+                # leaving the user to guess.
+                if "read timed out" in str(e).lower():
+                    msg += (
+                        "\n\nIf this keeps happening on a long conversation, the "
+                        "request is timing out before the model's first token "
+                        "rather than dropping — raise LLM.REQUEST_TIMEOUT (or "
+                        "/compact to shrink the prompt)."
+                    )
             else:
                 logger.error(f"Model request failed: {e}")
                 msg = (

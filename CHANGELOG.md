@@ -9,6 +9,36 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.7.8] — 2026-07-27
+
+### Fixed
+
+- **Large-context Bedrock turns timed out and could never recover.** No read
+  timeout was configured anywhere, so **botocore's 60-second default** applied —
+  and that default bounds the wait for the **first response byte**, not idle time.
+  On a large conversation the model spends that entire budget on prefill and
+  reasoning before emitting anything: measured against live Bedrock, a
+  ~440k-token turn at `REASONING_EFFORT: max` took **123 seconds to first byte**,
+  so every attempt died at 60s. Worse, `read timed out` classifies as a transient
+  network error, so all `MAX_RETRIES` attempts re-sent the same oversized prompt
+  and re-paid the same doomed prefill — minutes of retries that could not
+  possibly succeed, ending in "Stream failed after retries (connection issue)".
+  `STREAM_IDLE_TIMEOUT` never applied, because the connection died before the
+  stream began. The Bedrock client is now built with an explicit botocore
+  `Config`: `read_timeout` from the new **`LLM.REQUEST_TIMEOUT`** (default
+  **600s**, an order of magnitude above boto's default) plus a short
+  `connect_timeout` (**`LLM.CONNECT_TIMEOUT`**, default 30s — connecting is fast
+  and must not be inflated to the request ceiling). botocore's **own** retries are
+  disabled (`max_attempts: 0`) so this layer's retry/backoff isn't multiplied by
+  boto's. Verified end-to-end through the app's own model object: the identical
+  workload that failed with `ReadTimeoutError` now streams 2259 chunks to
+  completion. Both keys are documented in the Bedrock config template.
+- **A read-timeout failure now names the knob instead of blaming the network.**
+  The message said the connection was lost and to just send again — misleading
+  when the real cause is a request that timed out before the model's first token,
+  which resending reproduces exactly. A read timeout now adds a line pointing at
+  `LLM.REQUEST_TIMEOUT` (or `/compact` to shrink the prompt).
+
 ## [1.7.7] — 2026-07-26
 
 ### Changed
