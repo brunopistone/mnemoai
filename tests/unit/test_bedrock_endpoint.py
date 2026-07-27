@@ -144,6 +144,80 @@ class TestBedrockStreaming:
         )
 
 
+class TestBedrockRequestTimeout:
+    """A botocore Config with a generous read timeout must reach the client.
+
+    botocore's DEFAULT read_timeout is 60s and it bounds the wait for the FIRST
+    response byte — not idle time. On a large context the model spends that
+    budget on prefill + reasoning before emitting anything (a ~440k-token turn at
+    max effort measured ~123s to first byte against live Bedrock), so every
+    attempt died at 60s; and because "read timed out" classifies as transient,
+    all retries re-sent the same oversized prompt and re-paid the same doomed
+    wait. Nothing in the codebase configured a timeout at all before this.
+    """
+
+    def test_boto_config_is_passed(self, patch_bedrock, monkeypatch):
+        ctrl = _make_llm_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        cfg = patch_bedrock["ChatBedrockConverse"].get("config")
+        assert cfg is not None, "no botocore Config passed — boto's 60s default applies"
+
+    def test_default_read_timeout_far_above_boto_default(self, patch_bedrock, monkeypatch):
+        # The whole point: must exceed botocore's 60s, which is what broke.
+        ctrl = _make_llm_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        cfg = patch_bedrock["ChatBedrockConverse"]["config"]
+        assert cfg.read_timeout == 600
+        assert cfg.read_timeout > 60
+
+    def test_boto_internal_retries_disabled(self, patch_bedrock, monkeypatch):
+        # Our own retry/backoff layer owns retries; leaving boto's on would
+        # multiply them (6 app attempts x N boto attempts).
+        ctrl = _make_llm_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        assert patch_bedrock["ChatBedrockConverse"]["config"].retries[
+            "max_attempts"
+        ] == 0
+
+    def test_connect_timeout_stays_short(self, patch_bedrock, monkeypatch):
+        # Connecting is fast; it must NOT be inflated to the request ceiling.
+        ctrl = _make_llm_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        cfg = patch_bedrock["ChatBedrockConverse"]["config"]
+        assert cfg.connect_timeout == 30 and cfg.connect_timeout < cfg.read_timeout
+
+    def test_request_timeout_is_configurable(self, monkeypatch):
+        import mnemoai.models.controllers.llm_controller as mod
+
+        monkeypatch.setattr(
+            mod.config,
+            "get",
+            lambda k, d=None: (
+                {"REQUEST_TIMEOUT": 1200, "CONNECT_TIMEOUT": 5} if k == "LLM" else d
+            ),
+        )
+        ctrl = mod.LangChainLLMController.__new__(mod.LangChainLLMController)
+        cfg = ctrl._boto_config()
+        assert cfg.read_timeout == 1200 and cfg.connect_timeout == 5
+
+    def test_no_llm_section_still_gets_a_safe_default(self, monkeypatch):
+        # A config.yaml with no LLM.REQUEST_TIMEOUT must NOT fall back to boto's
+        # 60s — that's the broken state this fix exists to prevent.
+        import mnemoai.models.controllers.llm_controller as mod
+
+        monkeypatch.setattr(mod.config, "get", lambda k, d=None: d)
+        ctrl = mod.LangChainLLMController.__new__(mod.LangChainLLMController)
+        assert ctrl._boto_config().read_timeout == 600
+
+
 class TestStandardBedrockEndpoint:
     def test_endpoint_url_passed_when_configured(self, patch_bedrock, monkeypatch):
         ctrl = _make_llm_controller(
