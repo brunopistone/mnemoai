@@ -11,12 +11,36 @@ This tool wraps git commands with safety checks to prevent:
 import json
 import os
 import re
+import shlex
 import subprocess
 
 from mcp.server.fastmcp import FastMCP
 
 # Protected branches that should never receive force pushes
 PROTECTED_BRANCHES = ["main", "master", "develop", "production", "release"]
+
+# Git options that are refused outright, because they make git run arbitrary
+# programs and therefore route around every pattern check below:
+#   -c / --config-env  -> core.pager=, alias.x=!sh, core.fsmonitor=, core.sshCommand=
+#   --exec-path        -> makes git load its subcommand binaries from elsewhere
+#   --upload-pack / --receive-pack / --exec -> run a command on the remote side
+# -C / --git-dir / --work-tree / --namespace are refused too: they retarget the
+# repository, so a "safe" command silently operates outside the user's cwd.
+_REFUSED_LEADING_OPTIONS = (
+    "-c",
+    "-C",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--super-prefix",
+)
+_REFUSED_ANY_POSITION_OPTIONS = (
+    "--upload-pack",
+    "--receive-pack",
+    "--exec",
+)
 
 # Dangerous command patterns
 DANGEROUS_PATTERNS = [
@@ -99,6 +123,60 @@ BLOCKED_COMMANDS = [
         "Force push to main/master is blocked. This is almost never what you want.",
     ),
 ]
+
+
+def build_git_argv(command: str) -> tuple[list[str], str]:
+    """Split a git command string into argv, or explain why it was refused.
+
+    Uses ``shlex`` (POSIX quoting) rather than ``str.split()`` so quoted
+    arguments survive: ``commit -m 'Add feature'`` must reach git as ONE ``-m``
+    value, not two tokens. Also refuses the option families that turn git into
+    an arbitrary-command runner (see ``_REFUSED_*_OPTIONS``) — those bypass the
+    pattern checks entirely, so they are rejected before anything runs.
+
+    Args:
+        command: The git command WITHOUT the leading ``git`` (already stripped).
+
+    Returns:
+        ``(argv, "")`` on success, or ``([], reason)`` when refused. ``argv``
+        includes the leading ``"git"``.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError as e:
+        # Unbalanced quote: splitting it any other way would silently run a
+        # different command than the caller wrote.
+        return [], f"Could not parse the command ({e}). Check the quoting."
+
+    if not tokens:
+        return [], "No git command provided"
+
+    for token in tokens:
+        option = token.split("=", 1)[0]
+        if option in _REFUSED_ANY_POSITION_OPTIONS:
+            return [], (
+                f"The {option} option is refused: it makes git execute an "
+                "arbitrary command."
+            )
+
+    # Everything before the subcommand is a git-level option. None of them are
+    # needed here, and the dangerous ones are exactly the ones that hide intent.
+    for token in tokens:
+        if not token.startswith("-"):
+            break
+        option = token.split("=", 1)[0]
+        if option in _REFUSED_LEADING_OPTIONS:
+            return [], (
+                f"The git-level option {option} is refused: it can redirect git "
+                "to another repository or make it run an arbitrary command. "
+                "Drop it, or use execute_bash if you genuinely need it."
+            )
+        return [], (
+            f"Unexpected git-level option {option} before the subcommand. "
+            "Pass the subcommand first (e.g. \"status\", \"commit -m 'msg'\")."
+        )
+
+    return ["git"] + tokens, ""
 
 
 def check_dangerous_command(command: str) -> dict:
@@ -259,6 +337,20 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
         if command.lower().startswith("git "):
             command = command[4:].strip()
 
+        # Parse to argv up front: a command that can't be parsed safely (bad
+        # quoting) or that carries an option-injection vector never runs.
+        argv, refusal = build_git_argv(command)
+        if refusal:
+            return json.dumps(
+                {
+                    "error": True,
+                    "blocked": True,
+                    "message": refusal,
+                    "command": f"git {command}",
+                },
+                indent=2,
+            )
+
         # Check for dangerous commands
         safety_check = check_dangerous_command(command)
 
@@ -317,7 +409,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
         # Execute the command
         try:
             result = subprocess.run(
-                ["git"] + command.split(),
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=60,
@@ -527,7 +619,18 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
                     }
                 )
             elif add_files:
-                files = add_files.strip().split()
+                # shlex, not split(): a quoted path with spaces must stay one
+                # argument ("docs/my notes.md") instead of becoming two.
+                try:
+                    files = shlex.split(add_files)
+                except ValueError as e:
+                    return json.dumps(
+                        {
+                            "error": True,
+                            "message": f"Could not parse add_files ({e}). Check the quoting.",
+                        },
+                        indent=2,
+                    )
                 add_result = subprocess.run(
                     ["git", "add"] + files, capture_output=True, text=True, timeout=30
                 )

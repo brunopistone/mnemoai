@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from mnemoai.client.memory.reflector import PlaybookEntry
+from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
 
 
@@ -49,11 +50,10 @@ class PlaybookStore:
                 self.entries = []
 
     def _save(self) -> None:
-        """Persist playbook to disk."""
+        """Persist playbook to disk (atomically -- see utils.atomic_write)."""
         os.makedirs(self.persist_path, exist_ok=True)
         try:
-            with open(self.playbook_file, "w") as f:
-                json.dump(self.entries, f, indent=2)
+            atomic_write_json(self.playbook_file, self.entries)
         except Exception as e:
             logger.error(f"Failed to save playbook: {e}")
 

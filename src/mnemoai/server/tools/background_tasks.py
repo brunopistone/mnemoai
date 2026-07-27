@@ -21,7 +21,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.paths import tasks_dir
 
-from .safety import classify_shell_command
+from .safety import classify_shell_command, classify_write_path
 
 # Store for background tasks
 _background_tasks: Dict[str, dict] = {}
@@ -198,6 +198,25 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         if not os.path.exists(cwd):
             return json.dumps(
                 {"error": True, "message": f"Working directory does not exist: {cwd}"},
+                indent=2,
+            )
+
+        # A cwd inside a protected system directory turns every relative path in
+        # the command into a system write, below any path check the write tools
+        # would have applied. Same classifier as fs_write/file_edit.
+        cwd_verdict = classify_write_path(cwd)
+        if cwd_verdict.blocked:
+            return json.dumps(
+                {
+                    "error": True,
+                    "blocked": True,
+                    "message": (
+                        f"Refusing to run a background task with its working "
+                        f"directory inside a protected system location. "
+                        f"{cwd_verdict.reason}"
+                    ),
+                    "working_directory": cwd,
+                },
                 indent=2,
             )
 

@@ -1,12 +1,14 @@
 """Unit tests for git safety guardrails (server/tools/git_safety.py).
 
-These test the pure command-classification logic (no real git calls).
+These test the pure command-classification + argv-building logic (no real git
+calls).
 """
 
 from mnemoai.server.tools.git_safety import (
     BLOCKED_COMMANDS,
     DANGEROUS_PATTERNS,
     PROTECTED_BRANCHES,
+    build_git_argv,
     check_dangerous_command,
 )
 
@@ -104,3 +106,87 @@ class TestConstants:
     def test_pattern_tables_nonempty(self):
         assert len(DANGEROUS_PATTERNS) > 0
         assert len(BLOCKED_COMMANDS) > 0
+
+
+class TestBuildGitArgv:
+    """argv construction: quoting must survive, option injection must not."""
+
+    def test_quoted_commit_message_stays_one_argument(self):
+        # The tool's own documented example. With str.split() this became
+        # ["commit", "-m", "'Add", "feature'"] and committed the message "'Add".
+        argv, refusal = build_git_argv("commit -m 'Add feature'")
+        assert refusal == ""
+        assert argv == ["git", "commit", "-m", "Add feature"]
+
+    def test_double_quoted_message_stays_one_argument(self):
+        argv, refusal = build_git_argv('commit -m "fix: two words"')
+        assert refusal == ""
+        assert argv == ["git", "commit", "-m", "fix: two words"]
+
+    def test_multiline_message_preserved(self):
+        argv, _ = build_git_argv("commit -m 'subject\n\nbody line'")
+        assert argv[-1] == "subject\n\nbody line"
+
+    def test_plain_command_unchanged(self):
+        argv, refusal = build_git_argv("status --short")
+        assert refusal == ""
+        assert argv == ["git", "status", "--short"]
+
+    def test_path_with_spaces_in_quotes(self):
+        argv, _ = build_git_argv("add 'docs/my notes.md'")
+        assert argv == ["git", "add", "docs/my notes.md"]
+
+    def test_unbalanced_quote_is_refused(self):
+        argv, refusal = build_git_argv("commit -m 'unterminated")
+        assert argv == []
+        assert "quoting" in refusal.lower()
+
+    def test_empty_command_is_refused(self):
+        argv, refusal = build_git_argv("   ")
+        assert argv == []
+        assert refusal
+
+    def test_config_option_is_refused(self):
+        # -c core.pager / -c alias.x='!sh -c ...' is arbitrary code execution
+        # that no DANGEROUS_PATTERNS entry can see.
+        argv, refusal = build_git_argv("-c core.pager=sh status")
+        assert argv == []
+        assert "-c" in refusal
+
+    def test_alias_config_injection_is_refused(self):
+        argv, refusal = build_git_argv("-c alias.x=!touch /tmp/pwned x")
+        assert argv == []
+        assert refusal
+
+    def test_exec_path_is_refused(self):
+        argv, refusal = build_git_argv("--exec-path=/tmp/evil status")
+        assert argv == []
+        assert "--exec-path" in refusal
+
+    def test_repo_retargeting_options_are_refused(self):
+        for command in (
+            "-C /etc status",
+            "--git-dir=/tmp/other/.git log",
+            "--work-tree=/ checkout .",
+        ):
+            argv, refusal = build_git_argv(command)
+            assert argv == [], command
+            assert refusal, command
+
+    def test_upload_pack_is_refused_anywhere(self):
+        argv, refusal = build_git_argv(
+            "fetch --upload-pack='touch /tmp/pwned' origin main"
+        )
+        assert argv == []
+        assert "--upload-pack" in refusal
+
+    def test_unknown_leading_option_is_refused(self):
+        argv, refusal = build_git_argv("--bogus status")
+        assert argv == []
+        assert "--bogus" in refusal
+
+    def test_subcommand_options_still_allowed(self):
+        # Options AFTER the subcommand are the normal case and must pass.
+        argv, refusal = build_git_argv("log --oneline -n 5 --no-merges")
+        assert refusal == ""
+        assert argv == ["git", "log", "--oneline", "-n", "5", "--no-merges"]

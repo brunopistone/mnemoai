@@ -8,7 +8,7 @@ build-backend = "hatchling.build"
 # "mnemoai-assistant" — but the import package and CLI command stay "mnemoai"
 # (pip install mnemoai-assistant → import mnemoai / run `mnemoai`).
 name = "mnemoai-assistant"
-version = "1.7.9"
+version = "1.8.0"
 description = "Mnemo AI — a local agentic AI assistant (LangGraph + MCP) that learns and remembers, with multi-provider model support."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -63,7 +63,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "ruff>=0.6.0"]
+# Single source for tooling deps. requirements-dev.txt installs `.[dev,docs]`
+# rather than re-listing them, so the two can't drift.
+dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0", "ruff>=0.6.0"]
+docs = ["mkdocs-material>=9.5.0"]
 
 [project.urls]
 Homepage = "https://github.com/brunopistone/mnemoai"

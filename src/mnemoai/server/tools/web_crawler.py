@@ -8,6 +8,8 @@ from mcp.server.fastmcp import FastMCP
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
+from .safety import classify_url
+
 try:
     from .rag.session import get_rag_session
 
@@ -81,8 +83,15 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
         """
         logger.debug(f"Tool web_crawler called with url: {url}")
 
-        if not url or not url.startswith(("http://", "https://")):
-            return json.dumps({"error": True, "message": "Invalid URL"})
+        # Scheme + destination check. The fetched page becomes model input, so an
+        # internal address (localhost, RFC1918, 169.254.169.254) must not be
+        # reachable from a prompt. Resolves DNS before fetching.
+        url_verdict = classify_url(url)
+        if url_verdict.blocked:
+            logger.warning("web_crawler blocked url=%s: %s", url, url_verdict.reason)
+            return json.dumps(
+                {"error": True, "blocked": True, "message": url_verdict.reason}
+            )
 
         # Explicit per-page crawl timeout (ms); tunable via config, code default
         # so no config edit is required to reach existing installs. Guarded so a

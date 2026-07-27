@@ -203,15 +203,13 @@ def test_accept_handler_ignores_blank_lines():
     asyncio.run(main())
 
 
-def test_mid_turn_message_is_queued_not_steered():
+def test_mid_turn_message_is_queued_not_folded_into_running_turn():
     # A message submitted WHILE a turn runs must be QUEUED to run as its own turn
-    # after, NOT folded into the running turn via the steer hook — even when a steer 
-    # hook is present. This prevents the stranding bug where a message steered during 
-    # the final tool-call-free model call was never drained and leaked into the next turn.
-    steer_calls = []
-
+    # after, never folded into the running turn. Mid-turn steering (which did the
+    # folding) was removed in 1.8.0 because draining only at tool-round boundaries
+    # stranded a message typed during the final tool-call-free model call into the
+    # next turn; this test pins the queuing behavior that replaced it.
     reader = _reader(lambda line: None)
-    reader._steer = lambda text: steer_calls.append(text) or True  # would-be steer
 
     async def main():
         reader._queue = asyncio.Queue()
@@ -221,8 +219,6 @@ def test_mid_turn_message_is_queued_not_steered():
             text = "look at file X too"
 
         assert reader._on_accept(_Buff()) is False
-        # Steer hook must NOT have been called; the message went to the queue.
-        assert steer_calls == []
         assert reader._queued_lines == ["look at file X too"]
         assert reader._queue.get_nowait() == "look at file X too"
 

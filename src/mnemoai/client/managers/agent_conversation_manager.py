@@ -434,11 +434,20 @@ class AgentConversationManager:
 
         return self._strip_analysis(summary_response).strip()
 
-    def _build_system_with_summary(self, clean_summary: str) -> str:
+    def _build_system_with_summary(
+        self, clean_summary: str, client: Any = None
+    ) -> str:
         """Embed a conversation summary into the configured system prompt.
 
         The block carries a continuation instruction so the model resumes 
         the work seamlessly instead of re-acknowledging the summary or recapping.
+
+        Args:
+            clean_summary: The summary text to embed.
+            client: The ``LangGraphClient``, needed to rebuild the session-start
+                context blocks (profile / MEMORY.md / playbook). When omitted
+                only the client-independent blocks (skills, sub-agents) are
+                restored.
         """
         summary_block = textwrap.dedent(
             f"""
@@ -466,19 +475,37 @@ class AgentConversationManager:
         original_system_prompt = original_system_prompt.format(
             current_date=current_date
         )
-        # Re-inject the tier-1 skills block: this rebuild re-fetches the base
-        # prompt fresh, dropping all session-start injections, so without this
-        # the <available_skills> block would silently vanish after compaction
-        # and the model would forget which skills it can load.
+        # Re-inject every session-start block: this rebuild re-fetches the base
+        # prompt fresh, dropping ALL session-start injections, so without this
+        # the profile / MEMORY.md / <available_skills> / <available_subagents> /
+        # playbook blocks would silently vanish after the first compaction and
+        # the model would lose its learned context for the rest of the session.
         parts = [original_system_prompt]
-        skills_block = self._skills_block()
-        if skills_block:
-            parts.append(skills_block)
-        subagents_block = self._subagents_block()
-        if subagents_block:
-            parts.append(subagents_block)
+        parts.extend(self._session_blocks(client))
         parts.append(summary_block)
         return "\n\n".join(parts)
+
+    def _session_blocks(self, client: Any = None) -> List[str]:
+        """The session-start context blocks to restore after compaction.
+
+        Delegates to the single source in ``context_injection`` so the blocks
+        can't drift between this rebuild and the client's session-start path.
+        Falls back to the client-independent blocks when no client is available.
+        """
+        if client is not None:
+            from mnemoai.client.context_injection import build_session_blocks
+
+            try:
+                return build_session_blocks(client, include_playbook=True)
+            except Exception as e:
+                # Never let a memory/profile read failure abort a compaction:
+                # losing the blocks degrades context, losing the compaction
+                # overflows it.
+                logger.warning(f"Session-block rebuild failed on compaction: {e}")
+
+        return [
+            block for block in (self._skills_block(), self._subagents_block()) if block
+        ]
 
     def _skills_block(self) -> str:
         """Build the tier-1 ``<available_skills>`` block (or "" when disabled/empty).
@@ -748,7 +775,9 @@ class AgentConversationManager:
             client.spinner.set_label("Applying summary")
             clean_summary = "".join(c for c in summary if c.isprintable())
 
-            new_system_content = self._build_system_with_summary(clean_summary)
+            new_system_content = self._build_system_with_summary(
+                clean_summary, client=client
+            )
 
             # Keep recent turns verbatim; drop only the summarized older ones.
             # Sanitize the kept window so a tool call/result pair severed by the

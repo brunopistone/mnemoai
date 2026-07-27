@@ -4,6 +4,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import chromadb
 
+from mnemoai.client.memory.similarity import (
+    SCORING_VERSION,
+    l2_normalize,
+    squared_l2_to_unit,
+)
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
@@ -52,11 +57,19 @@ class ChromaEpisodicStore:
         self._rebuild_bm25()
 
     def _embed_fingerprint(self) -> str:
-        """Current embedding model's fingerprint (falls back to a dim string)."""
+        """Current embedding model's fingerprint (falls back to a dim string).
+
+        Includes ``SCORING_VERSION``: vectors are stored L2-normalized for the
+        shared cosine scale, so a collection written under the old ``1/(1+d)``
+        scoring is incompatible and must go through the same reset path as an
+        embedding-model change.
+        """
         fp = getattr(self.embeddings, "fingerprint", None)
         if callable(fp):
-            return fp()
-        return f"dim={getattr(self.embeddings, 'dim', '?')}"
+            base = fp()
+        else:
+            base = f"dim={getattr(self.embeddings, 'dim', '?')}"
+        return f"{base}|score={SCORING_VERSION}"
 
     def _create_collection(self):
         """Create the collection stamped with the current model fingerprint."""
@@ -173,8 +186,10 @@ class ChromaEpisodicStore:
         if not episode_id:
             episode_id = f"episode_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
-        # Generate embedding using configured model
-        embedding = self.embeddings.embed([text])
+        # Generate embedding using configured model. Normalized before storing so
+        # Chroma's squared-L2 distance maps cleanly onto the shared cosine scale
+        # (see memory/similarity.py).
+        embedding = l2_normalize(self.embeddings.embed([text]))
 
         # Add to ChromaDB with pre-computed embedding. If the on-disk DB was moved
         # or replaced under our open handle (SQLite code 1032 "readonly database
@@ -244,7 +259,7 @@ class ChromaEpisodicStore:
         candidate_k = min(top_k * 3, len(self.metadatas))
 
         # --- Semantic candidates ---
-        query_embedding = self.embeddings.embed([query])
+        query_embedding = l2_normalize(self.embeddings.embed([query]))
         results = self.collection.query(
             query_embeddings=query_embedding.tolist(), n_results=candidate_k
         )
@@ -254,7 +269,9 @@ class ChromaEpisodicStore:
         if results["metadatas"] and results["metadatas"][0]:
             for i, metadata in enumerate(results["metadatas"][0]):
                 distance = results["distances"][0][i] if results["distances"] else 0.0
-                sem_score = 1.0 / (1.0 + distance)
+                # Unit vectors -> squared-L2 rescales to a cosine in [0,1], the
+                # same scale the FAISS backend and the BM25 component use.
+                sem_score = squared_l2_to_unit(distance)
                 key = self._get_searchable_text(metadata)
                 sem_candidates[key] = (sem_score, metadata)
 

@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 from typing import List, Optional
 
+from mnemoai.utils.atomic_write import atomic_write_text
 from mnemoai.utils.logger import logger
 
 # Entry separator written to disk: a Markdown thematic break, blank-line padded
@@ -83,10 +84,14 @@ class MemoryStore:
         return [e.strip() for e in _SPLIT_RE.split(text) if e.strip()]
 
     def _write_entries(self, entries: List[str]) -> None:
-        """Persist entries joined by the delimiter (creates parent dir)."""
+        """Persist entries joined by the delimiter (creates parent dir).
+
+        Atomic: a crash or a second instance mid-write must not truncate the
+        user's curated memory.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         body = DELIMITER.join(entries)
-        self.path.write_text(body + "\n" if body else "")
+        atomic_write_text(str(self.path), body + "\n" if body else "")
 
     @staticmethod
     def _projected_len(entries: List[str]) -> int:

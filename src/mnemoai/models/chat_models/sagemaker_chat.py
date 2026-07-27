@@ -19,12 +19,18 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 
 from mnemoai.utils.logger import logger
 
+# Emit the "tools are not bound" warning once per process, not once per bind.
+_TOOL_SUPPORT_WARNED = False
+
 
 class ChatSageMaker(BaseChatModel):
     """Chat model for SageMaker endpoints.
 
     ``input_format`` selects the payload shape: ``openai_chat`` (messages array)
     or ``text_generation`` (HuggingFace ``inputs`` string).
+
+    Chat + streaming only: ``bind_tools`` is a no-op (see below), so this
+    provider cannot drive the agentic tool loop.
     """
 
     endpoint_name: str
@@ -315,5 +321,26 @@ class ChatSageMaker(BaseChatModel):
             raise
 
     def bind_tools(self, tools: List[Any], **kwargs) -> "ChatSageMaker":
-        """Bind tools for function calling (simplified — currently a no-op)."""
+        """Accept a tool binding without applying it -- NOT supported here.
+
+        SageMaker endpoints expose no common tool-calling contract (the payload
+        shape is whatever the container implements), so there is nothing generic
+        to bind. Returning ``self`` keeps the assistant usable for plain chat
+        instead of failing at startup, but the model will never emit a tool
+        call: every MCP tool is invisible to it.
+
+        The warning is emitted once per process, at WARNING level, because a
+        silent drop looks exactly like a broken assistant -- the user needs to
+        know the tools aren't reaching the model.
+        """
+        global _TOOL_SUPPORT_WARNED
+        if tools and not _TOOL_SUPPORT_WARNED:
+            _TOOL_SUPPORT_WARNED = True
+            logger.warning(
+                f"SageMaker endpoint '{self.endpoint_name}' does not support tool "
+                f"calling: {len(tools)} tools were NOT bound. The assistant will "
+                "answer from the model alone -- file, bash, search and memory "
+                "tools will not run. Use a Bedrock/OpenAI/Anthropic/Ollama "
+                "provider for agentic work."
+            )
         return self
