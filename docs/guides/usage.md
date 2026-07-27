@@ -25,6 +25,7 @@ All advanced features can be independently enabled or disabled in your config fi
 | **Memory Confirmation** (prompt before each memory write)                 | `REQUIRE_MEMORY_CONFIRMATION: false`   | `false`             | None (auto-skips when non-interactive)                                             |
 | **Memory Auto-Extraction** (background turn-end auto-save to `MEMORY.md`) | `ENABLE_MEMORY_AUTO_EXTRACTION: false` | `false`             | Writes without a prompt; one extra background model call per turn                  |
 | **Verbose Mode** (show thinking process)                                  | CLI flag `--no-verbose`                | Enabled             | Supported by model                                                                 |
+| **Session Recording** (resume a past session with `--resume`)             | `SESSION_MAX_AGE_DAYS: 30`             | `30` days           | `0` disables recording ([details](#resuming-a-session))                            |
 
 **Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `RAG.EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](../configuration.md#embeddings-model)).
 
@@ -109,3 +110,49 @@ mnemoai              # Verbose mode (shows thinking)
 mnemoai --no-verbose # Hide thinking process
 # from a checkout: PYTHONPATH=src python -m mnemoai [--no-verbose]
 ```
+
+### Resuming a Session
+
+Every session is recorded automatically, **scoped to the directory you launched
+from** — so resuming inside a project only ever offers that project's sessions:
+
+```bash
+mnemoai --resume              # pick from this directory's recent sessions
+mnemoai --resume <session-id> # resume that session directly
+mnemoai --continue            # resume the most recent one, no prompt
+```
+
+`--resume` with no value lists this directory's sessions newest-first, showing how
+long ago each one ran, how many turns it had, and its opening prompt:
+
+```
+   4m ago    6 turns  refactor the FSDP config parser
+  2h ago    2 turns  why does the loader crash on startup?
+   3d ago   14 turns  add a --resume flag
+```
+
+Pick one and the conversation replays into the terminal and continues where you
+left off, with the restored conversation shown just above the prompt. `Esc`
+cancels and **exits** — since you asked to resume, it won't quietly start a new
+conversation instead; run `mnemoai` without a flag for that.
+
+!!! note "`--resume` and `/save` are separate things"
+
+    `--resume` is **automatic** — every session is recorded without you asking, and
+    old ones expire (30 days by default; set `SESSION_MAX_AGE_DAYS`, or `0` to
+    turn session recording off entirely).
+
+    [`/save` and `/load`](#commands) are **yours to curate** — a conversation you
+    deliberately keep, under a name or path you choose, in
+    `~/.mnemoai/{profile}/conversations/`. Saved conversations are **never expired
+    or deleted** by session cleanup, and resuming a session never overwrites one
+    (after a `--resume`, a bare `/save` writes a new file rather than adopting the
+    resumed session).
+
+Sessions live in `~/.mnemoai/{profile}/sessions/{directory}/` as append-only
+files, one per session. A cancelled turn is recorded too, so a resumed session
+shows exactly what the live one did — including a question you interrupted.
+
+A launch you never typed into records nothing resumable, so its file is removed
+when you exit — only sessions with at least one exchange are offered. If this
+directory has no sessions yet, `--resume` says so and starts a normal session.

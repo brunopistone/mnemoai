@@ -155,13 +155,17 @@ Each chat session has a unique ID used for:
 
 - RAG document indexing (session-scoped)
 - Chunk caching for file summarization
+- The session transcript that `--resume` restores (see [Resuming a session](../guides/usage.md#resuming-a-session))
 
 Session data is stored in `~/.mnemoai/{profile_name}/`:
 
 ```
 ~/.mnemoai/
 └── {profile_name}/
-    ├── conversations/           # Saved conversations
+    ├── conversations/           # Saved conversations (/save — kept until you delete them)
+    ├── sessions/                # Recorded sessions for --resume, per launch directory
+    │   └── {directory}/         # e.g. Users-you-dev-myproject
+    │       └── session_*.jsonl  # append-only, one file per session (expires: 30d)
     ├── profiles/                # User profiles
     ├── todos/                   # Todo list data
     ├── rag_session_id_*.txt     # Per-instance RAG session pointer (one per tab)
@@ -175,6 +179,8 @@ Session data is stored in `~/.mnemoai/{profile_name}/`:
 ```
 
 > **Model-scoped memory:** episodic memory and the playbook live under `models/{model}/` so trying a different chat model doesn't contaminate the memory/strategies learned with another. Conversations, todos, RAG, and the user profile remain shared across models.
+
+> **Session transcripts vs saved conversations:** `sessions/` is written **automatically**, one append-only file per session, grouped by the directory you launched from — that's what `--resume` reads, and old files expire (`SESSION_MAX_AGE_DAYS`, default 30). `conversations/` is written **only when you ask** (`/save`) and is never expired. The transcript is append-only rather than a snapshot of the live history because [compaction](../guides/memory.md) rewrites that history in place; recording each turn as it happens means a resumed session shows the whole conversation, not a summarized stub. Sub-agent runs are excluded (they run on their own isolated context, so logging them would interleave a second conversation).
 
 > **Multi-instance isolation:** several `mnemoai` instances (e.g. one per terminal tab) share the profile dir, so the per-session RAG/chunk pointer files are **namespaced per-instance** (`MNEMOAI_INSTANCE_ID`, inherited by each instance's MCP subprocess). One instance uses only its own session's `rag_store_*` / `chunk_cache_*`, and exiting cleans up only its own — never another live tab's. Stale orphans from a crashed instance are pruned at startup on a 7-day age policy.
 

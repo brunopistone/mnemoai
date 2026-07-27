@@ -23,7 +23,12 @@ VISION_MODEL_ID:
   TEMPERATURE: 0.3
 # Model parameters
 MAX_CONVERSATION_TOKENS: 65536
-DOC_MAX_TOKENS: 16384 # Ask for confirmation before every execute_bash shell command.
+DOC_MAX_TOKENS: 16384
+# Days a recorded session is kept for `mnemoai --resume` (0 disables recording
+# entirely). Saved conversations (/save) live elsewhere and never expire.
+SESSION_MAX_AGE_DAYS: 30
+
+# Ask for confirmation before every execute_bash shell command.
 # Set to false to run shell commands without prompting (trusted/automation setups).
 REQUIRE_BASH_CONFIRMATION: true
 # Ask for confirmation before every fs_write / file_edit file modification.

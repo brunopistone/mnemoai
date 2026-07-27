@@ -26,6 +26,7 @@ Override the root with ``$MNEMOAI_HOME``. The config file location
 can additionally be overridden with ``$MNEMOAI_CONFIG``.
 """
 
+import hashlib
 import os
 import re
 import shutil
@@ -488,6 +489,89 @@ def conversations_dir(profile: str = None) -> Path:
     d = profile_dir(profile) / "conversations"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# Cap on the sanitized cwd dir name (longer paths get truncated + hashed).
+_MAX_SANITIZED_CWD = 120
+
+# Age after which a session transcript is swept at startup (30 days):
+# resumable sessions are a convenience, not a durable artifact — `/save` is the
+# durable, user-curated path and is never swept.
+SESSION_MAX_AGE_DAYS = 30
+
+
+def sanitize_cwd(path) -> str:
+    """Make a working-directory path safe to use as a single directory name.
+
+    Sessions are scoped to the directory you launched from, so the cwd becomes
+    one flat dir name: everything outside ``[A-Za-z0-9]`` collapses to ``-``.
+    Very long paths are truncated and suffixed with a short hash of the FULL
+    path, so two deep directories sharing a prefix can't collide.
+    """
+    raw = str(path or "")
+    safe = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-")
+    if not safe:
+        return "root"
+    if len(safe) <= _MAX_SANITIZED_CWD:
+        return safe
+    digest = hashlib.sha256(raw.encode("utf-8", "replace")).hexdigest()[:8]
+    return f"{safe[:_MAX_SANITIZED_CWD]}-{digest}"
+
+
+def sessions_dir(cwd=None, profile: str = None) -> Path:
+    """Per-(profile, launch-directory) dir holding resumable session logs (created).
+
+    Sessions are scoped to the directory the app was launched from, so
+    ``--resume`` in a project offers that project's sessions and nothing else.
+    Distinct from :func:`conversations_dir` — that holds user-curated ``/save``
+    files, which are never swept.
+    """
+    base = cwd if cwd is not None else os.getcwd()
+    d = profile_dir(profile) / "sessions" / sanitize_cwd(base)
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def sweep_old_sessions(
+    max_age_days: int = SESSION_MAX_AGE_DAYS, profile: str = None
+) -> int:
+    """Delete session logs older than ``max_age_days``; return the count.
+
+    Best-effort startup housekeeping (0 disables). Sweeps EVERY project's
+    session dir, not just the current one — otherwise a directory you stopped
+    working in would keep its logs forever. Empty dirs are removed after.
+    Only ``session_*.jsonl`` files are touched.
+    """
+    if max_age_days <= 0:
+        return 0
+    root = profile_dir(profile) / "sessions"
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    try:
+        for project in root.iterdir():
+            if not project.is_dir():
+                continue
+            for f in project.glob("session_*.jsonl"):
+                try:
+                    if f.is_file() and f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        removed += 1
+                except OSError:
+                    continue
+            try:  # prune the dir once its last session ages out
+                next(project.iterdir())
+            except StopIteration:
+                try:
+                    project.rmdir()
+                except OSError:
+                    pass
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return removed
 
 
 def memory_file_path(profile: str = None) -> Path:

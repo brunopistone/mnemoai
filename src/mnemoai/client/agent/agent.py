@@ -2545,6 +2545,12 @@ class LangGraphAgent:
                 self._messages.append(m)
                 delivered += 1
 
+        # Buffer this turn's messages for the session log and flush ONCE at the
+        # end. Buffering (rather than slicing _messages by a start index) is what
+        # makes the log survive compaction: compaction REPLACES _messages
+        # mid-turn, which would invalidate any index taken here.
+        turn_log: List[BaseMessage] = []
+
         stored_prompt = self._strip_ephemeral(prompt)
         if not stored_prompt.strip():
             if delivered == 0:
@@ -2554,7 +2560,9 @@ class LangGraphAgent:
             # don't append an empty user turn.
         else:
             # Model sees the full prompt this turn; only the clean prompt is stored.
-            self._messages.append(HumanMessage(content=stored_prompt))
+            user_msg = HumanMessage(content=stored_prompt)
+            self._messages.append(user_msg)
+            turn_log.append(user_msg)
 
         # Pre-flight compaction: shrink the accumulated history before it seeds this 
         # turn's graph run if it's over the high-water mark. The client provider owns 
@@ -2593,7 +2601,12 @@ class LangGraphAgent:
             # User cancelled mid-turn (the UI injects KeyboardInterrupt into this
             # worker thread). CLOSE the turn out rather than deleting it: keep the
             # user message and append an explicit interrupted marker.
-            self._messages.append(AIMessage(content=INTERRUPTED_MARKER))
+            marker = AIMessage(content=INTERRUPTED_MARKER)
+            self._messages.append(marker)
+            # Log the cancelled turn too — resuming should show the question was
+            # asked and interrupted, matching what the live history says.
+            turn_log.append(marker)
+            self._log_turn(turn_log)
             self._last_input_tokens = None  # stale after the appended marker
             raise
         except GraphRecursionError:
@@ -2627,6 +2640,8 @@ class LangGraphAgent:
             and m not in self._messages
         ]
         self._messages.extend(new_messages)
+        turn_log.extend(new_messages)
+        self._log_turn(turn_log)
 
         # Prefer the most recent AI turn with visible text. Emit it if the turn
         # produced it WITHOUT streaming (orchestrator single-subtask, aggregation
@@ -2653,6 +2668,20 @@ class LangGraphAgent:
         )
         self._emit_answer(fallback)
         return fallback
+
+    def _log_turn(self, messages: List[BaseMessage]) -> None:
+        """Append this turn to the session log, if one is attached (best-effort).
+
+        The client sets ``session_log`` when session persistence is on; a plain
+        agent (unit tests, embedded use) has none and this is a no-op.
+        """
+        log = getattr(self, "session_log", None)
+        if log is None or not messages:
+            return
+        try:
+            log.log_turn(messages)
+        except Exception as e:  # noqa: BLE001 — a log must never break a turn
+            logger.debug(f"Session log write failed: {e}")
 
     def _last_visible_from(self, messages: List[BaseMessage]) -> str:
         """Most recent visible AI text (to salvage a cut-short answer), or ""."""

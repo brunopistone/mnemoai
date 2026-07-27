@@ -29,6 +29,7 @@ from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector
+from mnemoai.client.session_log import SessionLog, read_session
 from mnemoai.client.ui import turn_view
 from mnemoai.client.ui.spinner import Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
@@ -36,6 +37,7 @@ from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import (
+    SESSION_MAX_AGE_DAYS,
     conversations_dir,
     instance_id,
     model_dir,
@@ -43,6 +45,7 @@ from mnemoai.utils.paths import (
     sanitize_model_name,
     sweep_old_plans,
     sweep_old_rag_artifacts,
+    sweep_old_sessions,
 )
 
 
@@ -230,6 +233,13 @@ class LangGraphClient:
             except Exception as e:
                 logger.debug(f"RAG artifact sweep skipped: {e}")
 
+            # Expire old resumable session transcripts (age-based, every project
+            # dir). `/save` files live elsewhere and are never swept.
+            try:
+                sweep_old_sessions(self._session_max_age_days())
+            except Exception as e:
+                logger.debug(f"Session sweep skipped: {e}")
+
             # Fail fast if prompts.yaml is missing a required prompt (a feature's
             # prompt is required when that feature is enabled).
             config.validate_prompts(
@@ -289,6 +299,10 @@ class LangGraphClient:
                 # Per-agent model override (custom sub-agent frontmatter 'model'):
                 # build a same-provider model with the NAME swapped, on demand.
                 self.agent._subagent_model_factory = self._subagent_model_factory
+                # Append-only session transcript for `--resume`, scoped to the
+                # launch directory. Independent of /save (user-curated, never
+                # swept); this one expires on age.
+                self._attach_session_log()
 
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -921,6 +935,75 @@ class LangGraphClient:
 
         except Exception as e:
             logger.error(f"Failed to load conversation: {e}")
+            return False
+
+    def _session_max_age_days(self) -> int:
+        """Days a resumable session log is kept (0 disables persistence).
+
+        Falls back to a code default so the knob reaches existing installs
+        without rewriting their ``config.yaml``.
+        """
+        try:
+            return int(config.get("SESSION_MAX_AGE_DAYS", SESSION_MAX_AGE_DAYS))
+        except (TypeError, ValueError):
+            return SESSION_MAX_AGE_DAYS
+
+    def _attach_session_log(self) -> None:
+        """Start this session's transcript and attach it to the agent.
+
+        Best-effort and opt-out: ``SESSION_MAX_AGE_DAYS: 0`` disables session
+        persistence entirely (nothing is written), matching the way the sweep
+        knob turns the feature off.
+        """
+        if not self.agent or self._session_max_age_days() <= 0:
+            return
+        try:
+            self.agent.session_log = SessionLog(model=self.model_name_for_log())
+        except Exception as e:  # noqa: BLE001 — never block startup
+            logger.debug(f"Session log unavailable: {e}")
+
+    def model_name_for_log(self) -> str:
+        """Best-effort model id, recorded in the session log's meta record."""
+        try:
+            return str(config.get("MODEL_ID", {}).get("NAME", "") or "")
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def resume_session(self, path: str) -> bool:
+        """Rehydrate a session transcript into the live agent; True on success.
+
+        Reuses the same decode + replay path as ``/load`` so a resumed chat looks
+        identical to a loaded one. Deliberately does NOT set
+        ``current_conversation_path`` — a resumed session is not an open ``/save``
+        file, so a bare ``/save`` must not overwrite one.
+        """
+        try:
+            data = read_session(path)
+            raw = [m for m in data["messages"] if m.get("role") != "system"]
+            if not raw:
+                logger.error(f"Session has no messages: {path}")
+                return False
+            if not self.agent:
+                logger.error("Agent not initialized")
+                return False
+
+            messages = convert_strands_messages_to_langchain(raw)
+            for m in messages:
+                content = getattr(m, "content", None)
+                if isinstance(content, str) and "<plan-mode-active>" in content:
+                    m.content = LangGraphAgent._strip_ephemeral(content)
+
+            self.agent.messages.clear()
+            self.agent.messages.extend(messages)
+            logger.info(f"Resumed {len(messages)} messages from {path}")
+
+            transcript = turn_view.render_conversation(messages)
+            if transcript:
+                print("\n" + transcript)
+            print(f"\n\033[90m[Context: {self._count_context_tokens()} tokens]\033[0m")
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to resume session: {e}")
             return False
 
     def __enter__(self):

@@ -422,11 +422,21 @@ MAX_CONVERSATION_TOKENS: 65536
 # Maximum tokens when reading documents (CSV, JSON, text files)
 DOC_MAX_TOKENS: 16384
 
+# Days a recorded session is kept for `--resume` (0 disables recording entirely).
+# Saved conversations (/save) are separate and never expire.
+SESSION_MAX_AGE_DAYS: 30
+
 # Profile configuration
 PROFILE:
   NAME: default # Used for session data isolation (~/.mnemoai/{NAME}/)
   USE_PROFILING: true # Enable automatic user profiling
 ```
+
+`SESSION_MAX_AGE_DAYS` controls the automatic session transcripts that
+`mnemoai --resume` restores (see [Resuming a session](guides/usage.md#resuming-a-session)).
+Sessions are grouped by the directory you launched from, so resuming in a project
+only offers that project's sessions. Set it to `0` to stop recording sessions
+altogether; this never affects `/save` / `/load`.
 
 ### Environment variables
 
