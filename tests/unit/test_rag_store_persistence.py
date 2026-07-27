@@ -64,14 +64,19 @@ class TestNoTmpFallback:
     def test_session_without_rag_dir_uses_profile_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(faiss_store, "profile_dir", lambda: tmp_path)
         store = FaissStore(4, session_id="s2")
-        assert not store.persist_path.startswith("/tmp/")
+        # The bug was a hardcoded `/tmp/rag_store*` fallback, NOT "any path under
+        # /tmp": pytest's own tmp_path IS /tmp/pytest-of-*/ on Linux (it's
+        # /private/var/folders/ on macOS, which is why asserting on the /tmp
+        # prefix passed locally and failed in CI). Assert the real property —
+        # the store lands in the profile dir it was given.
         assert str(tmp_path) in store.persist_path
+        assert "rag_store" in os.path.basename(store.persist_path)
 
     def test_no_args_uses_profile_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(faiss_store, "profile_dir", lambda: tmp_path)
         store = FaissStore(4)
-        assert not store.persist_path.startswith("/tmp/")
         assert str(tmp_path) in store.persist_path
+        assert "rag_store" in os.path.basename(store.persist_path)
 
     def test_source_has_no_tmp_literal(self):
         source = open(faiss_store.__file__, encoding="utf-8").read()
