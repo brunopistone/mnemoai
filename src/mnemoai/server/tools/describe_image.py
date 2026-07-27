@@ -42,7 +42,14 @@ def register_image_tools(mcp: FastMCP) -> None:
 
             # Check if it's a supported image format
             path = Path(normalized_path)
-            supported_formats = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"]
+            supported_formats = [
+                ".png",
+                ".jpg",
+                ".jpeg",
+                ".gif",
+                ".bmp",
+                ".webp",
+            ]
             if path.suffix.lower() not in supported_formats:
                 return json.dumps(
                     {
@@ -59,11 +66,13 @@ def register_image_tools(mcp: FastMCP) -> None:
             image_ext = normalized_path.split(".")[-1]
 
             # Create message with image and question using LangChain format
-            message = vision_model_controller.format_request(question, image_bytes, image_ext)
+            message = vision_model_controller.format_request(
+                question, image_bytes, image_ext
+            )
 
             # Use LangChain model invoke
             response = vision_model.invoke([message])
-            content = response.content if hasattr(response, 'content') else response
+            content = response.content if hasattr(response, "content") else response
             # Normalize: some protocols (e.g. OpenAI Responses, Anthropic) return
             # content as a list of blocks rather than a plain string.
             description = vision_model_controller._content_to_text(content)
