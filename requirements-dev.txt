@@ -8,4 +8,11 @@
 #
 # Includes: pytest + pytest-cov (test tier), ruff (the `ruff check --select I .`
 # import-sort gate), mkdocs-material (docs site: `mkdocs serve`).
+#
+# The explicit mcp pin is a deliberate exception to the single-source rule: mcp
+# 2.0.0 removed `mcp.server.fastmcp`, which every server tool imports, so an
+# unpinned resolve fails at collection time. THIS is the file CI installs from,
+# so the cap has to hold here too — it is what turned the 1.8.1 run red. Remove
+# it together with the port to the 2.x server API.
+mcp[cli]>=1.26.0,<2
 -e .[dev,docs]
