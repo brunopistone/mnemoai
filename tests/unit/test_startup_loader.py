@@ -5,6 +5,7 @@ TTY, and be a silent no-op off-TTY (pipes/CI) so captured output stays clean.
 """
 
 import sys
+import time
 
 from mnemoai.utils.startup_loader import StartupLoader
 
@@ -93,3 +94,82 @@ def test_context_manager_stops_on_exit(monkeypatch):
         time.sleep(0.03)
     assert loader._thread is None  # stopped on __exit__
     assert "Starting tools server" in "".join(fake.buf)
+
+
+class TestWriteAboveDoesNotCollideWithTheSpinner:
+    """A startup warning must not be glued onto the live spinner line.
+
+    Observed: an external MCP server failing to start printed
+    ``⠸ Connecting model.✗ MCP server 'time' failed to start`` — the error was
+    appended straight onto the animating line with no erase, so the message read
+    as if the MODEL had failed to connect, and a stale spinner line was left
+    stranded above the welcome banner.
+    """
+
+    def _run(self, monkeypatch, emit):
+        fake = _FakeTTY()
+        monkeypatch.setattr(sys, "stdout", fake)
+        loader = StartupLoader(interval=0.005).start("Connecting model")
+        try:
+            time.sleep(0.05)  # let some frames land
+            emit(loader)
+            time.sleep(0.05)  # let the spinner resume
+        finally:
+            loader.stop()
+        return "".join(fake.buf)
+
+    def test_message_is_not_appended_to_a_spinner_frame(self, monkeypatch):
+        out = self._run(monkeypatch, lambda ldr: ldr.write_above("BOOM"))
+        at = out.index("BOOM")
+        # Everything from the message to its newline must be the message alone —
+        # no phase text trailing it on the same line.
+        tail = out[at : out.index("\n", at)]
+        assert "Connecting model" not in tail
+
+    def test_the_spinner_line_is_erased_before_the_message(self, monkeypatch):
+        out = self._run(monkeypatch, lambda ldr: ldr.write_above("BOOM"))
+        assert "\r\033[KBOOM" in out
+
+    def test_the_message_survives_in_scrollback(self, monkeypatch):
+        out = self._run(monkeypatch, lambda ldr: ldr.write_above("BOOM"))
+        assert "BOOM\n" in out
+
+    def test_print_error_routes_through_the_active_loader(self, monkeypatch):
+        # The real call site is utils.console.print_error, deep inside
+        # client.start() — it must get the same treatment without knowing about
+        # the loader.
+        from mnemoai.utils.console import print_error
+
+        out = self._run(
+            monkeypatch,
+            lambda ldr: print_error("MCP server 'time' failed to start; skipping."),
+        )
+        at = out.index("failed to start")
+        assert "Connecting model" not in out[at : out.index("\n", at)]
+
+    def test_console_is_unhooked_after_stop(self, monkeypatch):
+        from mnemoai.utils import console
+
+        fake = _FakeTTY()
+        monkeypatch.setattr(sys, "stdout", fake)
+        loader = StartupLoader(interval=0.005).start("x")
+        assert console._active_loader is loader
+        loader.stop()
+        # A dangling loader would swallow every later message into a spinner
+        # that no longer paints.
+        assert console._active_loader is None
+
+    def test_write_above_off_tty_is_a_plain_print(self, capsys):
+        # Off-TTY there is no thread and no animation; the message must still
+        # reach stdout exactly once.
+        loader = StartupLoader()
+        loader.start("x")
+        loader.write_above("plain message")
+        loader.stop()
+        assert capsys.readouterr().out == "plain message\n"
+
+    def test_print_error_without_a_loader_still_prints(self, capsys):
+        from mnemoai.utils.console import print_error
+
+        print_error("standalone")
+        assert "standalone" in capsys.readouterr().out

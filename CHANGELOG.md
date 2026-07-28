@@ -9,6 +9,22 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.2] — 2026-07-28
+
+### Fixed
+
+- **A startup warning no longer looks like the model failed to connect.** A
+  message printed while the boot spinner was animating landed on the spinner's
+  own line with nothing erasing it first, so an unrelated warning rendered as
+  `⠸ Connecting model.✗ MCP server 'time' failed to start; skipping.` — reading
+  as though connecting the model was what went wrong. The message's newline then
+  pushed the animation onto a fresh line, and since only the final line is
+  cleared on exit, a stale `⠿ Connecting model…` was left stranded above the
+  welcome banner. Console output now suspends the spinner, clears its line, emits
+  the message, and resumes — so the warning stands alone and the spinner leaves
+  nothing behind. Applied at the `utils.console` chokepoint, so every startup
+  message gets it rather than just the one that surfaced the bug.
+
 ## [1.8.1] — 2026-07-28
 
 A bug-fix release, mostly about session transcripts: three separate defects made
