@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
 )
@@ -42,6 +43,60 @@ from mnemoai.utils.paths import sessions_dir
 
 # Chars of the first user message kept as a session's preview label.
 _PREVIEW_CHARS = 100
+
+# The episodic-memory block the client prepends to a prompt before the agent
+# stores it. It is injected context, not something the user typed, so it must
+# never become a session's label — an unfiltered preview made every row read
+# `[Episodic Memory - Similar Past Tasks] 1. "hello" → …`, so several unrelated
+# sessions looked identical and none was identifiable.
+_EPISODIC_PREFIX = "[Episodic Memory"
+
+
+def first_user_prompt(messages: List[Dict[str, Any]], max_len: int = _PREVIEW_CHARS) -> str:
+    """The first thing the USER actually typed, flattened and clipped.
+
+    Skips every kind of injected/synthetic content, because none of it
+    identifies the session to the person picking from a list: the ephemeral
+    reminder blocks (steering, plan mode), the prepended episodic-memory block,
+    tool results, and auto-delivered background sub-agent reports. Falls through
+    to the next user message when one yields nothing, so a session whose first
+    turn was pure injection is still labelled by its first real prompt.
+    """
+    for m in messages:
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        text = ""
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            # A tool-result-only message has no text block: skip it, don't stop.
+            for block in content:
+                if isinstance(block, str):
+                    text = block
+                    break
+                if isinstance(block, dict) and block.get("text"):
+                    text = str(block["text"])
+                    break
+
+        text = LangGraphAgent._strip_ephemeral(text)
+        # The episodic block is prepended as "[Episodic Memory …]\n…\n\n<prompt>";
+        # keep only the real prompt that follows it.
+        if text.lstrip().startswith(_EPISODIC_PREFIX):
+            text = text.split("\n\n", 1)[1] if "\n\n" in text else ""
+        # A background sub-agent's report is auto-delivered as a user message;
+        # it's the agent talking to itself, not a prompt.
+        if text.lstrip().startswith("Your background sub-agent"):
+            continue
+
+        text = " ".join(text.split())
+        if text:
+            # max_len is the TOTAL width, ellipsis included — callers size it to
+            # a column budget, so the marker must fit inside it, not overflow it.
+            if len(text) <= max_len:
+                return text
+            return text[: max_len - 1] + "…"
+    return ""
 
 
 class SessionLog:
@@ -83,6 +138,36 @@ class SessionLog:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Session log append failed: {e}")
 
+    def seed_history(self, messages: List[Any], source: str = "") -> None:
+        """Copy an ALREADY-RESTORED conversation into this session's transcript.
+
+        Called after ``--resume`` or ``/load`` rehydrates history into the agent.
+        A session file only ever held the turns that happened after it was
+        created, so continuing a restored conversation produced a transcript
+        starting mid-thread: resuming *that* file restored a stump, and each
+        resume-of-a-resume truncated the chain further. Copying the restored
+        messages in makes every session file self-contained — the same reason a
+        resumed session is re-stamped into the fresh log rather than appended to
+        the old one, which keeps the source file immutable so resuming it again
+        still yields the original conversation.
+
+        Recorded as one ``restore`` record (not a ``turn``) so the turn counter
+        keeps meaning "turns the user took in THIS session", while
+        :func:`read_session` still replays the messages in order.
+        """
+        if self.path is None or not messages:
+            return
+        try:
+            payload = convert_langchain_messages_to_strands(list(messages))
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Session log seed encode failed: {e}")
+            return
+        if not payload:
+            return
+        self._append(
+            {"t": "restore", "ts": time.time(), "source": source, "messages": payload}
+        )
+
     def log_turn(self, messages: List[Any]) -> None:
         """Record the messages this turn added (already-final LangChain messages)."""
         if self.path is None or not messages:
@@ -111,7 +196,8 @@ class SessionLog:
         cancelled ``--resume``) leaves a turn-less file. Those are already hidden
         from the picker, but without this they'd pile up on disk until they age
         out. Safe by construction: it only unlinks a file with zero `turn`
-        records.
+        records — a seeded ``restore`` record doesn't count, and dropping such a
+        file loses nothing, because the session it copied from is never mutated.
         """
         if self.path is None or self._turn > 0:
             return False
@@ -158,42 +244,31 @@ def read_session(path) -> Dict[str, Any]:
         kind = rec.get("t")
         if kind == "meta":
             meta = rec
-        elif kind == "turn":
+        elif kind in ("turn", "restore"):
             msgs = rec.get("messages")
             if isinstance(msgs, list):
                 messages.extend(msgs)
-                turns += 1
+                # A `restore` record is inherited history, not a turn the user
+                # took here — it must not inflate the turn count the picker
+                # shows, but it IS part of the conversation to replay.
+                if kind == "turn":
+                    turns += 1
     return {"meta": meta, "messages": messages, "turns": turns, "path": str(p)}
 
 
 def _preview(messages: List[Dict[str, Any]]) -> str:
-    """First user message, flattened and clipped — the picker's label."""
-    for m in messages:
-        if m.get("role") != "user":
-            continue
-        content = m.get("content")
-        text = ""
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("text"):
-                    text = str(block["text"])
-                    break
-                if isinstance(block, str):
-                    text = block
-                    break
-        text = " ".join(text.split())
-        if text:
-            return text[:_PREVIEW_CHARS] + ("…" if len(text) > _PREVIEW_CHARS else "")
-    return "(no prompt)"
+    """The picker's label: the user's first real prompt, injection stripped."""
+    return first_user_prompt(messages) or "(no prompt)"
 
 
 def list_sessions(cwd=None, profile: str = None, limit: int = 20) -> List[Dict[str, Any]]:
     """Resumable sessions for this directory, newest first, capped at ``limit``.
 
     Sessions with no completed turn are skipped — resuming one would restore an
-    empty conversation. ``limit`` bounds only what's OFFERED; nothing is deleted
+    empty conversation, and a resume the user never typed into is a pure
+    DUPLICATE of the session it restored (same messages, one row each), so
+    offering it would make the list grow by one every time they resume without
+    asking anything. ``limit`` bounds only what's OFFERED; nothing is deleted
     here (age-based expiry owns deletion, see ``sweep_old_sessions``).
     """
     try:
@@ -208,7 +283,7 @@ def list_sessions(cwd=None, profile: str = None, limit: int = 20) -> List[Dict[s
         if len(out) >= max(1, limit):
             break
         data = read_session(f)
-        if not data["messages"]:
+        if not data["messages"] or data["turns"] == 0:
             continue
         out.append(
             {

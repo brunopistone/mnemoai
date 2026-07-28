@@ -8,6 +8,7 @@ import numpy as np
 import ollama
 from openai import OpenAI
 
+from mnemoai.models.controllers.base_model_controller import BaseModelController
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.tokenization import count_tokens
@@ -51,8 +52,18 @@ _OVERFLOW_ERROR_MARKERS = (
 _LEARNED_EMBED_LIMITS: dict = {}
 
 
-class EmbeddingsController:
-    """Controller for embedding model operations across different providers."""
+class EmbeddingsController(BaseModelController):
+    """Controller for embedding model operations across different providers.
+
+    Inherits the provider dispatch table only, not ``_init_model_config``: the
+    embedding config lives at ``RAG.EMBED_MODEL_ID``, is injectable for tests,
+    uses its own attribute names, and tolerates a missing NAME/TYPE (the other
+    controllers require them), so the shared reads don't apply.
+    """
+
+    PROVIDERS = ("ollama", "bedrock", "openai", "sagemaker", "litellm")
+    PROVIDER_METHOD_TEMPLATE = "_embed_{provider}"
+    PROVIDER_LABEL = "embedding model"
 
     def __init__(self, embed_model_config: dict = None) -> None:
         self.embed_model_config = embed_model_config or config.get("RAG", {}).get(
@@ -399,20 +410,7 @@ class EmbeddingsController:
 
         The generic loop in :meth:`_embed_uncached` owns recovery, so each
         provider method just makes the call and lets exceptions propagate."""
-        if self.embed_model_type == "ollama":
-            return self._embed_ollama(texts)
-        elif self.embed_model_type == "bedrock":
-            return self._embed_bedrock(texts)
-        elif self.embed_model_type == "openai":
-            return self._embed_openai(texts)
-        elif self.embed_model_type == "sagemaker":
-            return self._embed_sagemaker(texts)
-        elif self.embed_model_type == "litellm":
-            return self._embed_litellm(texts)
-        else:
-            raise ValueError(
-                f"Unsupported embedding model type: {self.embed_model_type}"
-            )
+        return self._dispatch_provider(self.embed_model_type, texts)
 
     def _embed_ollama(self, texts: List[str]) -> np.ndarray:
         """One Ollama embed call at the configured HOST/PORT; raises on failure.

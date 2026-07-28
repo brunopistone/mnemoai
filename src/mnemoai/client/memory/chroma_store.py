@@ -1,6 +1,6 @@
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import chromadb
 
@@ -11,6 +11,11 @@ from mnemoai.client.memory.similarity import (
 )
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
+from mnemoai.utils.hybrid_search import (
+    candidate_count,
+    normalized_bm25_candidates,
+    rank_with_similarity,
+)
 from mnemoai.utils.logger import logger
 
 
@@ -50,8 +55,11 @@ class ChromaEpisodicStore:
         # re-embedding the whole history on every switch would be slow).
         self._open_or_migrate_collection()
 
-        # Track metadata separately
+        # Track metadata separately. `ids` is positionally aligned with
+        # `metadatas` (and so with the BM25 corpus) and is what hybrid search
+        # keys candidates by — see the note in `search`.
         self.metadatas = []
+        self.ids: List[str] = []
         self.bm25: Optional[BM25] = None
         self._load_metadatas()
         self._rebuild_bm25()
@@ -150,11 +158,17 @@ class ChromaEpisodicStore:
         self.collection = self._create_collection()
 
     def _load_metadatas(self) -> None:
-        """Load existing metadatas from collection."""
+        """Load existing metadatas (and their ids) from the collection.
+
+        ``collection.get()`` returns ``ids`` and ``metadatas`` in the same order,
+        so the two lists stay positionally aligned — which is what lets hybrid
+        search key semantic and keyword candidates by the same unique id.
+        """
         try:
             results = self.collection.get()
             if results and results["metadatas"]:
                 self.metadatas = results["metadatas"]
+                self.ids = list(results.get("ids") or [])
         except Exception as e:
             logger.warning(f"Failed to load metadatas: {e}")
 
@@ -165,6 +179,19 @@ class ChromaEpisodicStore:
         if isinstance(tools_str, str) and tools_str:
             parts.append(tools_str)
         return " ".join(p for p in parts if p)
+
+    def _bm25_key(self, metadata: Dict[str, Any], idx: int) -> str:
+        """The hybrid-search key for BM25 corpus position ``idx``: the episode id.
+
+        ``self.ids`` is positionally aligned with ``self.metadatas``, which IS the
+        BM25 corpus order, so position maps straight to id. Falls back to the
+        searchable text if the two ever disagree in length (a partial load), which
+        just restores the old collapsing behavior for that one item instead of
+        raising mid-query.
+        """
+        if idx < len(self.ids):
+            return self.ids[idx]
+        return self._get_searchable_text(metadata)
 
     def _rebuild_bm25(self) -> None:
         """Rebuild BM25 index from all stored episode metadata."""
@@ -206,8 +233,9 @@ class ChromaEpisodicStore:
                 embeddings=embedding.tolist(), metadatas=[metadata], ids=[episode_id]
             )
 
-        # Update local metadata list
+        # Update local metadata list (ids stay positionally aligned with it)
         self.metadatas.append(metadata)
+        self.ids.append(episode_id)
         self._rebuild_bm25()
 
         logger.debug(f"Stored episode: {episode_id}")
@@ -256,67 +284,52 @@ class ChromaEpisodicStore:
         if len(self.metadatas) == 0:
             return []
 
-        candidate_k = min(top_k * 3, len(self.metadatas))
+        candidate_k = candidate_count(top_k, len(self.metadatas))
 
-        # --- Semantic candidates ---
+        # --- Semantic candidates (backend-specific: squared-L2 -> cosine) ---
         query_embedding = l2_normalize(self.embeddings.embed([query]))
         results = self.collection.query(
             query_embeddings=query_embedding.tolist(), n_results=candidate_k
         )
 
-        # key -> (semantic_score, metadata)
-        sem_candidates: Dict[str, Tuple] = {}
+        # Candidates are keyed by the episode's unique id, NOT by its searchable
+        # text: that text is `task + solution + tools`, which is NOT unique — two
+        # runs of the same task collide into one key and only one of them can
+        # survive the merge, so distinct episodes silently vanished from results
+        # (asking the same thing twice with different outcomes kept only one).
+        # Falls back to the searchable text when Chroma returns no ids, which
+        # restores the old collapsing behavior rather than dropping the candidate.
+        sem_candidates = {}
         if results["metadatas"] and results["metadatas"][0]:
+            result_ids = (results.get("ids") or [[]])[0]
             for i, metadata in enumerate(results["metadatas"][0]):
                 distance = results["distances"][0][i] if results["distances"] else 0.0
                 # Unit vectors -> squared-L2 rescales to a cosine in [0,1], the
                 # same scale the FAISS backend and the BM25 component use.
-                sem_score = squared_l2_to_unit(distance)
-                key = self._get_searchable_text(metadata)
-                sem_candidates[key] = (sem_score, metadata)
+                key = (
+                    result_ids[i]
+                    if i < len(result_ids)
+                    else self._get_searchable_text(metadata)
+                )
+                sem_candidates[key] = (squared_l2_to_unit(distance), metadata)
 
-        # --- BM25 candidates ---
-        bm25_candidates: Dict[str, Tuple] = {}
-        if self.bm25 and self.bm25.corpus_size > 0:
-            raw_bm25 = self.bm25.score(query)
-            max_bm25 = max(raw_bm25) if raw_bm25 else 0.0
-
-            if max_bm25 > 0:
-                indexed_scores = sorted(
-                    enumerate(raw_bm25), key=lambda x: x[1], reverse=True
-                )[:candidate_k]
-
-                for idx, score in indexed_scores:
-                    if score <= 0 or idx >= len(self.metadatas):
-                        continue
-                    norm_score = score / max_bm25
-                    meta = self.metadatas[idx]
-                    key = self._get_searchable_text(meta)
-                    bm25_candidates[key] = (norm_score, meta)
-
-        # --- Merge and re-rank ---
-        all_keys = set(sem_candidates.keys()) | set(bm25_candidates.keys())
-        hybrid_results = []
-
-        for key in all_keys:
-            sem_score = sem_candidates[key][0] if key in sem_candidates else 0.0
-            meta = (
-                sem_candidates[key][1]
-                if key in sem_candidates
-                else bm25_candidates[key][1]
-            )
-            bm25_val = bm25_candidates[key][0] if key in bm25_candidates else 0.0
-
-            hybrid_score = (
-                self.semantic_weight * sem_score + self.keyword_weight * bm25_val
-            )
-
-            episode = meta.copy()
-            episode["similarity"] = hybrid_score
-            hybrid_results.append((hybrid_score, episode))
-
-        hybrid_results.sort(key=lambda x: x[0], reverse=True)
-        return [meta for _, meta in hybrid_results[:top_k]]
+        # --- Keyword candidates + merge (shared with the FAISS/RAG stores).
+        # Keyed by the same ids, by corpus position (ids[i] describes
+        # metadatas[i], which is the BM25 corpus order). ---
+        bm25_candidates = normalized_bm25_candidates(
+            self.bm25,
+            query,
+            candidate_k,
+            self.metadatas,
+            key_fn=self._bm25_key,
+        )
+        return rank_with_similarity(
+            sem_candidates,
+            bm25_candidates,
+            self.semantic_weight,
+            self.keyword_weight,
+            top_k,
+        )
 
     def cleanup(self, max_episodes: int = 1000, max_age_days: int = 90) -> None:
         """Remove old episodes and enforce size limit.
@@ -364,7 +377,11 @@ class ChromaEpisodicStore:
 
             if ids_to_delete:
                 self.collection.delete(ids=ids_to_delete)
+                # ids and metadatas must be pruned together — hybrid search keys
+                # candidates by ids[i] for metadatas[i], so a length mismatch
+                # would silently mis-key every candidate after the first deletion.
                 self.metadatas = valid_metadatas
+                self.ids = valid_ids
                 self._rebuild_bm25()
                 logger.info(
                     f"Cleaned up episodic memory: {old_count} → {len(valid_ids)} episodes"
@@ -377,5 +394,6 @@ class ChromaEpisodicStore:
         # (a bare create would leave the collection on the legacy un-stamped path).
         self.collection = self._create_collection()
         self.metadatas = []
+        self.ids = []
         self.bm25 = None
         logger.info("Cleared episodic memory collection")

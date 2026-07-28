@@ -244,3 +244,87 @@ class TestRecursionLimitKeepsTheWork:
         a._last_input_tokens = 999
         a.invoke("x")
         assert a._last_input_tokens is None
+
+
+class TestErroredTurnIsStillRecorded:
+    """A turn killed by a mid-flight ERROR must still reach the session log.
+
+    Whatever the turn produced stays in live `agent.messages` and the user keeps
+    talking, so a transcript that skips it drifts out of sync with the
+    conversation on screen. Observed in the wild: a dropped provider connection
+    ~30 minutes in meant the log stopped at the last SUCCESSFUL turn while the
+    chat ran on for another hour — `--resume` restored 64 of 408 messages, even
+    though `/save` had all of them. Silent, because `_log_turn` swallows errors.
+    """
+
+    class _Log:
+        def __init__(self):
+            self.turns = []
+
+        def log_turn(self, messages):
+            self.turns.append([str(m.content) for m in messages])
+
+    class _Boom:
+        def stream(self, state, config=None, stream_mode=None):
+            raise RuntimeError("bedrock connection drop")
+            yield
+
+    class _PartialBoom:
+        """Streams one snapshot, then the connection dies."""
+
+        def stream(self, state, config=None, stream_mode=None):
+            yield {
+                "messages": list(state["messages"]) + [AIMessage(content="partial work")],
+                "thinking": None,
+            }
+            raise RuntimeError("drop mid-stream")
+
+    def _agent_with_log(self, graph):
+        a = _agent(graph)
+        a._emit_answer = lambda m: None
+        a.session_log = self._Log()
+        return a
+
+    def test_prompt_is_logged_when_the_turn_dies_immediately(self):
+        a = self._agent_with_log(self._Boom())
+        with pytest.raises(RuntimeError):
+            a.invoke("please analyze this codebase")
+        assert a.session_log.turns, "the errored turn was never recorded"
+        assert "please analyze this codebase" in a.session_log.turns[0]
+
+    def test_partial_work_is_logged_when_the_stream_dies(self):
+        a = self._agent_with_log(self._PartialBoom())
+        with pytest.raises(RuntimeError):
+            a.invoke("do the big task")
+        logged = a.session_log.turns[0]
+        assert "do the big task" in logged
+        assert "partial work" in logged
+
+    def test_the_log_matches_live_history(self):
+        # The invariant behind the bug: transcript and history must not diverge.
+        a = self._agent_with_log(self._PartialBoom())
+        with pytest.raises(RuntimeError):
+            a.invoke("do the big task")
+        assert a.session_log.turns[0] == [str(m.content) for m in a._messages]
+
+    def test_the_error_still_propagates(self):
+        # Logging must not swallow the failure the caller has to handle.
+        a = self._agent_with_log(self._Boom())
+        with pytest.raises(RuntimeError, match="bedrock connection drop"):
+            a.invoke("q")
+
+    def test_a_later_turn_still_logs_normally(self):
+        a = self._agent_with_log(self._Boom())
+        with pytest.raises(RuntimeError):
+            a.invoke("the failed question")
+        a.graph = _OkGraph()
+        a.invoke("the next question")
+        assert len(a.session_log.turns) == 2
+        assert "the next question" in a.session_log.turns[1]
+
+    def test_stale_token_count_is_reset(self):
+        a = self._agent_with_log(self._Boom())
+        a._last_input_tokens = 999
+        with pytest.raises(RuntimeError):
+            a.invoke("q")
+        assert a._last_input_tokens is None

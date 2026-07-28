@@ -16,50 +16,41 @@ from mnemoai.utils.logger import logger
 class LangChainLLMController(BaseModelController):
     """LLM Controller using LangChain model abstractions."""
 
+    CONFIG_SECTION = "MODEL_ID"
+    PROVIDERS = (
+        "bedrock",
+        "mantle",
+        "ollama",
+        "openai",
+        "anthropic",
+        "sagemaker",
+        "litellm",
+    )
+    PROVIDER_LABEL = "model"
+
     def __init__(self, verbose: bool = False) -> None:
         self.verbose_mode = verbose
-        self.model_id = config.get("MODEL_ID")
-        self.model_name = self.model_id["NAME"]
-        self.model_type = self.model_id["TYPE"]
-        self.region = self.model_id.get("REGION", "us-east-1")
-        # Optional custom Bedrock endpoint (e.g. Mantle); routes SigV4 Converse
-        # calls there when set.
-        self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
+        # Shared reads (model_id/name/type, region, endpoint_url, max_tokens,
+        # max_conversation_tokens, temperature, top_p, top_k, stop, stream).
+        # The config.get calls stay HERE so tests can patch this module's config.
+        self._init_model_config(
+            config.get("MODEL_ID"),
+            config.get("MAX_CONVERSATION_TOKENS", 1024 * 8),
+        )
+        # LLM-only knobs.
         self.frequency_penalty = self.model_id.get("FREQUENCY_PENALTY", None)
-        self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
-        self.max_tokens = self.model_id.get("MAX_TOKENS", None)
         self.min_p = self.model_id.get("MIN_P", None)
         self.presence_penalty = self.model_id.get("PRESENCE_PENALTY", None)
         self.reasoning_effort = self.model_id.get("REASONING_EFFORT", None)
         self.reasoning_model = self.model_id.get("REASONING", False)
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
-        self.stop = self.model_id.get("STOP", None)
-        self.stream = self.model_id.get("STREAM", True)
-        self.temperature = self.model_id.get("TEMPERATURE", None)
         self.thinking_tokens = self.model_id.get("THINKING_TOKENS", 1024 * 2)
-        self.top_k = self.model_id.get("TOP_K", None)
-        self.top_p = self.model_id.get("TOP_P", None)
 
         self.model: Optional[BaseChatModel] = None
 
     def initialize_model(self, callbacks: list[BaseCallbackHandler] = None) -> None:
         """Initialize the LLM model based on the configured ``TYPE``."""
-        if self.model_type == "bedrock":
-            self._initialize_bedrock_model(callbacks)
-        elif self.model_type == "mantle":
-            self._initialize_mantle_model(callbacks)
-        elif self.model_type == "ollama":
-            self._initialize_ollama_model(callbacks)
-        elif self.model_type == "openai":
-            self._initialize_openai_model(callbacks)
-        elif self.model_type == "anthropic":
-            self._initialize_anthropic_model(callbacks)
-        elif self.model_type == "sagemaker":
-            self._initialize_sagemaker_model(callbacks)
-        elif self.model_type == "litellm":
-            self._initialize_litellm_model(callbacks)
-        else:
-            raise ValueError(f"Unsupported model type: {self.model_type}")
+        self._dispatch_provider(self.model_type, callbacks)
 
     def _boto_config(self):
         """botocore Config for Bedrock with a read timeout that fits a big prompt.

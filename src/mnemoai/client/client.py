@@ -29,7 +29,7 @@ from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector
-from mnemoai.client.session_log import SessionLog, read_session
+from mnemoai.client.session_log import SessionLog, first_user_prompt, read_session
 from mnemoai.client.ui import turn_view
 from mnemoai.client.ui.spinner import Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
@@ -869,24 +869,9 @@ class LangGraphClient:
             with open(os.path.expanduser(str(file_path)), "r") as f:
                 data = json.load(f)
             messages = data if isinstance(data, list) else data.get("messages", [])
-            for m in messages:
-                if m.get("role") != "user":
-                    continue
-                content = m.get("content", "")
-                text = content if isinstance(content, str) else "".join(
-                    b.get("text", "")
-                    for b in content
-                    if isinstance(b, dict) and "text" in b
-                )
-                text = LangGraphAgent._strip_ephemeral(text)
-                # Episodic block is prepended as "[Episodic Memory …]\n…\n\n<prompt>";
-                # keep only the real prompt after it.
-                if text.lstrip().startswith("[Episodic Memory"):
-                    text = text.split("\n\n", 1)[1] if "\n\n" in text else ""
-                text = " ".join(text.split())  # collapse whitespace/newlines
-                if not text:
-                    continue
-                return text if len(text) <= max_len else text[: max_len - 1] + "…"
+            # Same extraction the --resume picker uses, so a conversation and a
+            # session transcript of the same chat get the same label.
+            return first_user_prompt(messages, max_len=max_len)
         except Exception:
             pass
         return ""
@@ -924,6 +909,7 @@ class LangGraphClient:
                 self.agent.messages.extend(langchain_messages)
                 # Mark as open so a bare /save writes back to the same file.
                 self.current_conversation_path = normalized_path
+                self._seed_session_log(langchain_messages, normalized_path)
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"
                 )
@@ -975,6 +961,23 @@ class LangGraphClient:
         except Exception:  # noqa: BLE001
             return ""
 
+    def _seed_session_log(self, messages: list, source: str = "") -> None:
+        """Copy a just-restored conversation into THIS run's transcript.
+
+        Both ``--resume`` and ``/load`` replace the live history wholesale, so
+        without this the new session file records only what happens afterwards —
+        resuming it later would restore a fragment of the conversation the user
+        can plainly see on screen. Best-effort: a transcript must never break a
+        restore that already succeeded.
+        """
+        log = getattr(self.agent, "session_log", None)
+        if log is None:
+            return
+        try:
+            log.seed_history(messages, source=source)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Session log seed failed: {e}")
+
     def resume_session(self, path: str) -> bool:
         """Rehydrate a session transcript into the live agent; True on success.
 
@@ -1001,6 +1004,7 @@ class LangGraphClient:
 
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
+            self._seed_session_log(messages, str(path))
             logger.info(f"Resumed {len(messages)} messages from {path}")
 
             transcript = turn_view.render_conversation(messages)

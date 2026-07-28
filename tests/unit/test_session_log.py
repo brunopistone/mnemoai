@@ -233,3 +233,153 @@ class TestExpiry:
         os.utime(conv, (time.time() - 999 * 86400,) * 2)
         paths.sweep_old_sessions(30)
         assert conv.exists()
+
+
+class TestPreviewShowsWhatTheUserTyped:
+    """The picker label must be the user's words, not injected context.
+
+    Every one of these prefixes is prepended by the client BEFORE the agent
+    stores the message, so an unfiltered preview labelled unrelated sessions
+    identically (several rows all reading `[Episodic Memory …] 1. "hello" → …`)
+    and none of them could be told apart.
+    """
+
+    def test_episodic_block_is_stripped(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(
+            _turn(
+                '[Episodic Memory - Similar Past Tasks]\n1. "hello" → no tools '
+                "(similarity: 0.79)\n\n\nRefactor the router",
+                "ok",
+            )
+        )
+        assert slog.list_sessions(cwd="/proj/a")[0]["preview"] == "Refactor the router"
+
+    def test_steering_block_is_stripped(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("<steering>always use tabs</steering>\ndo the thing", "ok"))
+        assert slog.list_sessions(cwd="/proj/a")[0]["preview"] == "do the thing"
+
+    def test_plan_mode_banner_is_stripped(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(
+            _turn("<plan-mode-active>read only</plan-mode-active>\nplan the work", "ok")
+        )
+        assert slog.list_sessions(cwd="/proj/a")[0]["preview"] == "plan the work"
+
+    def test_falls_through_to_the_next_real_prompt(self, home):
+        # A first turn that is PURE injection yields nothing; the label must come
+        # from the next real prompt rather than giving up and showing "(no prompt)".
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("[Episodic Memory - Similar Past Tasks]\n1. x", "ok"))
+        log.log_turn(_turn("the actual question", "ok"))
+        assert slog.list_sessions(cwd="/proj/a")[0]["preview"] == "the actual question"
+
+    def test_background_subagent_report_is_not_a_prompt(self, home):
+        # Auto-delivered as a user message, but it's the agent talking to itself.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(
+            _turn("Your background sub-agent 'explore-2' finished: …", "noted")
+        )
+        log.log_turn(_turn("now summarize it", "ok"))
+        assert slog.list_sessions(cwd="/proj/a")[0]["preview"] == "now summarize it"
+
+    def test_plain_prompt_is_unchanged(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("just a normal question", "ok"))
+        assert slog.list_sessions(cwd="/proj/a")[0]["preview"] == "just a normal question"
+
+
+class TestResumedHistoryIsRecorded:
+    """A restored conversation must be copied into the NEW session file.
+
+    Otherwise the new file holds only what happened after the restore, so
+    resuming it later replays a fragment of a conversation the user can see in
+    full on screen — and each resume-of-a-resume truncates the chain further.
+    """
+
+    def _seed(self, log, data):
+        from mnemoai.client.agent.message_codec import (
+            convert_strands_messages_to_langchain,
+        )
+
+        log.seed_history(convert_strands_messages_to_langchain(data["messages"]))
+
+    def test_seeded_history_is_replayed(self, home):
+        first = slog.SessionLog(cwd="/proj/a")
+        first.log_turn(_turn("the original question", "the original answer"))
+
+        second = slog.SessionLog(cwd="/proj/a")
+        self._seed(second, slog.read_session(first.path))
+        second.log_turn(_turn("follow up", "ok"))
+
+        replayed = str(slog.read_session(second.path)["messages"])
+        assert "the original question" in replayed
+        assert "follow up" in replayed
+
+    def test_resume_of_a_resume_keeps_everything(self, home):
+        a = slog.SessionLog(cwd="/proj/a")
+        a.log_turn(_turn("turn one", "a1"))
+        b = slog.SessionLog(cwd="/proj/a")
+        self._seed(b, slog.read_session(a.path))
+        b.log_turn(_turn("turn two", "a2"))
+        c = slog.SessionLog(cwd="/proj/a")
+        self._seed(c, slog.read_session(b.path))
+        c.log_turn(_turn("turn three", "a3"))
+
+        replayed = str(slog.read_session(c.path)["messages"])
+        assert "turn one" in replayed and "turn two" in replayed
+        assert "turn three" in replayed
+
+    def test_the_source_session_is_never_mutated(self, home):
+        # Resuming must leave the original resumable and unchanged, so the user
+        # can resume the same point twice.
+        a = slog.SessionLog(cwd="/proj/a")
+        a.log_turn(_turn("original", "answer"))
+        before = a.path.read_text()
+
+        b = slog.SessionLog(cwd="/proj/a")
+        self._seed(b, slog.read_session(a.path))
+        b.log_turn(_turn("new work", "ok"))
+
+        assert a.path.read_text() == before
+
+    def test_seeded_history_does_not_inflate_the_turn_count(self, home):
+        a = slog.SessionLog(cwd="/proj/a")
+        for i in range(3):
+            a.log_turn(_turn(f"q{i}", "a"))
+        b = slog.SessionLog(cwd="/proj/a")
+        self._seed(b, slog.read_session(a.path))
+        b.log_turn(_turn("one new question", "a"))
+        # "turns" means turns taken in THIS session, so the picker doesn't claim
+        # the user asked four things here.
+        assert slog.read_session(b.path)["turns"] == 1
+
+    def test_a_resume_nobody_typed_into_is_not_offered(self, home):
+        # It's a byte-for-byte duplicate of the session it restored, so listing
+        # it would grow the picker by one row on every no-op resume.
+        a = slog.SessionLog(cwd="/proj/a")
+        a.log_turn(_turn("real question", "a"))
+        b = slog.SessionLog(cwd="/proj/a")
+        self._seed(b, slog.read_session(a.path))
+
+        listed = slog.list_sessions(cwd="/proj/a")
+        assert len(listed) == 1
+        assert listed[0]["path"] == str(a.path)
+
+    def test_an_unused_resume_is_discarded_at_exit(self, home):
+        a = slog.SessionLog(cwd="/proj/a")
+        a.log_turn(_turn("real question", "a"))
+        b = slog.SessionLog(cwd="/proj/a")
+        self._seed(b, slog.read_session(a.path))
+        assert b.discard_if_empty() is True
+        assert a.path.exists()  # the source is untouched
+
+    def test_a_resume_that_was_used_is_kept(self, home):
+        a = slog.SessionLog(cwd="/proj/a")
+        a.log_turn(_turn("real question", "a"))
+        b = slog.SessionLog(cwd="/proj/a")
+        self._seed(b, slog.read_session(a.path))
+        b.log_turn(_turn("something new", "a"))
+        assert b.discard_if_empty() is False
+        assert b.path.exists()

@@ -9,6 +9,69 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.1] — 2026-07-28
+
+A bug-fix release, mostly about session transcripts: three separate defects made
+`--resume` show conversations that were never yours, label the real ones
+unreadably, and restore only part of them. Plus an episodic-retrieval fix and two
+internal consolidations. No public-surface change.
+
+### Fixed
+
+- **A conversation is no longer partially recorded when a turn fails.** A turn
+  killed by a mid-flight error (a dropped provider connection, an MCP failure)
+  left its work in the live conversation but never reached the session
+  transcript, so recording silently stopped at the last _successful_ turn while
+  the chat carried on — one 408-message conversation had recorded only 64
+  messages, and `--resume` restored just that fragment even though `/save` held
+  everything. The failure was invisible because transcript writes are
+  best-effort by design. Every way a turn can end now writes before propagating
+  the error, so the transcript can't drift from the history on screen.
+- **Resuming a session now carries the whole conversation forward.** A session
+  file only held the turns that happened after it was created, so continuing a
+  resumed (or `/load`-ed) conversation produced a transcript starting mid-thread
+  — resuming _that_ replayed a stump, and each resume-of-a-resume truncated the
+  chain further. The restored history is now copied into the new session's file,
+  making every file a complete record; the session resumed _from_ is never
+  modified, so the same point can be resumed again.
+- **`--resume` labels show what you actually typed.** Retrieved episodic memory,
+  steering instructions, the plan-mode banner and auto-delivered sub-agent
+  reports are prepended to a prompt before it is stored, and the picker showed
+  them verbatim — so unrelated sessions all rendered as
+  `[Episodic Memory - Similar Past Tasks] 1. "hello" → …` and none could be told
+  apart. Labels are now extracted with injected context stripped, by the same
+  code the `/load` dialog uses. A resumed session you never typed into is also
+  no longer offered as a duplicate row of the session it restored.
+- **Running the integration test tier no longer writes into your own app home.**
+  That tier drives a real client, so each run recorded its test prompts as
+  genuine sessions in `~/.mnemoai` — they appeared in `--resume` as
+  conversations reading `Hello` or `What is the capital of France?` — and could
+  also leave an episode behind in episodic memory (a trivial `"hello"` episode
+  then got retrieved and injected as a "similar past task"). The tier now runs
+  against a throwaway `MNEMOAI_HOME` while still using the configured provider.
+  Existing stray entries from earlier runs are not removed automatically; delete
+  the leftover files under `{profile}/sessions/` if you want a clean picker.
+- **Episodic retrieval no longer silently drops episodes.** The ChromaDB backend
+  keyed hybrid-search candidates by an episode's searchable text
+  (`task + solution + tools`), which is not unique: two runs of the same task
+  collapsed into one candidate and only one could survive the merge, so asking
+  the same thing twice with different outcomes kept just one of them. Candidates
+  are now keyed by the episode's unique id — a store with three matching
+  episodes returns three (it returned two).
+
+### Changed
+
+- **Hybrid (semantic + BM25) ranking is now one shared implementation**
+  (`utils/hybrid_search.py`) instead of three near-copies in the episodic Chroma
+  store, the episodic FAISS store, and the session RAG store — a scoring change
+  had to land three times before, and the copies had already drifted. Ranking is
+  also deterministic now: the previous copies iterated a `set`, so equally scored
+  results could come back in a different order run to run.
+- **`BaseModelController` holds the behavior its subclasses were duplicating** —
+  shared config reads and provider dispatch, so the LLM, vision, and embeddings
+  controllers declare their supported providers instead of repeating an
+  `if/elif` chain each.
+
 ## [1.8.0] — 2026-07-27
 
 A correctness + hardening release from a full codebase audit. **Minor bump, not a
