@@ -11,11 +11,22 @@ import numpy as np
 from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
+from mnemoai.utils.hybrid_search import (
+    candidate_count,
+    merge_and_rank,
+    normalized_bm25_candidates,
+)
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import profile_dir, rag_session_pointer_path
 
 from ..readers.chunking_helper import __split_into_chunks as split_into_chunks
 from .vector_store_controller import VectorStoreController
+
+
+def _chunk_key(meta: Dict[str, Any]) -> str:
+    """Identity of one chunk within a session: which doc, which slice of it."""
+    return f"{meta.get('doc_id', '')}:{meta.get('chunk_idx', '')}"
+
 
 # Global reference to the RAG session (set by chat_interface)
 _rag_session = None
@@ -298,9 +309,10 @@ class SessionRAG:
             return [], []
 
         vec = embeddings[0]
-        candidate_k = top_k * 3
+        candidate_k = candidate_count(top_k)
 
-        # --- Semantic candidates ---
+        # --- Semantic candidates (backend-specific; the dict-store fallback has
+        # no vector index, so it scores every chunk with a numpy cosine) ---
         sem_candidates: Dict[str, Tuple[float, Dict]] = {}
         if hasattr(self.store, "search"):
             sem_scores, sem_metas = self.store.search(
@@ -318,49 +330,21 @@ class SessionRAG:
             sem_metas = [m for _, m in scores_metas[:candidate_k]]
 
         for score, meta in zip(sem_scores, sem_metas):
-            key = f"{meta.get('doc_id', '')}:{meta.get('chunk_idx', '')}"
-            sem_candidates[key] = (score, meta)
+            sem_candidates[_chunk_key(meta)] = (score, meta)
 
-        # --- BM25 candidates ---
-        bm25_candidates: Dict[str, Tuple[float, Dict]] = {}
-        if self.bm25 and self.bm25.corpus_size > 0:
-            raw_bm25 = self.bm25.score(query_text)
-            max_bm25 = max(raw_bm25) if raw_bm25 else 0.0
-
-            if max_bm25 > 0:
-                # Get top candidate_k BM25 results by index
-                indexed_scores = sorted(
-                    enumerate(raw_bm25), key=lambda x: x[1], reverse=True
-                )[:candidate_k]
-
-                all_metas = self.store.metadatas
-                for idx, score in indexed_scores:
-                    if score <= 0 or idx >= len(all_metas):
-                        continue
-                    norm_score = score / max_bm25
-                    meta = all_metas[idx]
-                    key = f"{meta.get('doc_id', '')}:{meta.get('chunk_idx', '')}"
-                    bm25_candidates[key] = (norm_score, meta)
-
-        # --- Merge and re-rank ---
-        all_keys = set(sem_candidates.keys()) | set(bm25_candidates.keys())
-        hybrid_results = []
-
-        for key in all_keys:
-            sem_score = sem_candidates[key][0] if key in sem_candidates else 0.0
-            bm25_score = bm25_candidates[key][0] if key in bm25_candidates else 0.0
-            meta = (
-                sem_candidates[key][1]
-                if key in sem_candidates
-                else bm25_candidates[key][1]
-            )
-
-            hybrid_score = (
-                self.semantic_weight * sem_score + self.keyword_weight * bm25_score
-            )
-            hybrid_results.append((hybrid_score, meta))
-
-        hybrid_results.sort(key=lambda x: x[0], reverse=True)
-
-        top_results = hybrid_results[:top_k]
-        return [r[0] for r in top_results], [r[1] for r in top_results]
+        # --- Keyword candidates + merge (shared with the episodic stores) ---
+        bm25_candidates = normalized_bm25_candidates(
+            self.bm25,
+            query_text,
+            candidate_k,
+            self.store.metadatas,
+            key_fn=_chunk_key,
+        )
+        ranked = merge_and_rank(
+            sem_candidates,
+            bm25_candidates,
+            self.semantic_weight,
+            self.keyword_weight,
+            top_k,
+        )
+        return [score for score, _ in ranked], [meta for _, meta in ranked]

@@ -15,49 +15,37 @@ from mnemoai.utils.logger import logger
 class VisionModelController(BaseModelController):
     """Vision model controller using LangChain abstractions."""
 
+    CONFIG_SECTION = "VISION_MODEL_ID"
+    PROVIDERS = (
+        "bedrock",
+        "mantle",
+        "ollama",
+        "openai",
+        "anthropic",
+        "sagemaker",
+        "litellm",
+    )
+    PROVIDER_LABEL = "vision model"
+
     def __init__(self, verbose: bool = False) -> None:
         self.verbose_mode = verbose
-        self.model_id = config.get("VISION_MODEL_ID")
-        self.model_name = self.model_id["NAME"]
-        self.model_type = self.model_id["TYPE"]
-        # Optional custom Bedrock endpoint (e.g. Bedrock Mantle).
-        self.endpoint_url = self.model_id.get("ENDPOINT_URL", None)
-        self.max_tokens = self.model_id.get("MAX_TOKENS", None)
-        self.max_conversation_tokens = config.get("MAX_CONVERSATION_TOKENS", 1024 * 8)
-        # No default: newer Bedrock Claude models reject `temperature` as
-        # deprecated, so only send it when explicitly configured.
-        self.temperature = self.model_id.get("TEMPERATURE", None)
-        self.top_p = self.model_id.get("TOP_P", None)
-        self.top_k = self.model_id.get("TOP_K", None)
-        self.stop = self.model_id.get("STOP", None)
-        # SageMaker / LiteLLM connection.
-        self.region = self.model_id.get("REGION", "us-east-1")
+        # Shared reads (model_id/name/type, region, endpoint_url, max_tokens,
+        # max_conversation_tokens, temperature, top_p, top_k, stop, stream).
+        # The config.get calls stay HERE so tests can patch this module's config.
+        self._init_model_config(
+            config.get("VISION_MODEL_ID"),
+            config.get("MAX_CONVERSATION_TOKENS", 1024 * 8),
+        )
+        # Vision-only: SageMaker / LiteLLM connection details.
         self.input_format = self.model_id.get("INPUT_FORMAT", "openai_chat")
         self.api_base = self.model_id.get("API_BASE")
         self.api_key = self.model_id.get("API_KEY")
-        # ChatSageMaker requires concrete numeric defaults.
-        self.stream = self.model_id.get("STREAM", True)
 
         self.model: Optional[BaseChatModel] = None
 
     def initialize_model(self) -> None:
         """Initialize the vision model based on configured type."""
-        if self.model_type == "bedrock":
-            self._initialize_bedrock_model()
-        elif self.model_type == "mantle":
-            self._initialize_mantle_model()
-        elif self.model_type == "ollama":
-            self._initialize_ollama_model()
-        elif self.model_type == "openai":
-            self._initialize_openai_model()
-        elif self.model_type == "anthropic":
-            self._initialize_anthropic_model()
-        elif self.model_type == "sagemaker":
-            self._initialize_sagemaker_model()
-        elif self.model_type == "litellm":
-            self._initialize_litellm_model()
-        else:
-            raise ValueError(f"Unsupported vision model type: {self.model_type}")
+        self._dispatch_provider(self.model_type)
 
     def _initialize_bedrock_model(self) -> None:
         """Initialize AWS Bedrock vision model using LangChain."""

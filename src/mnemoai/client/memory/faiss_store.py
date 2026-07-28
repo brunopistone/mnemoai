@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import faiss
 
@@ -12,6 +12,11 @@ from mnemoai.client.memory.similarity import (
 )
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
+from mnemoai.utils.hybrid_search import (
+    candidate_count,
+    normalized_bm25_candidates,
+    rank_with_similarity,
+)
 from mnemoai.utils.logger import logger
 
 
@@ -238,61 +243,36 @@ class FAISSEpisodicStore:
         if self.index is None or len(self.metadata) == 0:
             return []
 
-        candidate_k = min(top_k * 3, len(self.metadata))
+        candidate_k = candidate_count(top_k, len(self.metadata))
 
-        # --- Semantic candidates ---
+        # --- Semantic candidates (backend-specific: inner product -> cosine) ---
         query_embedding = l2_normalize(self.embeddings.embed([query]))
         scores, indices = self.index.search(query_embedding, candidate_k)
 
-        # idx -> (semantic_score, metadata)
-        sem_candidates: Dict[int, Tuple] = {}
+        sem_candidates = {}
         for i, idx in enumerate(indices[0]):
             if idx < 0 or idx >= len(self.metadata):
                 continue
             # Normalized vectors -> the inner product is a cosine; rescale it to
             # [0,1] so it shares one scale with the Chroma backend and with the
             # BM25 component below.
-            sem_candidates[idx] = (
+            sem_candidates[int(idx)] = (
                 cosine_to_unit(scores[0][i]),
                 self.metadata[idx],
             )
 
-        # --- BM25 candidates ---
-        bm25_candidates: Dict[int, float] = {}
-        if self.bm25 and self.bm25.corpus_size > 0:
-            raw_bm25 = self.bm25.score(query)
-            max_bm25 = max(raw_bm25) if raw_bm25 else 0.0
-
-            if max_bm25 > 0:
-                indexed_scores = sorted(
-                    enumerate(raw_bm25), key=lambda x: x[1], reverse=True
-                )[:candidate_k]
-
-                for idx, score in indexed_scores:
-                    if score <= 0 or idx >= len(self.metadata):
-                        continue
-                    bm25_candidates[idx] = score / max_bm25
-
-        # --- Merge and re-rank ---
-        all_indices = set(sem_candidates.keys()) | set(bm25_candidates.keys())
-        hybrid_results = []
-
-        for idx in all_indices:
-            sem_score = sem_candidates[idx][0] if idx in sem_candidates else 0.0
-            bm25_val = bm25_candidates.get(idx, 0.0)
-            meta = (
-                sem_candidates[idx][1] if idx in sem_candidates else self.metadata[idx]
-            ).copy()
-
-            hybrid_score = (
-                self.semantic_weight * sem_score + self.keyword_weight * bm25_val
-            )
-
-            meta["similarity"] = hybrid_score
-            hybrid_results.append((hybrid_score, meta))
-
-        hybrid_results.sort(key=lambda x: x[0], reverse=True)
-        return [meta for _, meta in hybrid_results[:top_k]]
+        # --- Keyword candidates + merge (shared with the Chroma/RAG stores).
+        # Keyed by corpus index, which is exactly the BM25 helper's default. ---
+        bm25_candidates = normalized_bm25_candidates(
+            self.bm25, query, candidate_k, self.metadata
+        )
+        return rank_with_similarity(
+            sem_candidates,
+            bm25_candidates,
+            self.semantic_weight,
+            self.keyword_weight,
+            top_k,
+        )
 
     def cleanup(self, max_episodes: int = 1000, max_age_days: int = 90) -> None:
         """Remove old episodes and enforce size limit.

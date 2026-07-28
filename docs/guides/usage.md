@@ -123,7 +123,9 @@ mnemoai --continue            # resume the most recent one, no prompt
 ```
 
 `--resume` with no value lists this directory's sessions newest-first, showing how
-long ago each one ran, how many turns it had, and its opening prompt:
+long ago each one ran, how many turns it had, and the opening prompt **as you
+typed it** — retrieved memory, steering instructions and other context the
+assistant adds behind the scenes are left out of the label:
 
 ```
    4m ago    6 turns  refactor the FSDP config parser
@@ -150,9 +152,18 @@ conversation instead; run `mnemoai` without a flag for that.
     resumed session).
 
 Sessions live in `~/.mnemoai/{profile}/sessions/{directory}/` as append-only
-files, one per session. A cancelled turn is recorded too, so a resumed session
-shows exactly what the live one did — including a question you interrupted.
+files, one per session. A turn that was **cancelled or that failed** is recorded
+too — so a resumed session shows exactly what the live one did, including a
+question you interrupted and one a dropped connection cut short.
+
+**Resuming carries the whole conversation forward.** When you resume (or `/load`),
+the restored history is copied into the new session's file, so that file is a
+complete record on its own and resuming *it* later replays everything — not just
+what you added after the restore. The session you resumed from is never modified,
+so you can always go back and resume the same point again.
 
 A launch you never typed into records nothing resumable, so its file is removed
-when you exit — only sessions with at least one exchange are offered. If this
-directory has no sessions yet, `--resume` says so and starts a normal session.
+when you exit — only sessions with at least one exchange are offered, which also
+means a resume you didn't ask anything in won't appear as a duplicate of the
+session it restored. If this directory has no sessions yet, `--resume` says so
+and starts a normal session.

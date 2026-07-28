@@ -12,6 +12,8 @@ Run only these with:   python -m pytest -m integration
 Skip them with:        python -m pytest -m "not integration"
 """
 
+import os
+
 import pytest
 
 
@@ -69,7 +71,41 @@ else:
 
 
 @pytest.fixture(scope="session")
-def live_client():
+def _isolated_app_home(tmp_path_factory):
+    """Redirect ``$MNEMOAI_HOME`` at a throwaway dir for the whole tier.
+
+    This tier drives a REAL client, so every side effect it has on the app home
+    is a real one: session transcripts (which then show up in the user's
+    ``--resume`` picker as fake "conversations" full of test prompts), episodic
+    memory and playbook entries learned from test queries, RAG indexes, and the
+    user profile. Without this, running the integration tier permanently
+    pollutes the developer's own ``~/.mnemoai``.
+
+    ``$MNEMOAI_CONFIG`` is pinned to the config that ALREADY resolved (the skip
+    guard above resolved it against the real home) so the tier still runs
+    against the user's configured provider — only writes are redirected.
+    """
+    from mnemoai.utils.config import Config
+
+    real_config = Config._resolve_config_path()
+    if real_config is not None:
+        os.environ["MNEMOAI_CONFIG"] = str(real_config)
+    real_prompts = Config._resolve_prompts_path()
+    if real_prompts is not None:
+        os.environ["MNEMOAI_PROMPTS"] = str(real_prompts)
+
+    home = tmp_path_factory.mktemp("mnemoai_home")
+    previous = os.environ.get("MNEMOAI_HOME")
+    os.environ["MNEMOAI_HOME"] = str(home)
+    yield home
+    if previous is None:
+        os.environ.pop("MNEMOAI_HOME", None)
+    else:
+        os.environ["MNEMOAI_HOME"] = previous
+
+
+@pytest.fixture(scope="session")
+def live_client(_isolated_app_home):
     """Start a real LangGraphClient once for the whole integration session."""
     if _SKIP_REASON:
         pytest.skip(_SKIP_REASON)

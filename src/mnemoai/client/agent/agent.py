@@ -2621,6 +2621,22 @@ class LangGraphAgent:
             self._emit_answer(msg)  # never streamed on this path — show it
             return msg
 
+        except Exception:
+            # ANY other mid-turn failure (a dropped provider connection, an MCP
+            # error, a bug). Whatever the turn produced stays in LIVE history and
+            # the user keeps talking, so the transcript MUST record it too:
+            # otherwise the log silently stops at the last SUCCESSFUL turn while
+            # the conversation runs on for another hour, and `--resume` restores
+            # a fraction of it even though `/save` has the whole thing.
+            # Log-then-re-raise — the caller still owns the error; this only
+            # makes the record agree with the history the user can see.
+            if result:
+                self._commit_turn(result, turn_log)
+            else:
+                self._log_turn(turn_log)
+            self._last_input_tokens = None
+            raise
+
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
         self._commit_turn(result, turn_log)
