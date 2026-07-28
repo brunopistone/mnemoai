@@ -11,12 +11,32 @@ _RED = "\033[91m"
 _GREEN = "\033[92m"
 _RESET = "\033[0m"
 
+# The boot spinner, while it's running. A message printed from under it would
+# otherwise be chased by the next animation frame, stranding a stale
+# "⠿ Connecting model…" in the scrollback — see StartupLoader.write_above.
+_active_loader = None
+
+
+def set_active_loader(loader) -> None:
+    """Route console output through ``loader`` (None to unset) while it spins."""
+    global _active_loader
+    _active_loader = loader
+
+
+def _emit(text: str) -> None:
+    """Print a line, pausing the boot spinner around it if one is animating."""
+    loader = _active_loader
+    if loader is not None:
+        loader.write_above(text)
+    else:
+        print(text)
+
 
 def print_error(message: str) -> None:
     """Print a user-facing error in red (prefixed with ✗)."""
-    print(f"{_RED}✗ {message}{_RESET}")
+    _emit(f"{_RED}✗ {message}{_RESET}")
 
 
 def print_success(message: str) -> None:
     """Print a user-facing success/status line in green."""
-    print(f"{_GREEN}{message}{_RESET}")
+    _emit(f"{_GREEN}{message}{_RESET}")
