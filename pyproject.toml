@@ -47,7 +47,12 @@ dependencies = [
     "langgraph>=1.1.3",
     "litellm>=1.81.1",
     "markdown-it-py>=4.2.0",
-    "mcp[cli]>=1.26.0",
+    # Capped below 2.0: mcp 2.0.0 removed `mcp.server.fastmcp` (the FastMCP
+    # server API this package's whole tool layer is built on — renamed to
+    # `mcp.server.mcpserver` with a different surface), so an unpinned install
+    # breaks every server tool at import time. Lift the cap together with the
+    # port to the 2.x server API.
+    "mcp[cli]>=1.26.0,<2",
     "mem0ai>=1.0.9",
     "mypy-boto3-sagemaker-runtime>=1.42.54",
     "numpy>=2.4.4",

@@ -18,6 +18,14 @@ internal consolidations. No public-surface change.
 
 ### Fixed
 
+- **`mcp` is capped below 2.0.** `mcp 2.0.0` removed `mcp.server.fastmcp` — the
+  server API every tool in `server/tools/` imports (renamed to
+  `mcp.server.mcpserver` with a different surface) — so a fresh install resolving
+  onto the 2.x line failed at import time and took the whole test suite with it.
+  The requirement is `mcp[cli]>=1.26.0,<2` in `pyproject.toml` and, as an
+  explicit exception to the single-source rule, restated in `requirements.txt` /
+  `requirements-dev.txt` so a `pip install -r` can't drift onto 2.x either. The
+  cap lifts with the port to the 2.x server API.
 - **A conversation is no longer partially recorded when a turn fails.** A turn
   killed by a mid-flight error (a dropped provider connection, an MCP failure)
   left its work in the live conversation but never reached the session

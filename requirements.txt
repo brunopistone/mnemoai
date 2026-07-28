@@ -5,4 +5,12 @@
 # previous hand-mirrored copy had already fallen out of step with pyproject.
 #
 #   pip install -r requirements.txt
+#
+# The one explicit pin below is a deliberate exception to that rule: mcp 2.0.0
+# removed `mcp.server.fastmcp`, the server API this package's entire tool layer
+# imports, so an unpinned resolve breaks every server tool at import time. It is
+# stated here as well as in pyproject.toml so a `pip install -r` that resolves
+# from a cache or an index mirror can't drift onto the 2.x line. Remove both
+# together with the port to the 2.x server API.
+mcp[cli]>=1.26.0,<2
 .
