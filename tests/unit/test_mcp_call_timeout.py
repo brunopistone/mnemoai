@@ -143,3 +143,138 @@ class TestToolWrapperSurfacesTheDetail:
         # Must not end at the colon with nothing after it.
         assert not str(ei.value).rstrip().endswith(":")
         assert "TimeoutError" in str(ei.value)
+
+
+class TestCancelLandsDuringABlockingCall:
+    """Esc must abort a tool call in progress, not at its deadline.
+
+    ``Future.result(timeout)`` parks in ``threading.Condition.wait`` — a C-level
+    acquire that only notices the ``KeyboardInterrupt`` the UI injects when it
+    RETURNS. Measured: an interrupt injected 0.5s into an 8s wait landed at 8.0s.
+    Since the deadline is now derived from the tool's own timeout, that window
+    reached ten minutes (``execute_bash(timeout=600)`` → 630s) while the UI showed
+    "(cancelling…)" and the user's next message sat queued.
+
+    The wait is therefore sliced, and the cooperative cancel event is consulted
+    between slices.
+    """
+
+    def _wrapper(self, monkeypatch):
+        w = mod.MCPClientWrapper.__new__(mod.MCPClientWrapper)
+        w._loop = "loop"  # only needs to be non-None
+        w._cancel_probe = None
+        return w
+
+    def _never_completes(self, monkeypatch, w):
+        """Patch run_coroutine_threadsafe to hand back a future that never resolves."""
+        from concurrent.futures import Future
+
+        fut = Future()
+        monkeypatch.setattr(
+            mod.asyncio, "run_coroutine_threadsafe", lambda coro, loop: fut
+        )
+        return fut
+
+    def test_a_pending_cancel_aborts_the_wait_quickly(self, monkeypatch):
+        import time as _t
+
+        w = self._wrapper(monkeypatch)
+        fut = self._never_completes(monkeypatch, w)
+        w._cancel_probe = lambda: True  # cancel already requested
+
+        t0 = _t.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            w._run_coroutine(object(), timeout=600)
+        elapsed = _t.monotonic() - t0
+        # Must land within a slice or two, NOT at the 600s deadline.
+        assert elapsed < 5, f"cancel took {elapsed:.1f}s"
+        assert fut.cancelled() or fut.cancel(), "orphaned coroutine not cancelled"
+
+    def test_no_cancel_still_times_out_normally(self, monkeypatch):
+        w = self._wrapper(monkeypatch)
+        self._never_completes(monkeypatch, w)
+        w._cancel_probe = lambda: False
+        with pytest.raises(MCPCallTimeout, match="no response"):
+            w._run_coroutine(object(), timeout=0.5)
+
+    def test_teardown_is_not_cancellable(self, monkeypatch):
+        # shutdown() runs right after a cancelled turn, with the flag still set.
+        # If that aborted the disconnect, the server subprocess would be orphaned.
+        w = self._wrapper(monkeypatch)
+        self._never_completes(monkeypatch, w)
+        w._cancel_probe = lambda: True
+        with pytest.raises(MCPCallTimeout):  # times out, NOT KeyboardInterrupt
+            w._run_coroutine(object(), timeout=0.5, cancellable=False)
+
+    def test_a_broken_probe_does_not_break_the_call(self, monkeypatch):
+        w = self._wrapper(monkeypatch)
+        self._never_completes(monkeypatch, w)
+
+        def _boom():
+            raise RuntimeError("probe exploded")
+
+        w._cancel_probe = _boom
+        # Must fall through to the normal timeout rather than propagate.
+        with pytest.raises(MCPCallTimeout):
+            w._run_coroutine(object(), timeout=0.5)
+
+    def test_no_probe_means_no_cancel(self, monkeypatch):
+        w = self._wrapper(monkeypatch)
+        self._never_completes(monkeypatch, w)
+        assert w._cancel_requested() is False
+        with pytest.raises(MCPCallTimeout):
+            w._run_coroutine(object(), timeout=0.5)
+
+    def test_a_completed_call_returns_its_result(self, monkeypatch):
+        # The slicing must not break the happy path.
+        from concurrent.futures import Future
+
+        w = self._wrapper(monkeypatch)
+        fut = Future()
+        fut.set_result("the result")
+        monkeypatch.setattr(
+            mod.asyncio, "run_coroutine_threadsafe", lambda coro, loop: fut
+        )
+        assert w._run_coroutine(object(), timeout=600) == "the result"
+
+    def test_multi_client_forwards_the_probe_to_members(self):
+        # A member wrapper has no other way to learn about a cancel.
+        multi = mod.MultiMCPClient.__new__(mod.MultiMCPClient)
+        a = mod.MCPClientWrapper.__new__(mod.MCPClientWrapper)
+        b = mod.MCPClientWrapper.__new__(mod.MCPClientWrapper)
+        multi._members = [("builtin", a), ("ext", b)]
+        multi._cancel_probe = None
+
+        probe = lambda: True  # noqa: E731
+        multi.set_cancel_probe(probe)
+        assert a._cancel_probe is probe and b._cancel_probe is probe
+
+
+class TestDerivedDeadlineIsBounded:
+    """A model-supplied timeout must not become an unbounded transport wait.
+
+    Nothing validates `timeout_seconds` / `timeout` on either side — not the
+    server tool, not the client — so a hallucinated `timeout_seconds=999999999`
+    would have made the transport wait ~32 years. The single 300s cap contained
+    this by accident; deriving the deadline from the argument removed that safety
+    net, so the bound is now explicit.
+    """
+
+    def test_an_absurd_timeout_is_clamped(self):
+        assert _call_deadline({"timeout_seconds": 999999999}) == mod._MAX_DERIVED_TIMEOUT
+
+    def test_a_days_long_timeout_is_clamped(self):
+        assert _call_deadline({"timeout_seconds": 86400}) == mod._MAX_DERIVED_TIMEOUT
+
+    def test_realistic_timeouts_are_untouched(self):
+        # The whole point of deriving the deadline — these must still pass through.
+        assert _call_deadline({"timeout_seconds": 1500}) == 1530
+        assert _call_deadline({"timeout": 600}) == 630
+
+    def test_the_ceiling_never_lowers_an_explicit_config(self):
+        # A user who sets LLM.MCP_CALL_TIMEOUT above the ceiling means it; the
+        # clamp guards the DERIVED part only and must not drag the floor down.
+        big = mod._MAX_DERIVED_TIMEOUT * 2
+        assert _call_deadline({"timeout": 100}, default=big) == big
+        assert _call_deadline({"timeout_seconds": 999999}, default=big) == big
+        assert _call_deadline({}, default=big) == big

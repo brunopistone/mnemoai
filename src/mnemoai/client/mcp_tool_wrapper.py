@@ -5,6 +5,7 @@ import atexit
 import contextlib
 import json
 import threading
+import time
 from typing import Any, Dict, List, Optional, Type
 
 from langchain_core.callbacks import CallbackManagerForToolRun
@@ -35,6 +36,18 @@ _TIMEOUT_ARGS = ("timeout_seconds", "timeout")
 # small and we abort the very response we asked it to produce.
 _TIMEOUT_HEADROOM = 30
 
+# How long each slice of the blocking wait lasts. Short enough that Esc feels
+# immediate, long enough that a multi-minute call isn't thousands of wakeups.
+_CANCEL_POLL_INTERVAL = 0.2
+
+# Hard ceiling on a DERIVED deadline. Nothing validates a tool's timeout argument
+# on either side, so a hallucinated `timeout_seconds=999999999` would otherwise
+# make the transport wait ~32 years. The old single 300s cap contained this by
+# accident; deriving the deadline from the argument removed that safety net, so
+# state the bound explicitly. One hour is far above any real tool wait and still
+# guarantees the call eventually ends.
+_MAX_DERIVED_TIMEOUT = 3600
+
 
 def _call_deadline(arguments: Dict[str, Any], default: float = MCP_CALL_TIMEOUT) -> float:
     """Transport deadline for one call: the tool's own timeout + headroom, or the default.
@@ -46,7 +59,9 @@ def _call_deadline(arguments: Dict[str, Any], default: float = MCP_CALL_TIMEOUT)
 
     Never returns LESS than ``default`` — a tool declaring a short timeout still
     gets the normal transport budget, since the argument describes the tool's own
-    internal deadline, not how long the round trip may take.
+    internal deadline, not how long the round trip may take. And never more than
+    ``_MAX_DERIVED_TIMEOUT``, because the argument is model-supplied and unvalidated
+    at both ends.
     """
     for key in _TIMEOUT_ARGS:
         raw = arguments.get(key) if isinstance(arguments, dict) else None
@@ -57,7 +72,11 @@ def _call_deadline(arguments: Dict[str, Any], default: float = MCP_CALL_TIMEOUT)
         except (TypeError, ValueError):
             continue  # a non-numeric timeout is the tool's problem, not ours
         if wanted > 0:
-            return max(default, wanted + _TIMEOUT_HEADROOM)
+            # Clamp the DERIVED part only, then floor at `default`: the ceiling
+            # guards against an absurd model-supplied argument, and must never
+            # drag the budget below what the user explicitly configured.
+            derived = min(wanted + _TIMEOUT_HEADROOM, _MAX_DERIVED_TIMEOUT)
+            return max(default, derived)
     return default
 
 
@@ -211,6 +230,10 @@ class MCPClientWrapper:
         # touch them — see _serve_session.
         self._session_task: Optional[asyncio.Task] = None
         self._close: Optional[asyncio.Event] = None
+        # Callable returning True when the UI has asked to cancel the turn. Set by
+        # the client once the agent exists; without it a blocking tool call can
+        # only end at its deadline (see _run_coroutine).
+        self._cancel_probe = None
 
         atexit.register(self.shutdown)
 
@@ -238,12 +261,30 @@ class MCPClientWrapper:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _run_coroutine(self, coro, timeout: float = MCP_CALL_TIMEOUT):
-        """Run a coroutine in the background event loop and wait for result.
+    def _run_coroutine(self, coro, timeout: float = MCP_CALL_TIMEOUT, cancellable: bool = True):
+        """Run a coroutine on the background loop and wait, cancellably.
+
+        Waits in short slices rather than one ``future.result(timeout)`` call,
+        because that single wait is **uninterruptible**: it parks in
+        ``threading.Condition.wait``, a C-level acquire that only notices the
+        ``KeyboardInterrupt`` the UI injects when it RETURNS. So pressing Esc
+        during a tool call did nothing until the deadline expired — measured, an
+        interrupt injected 0.5s into an 8s wait landed at 8.0s. Since the
+        deadline is now derived from the tool's own timeout, that window could be
+        ten minutes (``execute_bash(timeout=600)`` → 630s) with the UI showing
+        "(cancelling…)" the whole time.
+
+        Slicing gives the interpreter a chance to deliver that async exception
+        between slices, and lets us notice the cooperative cancel event even when
+        no exception is delivered at all.
 
         Args:
             coro: Coroutine to run
             timeout: Max seconds to wait before cancelling the coroutine
+            cancellable: Whether a pending UI cancel should abort this wait. False
+                for teardown (see ``shutdown``), which must still run *after* the
+                user cancelled a turn — otherwise the cancel flag that ended the
+                turn also aborts the disconnect and orphans the subprocess.
 
         Returns:
             Result of the coroutine
@@ -251,8 +292,20 @@ class MCPClientWrapper:
         if self._loop is None:
             raise RuntimeError("Background loop not started")
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        deadline = time.monotonic() + timeout
         try:
-            return future.result(timeout=timeout)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                try:
+                    return future.result(timeout=min(_CANCEL_POLL_INTERVAL, remaining))
+                except TimeoutError:
+                    # This slice expired, not the call. Check for a cancel, then
+                    # keep waiting — the loop's own deadline check ends it.
+                    if cancellable and self._cancel_requested():
+                        future.cancel()
+                        raise KeyboardInterrupt from None
         except TimeoutError:
             # Cancel the orphaned coroutine on the background loop so it can't
             # keep mutating session state after we've given up on it.
@@ -262,6 +315,28 @@ class MCPClientWrapper:
             raise MCPCallTimeout(
                 f"no response from the MCP server after {timeout:.0f}s"
             ) from None
+        except BaseException:
+            # Cancelled (injected KeyboardInterrupt landed between slices) or any
+            # other abort: don't leave the coroutine running against a session
+            # nobody is waiting on any more.
+            future.cancel()
+            raise
+
+    def _cancel_requested(self) -> bool:
+        """True if the UI asked to abort the running turn.
+
+        Reads the agent's cooperative cancel event, which the Esc/Ctrl+C handler
+        sets before injecting the KeyboardInterrupt. Consulting it here is what
+        makes a cancel land *during* a blocking tool call rather than after it.
+        Best-effort: no provider (embedded use, tests) simply means no cancel.
+        """
+        probe = self._cancel_probe
+        if probe is None:
+            return False
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 — a broken probe must not break the call
+            return False
 
     async def _serve_session(self, ready: "asyncio.Future") -> None:
         """Own the stdio + session contexts for the WHOLE life of the connection.
@@ -510,7 +585,12 @@ class MCPClientWrapper:
                     # 15s: _disconnect itself waits up to 10s for the session
                     # task to unwind before cancelling it, so a shorter budget
                     # here would abandon that teardown and orphan the subprocess.
-                    self._run_coroutine(self._disconnect(), timeout=15)
+                    # cancellable=False: shutdown often runs right after the user
+                    # cancelled a turn, and that still-set cancel flag would
+                    # otherwise abort the disconnect — leaking the subprocess.
+                    self._run_coroutine(
+                        self._disconnect(), timeout=15, cancellable=False
+                    )
                 except Exception as e:
                     logger.debug(f"MCP disconnect during shutdown failed: {e}")
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -552,6 +632,17 @@ class MultiMCPClient:
         for server in external_servers or []:
             self._members.append((server.name, MCPClientWrapper(server.params)))
         self._tools: List[MCPToolWrapper] = []
+        self._cancel_probe = None
+
+    def set_cancel_probe(self, probe) -> None:
+        """Route the UI's cancel signal to every member wrapper.
+
+        Without this an Esc during a tool call can't land until the call's
+        deadline — a member wrapper has no other way to learn about it.
+        """
+        self._cancel_probe = probe
+        for _, wrapper in self._members:
+            wrapper._cancel_probe = probe
 
     def __enter__(self):
         """Connect every server; skip (with a warning) any that fail."""
