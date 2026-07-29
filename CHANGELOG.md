@@ -11,8 +11,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [1.8.3] — 2026-07-29
 
-Three MCP transport fixes, all found from one real session where a long-running
-tool call failed four times with a blank error message.
+MCP transport fixes, all traced back to one real session where a long-running
+tool call failed four times with a blank error message and Esc appeared to do
+nothing.
 
 ### Fixed
 
@@ -22,7 +23,20 @@ tool call failed four times with a blank error message.
   the client gave up while the server was still dutifully waiting, once every five
   minutes. The per-call deadline is now derived from the tool's own
   `timeout_seconds` / `timeout` argument plus headroom, treating the configured
-  value as a floor rather than a ceiling.
+  value as a floor rather than a ceiling — and bounded above (1 hour), since that
+  argument is model-supplied and validated nowhere, so an absurd value would
+  otherwise become an effectively unbounded wait.
+- **Esc now cancels a tool call in progress instead of at its deadline.** The
+  worker waited in a single `Future.result(timeout=…)`, which parks in
+  `threading.Condition.wait` — a C-level acquire that only notices the injected
+  `KeyboardInterrupt` when it *returns*. So cancelling during a tool call showed
+  `(cancelling…)` and then hung for the whole deadline, with the next message
+  stuck in the queue behind it (measured: a cancel 1s into a 600s wait landed at
+  600s). The wait is now sliced and consults the agent's existing cooperative
+  cancel event between slices, so a cancel lands within a tick — verified at 1.0s
+  against a 630s deadline. Teardown is deliberately exempt: `shutdown()` often
+  runs right after a cancelled turn, and honoring that still-set flag there would
+  abort the disconnect and orphan the server subprocess.
 - **A timed-out call says what happened.** `concurrent.futures.TimeoutError`
   stringifies to the empty string, and every log and re-raise site interpolated
   it — so a timeout surfaced as a bare `Tool execution error:` with nothing after

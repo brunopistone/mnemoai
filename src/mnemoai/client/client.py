@@ -306,6 +306,12 @@ class LangGraphClient:
                 # launch directory. Independent of /save (user-curated, never
                 # swept); this one expires on age.
                 self._attach_session_log()
+                # Let a blocking MCP tool call notice Esc. The worker parks in an
+                # uninterruptible wait, so without this probe a cancel can't land
+                # until the call's deadline — up to ten minutes on a long tool.
+                probe = getattr(self.mcp_client, "set_cancel_probe", None)
+                if probe is not None:
+                    probe(lambda: self.agent is not None and self.agent._cancelled())
 
         except Exception as e:
             logger.error(traceback.format_exc())
