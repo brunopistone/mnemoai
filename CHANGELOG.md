@@ -9,6 +9,43 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.3] — 2026-07-29
+
+Three MCP transport fixes, all found from one real session where a long-running
+tool call failed four times with a blank error message.
+
+### Fixed
+
+- **A tool's own timeout is now honored by the transport.** Every call was capped
+  at `LLM.MCP_CALL_TIMEOUT` (default 300s) regardless of what the tool was asked
+  to wait for, so `wait_for_task(timeout_seconds=1500)` could **never** complete —
+  the client gave up while the server was still dutifully waiting, once every five
+  minutes. The per-call deadline is now derived from the tool's own
+  `timeout_seconds` / `timeout` argument plus headroom, treating the configured
+  value as a floor rather than a ceiling.
+- **A timed-out call says what happened.** `concurrent.futures.TimeoutError`
+  stringifies to the empty string, and every log and re-raise site interpolated
+  it — so a timeout surfaced as a bare `Tool execution error:` with nothing after
+  the colon, indistinguishable from a crash. Timeouts now carry the tool name, the
+  deadline that applied, and the knob to change; the model-facing formatter falls
+  back to the exception class rather than emitting a bare `Error:`. The call is
+  deliberately **not** retried: the request was already delivered, so the tool may
+  well have run, and repeating it could duplicate a commit, a file edit, or a
+  background build.
+- **Recovering from a dead MCP server no longer dumps a traceback.** The stdio and
+  session contexts were entered in one coroutine and exited in another; since each
+  runs as its own asyncio task, `anyio`'s task-affine cancel scopes rejected it
+  with `RuntimeError: Attempted to exit cancel scope in a different task than it
+  was entered in`. Reconnection still worked, but printed an alarming stack trace
+  and left the dead subprocess's pipes unreaped. A single long-lived task now owns
+  both contexts for the life of the connection, so entry and exit are the same
+  task by construction, and teardown is bounded so a wedged server can't hang exit.
+- **Compaction records its boundary in the session transcript.** The marker was
+  defined but never called from the compaction path. Purely informational — the
+  transcript is append-only, so `--resume` already restored the full conversation
+  either side of a compaction — but the boundary is otherwise invisible in a log
+  that never loses anything.
+
 ## [1.8.2] — 2026-07-28
 
 ### Fixed

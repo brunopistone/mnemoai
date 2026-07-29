@@ -383,3 +383,46 @@ class TestResumedHistoryIsRecorded:
         b.log_turn(_turn("something new", "a"))
         assert b.discard_if_empty() is False
         assert b.path.exists()
+
+
+class TestCompactionBoundaryIsRecorded:
+    """A compaction writes a marker, and the marker changes nothing else.
+
+    The transcript is append-only, so the turns compaction summarizes away are
+    still on disk and `--resume` restores them regardless — the marker is purely
+    informational, recording WHERE the live context was shrunk. It had been dead
+    code (defined, never called from the compaction path).
+    """
+
+    def test_marker_does_not_inflate_the_turn_count(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q1", "a1"))
+        log.log_compaction()
+        log.log_turn(_turn("q2", "a2"))
+        # The picker shows "N turns"; a compaction is not a turn the user took.
+        assert slog.read_session(log.path)["turns"] == 2
+
+    def test_history_either_side_of_a_compaction_survives(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("before compaction", "a1"))
+        log.log_compaction()
+        log.log_turn(_turn("after compaction", "a2"))
+        blob = str(slog.read_session(log.path)["messages"])
+        assert "before compaction" in blob and "after compaction" in blob
+
+    def test_a_marker_only_session_is_still_treated_as_empty(self, home):
+        # Otherwise a launch that only compacted would be offered as resumable
+        # and restore nothing.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_compaction()
+        assert slog.list_sessions(cwd="/proj/a") == []
+        assert log.discard_if_empty() is True
+
+    def test_the_compaction_path_calls_it(self, home, monkeypatch):
+        # Guard against it going dead again: assert the wiring, not just the API.
+        import inspect
+
+        from mnemoai.client.managers import agent_conversation_manager as acm
+
+        src = inspect.getsource(acm)
+        assert "log_compaction()" in src, "compaction no longer records a boundary"

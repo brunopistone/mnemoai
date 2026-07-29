@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import contextlib
 import json
 import threading
 from typing import Any, Dict, List, Optional, Type
@@ -18,10 +19,56 @@ from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import open_mcp_log
 
-# Upper bound for any single MCP tool call, in seconds. Must comfortably exceed
-# the longest tool-level timeout (e.g. execute_bash allows up to 120s) so the
-# transport doesn't abort a call the tool itself considers valid.
+# Default upper bound for a single MCP tool call, in seconds. This is a FLOOR,
+# not a ceiling: a tool that takes its own timeout argument raises the transport
+# deadline above it (see _call_deadline), because a transport that gives up while
+# the tool is still legitimately working can never let that call succeed.
 MCP_CALL_TIMEOUT = config.get("LLM", {}).get("MCP_CALL_TIMEOUT", 300)
+
+# Tool arguments that state how long the TOOL intends to run. The transport
+# deadline is derived from these plus headroom, so `wait_for_task(1500)` isn't
+# killed at the 300s default while the server is still dutifully waiting.
+_TIMEOUT_ARGS = ("timeout_seconds", "timeout")
+
+# Added to a tool's own timeout to get the transport deadline: the tool needs
+# time to notice its deadline, build the timeout payload, and ship it back. Too
+# small and we abort the very response we asked it to produce.
+_TIMEOUT_HEADROOM = 30
+
+
+def _call_deadline(arguments: Dict[str, Any], default: float = MCP_CALL_TIMEOUT) -> float:
+    """Transport deadline for one call: the tool's own timeout + headroom, or the default.
+
+    A single global cap is wrong for tools that are *asked* to wait: the client
+    aborted `wait_for_task(timeout_seconds=1500)` after 300s with an empty
+    `concurrent.futures.TimeoutError`, so a legitimate long wait could never
+    complete and the failure carried no message explaining why.
+
+    Never returns LESS than ``default`` — a tool declaring a short timeout still
+    gets the normal transport budget, since the argument describes the tool's own
+    internal deadline, not how long the round trip may take.
+    """
+    for key in _TIMEOUT_ARGS:
+        raw = arguments.get(key) if isinstance(arguments, dict) else None
+        if raw is None:
+            continue
+        try:
+            wanted = float(raw)
+        except (TypeError, ValueError):
+            continue  # a non-numeric timeout is the tool's problem, not ours
+        if wanted > 0:
+            return max(default, wanted + _TIMEOUT_HEADROOM)
+    return default
+
+
+class MCPCallTimeout(Exception):
+    """A tool call exceeded the transport deadline.
+
+    Exists because ``concurrent.futures.TimeoutError`` stringifies to the empty
+    string: every log/raise site interpolates ``{e}``, so a timeout surfaced as
+    a bare ``Tool execution error:`` with nothing after the colon — impossible to
+    tell from a crash. This one always carries what timed out and what to change.
+    """
 
 
 class MCPToolWrapper(BaseTool):
@@ -112,8 +159,12 @@ class MCPToolWrapper(BaseTool):
             # even when `.name` is namespaced for collisions (e.g. server__tool).
             return self.mcp_client.call_tool_sync(self.mcp_tool.name, kwargs)
         except Exception as e:
-            logger.error(f"Tool execution error: {e}")
-            raise ToolException(f"Error executing tool {self.name}: {e}")
+            # `or repr(e)` because some exceptions (notably the stdlib
+            # TimeoutError) have an EMPTY str(), which rendered this as a bare
+            # "Tool execution error:" with nothing after the colon.
+            detail = str(e) or repr(e)
+            logger.error(f"Tool execution error: {detail}")
+            raise ToolException(f"Error executing tool {self.name}: {detail}")
 
     async def _arun(
         self,
@@ -132,8 +183,9 @@ class MCPToolWrapper(BaseTool):
         try:
             return await self.mcp_client.call_tool(self.mcp_tool.name, kwargs)
         except Exception as e:
-            logger.error(f"Async tool execution error: {e}")
-            raise ToolException(f"Error executing tool {self.name}: {e}")
+            detail = str(e) or repr(e)  # see _run: some exceptions stringify to ""
+            logger.error(f"Async tool execution error: {detail}")
+            raise ToolException(f"Error executing tool {self.name}: {detail}")
 
 
 class MCPClientWrapper:
@@ -152,8 +204,13 @@ class MCPClientWrapper:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._session = None
-        self._client_cm = None
         self._errlog = None  # file handle for the subprocess's stderr
+        # The single task that owns the stdio + session contexts, and the event
+        # used to ask it to exit them. Both contexts must be entered and exited
+        # on the SAME task (anyio cancel-scope affinity), so no other code may
+        # touch them — see _serve_session.
+        self._session_task: Optional[asyncio.Task] = None
+        self._close: Optional[asyncio.Event] = None
 
         atexit.register(self.shutdown)
 
@@ -200,56 +257,120 @@ class MCPClientWrapper:
             # Cancel the orphaned coroutine on the background loop so it can't
             # keep mutating session state after we've given up on it.
             future.cancel()
-            raise
+            # Re-raise as something that has a message: the stdlib TimeoutError
+            # renders as "" and made this failure indistinguishable from a crash.
+            raise MCPCallTimeout(
+                f"no response from the MCP server after {timeout:.0f}s"
+            ) from None
 
-    async def _connect(self) -> None:
-        """Connect to the MCP server."""
-        if self._connected:
-            return
+    async def _serve_session(self, ready: "asyncio.Future") -> None:
+        """Own the stdio + session contexts for the WHOLE life of the connection.
 
-        # Route the server subprocess's stderr to a log file instead of the
-        # terminal, so its noise (e.g. `npm notice` from an npx server) doesn't
-        # corrupt the pinned UI — but stays available for debugging a startup
-        # failure. Fall back to the default (inherited stderr) if the log can't
-        # be opened.
+        This is the one place they may be entered and exited, and it is why the
+        method exists: ``stdio_client`` and ``ClientSession`` are built on
+        ``anyio`` task groups, whose cancel scopes are **task-affine** — exiting
+        one from a different task than entered it raises ``RuntimeError:
+        Attempted to exit cancel scope in a different task than it was entered
+        in``. The previous design entered them in ``_connect()`` and exited them
+        in ``_disconnect()``, each submitted through its own
+        ``run_coroutine_threadsafe`` call and therefore running as a DIFFERENT
+        task, so any reconnect after a server crash dumped that traceback into
+        the user's terminal and left the dead subprocess's pipes unreaped.
+
+        Keeping both `async with` blocks inside a single coroutine makes entry
+        and exit the same task by construction. Callers no longer touch the
+        contexts at all: they resolve ``ready`` to learn the session is usable,
+        and set ``_close`` to ask for teardown.
+        """
         errlog = None
         try:
-            self._errlog = open_mcp_log()  # size-rotated, line-buffered
-            errlog = self._errlog
-        except OSError as e:
-            logger.debug(f"Could not open MCP stderr log ({e}); using default")
+            # Route the subprocess's stderr to a log file instead of the terminal,
+            # so its noise (e.g. `npm notice` from an npx server) can't corrupt the
+            # pinned UI, while staying available for debugging a startup failure.
+            try:
+                errlog = open_mcp_log()  # size-rotated, line-buffered
+            except OSError as e:
+                logger.debug(f"Could not open MCP stderr log ({e}); using default")
 
-        self._client_cm = (
-            stdio_client(self.server_params, errlog=errlog)
-            if errlog is not None
-            else stdio_client(self.server_params)
-        )
-        read, write = await self._client_cm.__aenter__()
-
-        self._session = ClientSession(read, write)
-        await self._session.__aenter__()
-        await self._session.initialize()
-        self._connected = True
-
-    async def _disconnect(self) -> None:
-        """Disconnect from the MCP server."""
-        if not self._connected:
-            return
-        try:
-            if self._session:
-                await self._session.__aexit__(None, None, None)
-            if self._client_cm:
-                await self._client_cm.__aexit__(None, None, None)
+            client_cm = (
+                stdio_client(self.server_params, errlog=errlog)
+                if errlog is not None
+                else stdio_client(self.server_params)
+            )
+            async with client_cm as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    self._session = session
+                    self._connected = True
+                    if not ready.done():
+                        ready.set_result(True)
+                    # Park here for the connection's lifetime. Everything the
+                    # caller does happens on OTHER tasks against `self._session`;
+                    # this task exists purely to hold the contexts open so that
+                    # the eventual `__aexit__` runs where `__aenter__` did.
+                    await self._close.wait()
+        except BaseException as e:  # noqa: BLE001 — must reach the waiter
+            # A startup failure (missing binary, server that exits immediately)
+            # has to surface on the caller's thread, not vanish into a task
+            # nobody awaits — MultiMCPClient relies on it to skip a bad server.
+            if not ready.done():
+                ready.set_exception(e)
+            elif not isinstance(e, asyncio.CancelledError):
+                logger.debug(f"MCP session task ended: {type(e).__name__}: {e}")
         finally:
             self._connected = False
             self._session = None
-            self._client_cm = None
-            if self._errlog is not None:
+            if errlog is not None:
                 try:
-                    self._errlog.close()
+                    errlog.close()
                 except OSError:
                     pass
-                self._errlog = None
+            self._errlog = None
+            # Unblock anyone waiting on teardown of a task that died on its own.
+            if not ready.done():
+                ready.set_result(False)
+
+    async def _connect(self) -> None:
+        """Start the session task and wait until the session is usable."""
+        if self._connected:
+            return
+        loop = asyncio.get_running_loop()
+        self._close = asyncio.Event()
+        ready: asyncio.Future = loop.create_future()
+        # Strong reference: a bare create_task() can be garbage-collected
+        # mid-flight, which would tear down the connection at random.
+        self._session_task = loop.create_task(self._serve_session(ready))
+        await ready  # raises whatever the task failed with
+
+    async def _disconnect(self) -> None:
+        """Ask the session task to exit its contexts, and wait for it to finish.
+
+        Only ever SIGNALS: the `__aexit__` itself happens inside
+        ``_serve_session`` (see that method for why that distinction matters).
+        """
+        task = self._session_task
+        self._session_task = None
+        if task is None:
+            self._connected = False
+            self._session = None
+            return
+        if self._close is not None:
+            self._close.set()
+        try:
+            # Bounded: a wedged server must not hang shutdown forever. Cancelling
+            # is safe here — the cancellation is delivered to the task that owns
+            # the scopes, which is exactly what anyio requires.
+            await asyncio.wait_for(asyncio.shield(task), timeout=10)
+        except (asyncio.TimeoutError, TimeoutError):
+            logger.debug("MCP session task did not exit in time; cancelling")
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+        except BaseException as e:  # noqa: BLE001 — teardown must not propagate
+            logger.debug(f"MCP session task teardown error (ignored): {e}")
+        finally:
+            self._connected = False
+            self._session = None
 
     def list_tools_sync(self) -> List[MCPToolWrapper]:
         """Synchronously list available tools from the MCP server.
@@ -284,7 +405,21 @@ class MCPClientWrapper:
         Returns:
             Tool execution result as string
         """
-        return self._run_coroutine(self.call_tool(name, arguments))
+        deadline = _call_deadline(arguments)
+        try:
+            return self._run_coroutine(self.call_tool(name, arguments), timeout=deadline)
+        except MCPCallTimeout as e:
+            # Name the tool and the knob. Deliberately NOT retried: the request
+            # was already delivered, so the tool may well have run — replaying it
+            # would duplicate side effects (a second commit, a re-applied edit, a
+            # second background build), and we publish no idempotency hints that
+            # would let us tell a safe retry from a destructive one.
+            raise MCPCallTimeout(
+                f"'{name}' did not respond within {deadline:.0f}s. The call was "
+                "not retried — it may already have run, so repeating it could "
+                "duplicate its effects. Raise LLM.MCP_CALL_TIMEOUT if this tool "
+                "legitimately needs longer."
+            ) from e
 
     async def _reconnect(self) -> None:
         """Tear down a dead session and establish a fresh one.
@@ -294,13 +429,14 @@ class MCPClientWrapper:
         would make every subsequent tool call fail for the rest of the session.
         """
         logger.warning("MCP session appears dead; attempting reconnect")
-        self._connected = False
+        # _disconnect only SIGNALS the session task, which exits the contexts on
+        # the task that entered them — so this no longer raises anyio's
+        # "exit cancel scope in a different task" and the dead subprocess's
+        # pipes are actually closed instead of leaked.
         try:
             await self._disconnect()
         except Exception as e:
             logger.debug(f"Error during reconnect teardown (ignored): {e}")
-        self._session = None
-        self._client_cm = None
         await self._connect()
         # Refresh tool handles bound to the new session.
         await self._list_tools()
@@ -371,7 +507,10 @@ class MCPClientWrapper:
         if self._loop:
             if self._connected:
                 try:
-                    self._run_coroutine(self._disconnect(), timeout=5)
+                    # 15s: _disconnect itself waits up to 10s for the session
+                    # task to unwind before cancelling it, so a shorter budget
+                    # here would abandon that teardown and orphan the subprocess.
+                    self._run_coroutine(self._disconnect(), timeout=15)
                 except Exception as e:
                     logger.debug(f"MCP disconnect during shutdown failed: {e}")
             self._loop.call_soon_threadsafe(self._loop.stop)
@@ -381,7 +520,7 @@ class MCPClientWrapper:
             self._thread = None
             self._connected = False
             self._session = None
-            self._client_cm = None
+            self._session_task = None
 
 
 class MultiMCPClient:

@@ -791,6 +791,18 @@ class AgentConversationManager:
             client.system_prompt = new_system_content
             agent.system_prompt = new_system_content
 
+            # Note the boundary in the session transcript. Purely informational:
+            # the log is append-only, so the turns summarized away are still on
+            # disk and `--resume` restores the full conversation regardless. This
+            # only records WHERE the live context was shrunk, which is otherwise
+            # invisible in a transcript that never loses anything.
+            log = getattr(agent, "session_log", None)
+            if log is not None:
+                try:
+                    log.log_compaction()
+                except Exception as e:  # noqa: BLE001 — never break a compaction
+                    logger.debug(f"Session log compaction marker failed: {e}")
+
             if hasattr(agent, "_last_input_tokens"):
                 agent._last_input_tokens = None
             client.spinner.stop()
