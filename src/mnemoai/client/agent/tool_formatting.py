@@ -90,7 +90,10 @@ def tool_error_message(tool_name: str, exc: Exception) -> str:
     Translates a pydantic "Field required" failure (opaque text the model tends
     to retry verbatim) into a plain instruction to supply the missing args.
     """
-    text = str(exc)
+    # Some exceptions carry NO message — notably the stdlib TimeoutError, whose
+    # str() is "". That produced a bare "Error: " for the model to act on, with
+    # nothing saying what went wrong; fall back to the class name.
+    text = str(exc) or type(exc).__name__
     missing = _MISSING_FIELD_RE.findall(text)
     if missing:
         fields = ", ".join(sorted(set(missing)))

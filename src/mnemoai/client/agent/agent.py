@@ -2411,7 +2411,10 @@ class LangGraphAgent:
                         )
                     )
                 except Exception as e:
-                    logger.error(f"Tool execution error: {e}")
+                    # `str(e) or repr(e)` — a bare TimeoutError has an empty
+                    # str(), so this logged "Tool execution error:" and nothing
+                    # else. (`e or …` would NOT work: an exception is truthy.)
+                    logger.error(f"Tool execution error: {str(e) or repr(e)}")
                     tool_results.append(
                         ToolMessage(
                             content=self._tool_error_message(tool_name, e),
