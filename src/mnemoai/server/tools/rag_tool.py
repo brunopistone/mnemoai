@@ -119,19 +119,18 @@ def register_rag_tools(mcp: FastMCP) -> None:
             if rag_instance is None:
                 return "No documents to clear."
 
-            # Delegate to the store's own clear(). The previous code assigned to
-            # `store.metadatas` / `store.index`, which are getter-ONLY properties
-            # on VectorStoreController — every call raised AttributeError and was
-            # swallowed by the handler below, so clearing never once worked. Each
-            # backend already implements clear() correctly (FAISS rebuilds its
-            # index and persists; Chroma drops the collection).
-            clear = getattr(rag_instance.store, "clear", None)
-            if not callable(clear):
-                return (
-                    "This vector store does not support clearing. Use /clear to "
-                    "start a new session instead."
-                )
-            clear()
+            # Delegate to the SESSION's clear(), not the store's: it drops the
+            # vectors AND the BM25 keyword index, which is built separately and
+            # otherwise keeps a tokenized copy of every "cleared" document alive
+            # for the life of the process. (The earlier code assigned to
+            # `store.metadatas` / `store.index` — getter-ONLY properties — so it
+            # raised AttributeError on every call and never cleared anything.)
+            if rag_instance.store is None:
+                # No store yet means nothing was ever ingested — that's "nothing
+                # to clear", not an unsupported backend.
+                rag_instance.bm25 = None
+                return "No documents to clear."
+            rag_instance.clear()
 
             return "All documents have been cleared from the RAG system."
 

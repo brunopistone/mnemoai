@@ -7,20 +7,47 @@ import textwrap
 from datetime import datetime
 from typing import Any, Dict, List
 
+from mnemoai.client.ui import turn_view
 from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import profile_dir
 
-# An interaction_count above this is taken as evidence of the pre-fix
-# double counting rather than genuine use: reaching it honestly would take tens of
-# thousands of prompts in ONE profile, while the N²/2 growth got there in a few
-# hundred turns. Deliberately high so a heavy real user isn't "repaired".
-_INFLATION_SUSPECT_THRESHOLD = 5000
+# A pre-fix profile (no ``_recount_repaired`` flag) counted once per MESSAGE rather
+# than once per turn, so it is inflated at any real size. Above this the count is
+# certainly wrong and is reset; below it, a profile is young enough that keeping the
+# value costs nothing (and it may be a genuine handful of turns).
+_INFLATION_SUSPECT_THRESHOLD = 50
 
 # How close to a bound (or to the 0.5 default) counts as "saturated" — i.e. the
 # EMA was folded so many times that the value no longer carries signal.
 _SATURATION_EPSILON = 0.01
+
+
+def _is_user_prompt(message: Dict) -> bool:
+    """True when ``message`` is something the user actually typed.
+
+    A tool RESULT encodes to ``role: "user"`` (see ``message_codec``), and the
+    client also prepends injected context (steering, the episodic block) to real
+    prompts — none of which is an "interaction". ``turn_view.user_prompt_text``
+    is the single shared definition of what the user said; it returns "" for
+    every synthetic case.
+    """
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    content = message.get("content")
+    text = ""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, str):
+                text = block
+                break
+            if isinstance(block, dict) and block.get("text"):
+                text = str(block["text"])
+                break
+    return bool(turn_view.user_prompt_text(text))
 
 
 class UserProfileManager:
@@ -198,10 +225,19 @@ class UserProfileManager:
         one real profile showed ``technical_level`` at 0.0002 and ``abstraction``
         pinned at exactly 0.5.
 
-        The true count is unrecoverable from an inflated one, so it is estimated
-        by inverting N²/2. Traits are only reset when they're **saturated** (at a
-        bound, or sitting on the neutral default): an unsaturated value still
-        carries real signal and is left alone. Runs once, flagged in the profile.
+        **The true count is not recoverable, so it is not guessed.** Inverting N²/2
+        looks appealing but assumes the old per-turn increment was 1, when it was
+        actually 1 + (tool results that turn) — the overshoot is √(1+k), i.e. 2-3×
+        for a tool-heavy user (100 turns at 8 tools/turn estimated 301). A number
+        that wrong is worse than none, because its only real consumer is the "enough
+        data to profile you" gate. So the count RESETS to 0 and re-accrues honestly
+        at one per turn; the cost is re-earning that gate, which takes five turns.
+
+        Traits are only reset when they're **saturated** (at a bound, or sitting on
+        the neutral default): an unsaturated value still carries real signal.
+        Every pre-fix profile is inflated, not just the extreme ones — 50 real turns
+        already read as 1,275 — and the absence of ``_recount_repaired`` identifies a
+        pre-fix profile exactly. Runs once, flagged in the profile.
         """
         count = self.profile.get("interaction_count", 0)
         try:
@@ -210,13 +246,11 @@ class UserProfileManager:
             count = 0
 
         if count > _INFLATION_SUSPECT_THRESHOLD:
-            # count ≈ turns²/2  →  turns ≈ sqrt(2 · count)
-            estimated = max(1, int((2 * count) ** 0.5))
             logger.info(
-                f"Repairing inflated profile: interaction_count {count} → "
-                f"~{estimated} (was double-counted every turn)"
+                f"Resetting inflated profile count ({count} → 0): it was "
+                "incremented once per message, not once per turn"
             )
-            self.profile["interaction_count"] = estimated
+            self.profile["interaction_count"] = 0
             for trait in ("verbosity", "directness", "technical_level", "abstraction"):
                 value = self.profile.get(trait)
                 if not isinstance(value, (int, float)):
@@ -336,12 +370,24 @@ class UserProfileManager:
         if not messages:
             return
 
-        user_messages = [msg for msg in messages if msg.get("role") == "user"]
+        # Only messages the USER actually typed. A ToolMessage encodes to
+        # ``role: "user"`` (message_codec), so filtering on the role alone counted
+        # every tool RESULT as an interaction: one turn with 3 tool calls scored 4,
+        # which both inflated `interaction_count` and tripped the "enough data"
+        # gate in get_profile_summary after a single tool-heavy turn.
+        user_messages = [msg for msg in messages if _is_user_prompt(msg)]
         if not user_messages:
             return
 
-        # Update interaction count
-        self.profile["interaction_count"] += len(user_messages)
+        # Update interaction count. `.get` with a default, not `+=` on a bare key:
+        # a legacy profile predating this field would otherwise raise KeyError
+        # inside `client.query`'s try block, replacing an answer the user had
+        # ALREADY seen streamed with "Something went wrong".
+        try:
+            current = int(self.profile.get("interaction_count") or 0)
+        except (TypeError, ValueError):
+            current = 0
+        self.profile["interaction_count"] = current + len(user_messages)
 
         # Analyze each user message
         for msg in user_messages:
@@ -352,21 +398,25 @@ class UserProfileManager:
         self._save_profile()
 
     def _extract_text_content(self, message: Dict) -> str:
-        """Extract text content from message.
+        """The text the USER typed in ``message`` ("" if none).
 
-        Args:
-            message: Message dictionary
-
-        Returns:
-            Extracted text content
+        Injected context is stripped, because every trait here is scored from this
+        string and the raw message is mostly not the user's words. With a 5-entry
+        episodic block prepended, "fix it" (6 chars) measured 496 — so a terse user
+        was profiled as verbose, and `technical_level`/`abstraction` were
+        keyword-scored over a paragraph of tool names. The signal was not merely
+        noisy, it was INVERTED, and it fired on every turn episodic memory injected.
         """
         content = message.get("content", [])
         if isinstance(content, str):
-            return content
+            raw = content
         elif isinstance(content, list):
-            texts = [item.get("text", "") for item in content if isinstance(item, dict)]
-            return " ".join(texts)
-        return ""
+            raw = " ".join(
+                item.get("text", "") for item in content if isinstance(item, dict)
+            )
+        else:
+            return ""
+        return turn_view.user_prompt_text(raw)
 
     def _analyze_message(self, content: str) -> None:
         """Analyze message and update EMA metrics.

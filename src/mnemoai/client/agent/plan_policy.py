@@ -40,14 +40,19 @@ def write_target(args) -> str:
 
     Returns "" when no recognized key is present, so callers can tell "no target
     given" apart from a real path instead of inferring it from one spelling.
+
+    **Ambiguity fails closed.** If two spellings disagree we cannot know which one
+    the server will honor, and guessing is exploitable on a security gate: a call
+    carrying ``path=<the plan file>`` plus ``file_path=/etc/x`` would have had plan
+    mode check the plan while ``file_edit`` wrote ``/etc/x``. Returning "" makes
+    the gate treat it as an unknown target and block it.
     """
     if not isinstance(args, dict):
         return ""
-    for key in _PATH_ARG_NAMES:
-        value = args.get(key)
-        if value:
-            return str(value)
-    return ""
+    found = {str(args[key]) for key in _PATH_ARG_NAMES if args.get(key)}
+    if len(found) > 1:
+        return ""  # conflicting targets → refuse to pick one
+    return next(iter(found), "")
 
 # Leading programs allowed in plan mode (subject to is_readonly_bash checks).
 READONLY_BASH_CMDS = {

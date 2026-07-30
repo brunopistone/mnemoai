@@ -378,18 +378,7 @@ class LangGraphClient:
                     )
                 )
 
-                if config.get("PROFILE", {}).get("USE_PROFILING", False):
-                    # Scope to THIS turn. Profiling runs after every turn while
-                    # `agent.messages` is the whole session, so passing all of it
-                    # re-analyzed every earlier prompt again: `interaction_count`
-                    # grew as N²/2 (a real profile reached 62,977 for a few
-                    # hundred turns) and the EMA washed out toward its neutral
-                    # value because the same messages kept being folded in. Same
-                    # bug, same fix, as the reflector's `scope_to_last_turn`.
-                    messages_for_profile = convert_langchain_messages_to_strands(
-                        current_turn_messages(self.agent.messages)
-                    )
-                    self.profile_manager.analyze_conversation(messages_for_profile)
+                self._profile_turn()
 
                 token_count = self._count_context_tokens()
                 print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
@@ -1012,6 +1001,33 @@ class LangGraphClient:
             log.seed_history(messages, source=source)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Session log seed failed: {e}")
+
+    def _profile_turn(self) -> None:
+        """Feed THIS turn to the user profile (no-op when profiling is off).
+
+        Extracted from ``query`` so it can be tested directly: the scoping is the
+        whole point of the method, and a test that scopes its own input before
+        calling ``analyze_conversation`` proves nothing about the real call path.
+
+        Profiling runs after every turn while ``agent.messages`` holds the whole
+        session, so passing all of it re-analyzed every earlier prompt:
+        ``interaction_count`` grew as N²/2 (an observed profile reached 62,977) and
+        the trait EMAs washed out from folding the same messages repeatedly. Same
+        bug, same fix, as the reflector's ``scope_to_last_turn``.
+        """
+        if not config.get("PROFILE", {}).get("USE_PROFILING", False):
+            return
+        if not self.agent or not self.agent.messages:
+            return
+        try:
+            messages_for_profile = convert_langchain_messages_to_strands(
+                current_turn_messages(self.agent.messages)
+            )
+            self.profile_manager.analyze_conversation(messages_for_profile)
+        except Exception as e:  # noqa: BLE001
+            # Profiling is a side effect of a turn the user has ALREADY seen
+            # answered; it must never surface as "something went wrong".
+            logger.debug(f"Profiling this turn failed: {e}")
 
     def usage_report(self) -> str:
         """The ``/usage`` report: reported token totals for this session."""

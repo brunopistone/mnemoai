@@ -149,10 +149,23 @@ def render(tracker: UsageTracker, context_tokens: int = 0) -> str:
     """
     rows = tracker.snapshot()
     if not rows:
-        return (
-            "No model usage recorded yet — ask something first.\n"
-            "(Usage counts what the provider reports, for this session only.)"
-        )
+        # No calls made YET — but a resumed or /load-ed conversation already has a
+        # context, and reporting "ask something first" while several thousand tokens
+        # sit loaded reads as a bug. Say why the spend is zero, and still show the
+        # context, which is the number that actually applies to the next turn.
+        lines = ["No tokens spent yet in this session."]
+        if context_tokens:
+            lines.append(
+                f"  Current context: {_fmt(context_tokens)} tokens "
+                "(what the next turn re-sends)"
+            )
+            lines.append(
+                "  A restored conversation carries its context but no spend — "
+                "totals count only\n  the calls THIS session makes."
+            )
+        else:
+            lines.append("  Ask something and the totals appear here.")
+        return "\n".join(lines)
     agg = tracker.totals()
 
     out = ["Token usage this session (as reported by the provider)", ""]

@@ -6,6 +6,7 @@ re-analyzed every turn -- inflating metrics and re-bumping the confidence of
 strategies that were only ever learned once.
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -248,3 +249,58 @@ class TestRealFailuresAreStillCaught:
     def test_a_bulleted_error_line(self):
         # Leading punctuation must not hide it.
         assert _is_error("- Error: nope") is True
+
+
+class TestShellFailuresAreLearnedFrom:
+    """``execute_bash`` reports the COMMAND's failure as an exit code and carries
+    no ``error`` key, so trusting the JSON envelope alone recorded a failed test
+    run as a success — losing the single most common real failure in a coding
+    session. Driven through ``reflect_on_trajectory``, not just the predicate:
+    testing the predicate alone is how this regression slipped through.
+    """
+
+    FAILED_PYTEST = json.dumps({
+        "stdout": "collected 3 items\n\ntests/test_x.py::test_a FAILED\n",
+        "stderr": "Traceback (most recent call last):\n  AssertionError: 2 != 3\n",
+        "exit_status": 2,
+    })
+
+    def _reflect(self, result_json, tmp_path):
+        r = Reflector(persist_path=str(tmp_path / "m.json"))
+        r.reflect_on_trajectory(
+            messages=[
+                _human("run the tests"),
+                _ai_tool_call("execute_bash", {"command": "pytest"}, "c1"),
+                _tool_result("execute_bash", "c1", result_json),
+            ],
+            task="run the tests",
+        )
+        return r.metrics
+
+    def test_a_failed_command_is_recorded_as_a_failure(self, tmp_path):
+        m = self._reflect(self.FAILED_PYTEST, tmp_path)
+        assert m["failed_calls"] == 1
+        assert m["successful_calls"] == 0
+
+    def test_a_passing_command_is_recorded_as_a_success(self, tmp_path):
+        ok = json.dumps({"stdout": "3 passed\n", "stderr": "", "exit_status": 0})
+        m = self._reflect(ok, tmp_path)
+        assert m["successful_calls"] == 1
+        assert m["failed_calls"] == 0
+
+    def test_a_nonzero_exit_alone_is_enough(self):
+        # No error key, no error keywords — just the exit code.
+        payload = json.dumps({"stdout": "", "stderr": "", "exit_status": 1})
+        assert _is_error(payload) is True
+
+    def test_the_return_code_spelling_also_works(self):
+        payload = json.dumps({"stdout": "", "stderr": "boom", "return_code": 127})
+        assert _is_error(payload) is True
+
+    def test_a_non_numeric_exit_status_is_not_a_failure(self):
+        assert _is_error(json.dumps({"stdout": "x", "exit_status": None})) is False
+
+    def test_a_structured_success_without_an_exit_code_stays_success(self):
+        # e.g. file_edit's {"success": true, …} — no exit code to consult.
+        payload = json.dumps({"success": True, "file_path": "/a.py"})
+        assert _is_error(payload) is False

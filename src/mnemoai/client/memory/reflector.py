@@ -13,6 +13,11 @@ from mnemoai.utils.logger import logger
 # are what produced the false "error:" matches this bound exists to stop).
 _MAX_ERROR_MESSAGE_CHARS = 2000
 
+# Keys carrying a process exit code. Shell tools report the COMMAND's failure this
+# way rather than with an ``error`` flag, so a non-zero value here is a failure
+# even though the tool call itself succeeded.
+_EXIT_STATUS_KEYS = ("exit_status", "return_code", "returncode", "exit_code")
+
 
 def current_turn_messages(messages: List[Any]) -> List[Any]:
     """The tail of ``messages`` belonging to the current turn.
@@ -23,17 +28,40 @@ def current_turn_messages(messages: List[Any]) -> List[Any]:
 
     Falls back to the full list when no human message is present (e.g. history
     was compacted away), which is the old behavior.
+
+    Accepts LangChain objects and encoded (strands) dicts. For dicts, a TOOL
+    RESULT also carries ``role: "user"`` — so the boundary has to be a real
+    PROMPT, not merely a user-role message, or a turn with tool calls gets cut at
+    its last tool result and only the tail is analyzed.
     """
     last_human = -1
     for i, msg in enumerate(messages):
         if getattr(msg, "type", None) == "human":
             last_human = i
-        elif isinstance(msg, dict) and msg.get("role") == "user":
+        elif isinstance(msg, dict) and _is_prompt_dict(msg):
             last_human = i
 
     if last_human < 0:
         return list(messages)
     return list(messages[last_human:])
+
+
+def _is_prompt_dict(msg: dict) -> bool:
+    """True for an encoded message that is a real user prompt, not a tool result."""
+    if msg.get("role") != "user":
+        return False
+    content = msg.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        # A tool result is a ``toolResult`` block; a prompt carries text.
+        for block in content:
+            if isinstance(block, dict) and block.get("toolResult") is not None:
+                return False
+        return any(
+            isinstance(b, dict) and str(b.get("text", "")).strip() for b in content
+        )
+    return False
 
 
 class PlaybookEntry:
@@ -209,7 +237,20 @@ class Reflector:
                 parsed = None
             if isinstance(parsed, dict):
                 # Authoritative: the tool told us outright.
-                return bool(parsed.get("error")) or bool(parsed.get("isError"))
+                if parsed.get("error") or parsed.get("isError"):
+                    return True
+                # ...but execute_bash / start_background_task report the command's
+                # own failure as an EXIT CODE and carry no error key, so a JSON
+                # envelope alone must not be read as success. Missing this made a
+                # pytest run exiting 2 — stderr full of tracebacks — count as a
+                # win, losing exactly the failures worth learning from.
+                for key in _EXIT_STATUS_KEYS:
+                    if key in parsed:
+                        try:
+                            return int(parsed[key]) != 0
+                        except (TypeError, ValueError):
+                            return False
+                return False  # structured payload, no failure signal → success
             if parsed is not None:
                 return False  # valid JSON payload with no error flag → success
 

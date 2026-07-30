@@ -16,6 +16,7 @@ from mnemoai.client.memory.episodic_memory import (
     is_task_successful,
 )
 from mnemoai.client.memory.memory_store import MemoryStore
+from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
 from mnemoai.client.ui.tui import (
     _DELETE,
@@ -247,7 +248,11 @@ class ChatInterface:
             logger.debug(f"Previous query: {self.client.previous_query[:100]}...")
             logger.debug(f"Current query: {query[:100]}...")
 
-            tools_used = extract_tools_from_messages(self.client.previous_messages)
+            # Scoped for the same reason as the immediate path below: this snapshot
+            # is the whole session, and the episode describes one interaction.
+            tools_used = extract_tools_from_messages(
+                current_turn_messages(self.client.previous_messages)
+            )
 
             # Only store if actual work was done (tools used or substantial response).
             if not tools_used and len(self.client.previous_response) < 300:
@@ -300,7 +305,12 @@ class ChatInterface:
             logger.debug("✗ Skipping storage - empty response")
             return
 
-        messages = self.client.agent.messages.copy()
+        # THIS turn's tools, not the whole session: both consumers describe the
+        # interaction just completed. Unscoped, `record_tool_outcome` re-counted
+        # every earlier tool call on every turn, so `tool_patterns` totals grew
+        # quadratically (the same bug class as `interaction_count`), and an episode
+        # was labelled with tools it never used.
+        messages = current_turn_messages(self.client.agent.messages)
         tools_used = extract_tools_from_messages(messages)
         min_length = config.get("EPISODIC_MEMORY", {}).get("MIN_TOOLS_OR_LENGTH", 300)
 

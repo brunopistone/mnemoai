@@ -198,11 +198,94 @@ class TestClearingTheStore:
         with open(store.persist_path + ".meta.json") as f:
             assert json.load(f) == []
 
-    def test_the_tool_no_longer_assigns_a_read_only_property(self):
-        import inspect
+    def test_clearing_drops_the_bm25_index_too(self, tmp_path):
+        # Vectors alone isn't "cleared": BM25 is built separately and kept a
+        # tokenized copy of every document for the life of the process. Nothing
+        # was served from it only because normalized_bm25_candidates discards
+        # indices past the (now empty) metadata list — isolation resting on a
+        # bounds check, not on the data being gone.
+        from mnemoai.server.tools.rag.session import SessionRAG
+        from mnemoai.utils.bm25 import BM25
 
+        s = SessionRAG.__new__(SessionRAG)
+        s.store = self._store(tmp_path)
+        s.bm25 = BM25()
+        s.bm25.fit(["secret plan alpha"])
+        assert max(s.bm25.score("secret plan")) > 0
+
+        s.clear()
+
+        assert s.bm25 is None
+        assert s.store.index.ntotal == 0
+        assert s.store.metadatas == []
+
+    def test_rebuilding_on_an_empty_store_drops_a_stale_index(self, tmp_path):
+        from mnemoai.server.tools.rag.session import SessionRAG
+        from mnemoai.utils.bm25 import BM25
+
+        s = SessionRAG.__new__(SessionRAG)
+        s.store = FaissStore(dim=4, persist_path=str(tmp_path / "empty"))
+        s.bm25 = BM25()
+        s.bm25.fit(["stale text from before"])
+        s._rebuild_bm25()
+        assert s.bm25 is None
+
+    def test_the_tool_clears_vectors_and_keyword_index(self, tmp_path, monkeypatch):
+        """Drives the registered tool end-to-end rather than grepping its source.
+
+        A source assertion passes if the string merely appears in a comment, and it
+        says nothing about whether the call actually empties anything.
+        """
         from mnemoai.server.tools import rag_tool
+        from mnemoai.server.tools.rag.session import SessionRAG
+        from mnemoai.utils.bm25 import BM25
 
-        src = inspect.getsource(rag_tool)
-        assert "store.metadatas = []" not in src
-        assert "store.index = faiss" not in src
+        session = SessionRAG.__new__(SessionRAG)
+        session.store = self._store(tmp_path)
+        session.bm25 = BM25()
+        session.bm25.fit(["secret plan alpha"])
+
+        # Capture the tool the register function installs.
+        captured = {}
+
+        class _MCP:
+            def tool(self, *a, **k):
+                def deco(fn):
+                    captured[fn.__name__] = fn
+                    return fn
+                return deco
+
+        monkeypatch.setattr(rag_tool, "get_rag_session", lambda: session)
+        rag_tool.register_rag_tools(_MCP())
+        clear = captured["clear_documents"]
+
+        result = clear()
+
+        assert "cleared" in result.lower()
+        assert session.store.index.ntotal == 0
+        assert session.store.metadatas == []
+        assert session.bm25 is None
+
+    def test_the_tool_reports_nothing_to_clear_before_any_ingest(self, monkeypatch):
+        # Previously claimed the backend "does not support clearing", because the
+        # store is None until the first ingest.
+        from mnemoai.server.tools import rag_tool
+        from mnemoai.server.tools.rag.session import SessionRAG
+
+        session = SessionRAG.__new__(SessionRAG)
+        session.store = None
+        session.bm25 = None
+        captured = {}
+
+        class _MCP:
+            def tool(self, *a, **k):
+                def deco(fn):
+                    captured[fn.__name__] = fn
+                    return fn
+                return deco
+
+        monkeypatch.setattr(rag_tool, "get_rag_session", lambda: session)
+        rag_tool.register_rag_tools(_MCP())
+        result = captured["clear_documents"]()
+        assert "no documents to clear" in result.lower()
+        assert "does not support" not in result.lower()

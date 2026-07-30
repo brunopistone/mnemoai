@@ -166,7 +166,22 @@ class TestConcurrentRecordingIsSafe:
 
 class TestTheReport:
     def test_an_empty_session_says_so_rather_than_showing_zeros(self):
-        assert "No model usage recorded yet" in ut.render(ut.UsageTracker())
+        out = ut.render(ut.UsageTracker())
+        assert "No tokens spent yet" in out
+        assert "Ask something" in out
+
+    def test_a_restored_conversation_still_shows_its_context(self):
+        # Regression: after `--resume` or `/load` the tracker is empty (this
+        # process made no calls) but a context IS loaded. Reporting "ask something
+        # first" while several thousand tokens sit ready reads as a broken command.
+        out = ut.render(ut.UsageTracker(), context_tokens=3907)
+        assert "3,907" in out
+        assert "No tokens spent yet" in out
+        assert "Ask something" not in out  # there IS something loaded
+
+    def test_the_zero_spend_is_explained_not_just_stated(self):
+        out = ut.render(ut.UsageTracker(), context_tokens=1000)
+        assert "restored conversation" in out
 
     def test_counts_are_thousands_separated(self):
         t = ut.UsageTracker()
