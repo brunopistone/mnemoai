@@ -124,6 +124,28 @@ BLOCKED_COMMANDS = [
     ),
 ]
 
+# Options whose value is arbitrary text rather than another flag. The value is
+# excluded from the danger scan: a commit message that merely NAMES a dangerous
+# operation (`-m "revert the reset --hard"`) is not that operation.
+_VALUE_OPTIONS = (
+    "-m",
+    "--message",
+    "-F",
+    "--file",
+    "-C",
+    "--reuse-message",
+    "--reedit-message",
+    "--author",
+    "--date",
+    "-t",
+    "--template",
+    "--fixup",
+    "--squash",
+)
+# Short forms of the above that can carry their value attached (`-m'msg'` arrives
+# from shlex as one token, `-mmsg`).
+_ATTACHED_VALUE_OPTIONS = ("-m", "-F", "-C", "-t")
+
 
 def build_git_argv(command: str) -> tuple[list[str], str]:
     """Split a git command string into argv, or explain why it was refused.
@@ -179,12 +201,58 @@ def build_git_argv(command: str) -> tuple[list[str], str]:
     return ["git"] + tokens, ""
 
 
+def build_scan_string(command: str) -> str:
+    """Normalize a git command into the string the danger patterns run against.
+
+    The patterns must see exactly what *git* will see. Scanning the raw string
+    let quoting hide a flag: ``push origin main --for"ce"`` reaches git as
+    ``--force`` but matched no pattern, so a force push ran unwarned. Tokenizing
+    with ``shlex`` (the same splitter :func:`build_git_argv` uses to execute)
+    closes that gap, and dropping text-carrying option values closes the
+    symmetric false positive.
+
+    Falls back to the raw string when the command can't be tokenized — that call
+    is refused by :func:`build_git_argv` anyway, but a check is better than none.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return command.strip()
+
+    parts: list[str] = []
+    skip_value = False
+    for token in tokens:
+        if skip_value:
+            skip_value = False
+            continue
+        if token in _VALUE_OPTIONS:
+            parts.append(token)
+            skip_value = True
+            continue
+        if token.startswith("--") and "=" in token:
+            name = token.split("=", 1)[0]
+            parts.append(name if name in _VALUE_OPTIONS else token)
+            continue
+        attached = next(
+            (
+                flag
+                for flag in _ATTACHED_VALUE_OPTIONS
+                if not token.startswith("--")
+                and token.startswith(flag)
+                and len(token) > len(flag)
+            ),
+            None,
+        )
+        parts.append(attached or token)
+    return " ".join(parts)
+
+
 def check_dangerous_command(command: str) -> dict:
     """Check if a git command is dangerous and return details."""
-    # Match against the original-case command with IGNORECASE so keywords are
-    # case-insensitive, while patterns can still opt into case-sensitivity for
-    # flags like -D vs -d via an inline (?-i:...) scope.
-    command_stripped = command.strip()
+    # Match against the argv-normalized command (see build_scan_string) with
+    # IGNORECASE so keywords are case-insensitive, while patterns can still opt
+    # into case-sensitivity for flags like -D vs -d via an inline (?-i:...) scope.
+    command_stripped = build_scan_string(command)
 
     # Check for completely blocked commands
     for pattern, message in BLOCKED_COMMANDS:
@@ -573,11 +641,17 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
         add_files: str = "",
         amend: bool = False,
         allow_empty: bool = False,
+        allow_dangerous: bool = False,
+        reason: str = "",
     ) -> str:
         """Safely create a git commit with validations.
 
         This tool provides a safer way to create commits with built-in
         checks and validations.
+
+        CONFIRMATION FLOW: an unsafe amend returns requires_confirmation=True.
+        Do not retry blindly — explain the risk to the user, get their approval,
+        then call again with allow_dangerous=True and a reason.
 
         Args:
             message: Commit message (required)
@@ -585,6 +659,8 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
             add_files: Space-separated list of specific files to add before commit
             amend: If True, amends the last commit (with safety checks)
             allow_empty: If True, allows creating empty commits
+            allow_dangerous: Set to True to proceed with an unsafe amend (requires reason)
+            reason: Required explanation when allow_dangerous=True
 
         Returns:
             JSON string with commit result or safety warnings
@@ -601,6 +677,35 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
 
         try:
             results = []
+
+            # Amend safety is checked BEFORE staging: this branch can refuse the
+            # call, and a refusal that had already run `git add` would leave the
+            # index mutated with nothing committed — the user declines and their
+            # staging area silently changed anyway.
+            if amend:
+                amend_check = check_amend_safety()
+                if not amend_check["safe"] and not allow_dangerous:
+                    return json.dumps(
+                        {
+                            "error": True,
+                            "requires_confirmation": True,
+                            "message": "Amending this commit may cause issues",
+                            "issues": amend_check["issues"],
+                            "branch": amend_check["branch"],
+                            "is_pushed": amend_check["is_pushed"],
+                            "suggestion": "If the commit has been pushed, you'll need to force push after amending. Consider creating a new commit instead.",
+                            "next_step": "To proceed, call git_commit_safe with allow_dangerous=True and provide a reason explaining why this is intentional.",
+                        },
+                        indent=2,
+                    )
+                if not amend_check["safe"] and allow_dangerous and not reason:
+                    return json.dumps(
+                        {
+                            "error": True,
+                            "message": "When using allow_dangerous=True, you must provide a reason",
+                        },
+                        indent=2,
+                    )
 
             # Handle file staging
             if add_all:
@@ -646,23 +751,6 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
                         ),
                     }
                 )
-
-            # Check for amend safety
-            if amend:
-                amend_check = check_amend_safety()
-                if not amend_check["safe"]:
-                    return json.dumps(
-                        {
-                            "error": True,
-                            "requires_confirmation": True,
-                            "message": "Amending this commit may cause issues",
-                            "issues": amend_check["issues"],
-                            "branch": amend_check["branch"],
-                            "is_pushed": amend_check["is_pushed"],
-                            "suggestion": "If the commit has been pushed, you'll need to force push after amending. Consider creating a new commit instead.",
-                        },
-                        indent=2,
-                    )
 
             # Build commit command
             commit_cmd = ["git", "commit", "-m", message]

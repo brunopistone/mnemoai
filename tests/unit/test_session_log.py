@@ -22,6 +22,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from mnemoai.client import session_log as slog
+from mnemoai.client.agent.message_codec import convert_strands_messages_to_langchain
 from mnemoai.utils import paths
 
 
@@ -617,3 +618,200 @@ class TestABranchIsDistinguishableInThePicker:
             "modified": time.time(), "turns": 2, "preview": "hello",
         })
         assert "branch" not in row and "hello" in row
+
+
+class TestAResumeChainIsOneRowNotFour:
+    """Resuming writes a NEW file seeded with the whole prior conversation, so a
+    chat resumed three times exists as four files — each a strict SUPERSET of the
+    last, all sharing one opening prompt. Listing per-file showed four
+    near-identical rows for ONE conversation, and the newest (longest) one
+    reported the FEWEST turns because `turns` excludes inherited history.
+    """
+
+    def _chain(self, home, links=3):
+        """A session resumed ``links`` times; returns the files oldest→newest."""
+        first = slog.SessionLog(cwd="/proj/a")
+        first.log_turn(_turn("the original question", "a1"))
+        files = [first.path]
+        prev = first
+        for i in range(links):
+            nxt = slog.SessionLog(cwd="/proj/a")
+            # What client.resume_session does: decode the transcript back to
+            # LangChain messages, then seed them into the fresh session's log.
+            restored = convert_strands_messages_to_langchain(
+                slog.read_session(prev.path)["messages"]
+            )
+            nxt.seed_history(restored, source=str(prev.path))
+            nxt.log_turn(_turn(f"follow-up {i}", f"b{i}"))
+            files.append(nxt.path)
+            prev = nxt
+        return files
+
+    def test_only_the_tip_of_the_chain_is_offered(self, home):
+        files = self._chain(home)
+        rows = slog.list_sessions(cwd="/proj/a")
+        assert len(rows) == 1
+        assert rows[0]["path"] == str(files[-1])
+
+    def test_the_row_is_sized_by_the_whole_conversation(self, home):
+        # 1 original + 3 follow-ups = 4 real exchanges, even though the tip file
+        # only recorded ONE turn of its own.
+        self._chain(home)
+        row = slog.list_sessions(cwd="/proj/a")[0]
+        assert row["turns"] == 1
+        assert row["exchanges"] == 4
+
+    def test_the_label_shows_the_true_length(self, home):
+        from mnemoai.main import _format_session_label
+
+        self._chain(home)
+        row = slog.list_sessions(cwd="/proj/a")[0]
+        label = _format_session_label(row)
+        assert "4 turns" in label
+        assert "1 turn " not in label
+        assert "(continued)" in label
+
+    def test_nothing_from_the_hidden_links_is_lost(self, home):
+        # The whole justification for hiding them.
+        self._chain(home)
+        blob = str(slog.list_sessions(cwd="/proj/a")[0]["messages"])
+        assert "the original question" in blob
+        for i in range(3):
+            assert f"follow-up {i}" in blob
+
+    def test_an_unresumed_session_is_still_offered(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("standalone", "a"))
+        rows = slog.list_sessions(cwd="/proj/a")
+        assert [r["path"] for r in rows] == [str(log.path)]
+        assert "(continued)" not in __import__(
+            "mnemoai.main", fromlist=["x"]
+        )._format_session_label(rows[0])
+
+    def test_two_independent_conversations_stay_two_rows(self, home):
+        a = slog.SessionLog(cwd="/proj/a")
+        a.log_turn(_turn("first chat", "x"))
+        b = slog.SessionLog(cwd="/proj/a")
+        b.log_turn(_turn("second chat", "y"))
+        assert len(slog.list_sessions(cwd="/proj/a")) == 2
+
+    def test_a_branch_is_NOT_collapsed(self, home):
+        # A fork DIVERGES from its parent (both are real conversations); only a
+        # resume supersedes. Collapsing a branch would hide the work it forked from.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("shared start", "a1"))
+        log.log_turn(_turn("the path not taken", "a2"))
+        fork = slog.branch_session(log.path, through_turn=1)
+        slog.SessionLog.reopen(fork).log_turn(_turn("the other direction", "b1"))
+
+        rows = slog.list_sessions(cwd="/proj/a")
+        assert len(rows) == 2
+        paths = {r["path"] for r in rows}
+        assert str(log.path) in paths and str(fork) in paths
+
+    def test_a_load_of_a_saved_conversation_does_not_hide_a_session(self, home):
+        # /load seeds from a conversations/*.json file, which is not a session —
+        # a non-session source must never suppress anything.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("live work", "a"))
+        loaded = slog.SessionLog(cwd="/proj/a")
+        loaded.seed_history(_turn("from a saved file", "b"), source="/tmp/conv.json")
+        loaded.log_turn(_turn("after the load", "c"))
+        assert len(slog.list_sessions(cwd="/proj/a")) == 2
+
+    def test_the_limit_applies_after_collapsing(self, home):
+        # Otherwise a chain could consume the whole budget and hide real chats.
+        self._chain(home, links=4)
+        other = slog.SessionLog(cwd="/proj/a")
+        other.log_turn(_turn("a different chat", "z"))
+        rows = slog.list_sessions(cwd="/proj/a", limit=2)
+        assert len(rows) == 2
+        previews = {r["preview"] for r in rows}
+        assert "a different chat" in previews
+
+
+class TestExchangeCountingIgnoresInjectedMessages:
+    """`exchanges` sizes the row, so it must count only real prompts — a
+    tool-result message and a background sub-agent report both carry
+    ``role: user``."""
+
+    def test_a_plain_prompt_counts(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("hello", "hi"))
+        assert slog.read_session(log.path)["exchanges"] == 1
+
+    def test_an_episodic_prefixed_prompt_counts_once(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn([
+            HumanMessage(content='[Episodic Memory - x]\n1. "y"\n\nthe real ask'),
+            AIMessage(content="a"),
+        ])
+        assert slog.read_session(log.path)["exchanges"] == 1
+
+    def test_a_steering_only_message_does_not_count(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn([
+            HumanMessage(content="<steering>rules</steering>"),
+            AIMessage(content="a"),
+        ])
+        assert slog.read_session(log.path)["exchanges"] == 0
+
+    def test_a_background_subagent_report_does_not_count(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn([
+            HumanMessage(content="Your background sub-agent finished: …"),
+            AIMessage(content="a"),
+        ])
+        assert slog.read_session(log.path)["exchanges"] == 0
+
+
+class TestAnExplicitIdStillReachesACollapsedLink:
+    """The menu collapses a resume chain to its tip, but naming an id asks for
+    THAT exact point — so hiding a row must not make it unresolvable. Regression:
+    `--resume <id>` of a superseded session started failing with "No session
+    matching …" once collapsing landed.
+    """
+
+    def _chain(self):
+        first = slog.SessionLog(cwd="/proj/a")
+        first.log_turn(_turn("original", "a1"))
+        second = slog.SessionLog(cwd="/proj/a")
+        second.seed_history(
+            convert_strands_messages_to_langchain(
+                slog.read_session(first.path)["messages"]
+            ),
+            source=str(first.path),
+        )
+        second.log_turn(_turn("follow-up", "a2"))
+        return first, second
+
+    def test_collapsing_hides_the_parent_from_the_menu(self, home):
+        first, second = self._chain()
+        assert [r["path"] for r in slog.list_sessions(cwd="/proj/a")] == [
+            str(second.path)
+        ]
+
+    def test_uncollapsed_listing_still_contains_every_link(self, home):
+        first, second = self._chain()
+        paths = {
+            r["path"]
+            for r in slog.list_sessions(cwd="/proj/a", collapse_chains=False)
+        }
+        assert paths == {str(first.path), str(second.path)}
+
+    def test_the_hidden_link_keeps_its_own_shorter_history(self, home):
+        # Resolving the id must restore that POINT, not the tip.
+        first, _ = self._chain()
+        rows = slog.list_sessions(cwd="/proj/a", collapse_chains=False)
+        parent = next(r for r in rows if r["path"] == str(first.path))
+        blob = str(parent["messages"])
+        assert "original" in blob and "follow-up" not in blob
+
+    def test_the_resume_path_resolves_against_all_sessions(self, home):
+        # Guard the wiring: reading the menu list here is what broke it.
+        import inspect
+
+        from mnemoai import main as m
+
+        src = inspect.getsource(m._resume_session)
+        assert "collapse_chains=False" in src

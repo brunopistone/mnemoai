@@ -41,6 +41,7 @@ from mnemoai.client.agent.orchestrator import (
 from mnemoai.client.agent.reasoning_utils import disable_reasoning, restore_reasoning
 from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
 from mnemoai.client.ui import turn_view
+from mnemoai.client.usage_tracker import UsageTracker
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
@@ -215,6 +216,12 @@ class LangGraphAgent:
         # Exact prompt-token count from the provider's own usage_metadata on the
         # last model turn — ground truth for "how big is my context"
         self._last_input_tokens: Optional[int] = None
+        # Cumulative reported token usage for the session (drives /usage). Lives on
+        # the agent because every model-call path reaches it, including the ones
+        # with no visible turn (sub-agents, orchestrator workers, the router).
+        self.usage = UsageTracker()
+        # Model name usage is attributed to; set by the client, which owns config.
+        self.usage_model_name = ""
         self._code_formatter = CodeFormatter()
         # Set True once a turn has STREAMED visible answer text to the terminal.
         # The display contract is "streaming prints the answer", so any path that
@@ -938,6 +945,11 @@ class LangGraphAgent:
                     self._strip_malformed_reasoning(worker_messages), config=config
                 )
 
+            # Count the worker's spend toward the session totals, but NOT toward
+            # _last_input_tokens: this is a private worker context, and treating it
+            # as the main conversation's size would skew the compaction trigger.
+            self._record_usage(response)
+
             worker_messages.append(response)
 
             # No tool calls → worker is done.
@@ -1230,7 +1242,14 @@ class LangGraphAgent:
         """Record the provider's exact prompt-token count from a response's
         ``usage_metadata`` (LangChain normalizes it across Anthropic/OpenAI/
         Bedrock). This is ground truth for the current context size — far more
-        accurate than re-estimating — and drives the compaction decision."""
+        accurate than re-estimating — and drives the compaction decision.
+
+        Also feeds the session usage totals (``/usage``). Note the two differ by
+        design: ``_last_input_tokens`` is the LATEST prompt size (it's overwritten,
+        and reset to None whenever history is rewritten), while the tracker
+        ACCUMULATES every call for the whole session.
+        """
+        self._record_usage(response)
         try:
             um = getattr(response, "usage_metadata", None) or {}
             it = um.get("input_tokens")
@@ -1238,6 +1257,20 @@ class LangGraphAgent:
                 self._last_input_tokens = int(it)
         except Exception:
             pass
+
+    def _record_usage(self, response: Any) -> None:
+        """Add one model call to the session usage totals (best-effort).
+
+        Separate from :meth:`_capture_input_tokens` because the quiet paths
+        (sub-agents, orchestrator workers) must count toward usage WITHOUT
+        touching ``_last_input_tokens`` — their prompt is a private worker context,
+        so letting it set the main conversation's "current context size" would
+        corrupt the compaction trigger.
+        """
+        tracker = getattr(self, "usage", None)
+        if tracker is None:
+            return  # bare test stub built via __new__
+        tracker.record(response, getattr(self, "usage_model_name", "") or "")
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with the current state, streaming the response."""
@@ -2007,7 +2040,8 @@ class LangGraphAgent:
                 cmd = cmd[:47] + "…"
             return f"Running: {cmd}" if cmd else "Running command"
         if tool_name in ("fs_write", "file_edit"):
-            path = str(tool_args.get("path", "")).strip()
+            # Both spellings — file_edit uses file_path, fs_write uses path.
+            path = plan_policy.write_target(tool_args).strip()
             return f"Writing {path}" if path else "Writing file"
         labels = {
             "web_crawler": "Crawling the page",
@@ -2026,16 +2060,20 @@ class LangGraphAgent:
         the shared spinner — per-tool start/stop from a pool thread would clobber
         it (and race the other sub-agents)."""
         if quiet:
-            return tool.invoke(tool_args)
-        if tool_name in self._SELF_REPORTING_TOOLS:
+            result = tool.invoke(tool_args)
+        elif tool_name in self._SELF_REPORTING_TOOLS:
             self._stop_spinner()
-            return tool.invoke(tool_args)
-
-        self._start_spinner(self._tool_progress_label(tool_name, tool_args))
-        try:
-            return tool.invoke(tool_args)
-        finally:
-            self._stop_spinner()
+            result = tool.invoke(tool_args)
+        else:
+            self._start_spinner(self._tool_progress_label(tool_name, tool_args))
+            try:
+                result = tool.invoke(tool_args)
+            finally:
+                self._stop_spinner()
+        # A tool that can only detect danger server-side refuses and asks for
+        # confirmation in its RESULT. Resolve that with the user here — the model
+        # must not be the one that approves it.
+        return self._confirm_tool_result(tool, tool_name, tool_args, result)
 
     @staticmethod
     def _reasoning_content_text(block: dict) -> str:
@@ -2281,6 +2319,12 @@ class LangGraphAgent:
     def _confirm_tool(self, tool_name: str, tool_args: dict) -> bool:
         """Delegates to :func:`confirmation_gate.confirm`."""
         return confirmation_gate.confirm(self, tool_name, tool_args)
+
+    def _confirm_tool_result(self, tool, tool_name: str, tool_args: dict, result):
+        """Delegates to :func:`confirmation_gate.confirm_result`."""
+        return confirmation_gate.confirm_result(
+            self, tool, tool_name, tool_args, result
+        )
 
     def _prompt_confirm(self, header: str, detail: str, category: str) -> bool:
         """Delegates to :func:`confirmation_gate.prompt_confirm`."""

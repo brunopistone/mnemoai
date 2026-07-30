@@ -25,6 +25,30 @@ PLAN_BLOCKED_TOOLS = {
 # fs_write/file_edit are allowed only for the plan file (a .md under plans_dir).
 PLAN_FILE_SUFFIX = ".md"
 
+# The write tools DISAGREE on what they call their target: ``fs_write`` takes
+# ``path`` while ``file_edit`` takes ``file_path``. Every client-side reader has
+# to accept both, or it silently sees no target — which is exactly what happened:
+# reading only ``path`` made ``file_edit``'s confirmation prompt show a bare
+# "edit" with no filename (approving a write to an unknown file), and made
+# ``is_plan_file("")`` false so plan mode blocked EVERY file_edit, including one
+# writing the plan itself.
+_PATH_ARG_NAMES = ("path", "file_path", "filePath")
+
+
+def write_target(args) -> str:
+    """The file a write-tool call targets, whatever the tool calls that argument.
+
+    Returns "" when no recognized key is present, so callers can tell "no target
+    given" apart from a real path instead of inferring it from one spelling.
+    """
+    if not isinstance(args, dict):
+        return ""
+    for key in _PATH_ARG_NAMES:
+        value = args.get(key)
+        if value:
+            return str(value)
+    return ""
+
 # Leading programs allowed in plan mode (subject to is_readonly_bash checks).
 READONLY_BASH_CMDS = {
     "ls", "cat", "head", "tail", "less", "more", "pwd", "echo", "find",
@@ -107,7 +131,7 @@ def is_blocked_by_plan_mode(
     if tool_name == "execute_bash":
         return not is_readonly_bash(str(args.get("command", "")))
     if tool_name in ("fs_write", "file_edit"):
-        return not is_plan_file(str(args.get("path", "")))
+        return not is_plan_file(write_target(args))
     return True
 
 

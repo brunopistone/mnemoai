@@ -34,22 +34,40 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
 )
+from mnemoai.client.ui import turn_view
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import sessions_dir
 
 # Chars of the first user message kept as a session's preview label.
 _PREVIEW_CHARS = 100
 
-# The episodic-memory block the client prepends to a prompt before the agent
-# stores it. It is injected context, not something the user typed, so it must
-# never become a session's label — an unfiltered preview made every row read
-# `[Episodic Memory - Similar Past Tasks] 1. "hello" → …`, so several unrelated
-# sessions looked identical and none was identifiable.
-_EPISODIC_PREFIX = "[Episodic Memory"
+def _message_text(message: Dict[str, Any]) -> str:
+    """First text block of a strands message ("" for a tool-result-only message)."""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, str):
+                return block
+            if isinstance(block, dict) and block.get("text"):
+                return str(block["text"])
+    return ""
+
+
+def _is_user_prompt(message: Dict[str, Any]) -> bool:
+    """True for a message that is something the USER actually typed.
+
+    Used to size a conversation for the picker. A tool-result-only message and an
+    auto-delivered background sub-agent report both carry ``role: user`` but
+    neither is a prompt, so counting them would overstate the length.
+    """
+    if message.get("role") != "user":
+        return False
+    return bool(turn_view.user_prompt_text(_message_text(message)))
 
 
 def first_user_prompt(messages: List[Dict[str, Any]], max_len: int = _PREVIEW_CHARS) -> str:
@@ -65,31 +83,11 @@ def first_user_prompt(messages: List[Dict[str, Any]], max_len: int = _PREVIEW_CH
     for m in messages:
         if m.get("role") != "user":
             continue
-        content = m.get("content")
-        text = ""
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            # A tool-result-only message has no text block: skip it, don't stop.
-            for block in content:
-                if isinstance(block, str):
-                    text = block
-                    break
-                if isinstance(block, dict) and block.get("text"):
-                    text = str(block["text"])
-                    break
-
-        text = LangGraphAgent._strip_ephemeral(text)
-        # The episodic block is prepended as "[Episodic Memory …]\n…\n\n<prompt>";
-        # keep only the real prompt that follows it.
-        if text.lstrip().startswith(_EPISODIC_PREFIX):
-            text = text.split("\n\n", 1)[1] if "\n\n" in text else ""
-        # A background sub-agent's report is auto-delivered as a user message;
-        # it's the agent talking to itself, not a prompt.
-        if text.lstrip().startswith("Your background sub-agent"):
-            continue
-
-        text = " ".join(text.split())
+        # Injected context (steering/plan reminders, the episodic block) and an
+        # auto-delivered sub-agent report all resolve to "" — skip to the next
+        # message rather than stopping, so a session whose first turn was pure
+        # injection is still labelled by its first real prompt.
+        text = " ".join(turn_view.user_prompt_text(_message_text(m)).split())
         if text:
             # max_len is the TOTAL width, ellipsis included — callers size it to
             # a column budget, so the marker must fit inside it, not overflow it.
@@ -186,6 +184,13 @@ class SessionLog:
             logger.debug(f"Session log seed encode failed: {e}")
             return
         if not payload:
+            # The encoder silently yields nothing for input that isn't LangChain
+            # messages (e.g. already-encoded strands dicts), which would drop the
+            # restored history and resume a stump. Loud enough to diagnose.
+            logger.warning(
+                f"Session log seed produced no records from {len(messages)} "
+                "message(s) — expected LangChain messages; history not recorded."
+            )
             return
         self._append(
             {"t": "restore", "ts": time.time(), "source": source, "messages": payload}
@@ -349,26 +354,38 @@ def _iter_records(path: Path):
 
 
 def read_session(path) -> Dict[str, Any]:
-    """Read one session file into ``{meta, messages, turns, branched_from}``.
+    """Read one session file into ``{meta, messages, turns, …}``.
 
     Returns ``messages: []`` for a session that never completed a turn.
-    ``branched_from`` is set only for a ``/branch`` fork (see
-    :func:`branch_session`), so the picker can distinguish a branch from the
-    conversation it was forked from — they share an opening prompt, and without
-    this the two rows are identical.
+
+    ``turns`` counts only turns taken in THIS file (inherited history doesn't
+    inflate it). ``exchanges`` is what a reader actually cares about: how long the
+    whole restorable conversation is, inherited history included — the picker shows
+    that one, because you're choosing what to RESTORE, and a 243-message resumed
+    conversation reporting "1 turn" reads as the shortest entry in the list.
+
+    ``resumed_from`` is the session file a ``--resume``/``/load`` copied its history
+    from, and ``branched_from`` the fork point for a ``/branch``. They differ in
+    kind, so the picker treats them oppositely: a resume SUPERSEDES its source (the
+    child contains all of it), while a branch DIVERGES from it (both are real).
     """
     p = Path(path)
     meta: Dict[str, Any] = {}
     messages: List[Dict[str, Any]] = []
     branched_from: Dict[str, Any] = {}
+    resumed_from = ""
     turns = 0
     for rec in _iter_records(p):
         kind = rec.get("t")
         if kind == "meta":
             meta = rec
         elif kind in ("turn", "restore"):
-            if kind == "restore" and isinstance(rec.get("branched_from"), dict):
-                branched_from = rec["branched_from"]
+            if kind == "restore":
+                if isinstance(rec.get("branched_from"), dict):
+                    branched_from = rec["branched_from"]
+                else:
+                    # A plain restore (resume / load), not a fork.
+                    resumed_from = str(rec.get("source") or "")
             msgs = rec.get("messages")
             if isinstance(msgs, list):
                 messages.extend(msgs)
@@ -381,8 +398,10 @@ def read_session(path) -> Dict[str, Any]:
         "meta": meta,
         "messages": messages,
         "turns": turns,
+        "exchanges": sum(1 for m in messages if _is_user_prompt(m)),
         "path": str(p),
         "branched_from": branched_from,
+        "resumed_from": resumed_from,
     }
 
 
@@ -391,15 +410,32 @@ def _preview(messages: List[Dict[str, Any]]) -> str:
     return first_user_prompt(messages) or "(no prompt)"
 
 
-def list_sessions(cwd=None, profile: str = None, limit: int = 20) -> List[Dict[str, Any]]:
-    """Resumable sessions for this directory, newest first, capped at ``limit``.
+def list_sessions(
+    cwd=None, profile: str = None, limit: int = 20, collapse_chains: bool = True
+) -> List[Dict[str, Any]]:
+    """Resumable conversations for this directory, newest first, capped at ``limit``.
+
+    **One row per conversation, not per file.** Resuming writes a NEW file seeded
+    with the whole prior conversation (so each file is self-contained), which means
+    a chat resumed three times exists as four files — each a strict SUPERSET of the
+    one before, all sharing the same opening prompt. Listing them per-file produced
+    four identical-looking rows for one conversation, and the newest (longest) one
+    reported the FEWEST turns because ``turns`` excludes inherited history. So a
+    session that another session resumed is dropped: its content is entirely inside
+    its successor, and the successor is what you want to continue.
+
+    A ``/branch`` fork is deliberately NOT collapsed — it diverges from its parent
+    rather than superseding it, so both remain real conversations and both are
+    offered (the fork is tagged in the label).
 
     Sessions with no completed turn are skipped — resuming one would restore an
-    empty conversation, and a resume the user never typed into is a pure
-    DUPLICATE of the session it restored (same messages, one row each), so
-    offering it would make the list grow by one every time they resume without
-    asking anything. ``limit`` bounds only what's OFFERED; nothing is deleted
+    empty conversation. ``limit`` bounds only what's OFFERED; nothing is deleted
     here (age-based expiry owns deletion, see ``sweep_old_sessions``).
+
+    ``collapse_chains=False`` returns every session including superseded links.
+    That's for resolving an EXPLICIT ``--resume <id>``: hiding a row from the menu
+    must not make its id unresolvable, since naming an id is a deliberate request
+    for that exact point in the chain.
     """
     try:
         d = sessions_dir(cwd, profile)
@@ -408,24 +444,48 @@ def list_sessions(cwd=None, profile: str = None, limit: int = 20) -> List[Dict[s
         return []
     files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
 
-    out: List[Dict[str, Any]] = []
+    # Read everything first: which files are superseded can only be known from the
+    # whole set, so this can't be decided inside the (limited) emit loop below.
+    scanned: List[Dict[str, Any]] = []
+    superseded: set = set()
     for f in files:
-        if len(out) >= max(1, limit):
-            break
         data = read_session(f)
         if not data["messages"] or data["turns"] == 0:
             continue
+        scanned.append((f, data))
+        parent = data.get("resumed_from") or ""
+        if parent and collapse_chains:
+            # Match on the resolved path: `source` is absolute, but normalize so a
+            # symlinked/differently-spelled app home still matches.
+            try:
+                superseded.add(str(Path(parent).resolve()))
+            except OSError:
+                superseded.add(parent)
+
+    out: List[Dict[str, Any]] = []
+    for f, data in scanned:
+        if len(out) >= max(1, limit):
+            break
+        try:
+            if str(f.resolve()) in superseded:
+                continue  # a later session resumed this one and contains all of it
+        except OSError:
+            pass
         out.append(
             {
                 "path": str(f),
                 "session_id": data["meta"].get("session_id", f.stem),
                 "modified": f.stat().st_mtime,
                 "turns": data["turns"],
+                # What the row should SIZE itself by: the whole restorable
+                # conversation, inherited history included.
+                "exchanges": data.get("exchanges", data["turns"]),
                 "messages": data["messages"],
                 "preview": _preview(data["messages"]),
                 # A fork shares its parent's opening prompt, so the preview alone
                 # can't tell them apart — the picker appends a "(branch)" marker.
                 "branched_from": data.get("branched_from") or {},
+                "resumed_from": data.get("resumed_from", ""),
             }
         )
     return out

@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
 
+# An unstructured tool result longer than this is treated as CONTENT, never as an
+# error message: a real failure report is short, while file contents are not (and
+# are what produced the false "error:" matches this bound exists to stop).
+_MAX_ERROR_MESSAGE_CHARS = 2000
+
 
 def current_turn_messages(messages: List[Any]) -> List[Any]:
     """The tail of ``messages`` belonging to the current turn.
@@ -178,9 +183,43 @@ class Reflector:
         "json_error": "Validate JSON structure before parsing; check for trailing commas or missing quotes",
     }
 
-    def _is_actual_error(self, result_lower: str) -> bool:
-        """Check if the result indicates an actual tool error, not just content."""
-        return any(indicator in result_lower for indicator in self.ERROR_INDICATORS)
+    def _is_actual_error(self, result_lower: str, raw_result: str = "") -> bool:
+        """True when the TOOL failed — not merely when its output mentions failure.
+
+        Tools built on ``@tool_error_handler`` report failure as structured JSON
+        (``{"error": true, …}``), so that is checked first and trusted absolutely:
+        present → failure, well-formed JSON without it → success.
+
+        The substring indicators are only a fallback for unstructured output, and
+        they are why this needed fixing: matching ``"error:"`` anywhere meant a
+        SUCCESSFUL ``fs_read`` of any file containing ``logger.error("error: …")``
+        — or a test asserting on ``"failed:"``, or docs mentioning a traceback —
+        was recorded as a tool failure. That inflated the failure metrics and wrote
+        junk strategies into the playbook, which is injected into the system
+        prompt. So the fallback now requires the whole result to *look* like an
+        error report (short, and led by the indicator) rather than merely contain
+        one somewhere in a file's contents.
+        """
+        payload = raw_result or result_lower
+        stripped = payload.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, dict):
+                # Authoritative: the tool told us outright.
+                return bool(parsed.get("error")) or bool(parsed.get("isError"))
+            if parsed is not None:
+                return False  # valid JSON payload with no error flag → success
+
+        # Unstructured output: only treat it as an error when the result IS an
+        # error message, not when it happens to contain one. File contents are
+        # long and don't begin with the indicator.
+        if len(stripped) > _MAX_ERROR_MESSAGE_CHARS:
+            return False
+        head = result_lower.lstrip().lstrip("!*#-[( \t")
+        return any(head.startswith(ind) for ind in self.ERROR_INDICATORS)
 
     def _track_metric(self, success: bool, failure_type: str = None) -> None:
         """Track a tool execution metric and persist."""
@@ -230,8 +269,8 @@ class Reflector:
 
         result_lower = tool_result.lower()
 
-        # Check for failures first
-        if self._is_actual_error(result_lower):
+        # Check for failures first (raw result too: JSON parsing needs real case)
+        if self._is_actual_error(result_lower, tool_result):
             # Check for specific failure patterns
             for failure_type, patterns in self.FAILURE_PATTERNS.items():
                 if any(p in result_lower for p in patterns):

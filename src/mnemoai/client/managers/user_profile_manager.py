@@ -12,6 +12,16 @@ from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import profile_dir
 
+# An interaction_count above this is taken as evidence of the pre-fix
+# double counting rather than genuine use: reaching it honestly would take tens of
+# thousands of prompts in ONE profile, while the N²/2 growth got there in a few
+# hundred turns. Deliberately high so a heavy real user isn't "repaired".
+_INFLATION_SUSPECT_THRESHOLD = 5000
+
+# How close to a bound (or to the 0.5 default) counts as "saturated" — i.e. the
+# EMA was folded so many times that the value no longer carries signal.
+_SATURATION_EPSILON = 0.01
+
 
 class UserProfileManager:
     """Manages user interaction patterns with efficient EMA-based learning."""
@@ -78,6 +88,10 @@ class UserProfileManager:
         # Migrate legacy profile if needed
         if not self.profile.get("_legacy_migrated", False):
             self._migrate_profile()
+
+        # Repair a profile inflated by the pre-fix double counting (one-shot).
+        if not self.profile.get("_recount_repaired", False):
+            self._repair_inflated_counts()
 
     def _load_profile(self) -> Dict:
         """Load existing profile or create new one.
@@ -173,6 +187,47 @@ class UserProfileManager:
         self.profile["_legacy_migrated"] = True
         self._save_profile()
         logger.info("Profile migration complete")
+
+    def _repair_inflated_counts(self) -> None:
+        """Undo the damage from re-analyzing the whole history every turn (one-shot).
+
+        Profiling used to receive all of ``agent.messages`` after each turn, so
+        turn N re-counted every earlier prompt: ``interaction_count`` grew as
+        N²/2 (an observed profile reached 62,977) and each trait's EMA was folded
+        the same messages thousands of times, pulling it to a degenerate value —
+        one real profile showed ``technical_level`` at 0.0002 and ``abstraction``
+        pinned at exactly 0.5.
+
+        The true count is unrecoverable from an inflated one, so it is estimated
+        by inverting N²/2. Traits are only reset when they're **saturated** (at a
+        bound, or sitting on the neutral default): an unsaturated value still
+        carries real signal and is left alone. Runs once, flagged in the profile.
+        """
+        count = self.profile.get("interaction_count", 0)
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            count = 0
+
+        if count > _INFLATION_SUSPECT_THRESHOLD:
+            # count ≈ turns²/2  →  turns ≈ sqrt(2 · count)
+            estimated = max(1, int((2 * count) ** 0.5))
+            logger.info(
+                f"Repairing inflated profile: interaction_count {count} → "
+                f"~{estimated} (was double-counted every turn)"
+            )
+            self.profile["interaction_count"] = estimated
+            for trait in ("verbosity", "directness", "technical_level", "abstraction"):
+                value = self.profile.get(trait)
+                if not isinstance(value, (int, float)):
+                    continue
+                # Saturated = washed out by repeated folding; reset to neutral so
+                # it can re-learn. A mid-range value is kept.
+                if value <= _SATURATION_EPSILON or value >= 1 - _SATURATION_EPSILON:
+                    self.profile[trait] = 0.5
+
+        self.profile["_recount_repaired"] = True
+        self._save_profile()
 
     def _save_profile(self) -> None:
         """Save profile to disk."""

@@ -17,14 +17,27 @@ the shared ``config`` singleton and the real ``sys.stdin`` (the tests' patch
 points), so the extraction is transparent to them.
 """
 
+import json
 import sys
 
+from mnemoai.client.agent import plan_policy
 from mnemoai.utils.config import config
 
 # Destructive-tool confirmation categories (each gated behind a REQUIRE_* toggle).
 CONFIRM_BASH_TOOLS = {"execute_bash"}
 CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
 CONFIRM_MEMORY_TOOLS = {"memory"}
+
+# Some tools can only tell a call is dangerous once they inspect the world (is
+# this branch pushed? is this a protected branch?), so they refuse and answer
+# ``requires_confirmation`` instead of acting. That payload used to go to the
+# MODEL, whose only documented next step was to re-call with
+# ``allow_dangerous=True`` — i.e. the model approved its own dangerous call and
+# no human was ever in the loop. Both halves are gated here instead: the flag is
+# confirmed before the call, and the refusal payload is confirmed after it.
+CONFIRM_RESULT_CATEGORY = "git"
+_RESULT_APPROVAL_REASON = "User approved this operation at the confirmation prompt."
+_RESULT_TOGGLE = "REQUIRE_GIT_CONFIRMATION"
 
 
 def is_preapproved_bash(agent, command: str) -> bool:
@@ -51,6 +64,20 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
     ``REQUIRE_*`` toggle; every other tool proceeds. Enforced client-side (the
     MCP subprocess can't prompt); non-TTY runs auto-proceed.
     """
+    # Arg-driven and tool-agnostic, so it comes first: ``allow_dangerous=True``
+    # IS the request to override a server-side safety refusal. The MCP server
+    # can see the flag but not the human, so the flag itself has to be confirmed
+    # here or the model can wave through anything it was just refused.
+    if tool_args.get("allow_dangerous"):
+        return _gated_prompt(
+            agent,
+            CONFIRM_RESULT_CATEGORY,
+            _RESULT_TOGGLE,
+            True,
+            "▶ Override safety check?",
+            f"{tool_name} {tool_args.get('command') or ''}".strip(),
+        )
+
     if tool_name in CONFIRM_BASH_TOOLS:
         # A command the plan pre-declared (via exit_plan_mode allowed_bash)
         # runs without a prompt — approving the plan approved these.
@@ -64,7 +91,9 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
             tool_args.get("command", ""),
         )
     elif tool_name in CONFIRM_WRITE_TOOLS:
-        path = tool_args.get("path", "")
+        # Both spellings: file_edit calls it file_path, fs_write calls it path.
+        # Reading one made the prompt read a bare "edit" with no filename.
+        path = plan_policy.write_target(tool_args)
         op = tool_args.get("command", "edit")  # fs_write: create/str_replace/…
         category, toggle, toggle_default, header, detail = (
             "write",
@@ -89,6 +118,22 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
     else:
         return True
 
+    return _gated_prompt(agent, category, toggle, toggle_default, header, detail)
+
+
+def _gated_prompt(
+    agent,
+    category: str,
+    toggle: str,
+    toggle_default: bool,
+    header: str,
+    detail: str,
+) -> bool:
+    """Run the toggle → trust → headless → TTY ladder, then prompt. True to proceed.
+
+    Shared by the pre-call gate (:func:`confirm`) and the post-call one
+    (:func:`confirm_result`) so the two can't drift apart on who gets asked.
+    """
     if not config.get(toggle, toggle_default):
         return True
     # Already trusted this session (user answered "a" earlier). A background
@@ -118,6 +163,84 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
         if category in getattr(agent, "_trusted_confirm_categories", set()):
             return True
         return agent._prompt_confirm(header, detail, category)
+
+
+def parse_confirmation_request(result):
+    """Return the payload when a tool result is asking for confirmation, else None."""
+    if not isinstance(result, str) or "requires_confirmation" not in result:
+        return None
+    try:
+        payload = json.loads(result)
+    except ValueError:
+        return None
+    if isinstance(payload, dict) and payload.get("requires_confirmation"):
+        return payload
+    return None
+
+
+def _request_detail(payload: dict) -> str:
+    """One-line summary of why the tool refused, for the prompt's detail row."""
+    reasons = []
+    for warning in payload.get("warnings") or []:
+        text = warning.get("message", "") if isinstance(warning, dict) else str(warning)
+        if text:
+            reasons.append(text)
+    reasons.extend(str(issue) for issue in payload.get("issues") or [])
+    if not reasons:
+        reasons.append(str(payload.get("message") or "Flagged as risky."))
+    detail = " ".join(reasons)
+    command = payload.get("command") or ""
+    return (f"{command} — {detail}" if command else detail)[:300]
+
+
+def _tool_accepts(tool, field: str) -> bool:
+    """True when ``tool``'s arg schema exposes ``field``, so a retry can set it."""
+    fields = getattr(getattr(tool, "args_schema", None), "model_fields", None)
+    return bool(fields) and field in fields
+
+
+def confirm_result(agent, tool, tool_name: str, tool_args: dict, result):
+    """Resolve a ``requires_confirmation`` tool result with the user.
+
+    Called for every tool result; returns ``result`` untouched unless the tool
+    refused and asked for confirmation. When it did, the user is shown the real
+    warnings and either the call is retried with the override set, or a refusal
+    is returned that tells the model NOT to override it itself.
+    """
+    payload = parse_confirmation_request(result)
+    if payload is None:
+        return result
+    # An already-approved retry (see below), or a tool with no override
+    # parameter: nothing to ask, and nothing we could re-run differently.
+    if tool_args.get("allow_dangerous") or not _tool_accepts(tool, "allow_dangerous"):
+        return result
+
+    if not _gated_prompt(
+        agent,
+        CONFIRM_RESULT_CATEGORY,
+        _RESULT_TOGGLE,
+        True,
+        "▶ Proceed with flagged operation?",
+        _request_detail(payload),
+    ):
+        return json.dumps(
+            {
+                "error": True,
+                "declined_by_user": True,
+                "message": (
+                    "The user was shown the risks of this operation and declined "
+                    "it. Do NOT retry with allow_dangerous=True — ask them how "
+                    "they want to proceed instead."
+                ),
+                "command": payload.get("command", ""),
+            }
+        )
+
+    retry_args = dict(tool_args)
+    retry_args["allow_dangerous"] = True
+    if _tool_accepts(tool, "reason") and not str(tool_args.get("reason") or "").strip():
+        retry_args["reason"] = _RESULT_APPROVAL_REASON
+    return tool.invoke(retry_args)
 
 
 def prompt_confirm(agent, header: str, detail: str, category: str) -> bool:

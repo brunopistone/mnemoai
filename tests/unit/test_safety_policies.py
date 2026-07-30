@@ -9,6 +9,7 @@ No config, LLM, or filesystem needed.
 
 from mnemoai.server.tools.safety import (
     classify_shell_command,
+    classify_shell_write_targets,
     classify_write_path,
 )
 
@@ -70,6 +71,101 @@ class TestBashPolicyBlocks:
         r = classify_shell_command("rm -rf /")
         assert r.reason  # non-empty human message
         assert r.rule == "rm_rf_root"
+
+
+class TestRmRfRootAnchor:
+    """The root-wipe rule must not be defeated by what FOLLOWS the target.
+
+    `rm -rf /` alone is refused by GNU rm, so the form that actually wipes the
+    filesystem is `rm -rf / --no-preserve-root` — which the original rule missed
+    because it anchored on end-of-command immediately after the target.
+    """
+
+    def test_no_preserve_root_after_target(self):
+        r = classify_shell_command("rm -rf / --no-preserve-root")
+        assert r.blocked is True and r.rule == "rm_rf_root"
+
+    def test_no_preserve_root_before_flags(self):
+        assert classify_shell_command("rm --no-preserve-root -rf /").blocked is True
+
+    def test_redirection_after_target(self):
+        assert classify_shell_command("rm -rf / 2>/dev/null").blocked is True
+
+    def test_quoted_target(self):
+        assert classify_shell_command('rm -rf "/"').blocked is True
+        assert classify_shell_command("rm -rf '/'").blocked is True
+
+    def test_scoped_delete_still_allowed_with_trailing_flags(self):
+        # The anchor still does its job: a real subdirectory is not a root wipe.
+        assert classify_shell_command("rm -rf build/ --verbose").blocked is False
+        assert classify_shell_command("rm -rf /tmp/x 2>/dev/null").blocked is False
+
+
+class TestShellWriteTargets:
+    """A shell write must obey the same path policy as fs_write/file_edit.
+
+    `execute_bash` never consulted classify_write_path, so a redirection into a
+    system directory was simply not a "write tool" call.
+    """
+
+    def test_redirect_into_etc(self):
+        r = classify_shell_command("echo x > /etc/hosts")
+        assert r.blocked is True and r.rule == "system_write"
+
+    def test_append_into_etc(self):
+        assert classify_shell_command("echo x >> /etc/sudoers").blocked is True
+
+    def test_nested_shell_c_payload(self):
+        assert classify_shell_command("sh -c 'echo x > /etc/hosts'").blocked is True
+
+    def test_tee_through_a_pipe(self):
+        assert classify_shell_command("echo x | sudo tee /etc/hosts").blocked is True
+
+    def test_copy_destination(self):
+        assert classify_shell_command("cp evil /usr/local/bin/ls").blocked is True
+
+    def test_sed_in_place(self):
+        assert classify_shell_command("sed -i 's/a/b/' /etc/passwd").blocked is True
+
+    def test_second_segment_of_a_chain(self):
+        assert classify_shell_command("ls; echo y > /private/etc/hosts").blocked is True
+
+    def test_reason_names_the_target(self):
+        assert "/etc/hosts" in classify_shell_command("echo x > /etc/hosts").reason
+
+    def test_dev_null_is_exempt(self):
+        # /dev is a protected prefix, but the standard sinks must stay writable
+        # or nearly every real command would be blocked.
+        assert classify_shell_command("ls -la 2>/dev/null").blocked is False
+        assert classify_shell_command("make 1>/dev/null 2>&1").blocked is False
+
+    def test_fd_duplication_is_not_a_path(self):
+        assert classify_shell_command("echo oops 1>&2").blocked is False
+
+    def test_quoting_is_respected(self):
+        # A redirection inside a quoted string is text, not a redirection.
+        assert classify_shell_command("echo 'x > /etc/hosts'").blocked is False
+        assert classify_shell_command("git commit -m 'fix > /etc/x typo'").blocked is False
+
+    def test_ordinary_writes_allowed(self):
+        for cmd in (
+            "echo hi > /tmp/out.txt",
+            "pytest -q > out.log 2>&1",
+            "cp a.py b.py",
+            "mkdir -p ~/scratch/x",
+            "npm run build 2>&1 | tee build.log",
+            "make install",
+        ):
+            assert classify_shell_command(cmd).blocked is False, cmd
+
+    def test_reads_are_not_writes(self):
+        for cmd in ("cat /etc/hosts", "diff /etc/hosts /tmp/h", "wc -l < /etc/hosts"):
+            assert classify_shell_write_targets(cmd).blocked is False, cmd
+
+    def test_unbalanced_quoting_still_scanned(self):
+        # Can't tokenize -> fall back to the raw-string redirection scan rather
+        # than skipping the check entirely.
+        assert classify_shell_write_targets('echo "oops > /etc/hosts').blocked is True
 
 
 class TestBashPolicyAllows:

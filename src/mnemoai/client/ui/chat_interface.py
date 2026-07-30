@@ -69,24 +69,34 @@ class ChatInterface:
     ]
 
     # Command groups for the welcome box: (heading, [(command, description)]).
+    # Grouped by the QUESTION you'd have, not by implementation area — "Conversation"
+    # had grown to nine entries doing three unrelated jobs (trimming the live
+    # context, managing session files, steering the assistant), which is what made
+    # the banner read as a wall. Keep any new command in the group whose heading
+    # answers why you'd reach for it; split the group before letting one pass ~5.
     _COMMAND_GROUPS = [
+        ("Context", [
+            ("/clear", "Clear conversation context"),
+            ("/compact [focus]", "Summarize & shrink context"),
+            ("/usage", "Token usage for this session (per model)"),
+        ]),
+        ("Sessions", [
+            ("/save [path]", "Save conversation (optional file/dir path)"),
+            ("/load [path]", "Load a saved conversation (lists if no path)"),
+            ("/export [md|txt]", "Write a shareable transcript here"),
+            ("/branch [turn]", "Fork this session and continue there"),
+        ]),
+        ("Assistant", [
+            ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
+            ("/memory [clear]", "View (or clear) persistent memory"),
+            ("/skills [name]", "List installed skills (or preview one)"),
+            ("/mcp", "List configured MCP servers & tools"),
+        ]),
         ("Configure", [
             ("/config", "Reconfigure config.yaml (overwrites it)"),
             ("/model", "Override one model (LLM/vision/embeddings)"),
-            ("/params", "Tune model inference params (temp, top_p, …)"),
+            ("/params", "Tune inference params (temp, top_p, …)"),
             ("/features", "Enable/disable features (RAG, memory, web, …)"),
-            ("/mcp", "List configured MCP servers & tools"),
-            ("/skills [name]", "List installed skills (or preview one)"),
-        ]),
-        ("Conversation", [
-            ("/clear", "Clear conversation context"),
-            ("/compact [focus]", "Summarize & shrink context"),
-            ("/memory [clear]", "View (or clear) persistent memory"),
-            ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
-            ("/save [path]", "Save conversation (optional file/dir path)"),
-            ("/load [path]", "Load a saved conversation (lists saved if no path)"),
-            ("/export [md|txt]", "Export a shareable transcript to this directory"),
-            ("/branch [turn]", "Fork this session at a turn and continue there"),
         ]),
         ("Exit", [
             ("/exit, /quit", "Exit the application"),
@@ -108,6 +118,7 @@ class ChatInterface:
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/save", "Save conversation (/save [path])"),
         ("/load", "Load a saved conversation (/load lists saved)"),
+        ("/usage", "Show token usage for this session"),
         ("/export", "Export a shareable transcript (/export [md|txt] [path])"),
         ("/branch", "Fork this session at a turn and continue there"),
         ("/exit", "Exit the application"),
@@ -142,9 +153,12 @@ class ChatInterface:
             return len(self._ANSI_RE.sub("", s))
 
         # Inner width: banner width (64), widened to fit the longest command row.
+        # A row is "<heading gutter>  <command>  <description>", so the gutter that
+        # holds the inlined group heading counts toward the width too.
         cmd_w = max(vlen(c) for _, items in self._COMMAND_GROUPS for c, _ in items)
+        gutter_w = max(vlen(h) for h, _ in self._COMMAND_GROUPS)
         longest_row = max(
-            2 + cmd_w + 2 + vlen(desc)
+            gutter_w + 2 + cmd_w + 2 + vlen(desc)
             for _, items in self._COMMAND_GROUPS for _, desc in items
         )
         W = max(64, longest_row)
@@ -159,30 +173,50 @@ class ChatInterface:
         bot = f"{C['border']}╰{'─' * (W + 2)}╯{C['reset']}"
 
         # --- Wordmark banner (indigo ≈ #5f5fff via 256-color 63) ---
-        # Center the tagline under the BANNER (its own width), not the command
-        # box (which widens to the longest row) — otherwise it drifts right of
-        # the wordmark when the box is wider than the banner.
+        # Center the wordmark AND its tagline over the command box. The box widens
+        # to its longest row (well past the wordmark's fixed 64 columns), so
+        # left-aligning both left the logo visibly adrift of the frame below it.
+        # Indent the block by half the difference; the tagline is then centered
+        # within the wordmark's own width so it stays under the letters.
         banner_w = max(vlen(line) for line in self._BANNER)
+        box_w = W + 4  # inner width + the "│ " / " │" frame on each side
+        indent = " " * max(0, (box_w - banner_w) // 2)
         print()
         for line in self._BANNER:
-            print(f"\033[38;5;63m{line}\033[0m")
+            print(f"{indent}\033[38;5;63m{line}\033[0m")
         tagline = "local agentic AI assistant · learns & remembers"
-        print(f"{C['dim']}" + tagline.center(banner_w) + C["reset"])
+        print(f"{indent}{C['dim']}" + tagline.center(banner_w) + C["reset"])
         print()
 
         # --- Framed command list ---
         print(top)
 
-        for gi, (heading, items) in enumerate(self._COMMAND_GROUPS):
-            if gi:
-                row()  # blank spacer between groups
-            row(f"{C['head']}{heading}{C['reset']}")
-            for cmd, desc in items:
+        # Group headings sit on the SAME row as their first command rather than on
+        # their own line. Five groups × (heading + spacer) is ten lines of pure
+        # chrome in a box that's already the tallest thing on screen at launch;
+        # inlining the heading buys all of it back and still reads as grouped,
+        # because the headings are the only text in the left column.
+        head_w = max(vlen(h) for h, _ in self._COMMAND_GROUPS)
+        for heading, items in self._COMMAND_GROUPS:
+            for idx, (cmd, desc) in enumerate(items):
+                label = heading if idx == 0 else ""
+                gutter = f"{C['head']}{label}{C['reset']}" + " " * (
+                    head_w - vlen(label)
+                )
                 padded_cmd = cmd + " " * (cmd_w - vlen(cmd))
-                row(f"  {C['cmd']}{padded_cmd}{C['reset']}  {C['text']}{desc}{C['reset']}")
+                row(
+                    f"{gutter}  {C['cmd']}{padded_cmd}{C['reset']}  "
+                    f"{C['text']}{desc}{C['reset']}"
+                )
 
         print(sep)
-        row(f"{C['dim']}Ctrl+J{C['reset']} for new lines · {C['dim']}Enter{C['reset']} to submit")
+        # Mention the completion menu: it's how you find a command WITHOUT this box,
+        # so it's what keeps the banner from having to be the whole reference.
+        row(
+            f"{C['dim']}Ctrl+J{C['reset']} for new lines · "
+            f"{C['dim']}Enter{C['reset']} to submit · "
+            f"{C['dim']}/{C['reset']} to search commands"
+        )
         print(bot + "\n")
 
     def _store_success_episode(self, task: str, tools_used: list) -> None:
@@ -764,6 +798,10 @@ class ChatInterface:
             timestamp = self.client.session_id.split("_", 1)[1]
             save_path = query[len("/save"):].strip() or None
             self.client.save_conversation(timestamp, path=save_path)
+            return None
+
+        if query.lower() == "/usage":
+            print("\n" + self.client.usage_report() + "\n")
             return None
 
         # /export [md|txt] [path] — a shareable transcript, not a reloadable file.

@@ -12,7 +12,12 @@ from typing import Optional
 
 from mcp import StdioServerParameters
 
-from mnemoai.client import context_injection, session_artifacts, transcript_export
+from mnemoai.client import (
+    context_injection,
+    session_artifacts,
+    transcript_export,
+    usage_tracker,
+)
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
@@ -28,7 +33,7 @@ from mnemoai.client.mcp_config import load_external_servers
 from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.playbook_store import PlaybookStore
-from mnemoai.client.memory.reflector import Reflector
+from mnemoai.client.memory.reflector import Reflector, current_turn_messages
 from mnemoai.client.session_log import (
     SessionLog,
     branch_session,
@@ -305,6 +310,12 @@ class LangGraphClient:
                 # model call when history exceeds its high-water mark, reusing the
                 # same manager as the post-turn /compact path.
                 self.agent._compact_provider = self._compact_now
+                # Attribute usage to the configured model, and let the router
+                # (a model call the user never sees) count toward the same totals.
+                self.agent.usage_model_name = self.model_name_for_log() or "model"
+                if router is not None:
+                    router.usage = self.agent.usage
+                    router.usage_model_name = self.agent.usage_model_name
                 # Per-agent model override (custom sub-agent frontmatter 'model'):
                 # build a same-provider model with the NAME swapped, on demand.
                 self.agent._subagent_model_factory = self._subagent_model_factory
@@ -368,8 +379,15 @@ class LangGraphClient:
                 )
 
                 if config.get("PROFILE", {}).get("USE_PROFILING", False):
+                    # Scope to THIS turn. Profiling runs after every turn while
+                    # `agent.messages` is the whole session, so passing all of it
+                    # re-analyzed every earlier prompt again: `interaction_count`
+                    # grew as N²/2 (a real profile reached 62,977 for a few
+                    # hundred turns) and the EMA washed out toward its neutral
+                    # value because the same messages kept being folded in. Same
+                    # bug, same fix, as the reflector's `scope_to_last_turn`.
                     messages_for_profile = convert_langchain_messages_to_strands(
-                        self.agent.messages
+                        current_turn_messages(self.agent.messages)
                     )
                     self.profile_manager.analyze_conversation(messages_for_profile)
 
@@ -747,6 +765,11 @@ class LangGraphClient:
         # Fresh conversation: the next /save makes a new file.
         self.current_conversation_path = None
 
+        # /usage counts THIS conversation, so a cleared context starts from zero.
+        tracker = getattr(self.agent, "usage", None) if self.agent else None
+        if tracker is not None:
+            tracker.reset()
+
     def _new_session_id(self) -> str:
         """Delegates to :func:`session_artifacts.new_session_id`."""
         return session_artifacts.new_session_id(self)
@@ -989,6 +1012,13 @@ class LangGraphClient:
             log.seed_history(messages, source=source)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Session log seed failed: {e}")
+
+    def usage_report(self) -> str:
+        """The ``/usage`` report: reported token totals for this session."""
+        tracker = getattr(self.agent, "usage", None) if self.agent else None
+        if tracker is None:
+            return "Usage tracking is unavailable (no agent running)."
+        return usage_tracker.render(tracker, self._count_context_tokens())
 
     def export_transcript(
         self, path: str = None, fmt: str = None, include_reasoning: bool = False

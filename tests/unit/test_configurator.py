@@ -792,9 +792,10 @@ def test_config_openai_transforms_base_template():
         # chat name, [blank base URL, blank key], MAX_TOKENS none, context,
         # vision? y, "same as chat?" y (copies chat), embeddings? n, profile, brave,
         # then toggles: RAG, EPISODIC, PLAYBOOK, MEMORY, AUTO_EXTRACT, SKILLS,
-        # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH_CONFIRM, WRITE_CONFIRM, MEM_CONFIRM.
+        # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH_CONFIRM, WRITE_CONFIRM,
+        # MEM_CONFIRM, GIT_CONFIRM.
         ["gpt-5-mini", "", "", "none", "65536", "y", "y", "n", "alice", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "openai" and m["NAME"] == "gpt-5-mini"
@@ -810,9 +811,10 @@ def test_config_sagemaker_sets_region_and_input_format():
     d = _run_build(
         "sagemaker", "my-endpoint",
         # chat name, region, input_format, MAX_TOKENS none, ctx,
-        # vision? n, embeddings? n, profile, brave, then 13 toggles (see openai test).
+        # vision? n, embeddings? n, profile, brave, then 14 toggles (see openai test).
         ["my-endpoint", "eu-west-1", "huggingface", "none", "65536", "n", "n",
-         "bob", "", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "bob", "", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y",
+         "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "sagemaker"
@@ -824,10 +826,10 @@ def test_config_litellm_sets_api_base_and_key():
     d = _run_build(
         "litellm", "openai/gpt-4o",
         # chat name, api_base, api_key, MAX_TOKENS none, ctx,
-        # vision? n, embeddings? n, profile, brave, then 13 toggles (see openai test).
+        # vision? n, embeddings? n, profile, brave, then 14 toggles (see openai test).
         ["openai/gpt-4o", "http://localhost:8000/v1", "sk-xyz", "none", "65536",
          "n", "n", "carol", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "litellm"
@@ -838,14 +840,14 @@ def test_config_litellm_sets_api_base_and_key():
 def test_config_anthropic_transforms_base_template():
     # answers: chat name, API_KEY, base URL (blank), MAX_TOKENS, ctx, configure
     # vision? (y), "same as chat?" (y → copies chat), embeddings? (n), profile,
-    # brave (blank), then 13 toggles: RAG, EPISODIC, PLAYBOOK, MEMORY,
+    # brave (blank), then 14 toggles: RAG, EPISODIC, PLAYBOOK, MEMORY,
     # AUTO_EXTRACT, SKILLS, WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH_CONFIRM,
-    # WRITE_CONFIRM, MEM_CONFIRM.
+    # WRITE_CONFIRM, MEM_CONFIRM, GIT_CONFIRM.
     d = _run_build(
         "anthropic", "claude-opus-4-8",
         ["claude-opus-4-8", "fake-anthropic-key", "", "none", "65536",
          "y", "y", "n", "dave", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "anthropic" and m["NAME"] == "claude-opus-4-8"
@@ -864,6 +866,7 @@ def test_config_anthropic_transforms_base_template():
     assert d["ENABLE_MEMORY_AUTO_EXTRACTION"] is True  # asked because memory=y
     assert d["ENABLE_SKILLS"] is True
     assert d["REQUIRE_MEMORY_CONFIRMATION"] is True
+    assert d["REQUIRE_GIT_CONFIRMATION"] is True
 
 
 def test_config_skips_auto_extract_when_memory_off():
@@ -874,8 +877,9 @@ def test_config_skips_auto_extract_when_memory_off():
         ["claude-opus-4-8", "fake-key", "", "none", "65536",
          "n", "n", "dave", "",   # vision? n, embeddings? n
          # RAG, EPISODIC, PLAYBOOK, MEMORY(n → no auto-extract prompt), SKILLS,
-         # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH, WRITE, MEM_CONFIRM.
-         "y", "y", "y", "n", "y", "y", "y", "y", "y", "y", "y", "y"],
+         # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH, WRITE, MEM_CONFIRM,
+         # GIT_CONFIRM.
+         "y", "y", "y", "n", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
     )
     assert d["ENABLE_MEMORY"] is False
     # Not prompted → key stays at its template value (not forced by this run).

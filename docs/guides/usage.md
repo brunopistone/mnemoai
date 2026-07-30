@@ -23,6 +23,7 @@ All advanced features can be independently enabled or disabled in your config fi
 | **Write Confirmation** (prompt before each file write)                    | `REQUIRE_WRITE_CONFIRMATION: true`     | `true`              | None (auto-skips when non-interactive)                                             |
 | **Persistent Memory** (curated memory the agent maintains, `MEMORY.md`)   | `ENABLE_MEMORY: true`                  | `true`              | None                                                                               |
 | **Memory Confirmation** (prompt before each memory write)                 | `REQUIRE_MEMORY_CONFIRMATION: false`   | `false`             | None (auto-skips when non-interactive)                                             |
+| **Git Override Confirmation** (prompt before overriding a git safety refusal) | `REQUIRE_GIT_CONFIRMATION: true`   | `true`              | None (auto-skips when non-interactive)                                             |
 | **Memory Auto-Extraction** (background turn-end auto-save to `MEMORY.md`) | `ENABLE_MEMORY_AUTO_EXTRACTION: false` | `false`             | Writes without a prompt; one extra background model call per turn                  |
 | **Verbose Mode** (show thinking process)                                  | CLI flag `--no-verbose`                | Enabled             | Supported by model                                                                 |
 | **Session Recording** (resume a past session with `--resume`)             | `SESSION_MAX_AGE_DAYS: 30`             | `30` days           | `0` disables recording ([details](#resuming-a-session))                            |
@@ -47,23 +48,24 @@ Assistant: [Uses fs_read tool and displays content]
 
 ### Commands
 
-| Command            | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/exit` or `/quit` | Exit the application                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `/clear`           | Clear conversation history and RAG index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `/save`            | Save the current conversation. After a `/load` (or an earlier `/save`), a bare `/save` **overwrites that same file**; `/save <path>` saves to a specific file/dir; a fresh conversation (after `/clear`) saves to a new timestamped file                                                                                                                                                                                                                                                                                                                 |
-| `/load <path>`     | Load a saved conversation (no path → pick from a list; the picker has a **Delete** button to remove a saved conversation after a Yes/No confirm, then reopens). The loaded file becomes the one a later `/save` writes back to                                                                                                                                                                                                                                                                                                                           |
-| `/export [md\|txt] [path]` | Write the conversation as a **shareable transcript** — readable Markdown (default) or plain text — into the **current directory** unless you give a path. Not the same as `/save`: an export is a one-way artifact for pasting into a bug report or PR, not something `/load` can read back. Tool *calls* appear as one-line summaries; tool *results* and injected context are left out. Add `reasoning` to include thinking blocks ([details](#exporting-a-transcript))                                                                          |
-| `/branch [turn]`   | **Fork this session** and carry on in the copy. No argument → pick the turn to branch after; `/branch 3` branches directly. The original session is **never modified** — it stays resumable with `--resume` ([details](#branching-a-session))                                                                                                                                                                                                                                                                                                              |
-| `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `/config`          | Re-run the interactive configurator — chat, vision (with a "same as chat?" shortcut + provider choice), and embeddings models, then feature toggles. `Ctrl+B` steps back within a model section. Overwrites `config.yaml` and restarts in place                                                                                                                                                                                                                                                                                                          |
-| `/model`           | Set up one model — chat (LLM), vision, or embeddings. Vision offers a "use the same model as Chat?" shortcut. Inference params reset to model defaults on a change (re-tune with `/params`); restarts in place                                                                                                                                                                                                                                                                                                                                           |
-| `/params`          | Tune a model's inference parameters (temperature, top_p, top_k, penalties, reasoning, stop, stream, …) — only the params the chosen provider supports are offered, then restart in place                                                                                                                                                                                                                                                                                                                                                                 |
-| `/features`        | Enable/disable app features — a checklist of RAG, episodic memory, playbook, web search/crawl, routing, orchestration, memory, skills. Turning one on prompts for anything it needs (Brave API key, embeddings model); restarts in place                                                                                                                                                                                                                                                                                                                 |
-| `/mcp`             | List the configured MCP servers (built-in + any from `mcp.json`), their connection status, and tool counts                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `/skills`          | List installed skills (name + description); `/skills <name>` previews a skill's full instructions. See [Agent Skills](agent-skills.md) below                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `/memory`          | View the curated persistent memory (`MEMORY.md`); `/memory clear` wipes it (with a y/N confirm)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `/plan`            | Toggle **plan mode** — an enforced read-only mode. While ON, the agent investigates and, when ready, presents a plan you **approve (y), edit in `$EDITOR` (e), or keep refining (n)**; approving turns plan mode off and the agent executes the plan in the same turn (saved to `plans/plan_<ts>.md`). Read-only shell commands (`ls`, `cat`, `grep`, `git status/log/diff`, …) still run; file edits, mutating shell, git writes, and background tasks are **hard-blocked** while ON. See [Plan Mode](productivity-tools.md#plan-mode) for full details |
+| Command                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/exit` or `/quit`         | Exit the application                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `/clear`                   | Clear conversation history and RAG index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `/save`                    | Save the current conversation. After a `/load` (or an earlier `/save`), a bare `/save` **overwrites that same file**; `/save <path>` saves to a specific file/dir; a fresh conversation (after `/clear`) saves to a new timestamped file                                                                                                                                                                                                                                                                                                                 |
+| `/load <path>`             | Load a saved conversation (no path → pick from a list; the picker has a **Delete** button to remove a saved conversation after a Yes/No confirm, then reopens). The loaded file becomes the one a later `/save` writes back to                                                                                                                                                                                                                                                                                                                           |
+| `/usage`                   | Token totals for this session, per model — input, output and cache tokens, counting **every** model call including sub-agents, orchestrator workers and the query router. Cumulative spend, not the size of your conversation ([details](#checking-token-usage))                                                                                                                                                                                                                                                                                         |
+| `/export [md\|txt] [path]` | Write the conversation as a **shareable transcript** — readable Markdown (default) or plain text — into the **current directory** unless you give a path. Not the same as `/save`: an export is a one-way artifact for pasting into a bug report or PR, not something `/load` can read back. Tool _calls_ appear as one-line summaries; tool _results_ and injected context are left out. Add `reasoning` to include thinking blocks ([details](#exporting-a-transcript))                                                                                |
+| `/branch [turn]`           | **Fork this session** and carry on in the copy. No argument → pick the turn to branch after; `/branch 3` branches directly. The original session is **never modified** — it stays resumable with `--resume` ([details](#branching-a-session))                                                                                                                                                                                                                                                                                                            |
+| `/compact [focus]`         | Summarize older turns to shrink context (optional focus instructions)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `/config`                  | Re-run the interactive configurator — chat, vision (with a "same as chat?" shortcut + provider choice), and embeddings models, then feature toggles. `Ctrl+B` steps back within a model section. Overwrites `config.yaml` and restarts in place                                                                                                                                                                                                                                                                                                          |
+| `/model`                   | Set up one model — chat (LLM), vision, or embeddings. Vision offers a "use the same model as Chat?" shortcut. Inference params reset to model defaults on a change (re-tune with `/params`); restarts in place                                                                                                                                                                                                                                                                                                                                           |
+| `/params`                  | Tune a model's inference parameters (temperature, top_p, top_k, penalties, reasoning, stop, stream, …) — only the params the chosen provider supports are offered, then restart in place                                                                                                                                                                                                                                                                                                                                                                 |
+| `/features`                | Enable/disable app features — a checklist of RAG, episodic memory, playbook, web search/crawl, routing, orchestration, memory, skills. Turning one on prompts for anything it needs (Brave API key, embeddings model); restarts in place                                                                                                                                                                                                                                                                                                                 |
+| `/mcp`                     | List the configured MCP servers (built-in + any from `mcp.json`), their connection status, and tool counts                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `/skills`                  | List installed skills (name + description); `/skills <name>` previews a skill's full instructions. See [Agent Skills](agent-skills.md) below                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `/memory`                  | View the curated persistent memory (`MEMORY.md`); `/memory clear` wipes it (with a y/N confirm)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `/plan`                    | Toggle **plan mode** — an enforced read-only mode. While ON, the agent investigates and, when ready, presents a plan you **approve (y), edit in `$EDITOR` (e), or keep refining (n)**; approving turns plan mode off and the agent executes the plan in the same turn (saved to `plans/plan_<ts>.md`). Read-only shell commands (`ls`, `cat`, `grep`, `git status/log/diff`, …) still run; file edits, mutating shell, git writes, and background tasks are **hard-blocked** while ON. See [Plan Mode](productivity-tools.md#plan-mode) for full details |
 
 ### The prompt
 
@@ -130,10 +132,23 @@ typed it** — retrieved memory, steering instructions and other context the
 assistant adds behind the scenes are left out of the label:
 
 ```
-   4m ago    6 turns  refactor the FSDP config parser
+   4m ago    6 turns  refactor the FSDP config parser (continued)
   2h ago    2 turns  why does the loader crash on startup?
    3d ago   14 turns  add a --resume flag
 ```
+
+The turn count describes the **whole conversation you'd restore**, inherited
+history included — so a chat you've resumed several times shows its full length,
+not just what you typed since the last resume. `(continued)` marks a session that
+carried on from an earlier one.
+
+**One row per conversation, not per file.** Resuming records a new session seeded
+with everything that came before, so a chat you resumed three times exists as four
+files on disk. Only the most recent is offered: the earlier ones are contained in
+it, and that's the one you want to continue. Nothing is deleted — and if you want
+an earlier point specifically, `mnemoai --resume <session-id>` still restores that
+exact one. (A [`/branch`](#branching-a-session) fork is _not_ collapsed, since it
+diverges rather than continues.)
 
 Pick one and the conversation replays into the terminal and continues where you
 left off, with the restored conversation shown just above the prompt. `Esc`
@@ -160,7 +175,7 @@ question you interrupted and one a dropped connection cut short.
 
 **Resuming carries the whole conversation forward.** When you resume (or `/load`),
 the restored history is copied into the new session's file, so that file is a
-complete record on its own and resuming *it* later replays everything — not just
+complete record on its own and resuming _it_ later replays everything — not just
 what you added after the restore. The session you resumed from is never modified,
 so you can always go back and resume the same point again.
 
@@ -212,6 +227,46 @@ opening prompt and the two rows would otherwise look identical:
     branching past a turn that edited code, the assistant's picture of those files
     comes from the branch's history: say what you want undone, or check `git diff`
     before continuing.
+
+### Checking token usage
+
+`/usage` shows what this session has actually cost in tokens:
+
+```
+Token usage this session (as reported by the provider)
+
+  anthropic.claude-opus-5
+    12 calls  ·  in 103,204  ·  out 307  ·  total 103,511
+    cache: 41,208 read  ·  0 written
+
+  Current context: 10,741 tokens (what the next turn re-sends)
+```
+
+**It counts work you never see.** Sub-agents, orchestrator workers and the query
+router are all real model calls, and they're usually where the tokens go — a single
+delegated research task can spend an order of magnitude more than the turn that
+triggered it. Those are exactly the numbers worth surfacing, so they're included.
+
+**`/usage` and `[Context: N]` measure different things.** The context line after each
+turn is how big the prompt is _right now_ — what the next turn re-sends, and what
+[compaction](#commands) shrinks. `/usage` is cumulative spend since the session
+started (or since your last `/clear`, which resets it). A long conversation has a
+large context; a conversation with lots of delegated work has large usage. They move
+independently.
+
+!!! note "No dollar figure, on purpose"
+
+    Token pricing doesn't apply uniformly across the providers mnemoai supports:
+    Ollama and a local OpenAI-compatible server cost nothing per token, SageMaker
+    bills by endpoint-hour rather than by token, and LiteLLM can proxy any model at
+    prices this process has no way to know. A hardcoded price table would produce
+    confidently wrong numbers, so `/usage` reports tokens and tells you whose
+    numbers they are.
+
+    For the same reason the totals are **reported, not measured**: they come from each
+    provider's own `usage_metadata`. Not every provider populates it — if some calls
+    report nothing, the report says so and treats the total as a lower bound rather
+    than quietly counting them as zero.
 
 ### Exporting a transcript
 

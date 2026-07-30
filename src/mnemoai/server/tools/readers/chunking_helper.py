@@ -15,11 +15,18 @@ from datetime import datetime
 
 import tiktoken
 
+from mnemoai.utils import tokenization
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import chunk_session_pointer_path, profile_dir
 
-MODEL_ID = "gpt-4"
+# tiktoken wants an ENCODING name, not a model name — ``get_encoding("gpt-4")``
+# raises ``ValueError: Unknown encoding gpt-4``, so every count silently fell
+# through to the ``len(text)//4`` fallback and chunk sizes were ~12% off. Shared
+# with ``utils.tokenization`` so the two can't drift onto different encodings.
+# (``encoding_for_model`` would also work, but pinning the encoding keeps chunk
+# boundaries stable if the configured model changes.)
+_ENCODING_NAME = tokenization._ENCODING_NAME
 
 
 def _get_cache_db_path() -> str:
@@ -121,7 +128,7 @@ def __count_tokens(text: str) -> int:
         Token count
     """
     try:
-        encoding = tiktoken.get_encoding(MODEL_ID)
+        encoding = tiktoken.get_encoding(_ENCODING_NAME)
         # disallowed_special=() so text that literally contains a special token
         # (e.g. "<|endoftext|>" in a source file being chunked) is counted as
         # ordinary text rather than raising.

@@ -131,9 +131,13 @@ class CodeFormatter:
             # Parser produced nothing mappable (e.g. only whitespace so far, or a
             # partial line). Nothing to finalize yet; render the tail on final.
             if final and self._rendered_lines < len(lines):
-                tail = "\n".join(lines[self._rendered_lines:])
-                if tail.strip():
-                    self._render_text_block(tail)
+                # Emit the tail the same way _render_token does (line renderer +
+                # _out), rather than calling a `_render_text_block` that never
+                # existed — this branch is only reached when the parser itself
+                # raised, so the AttributeError would have replaced a recoverable
+                # render failure with a crash, losing the answer entirely.
+                for line in lines[self._rendered_lines:]:
+                    self._out(self._render_line(line), flush=True)
                 self._rendered_lines = len(lines)
             return
 

@@ -118,9 +118,13 @@ def get_classifier_prompt() -> str:
 class QueryRouter:
     """Routes queries to appropriate tool subsets based on classification."""
 
-    def __init__(self, model: BaseChatModel) -> None:
+    def __init__(self, model: BaseChatModel, usage=None) -> None:
         self.model = model
         self._valid_routes = set(ROUTE_TOOLS.keys())
+        # Optional UsageTracker: classification is a real model call the user never
+        # sees, so it must still count toward the session totals (/usage).
+        self.usage = usage
+        self.usage_model_name = ""
 
     def fast_route(self, query: str) -> Optional[str]:
         """Route deterministically from unambiguous signals, or None.
@@ -204,6 +208,8 @@ class QueryRouter:
                 route = ""
                 for _ in range(2):
                     response = self.model.invoke(messages, config={"callbacks": []})
+                    if self.usage is not None:
+                        self.usage.record(response, self.usage_model_name)
                     route = self._parse_route(response.content)
                     if route:
                         break
