@@ -9,6 +9,12 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.4] — 2026-07-30
+
+Three ways to get a conversation unstuck: let the assistant ask you when it's
+genuinely blocked, fork a session that went the wrong way, and get a readable
+transcript out of one.
+
 ### Added
 
 - **`ask_user_question` — the model can put a decision back to you.** When it's
@@ -27,6 +33,26 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
     own judgment and says what it assumed, rather than re-asking.
   - The prompt guidance pushes toward acting on a sensible default — one question
     the user must answer costs more than a choice they can correct.
+
+- **`/export [md|txt] [path]` — a shareable transcript.** Writes the conversation
+  as readable Markdown or plain text into the **current directory** (not the
+  profile), for pasting into a bug report, a PR description, or a message. This is
+  deliberately NOT `/save`: that writes re-importable JSON for `/load`, while an
+  export is a one-way artifact optimized for a human reader. Tool *calls* are kept
+  as one-line summaries (a file body passed as an argument is replaced by its
+  size); tool **results** are dropped, since a few thousand lines of file content
+  is the single biggest source of noise. Injected context — the steering block and
+  the prepended episodic-memory block — is stripped, because the user never typed
+  it. Reasoning is opt-in (`/export reasoning`). The filename is derived from the
+  opening prompt, so exports are identifiable in a directory listing.
+- **`/branch [turn]` — fork a session and continue in the copy.** With no argument
+  it shows a turn picker; `/branch 3` branches directly. The transcript up to that
+  turn is copied to a new session, the live history is truncated to match, and this
+  run continues writing into the fork. **The original is never modified** — that's
+  the whole safety property: it stays resumable exactly as it was, so a branch that
+  goes nowhere costs nothing. Forks are tagged `(branch @ turn N)` in the `--resume`
+  picker, since a fork inherits its parent's opening prompt and the two rows would
+  otherwise be indistinguishable.
 
 ### Fixed
 

@@ -129,6 +129,29 @@ class SessionLog:
             logger.debug(f"Session log disabled (could not create): {e}")
             self.path = None
 
+    @classmethod
+    def reopen(cls, path) -> "SessionLog":
+        """Attach to an EXISTING session file and keep appending to it.
+
+        Used by ``/branch``: the fork's file already holds the copied history, and
+        this run must continue writing into it rather than create a third file.
+        Skips ``__init__`` (which would write a second ``meta`` record) and
+        restores the turn counter from what's on disk, so the next turn is
+        numbered correctly instead of restarting at 1.
+        """
+        log = cls.__new__(cls)
+        p = Path(path)
+        log.path = p
+        log._turn = 0
+        try:
+            data = read_session(p)
+            log._turn = data["turns"]
+            log.session_id = data["meta"].get("session_id", p.stem)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Session log reopen fell back to a fresh counter: {e}")
+            log.session_id = p.stem
+        return log
+
     def _append(self, record: Dict[str, Any]) -> None:
         if self.path is None:
             return
@@ -211,6 +234,100 @@ class SessionLog:
             return False
 
 
+def turn_summaries(path) -> List[Dict[str, Any]]:
+    """Per-turn labels for a session, for the ``/branch`` turn picker.
+
+    Returns ``[{"n": 1, "preview": …, "ts": …}, …]`` — one entry per ``turn``
+    record, labelled by what the USER typed that turn (same stripping as the
+    ``--resume`` picker). A ``restore`` record contributes no entry: its messages
+    are inherited history, so they are not a turn you can branch *at* — branching
+    before turn 1 would just duplicate the parent.
+    """
+    out: List[Dict[str, Any]] = []
+    n = 0
+    for rec in _iter_records(Path(path)):
+        if rec.get("t") != "turn":
+            continue
+        n += 1
+        msgs = rec.get("messages") if isinstance(rec.get("messages"), list) else []
+        out.append(
+            {
+                "n": n,
+                "ts": rec.get("ts"),
+                "preview": first_user_prompt(msgs) or "(no prompt)",
+            }
+        )
+    return out
+
+
+def branch_session(path, through_turn: int = None, cwd=None, profile: str = None) -> Optional[Path]:
+    """Copy a session's transcript up to ``through_turn`` into a NEW session file.
+
+    Returns the new path, or None if there was nothing to copy. ``through_turn``
+    is inclusive and 1-based (None/0 or beyond the end = the whole session), so
+    branching at turn 3 yields a session ending after turn 3 — the point to
+    continue from in a different direction.
+
+    **The source file is never touched.** That is the whole safety property: a
+    branch is a copy, so the original conversation stays resumable exactly as it
+    was, and a branch that goes nowhere costs nothing. The copy is written as a
+    single ``restore`` record rather than replayed turn-by-turn, because it is
+    inherited history for the new session — the same shape ``seed_history`` writes
+    after ``--resume``, so the new file is self-contained and its own turn counter
+    starts at the turns the user takes *in the branch*.
+    """
+    src = Path(path)
+    meta: Dict[str, Any] = {}
+    messages: List[Dict[str, Any]] = []
+    kept = 0
+    limit = through_turn if (through_turn and through_turn > 0) else None
+    for rec in _iter_records(src):
+        kind = rec.get("t")
+        if kind == "meta":
+            meta = rec
+            continue
+        if kind not in ("turn", "restore"):
+            continue
+        msgs = rec.get("messages")
+        if not isinstance(msgs, list):
+            continue
+        if kind == "turn":
+            if limit is not None and kept >= limit:
+                break  # records are in order, so the rest is past the branch point
+            kept += 1
+        messages.extend(msgs)
+    if not messages:
+        return None
+
+    # A branch must land in the SAME per-directory session dir as its source, or
+    # it disappears from that project's picker. The source's own `meta.cwd` is
+    # authoritative: `branch_session` can be called from anywhere (and a test's
+    # process cwd is never the session's project), so falling back to the process
+    # cwd silently files the fork under the wrong project.
+    if cwd is None:
+        cwd = meta.get("cwd") or None
+    log = SessionLog(cwd=cwd, profile=profile, model=meta.get("model", ""))
+    if log.path is None:
+        return None
+    if log.path.parent != src.parent:
+        logger.debug(
+            f"Branch filed under {log.path.parent} (source: {src.parent})"
+        )
+    log._append(
+        {
+            "t": "restore",
+            "ts": time.time(),
+            "source": str(src),
+            "branched_from": {
+                "session_id": meta.get("session_id", src.stem),
+                "through_turn": kept,
+            },
+            "messages": messages,
+        }
+    )
+    return log.path
+
+
 def _iter_records(path: Path):
     """Yield parsed records from a session file, skipping unparsable lines.
 
@@ -232,19 +349,26 @@ def _iter_records(path: Path):
 
 
 def read_session(path) -> Dict[str, Any]:
-    """Read one session file into ``{meta, messages, turns}`` (strands dicts).
+    """Read one session file into ``{meta, messages, turns, branched_from}``.
 
     Returns ``messages: []`` for a session that never completed a turn.
+    ``branched_from`` is set only for a ``/branch`` fork (see
+    :func:`branch_session`), so the picker can distinguish a branch from the
+    conversation it was forked from — they share an opening prompt, and without
+    this the two rows are identical.
     """
     p = Path(path)
     meta: Dict[str, Any] = {}
     messages: List[Dict[str, Any]] = []
+    branched_from: Dict[str, Any] = {}
     turns = 0
     for rec in _iter_records(p):
         kind = rec.get("t")
         if kind == "meta":
             meta = rec
         elif kind in ("turn", "restore"):
+            if kind == "restore" and isinstance(rec.get("branched_from"), dict):
+                branched_from = rec["branched_from"]
             msgs = rec.get("messages")
             if isinstance(msgs, list):
                 messages.extend(msgs)
@@ -253,7 +377,13 @@ def read_session(path) -> Dict[str, Any]:
                 # shows, but it IS part of the conversation to replay.
                 if kind == "turn":
                     turns += 1
-    return {"meta": meta, "messages": messages, "turns": turns, "path": str(p)}
+    return {
+        "meta": meta,
+        "messages": messages,
+        "turns": turns,
+        "path": str(p),
+        "branched_from": branched_from,
+    }
 
 
 def _preview(messages: List[Dict[str, Any]]) -> str:
@@ -293,6 +423,9 @@ def list_sessions(cwd=None, profile: str = None, limit: int = 20) -> List[Dict[s
                 "turns": data["turns"],
                 "messages": data["messages"],
                 "preview": _preview(data["messages"]),
+                # A fork shares its parent's opening prompt, so the preview alone
+                # can't tell them apart — the picker appends a "(branch)" marker.
+                "branched_from": data.get("branched_from") or {},
             }
         )
     return out

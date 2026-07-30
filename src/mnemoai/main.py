@@ -88,7 +88,12 @@ def _discard_empty_session(client: Any) -> None:
 
 
 def _format_session_label(entry: dict) -> str:
-    """One picker row: how long ago, turn count, and the opening prompt."""
+    """One picker row: how long ago, turn count, and the opening prompt.
+
+    A ``/branch`` fork is tagged, because it INHERITS its parent's opening prompt
+    — so the preview alone renders a branch and the conversation it came from as
+    two identical rows.
+    """
     import time
 
     age = max(0, int(time.time() - entry.get("modified", 0)))
@@ -99,7 +104,12 @@ def _format_session_label(entry: dict) -> str:
     else:
         when = f"{age // 86400}d ago"
     turns = entry.get("turns", 0)
-    return f"{when:>8}  {turns:>3} turn{'s' if turns != 1 else ''}  {entry.get('preview', '')}"
+    forked = entry.get("branched_from") or {}
+    tag = f" (branch @ turn {forked['through_turn']})" if forked.get("through_turn") else ""
+    return (
+        f"{when:>8}  {turns:>3} turn{'s' if turns != 1 else ''}  "
+        f"{entry.get('preview', '')}{tag}"
+    )
 
 
 def _resume_session(client: Any, resume: str, chat_interface: Any = None) -> str:

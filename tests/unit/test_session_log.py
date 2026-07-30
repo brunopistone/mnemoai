@@ -426,3 +426,194 @@ class TestCompactionBoundaryIsRecorded:
 
         src = inspect.getsource(acm)
         assert "log_compaction()" in src, "compaction no longer records a boundary"
+
+
+class TestTurnSummariesLabelEachTurn:
+    """The ``/branch`` picker needs a label per turn, stripped the same way the
+    ``--resume`` picker strips (else every row reads as injected context)."""
+
+    def test_one_entry_per_turn_in_order(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("first question", "a1"))
+        log.log_turn(_turn("second question", "a2"))
+        rows = slog.turn_summaries(log.path)
+        assert [r["n"] for r in rows] == [1, 2]
+        assert rows[0]["preview"] == "first question"
+        assert rows[1]["preview"] == "second question"
+
+    def test_injected_context_is_stripped_from_the_label(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn([
+            HumanMessage(content="<steering>x</steering>\nreal prompt"),
+            AIMessage(content="a"),
+        ])
+        assert slog.turn_summaries(log.path)[0]["preview"] == "real prompt"
+
+    def test_restored_history_is_not_a_branchable_turn(self, home):
+        # Branching "at" inherited history would just duplicate the parent.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.seed_history(_turn("inherited", "a0"), source="/old.jsonl")
+        log.log_turn(_turn("mine", "a1"))
+        rows = slog.turn_summaries(log.path)
+        assert [r["preview"] for r in rows] == ["mine"]
+
+    def test_a_session_with_no_turns_has_no_rows(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        assert slog.turn_summaries(log.path) == []
+
+
+class TestBranchingCopiesAndNeverMutates:
+    """A branch is a COPY: the original must stay resumable exactly as it was, so
+    a branch that goes nowhere costs nothing."""
+
+    def _three_turns(self):
+        log = slog.SessionLog(cwd="/proj/a")
+        for i in (1, 2, 3):
+            log.log_turn(_turn(f"question {i}", f"answer {i}"))
+        return log
+
+    def test_branching_truncates_at_the_chosen_turn(self, home):
+        log = self._three_turns()
+        new = slog.branch_session(log.path, through_turn=2)
+        blob = str(slog.read_session(new)["messages"])
+        assert "question 1" in blob and "question 2" in blob
+        assert "question 3" not in blob
+
+    def test_the_source_file_is_untouched(self, home):
+        log = self._three_turns()
+        before = log.path.read_bytes()
+        slog.branch_session(log.path, through_turn=1)
+        assert log.path.read_bytes() == before
+
+    def test_the_original_stays_fully_resumable(self, home):
+        log = self._three_turns()
+        slog.branch_session(log.path, through_turn=1)
+        data = slog.read_session(log.path)
+        assert data["turns"] == 3
+        assert "question 3" in str(data["messages"])
+
+    def test_a_branch_is_a_new_file(self, home):
+        log = self._three_turns()
+        new = slog.branch_session(log.path, through_turn=2)
+        assert new is not None and new != log.path
+
+    def test_no_limit_copies_the_whole_session(self, home):
+        log = self._three_turns()
+        for limit in (None, 0, 99):
+            blob = str(slog.read_session(slog.branch_session(log.path, limit))["messages"])
+            assert "question 3" in blob
+
+    def test_the_branch_records_where_it_came_from(self, home):
+        log = self._three_turns()
+        new = slog.branch_session(log.path, through_turn=2)
+        recs = list(slog._iter_records(new))
+        restore = next(r for r in recs if r.get("t") == "restore")
+        assert restore["branched_from"]["through_turn"] == 2
+        assert restore["branched_from"]["session_id"] == log.session_id
+
+    def test_copied_history_does_not_count_as_the_branchs_own_turns(self, home):
+        # The branch's turn counter means "turns taken IN the branch", so a fresh
+        # branch has none — and it isn't offered as a duplicate in the picker.
+        log = self._three_turns()
+        new = slog.branch_session(log.path, through_turn=2)
+        assert slog.read_session(new)["turns"] == 0
+        assert slog.turn_summaries(new) == []
+
+    def test_branching_an_empty_session_yields_nothing(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        assert slog.branch_session(log.path, through_turn=1) is None
+
+    def test_branching_a_branch_keeps_the_inherited_history(self, home):
+        log = self._three_turns()
+        first = slog.branch_session(log.path, through_turn=2)
+        second = slog.branch_session(first)
+        blob = str(slog.read_session(second)["messages"])
+        assert "question 1" in blob and "question 2" in blob
+
+
+class TestReopeningABranchKeepsAppending:
+    def test_it_writes_into_the_existing_file(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q1", "a1"))
+        new = slog.branch_session(log.path, through_turn=1)
+
+        reopened = slog.SessionLog.reopen(new)
+        assert reopened.path == new  # no third file
+        reopened.log_turn(_turn("branch turn", "a2"))
+        blob = str(slog.read_session(new)["messages"])
+        assert "q1" in blob and "branch turn" in blob
+
+    def test_no_second_meta_record_is_written(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q1", "a1"))
+        new = slog.branch_session(log.path, through_turn=1)
+        slog.SessionLog.reopen(new).log_turn(_turn("q2", "a2"))
+        metas = [r for r in slog._iter_records(new) if r.get("t") == "meta"]
+        assert len(metas) == 1
+
+    def test_the_turn_counter_continues_instead_of_restarting(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q1", "a1"))
+        new = slog.branch_session(log.path, through_turn=1)
+        r1 = slog.SessionLog.reopen(new)
+        r1.log_turn(_turn("b1", "x"))
+        # Reopen AGAIN (a later /branch or restart) — numbering must not reset.
+        r2 = slog.SessionLog.reopen(new)
+        r2.log_turn(_turn("b2", "y"))
+        ns = [r["n"] for r in slog._iter_records(new) if r.get("t") == "turn"]
+        assert ns == [1, 2]
+
+    def test_a_reopened_branch_is_offered_once_it_has_a_turn(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q1", "a1"))
+        new = slog.branch_session(log.path, through_turn=1)
+        slog.SessionLog.reopen(new).log_turn(_turn("in the branch", "a2"))
+        previews = [s["preview"] for s in slog.list_sessions(cwd="/proj/a")]
+        assert any("in the branch" in p or "q1" in p for p in previews)
+
+
+class TestABranchIsDistinguishableInThePicker:
+    """A fork inherits its parent's opening prompt, so the preview alone renders
+    the two as identical rows — the same indistinguishable-sessions bug fixed for
+    injected prefixes in 1.8.1."""
+
+    def test_the_listing_carries_the_branch_point(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("shared opening", "a1"))
+        log.log_turn(_turn("second", "a2"))
+        new = slog.branch_session(log.path, through_turn=1)
+        slog.SessionLog.reopen(new).log_turn(_turn("in branch", "a3"))
+
+        rows = {r["path"]: r for r in slog.list_sessions(cwd="/proj/a")}
+        assert rows[str(new)]["branched_from"]["through_turn"] == 1
+        assert not rows[str(log.path)]["branched_from"]  # the parent is not a fork
+
+    def test_read_session_exposes_the_provenance(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q", "a"))
+        new = slog.branch_session(log.path, through_turn=1)
+        assert slog.read_session(new)["branched_from"]["session_id"] == log.session_id
+
+    def test_an_ordinary_resume_is_not_labelled_a_branch(self, home):
+        # seed_history writes a `restore` record too; only a fork sets provenance.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.seed_history(_turn("restored", "a"), source="/old.jsonl")
+        log.log_turn(_turn("q", "a"))
+        assert slog.read_session(log.path)["branched_from"] == {}
+
+    def test_the_picker_row_tags_a_branch(self, home):
+        from mnemoai.main import _format_session_label
+
+        row = _format_session_label({
+            "modified": time.time(), "turns": 2, "preview": "shared opening",
+            "branched_from": {"through_turn": 3, "session_id": "x"},
+        })
+        assert "branch @ turn 3" in row
+
+    def test_the_picker_row_is_unchanged_for_a_normal_session(self, home):
+        from mnemoai.main import _format_session_label
+
+        row = _format_session_label({
+            "modified": time.time(), "turns": 2, "preview": "hello",
+        })
+        assert "branch" not in row and "hello" in row

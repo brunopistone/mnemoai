@@ -138,6 +138,39 @@ All tools now provide intelligent error messages with troubleshooting guidance:
 - Command execution errors
 - Timeout errors
 
+### ❓ Questions the Assistant Asks You
+
+When the assistant is blocked on a decision that's genuinely **yours** — a real fork
+with different tradeoffs, which it can't settle from your request, the code, or a
+sensible default — it puts the question to you as a short list instead of guessing or
+writing out every alternative for you to sort through:
+
+```
+? Which caching layer should the new store use?
+
+  ▸ In-process LRU (recommended)
+    Redis
+    Memcached
+```
+
+Arrow keys move, `Enter` picks, `Esc` dismisses. Your choice is echoed above the
+prompt so the conversation keeps a record of what was asked and what you answered.
+
+**Dismissing is a real answer.** Press `Esc` and the assistant carries on with its
+own best judgment and tells you which assumption it made — it won't ask again. That's
+deliberate: a question you didn't want to answer shouldn't stall the work.
+
+This is meant to be **rare**. The assistant is instructed to prefer acting on a
+reasonable default and saying what it assumed, because one question you have to answer
+costs you more than a choice you can correct. It asks at most one at a time.
+
+!!! note "Sub-agents can't ask"
+
+    A [sub-agent](orchestration.md) has no direct user — a background one runs with no
+    terminal at all — so it never raises this prompt. Instead it decides for itself and
+    reports the assumption it made, which is why a background task can't quietly stall
+    waiting on a prompt nobody would see.
+
 ### 🔐 Action Confirmation (bash & file writes)
 
 Destructive tools ask for explicit confirmation before they run — shell commands (`execute_bash`) and file modifications (`fs_write`, `file_edit`):
