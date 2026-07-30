@@ -1,10 +1,13 @@
-# Productivity Tools
+# Everyday tools
 
-## 🚀 Productivity Tools
+The tools the assistant reaches for on most tasks: tracking multi-step work,
+finding code, editing precisely, and running long jobs without blocking.
 
-The assistant includes specialized tools for efficient code and file manipulation:
+For exact parameters and defaults, see the [Tools reference](../reference/tools.md).
+For what asks before it runs and what is refused, see
+[Safety & permissions](safety.md).
 
-### 📋 Todo List Management
+## 📋 Todo List Management
 
 Track multi-step tasks with automatic status management:
 
@@ -30,11 +33,11 @@ Assistant: [Marks first todo as in_progress]
 Assistant: [Completes each step, updating todos in real-time]
 ```
 
-### 🔎 Fast Search Tools
+## 🔎 Fast Search Tools
 
 High-performance file and content searching:
 
-#### Glob Search (File Names)
+### Glob Search (File Names)
 
 Find files by name patterns:
 
@@ -53,7 +56,7 @@ glob_search(pattern="test_*.py", sort_by_mtime=False)  # Unsorted for speed
 
 **Performance:** Best for project/codebase searches. For system-wide searches (entire home directory), the assistant automatically uses `find` command instead.
 
-#### Grep Search (File Content)
+### Grep Search (File Content)
 
 Search within file contents using ripgrep:
 
@@ -71,13 +74,13 @@ grep_search(pattern="import React", output_mode="content")  # Show matched lines
 - `case_insensitive`: Case-insensitive search (default: False)
 - `output_mode`: `files_with_matches` (default), `content`, or `count`
 - `context_lines`: Lines of context around matches
-- `max_results`: Maximum matches per file (default: 100)
+- `max_results`: Total cap on matches returned across all files (default: 100; `0` = unlimited)
 
-**Requirements:** [ripgrep](../getting-started/installation.md#7-recommended-optional-tools) is recommended for full speed; without it, `grep_search` automatically falls back to a slower built-in search.
+**Requirements:** [ripgrep](../getting-started/installation.md#7-recommended-optional-tools) is **required**. Without it `grep_search` returns `ripgrep (rg) not installed` — there is no fallback.
 
 **Performance:** 10-100x faster than traditional grep for large codebases.
 
-### ✏️ Precise File Editing
+## ✏️ Precise File Editing
 
 Safe string replacement with validation:
 
@@ -107,7 +110,7 @@ file_edit(
 
 **Error Handling:** If the string isn't unique, the tool provides the line numbers where it appears so you can add more context.
 
-### 🛡️ Enhanced Error Handling
+## 🛡️ Enhanced Error Handling
 
 All tools now provide intelligent error messages with troubleshooting guidance:
 
@@ -138,7 +141,7 @@ All tools now provide intelligent error messages with troubleshooting guidance:
 - Command execution errors
 - Timeout errors
 
-### ❓ Questions the Assistant Asks You
+## ❓ Questions the Assistant Asks You
 
 When the assistant is blocked on a decision that's genuinely **yours** — a real fork
 with different tradeoffs, which it can't settle from your request, the code, or a
@@ -171,117 +174,7 @@ costs you more than a choice you can correct. It asks at most one at a time.
     reports the assumption it made, which is why a background task can't quietly stall
     waiting on a prompt nobody would see.
 
-### 🔐 Action Confirmation (bash & file writes)
-
-Destructive tools ask for explicit confirmation before they run — shell commands (`execute_bash`) and file modifications (`fs_write`, `file_edit`):
-
-```
-▶ Run shell command?
-  rm -rf build/
-  Proceed? (y/N/a=allow all this session):
-
-▶ Write to file?
-  create ~/script.py
-  Proceed? (y/N/a=allow all this session):
-```
-
-Only an explicit `y`/`yes` proceeds; `a` trusts that whole category (bash / file writes / memory) for the rest of the session so a multi-step task doesn't re-prompt; anything else (including Enter) declines, and the model is told the user declined. This is a **hard gate enforced client-side** — the prompt always fires regardless of what the model does, because the client owns the terminal (the MCP server is a piped subprocess and can't prompt).
-
-- Toggles: `REQUIRE_BASH_CONFIRMATION` and `REQUIRE_WRITE_CONFIRMATION` (both default `true`). Set either to `false` for trusted/automation setups.
-- Non-interactive runs (no TTY — tests, pipes, CI) auto-proceed so they don't hang.
-
-### 🧱 Server-Side Safety Floor
-
-The confirmation prompt above is a **convenience layer** you can turn off. Below it sits a **hard floor** that is always on and lives inside the MCP server itself — so it holds even when confirmations are disabled, in non-interactive runs, or if the server is driven by another client. It blocks only **catastrophic, irreversible** actions; ordinary work is never affected.
-
-| Layer                        | What it does                                             | Can be disabled?          |
-| ---------------------------- | -------------------------------------------------------- | ------------------------- |
-| Client confirmation prompt   | Asks `Proceed? (y/N/a)` before each shell/file/memory op | Yes (`REQUIRE_*` toggles) |
-| **Server-side safety floor** | Refuses system-destroying commands and system-dir writes | **No** (always enforced)  |
-
-**Shell commands** (`execute_bash`, `start_background_task`) are refused when they would:
-
-- recursively force-delete a root or home target — `rm -rf /`, `rm -rf ~`, `rm -rf /*`
-- create a filesystem or overwrite a raw device — `mkfs…`, `dd of=/dev/…`, `shred`/`wipefs` on a device
-- change the machine power state — `shutdown`, `reboot`, `halt`, `poweroff`, `init 0/6`
-- fork-bomb the machine — `:(){ :|:& };:`
-
-**File writes** (`fs_write`, `file_edit`) are refused when the target is inside a critical system directory — `/`, `/etc`, `/bin`, `/usr`, `/boot`, `/dev`, `/System`, `/Library`, … (`..` and `~` are resolved first). Your home, project trees, temp directories, and the app home stay fully writable.
-
-This floor is intentionally **narrow**: scoped, everyday-destructive commands like `rm -rf build/` or `git reset --hard` are _not_ blocked here — they remain gated by the confirmation prompt. The goal is to make irreversible system damage impossible, not to second-guess normal edits.
-
-### 🛡️ Git Safety
-
-Safe git operations with protection against common mistakes:
-
-**Tools:**
-
-- `git_safe(command="...")` - Execute git commands with safety checks
-- `git_status_safe()` - Comprehensive status with warnings
-- `git_commit_safe(message="...", add_all=True)` - Safe commits with staging
-
-**Protected Operations:**
-
-| Operation                  | Protection                         |
-| -------------------------- | ---------------------------------- |
-| Force push to main/master  | Blocked                            |
-| `git reset --hard`         | Warning + confirmation required    |
-| `git push --force`         | Warning (use `--force-with-lease`) |
-| `git commit --amend`       | Checks if already pushed           |
-| Skip hooks (`--no-verify`) | Warning                            |
-| Force delete branch (`-D`) | Warning                            |
-
-**Example:**
-
-```python
-# Safe - uses git_safe with protections
-git_safe(command="push origin feature-branch")
-
-# Dangerous - requires confirmation
-git_safe(command="reset --hard HEAD~1", allow_dangerous=True, reason="Discarding failed experiment")
-```
-
-### 📝 Plan Mode
-
-**Enforced read-only plan mode (`/plan`).** Toggle it with the **`/plan`** command
-before asking for a complex change — the agent investigates and drafts a plan
-without touching anything, then you approve and it executes.
-
-**When to Use:**
-
-- New feature with multiple files
-- Architectural decisions needed
-- Multi-step refactoring
-- Unclear requirements
-
-**How it works:**
-
-- While ON, the agent can only use **read-only** tools (file reads, glob/grep
-  search, read-only shell like `ls`/`cat`/`git status`, web search, document
-  readers) and its own memory notebook. Any attempt to edit files
-  (`fs_write`/`file_edit`), run mutating shell commands (`execute_bash`), perform
-  git writes, or start background tasks is **hard-blocked client-side** — regardless
-  of what the model tries to do.
-- **Approve → execute in one step.** When the plan is ready the agent calls the
-  `exit_plan_mode` tool, which presents the plan and asks how to proceed:
-  - **y** — approve and run: plan mode turns off and the agent **executes the
-    approved plan immediately, in the same turn** (no need to `/plan` off and re-ask).
-  - **e** — open the plan in your `$EDITOR` to tweak it, then re-review.
-  - **n** — keep planning: stays read-only and refines the plan.
-- The approved plan is saved to `~/.mnemoai/plans/plan_<timestamp>.md` so it
-  survives compaction and can be re-read later.
-- **Pre-approved commands.** A plan can declare the shell commands it will run
-  during execution (tests, builds, installs). Approving the plan pre-approves
-  them, so they run **without** a per-command `Proceed?` prompt while the plan
-  executes; anything not on the list still prompts. These pre-approvals are scoped
-  to that plan — they're cleared when you `/clear` or re-enter plan mode.
-- You can still toggle plan mode off manually with `/plan` at any time.
-
-This is enforced at the same client-side chokepoint as the action-confirmation gate,
-so it holds across both the normal loop and the orchestrator workers, and even a
-misbehaving local model cannot mutate anything while plan mode is on.
-
-### 🔄 Background Tasks
+## 🔄 Background Tasks
 
 Run long operations in parallel without blocking:
 

@@ -9,6 +9,62 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.5] — 2026-07-30
+
+Documentation release: the capability docs are rewritten task-first, every tool
+the model can call is now documented, and three statements that were simply wrong
+are corrected. One shipped config template changed, which is why this is a release
+and not just a site rebuild.
+
+### Added
+
+- **A tools reference — all 31 tools, with their real parameters and limits.**
+  Previously the largest documentation gap: `fs_read`'s seven modes
+  (`Line`/`Search`/`Directory`/`CSV`/`JSON`/`JSONL`/`PDF`/`DOCX`) and `fs_write`'s
+  four commands (`create`/`str_replace`/`insert`/`append`) appeared nowhere, so the
+  only way to learn what they accepted was to read the source. Also newly
+  documented: the read-before-write gate and its two errors (`must_read_first`,
+  `stale_read`), `clear_completed_tasks`, the `use_skill` and `resume_agent` tool
+  names, `glob_search`'s `include_ignored`, `grep_search`'s `offset` /
+  `context_before` / `context_after`, and `web_search`'s six parameters.
+- **A safety page** collecting the confirmation prompt, plan mode, the server-side
+  safety floor, the git protections, and the read-before-write gate — previously
+  scattered across a ten-topic page, or (for the URL/SSRF policy) absent.
+- **A `~/.mnemoai` directory map**, with a "choose the right file" table. The
+  answer to "where does my config go?" was spread across five pages and
+  `paths.py`; `MEMORY.md`, `STEERING.md`, skills, agents, plans, task logs and the
+  per-model stores now have one home.
+
+### Changed
+
+- **`FALLBACK_MODEL` removed from the three shipped `config.yaml` templates.** The
+  key was read by nothing — it named a tiktoken _model_ where the code wants an
+  _encoding_, and the counter it belonged to was replaced. Removing it is not
+  breaking: an existing `config.yaml` that still lists it keeps working, since an
+  unknown key is ignored. `OLLAMA_APPROXIMATION` stays — it is still read, though
+  only for the episodic-memory size budget and not for conversation token
+  counting, which the docs now say.
+- **Capability docs lead with the task, not the subsystem.** Headings name what
+  you're trying to do; each capability states the situation that should make you
+  reach for it, what to type, and what you'll see. The ten-capability
+  "Productivity tools" grab-bag is now everyday tools only, with safety, plan mode,
+  and git split out.
+- Docs gained a **Reference** section, separating exhaustive tables from the
+  task-shaped guides.
+
+### Fixed
+
+- **The docs promised a ripgrep fallback that does not exist.** Two pages stated
+  that `grep_search` "automatically falls back to a slower built-in search"
+  without ripgrep. It does not: it returns `ripgrep (rg) not installed` and
+  searches nothing. Both pages now say ripgrep is required, and the installation
+  page no longer files it under "recommended".
+- **`LLM.MAX_RETRIES` was documented as `3`**; the shipped template says `5`.
+- Two pages still dated their behavior "as of 0.8.16".
+- Malformed Markdown that silently degraded to plain text: `!!!` admonition bodies
+  without the 4-space indent Material requires, and an unescaped `|` inside a table
+  cell that collapsed an entire table into literal text.
+
 ## [1.8.4] — 2026-07-30
 
 Three ways to get a conversation unstuck: let the assistant ask you when it's
@@ -219,7 +275,7 @@ them was a regression I introduced:
   `abstraction` were keyword-scored over a paragraph of tool names. Traits are now
   scored on what you actually typed.
 - **An inflated `interaction_count` resets instead of being estimated.** Inverting
-  N²/2 assumed the old increment was one per turn when it was one per *message*, so
+  N²/2 assumed the old increment was one per turn when it was one per _message_, so
   the estimate overshot by √(1+tools) — 2-3× for a tool-heavy user. Its only consumer
   is the "enough data to profile you" gate, and a confidently wrong number there is
   worse than starting over, so the count resets to 0 and re-accrues honestly.

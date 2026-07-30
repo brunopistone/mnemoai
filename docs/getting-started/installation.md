@@ -184,7 +184,10 @@ Verify:
 rg --version
 ```
 
-Without ripgrep, Mnemo AI falls back to slower grep-based searches.
+Without ripgrep, the `grep_search` tool is unavailable: it returns
+`ripgrep (rg) not installed` instead of searching. There is no fallback.
+`glob_search` (filename patterns) works regardless — it uses the Python standard
+library.
 
 ## 8. Developer install from a checkout
 
