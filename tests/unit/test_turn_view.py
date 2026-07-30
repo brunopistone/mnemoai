@@ -15,6 +15,7 @@ from mnemoai.client.ui.turn_view import (
     render_plan,
     render_reasoning_block,
     render_tool_call,
+    user_prompt_text,
 )
 
 
@@ -293,6 +294,90 @@ class TestRenderConversation:
     def test_empty_messages_render_nothing(self):
         assert render_conversation([]) == ""
         assert render_conversation([_ai(content="")]) == ""
+
+
+class TestReplayShowsOnlyWhatTheUserTyped:
+    """A stored user message still carries the context the client PREPENDED. The
+    replay used to print it raw, so every `--resume` opened with a ~30-line wall
+    of episodic-memory tool names, and the first real prompt lost its `>` marker
+    inside that block. Stripping is shared with the picker label and `/export` via
+    ``turn_view.user_prompt_text`` so the three can't drift apart.
+    """
+
+    EPISODIC = (
+        '[Episodic Memory - Similar Past Tasks]\n'
+        '1. "please continue" \u2192 execute_bash, fs_read (similarity: 0.72)\n\n'
+        "Remember the word RED."
+    )
+
+    def test_the_episodic_block_is_not_replayed(self):
+        out = render_conversation([_human(self.EPISODIC), _ai("RED - got it.")])
+        assert "Episodic Memory" not in out
+        assert "similarity" not in out
+        assert "execute_bash" not in out
+
+    def test_the_real_prompt_survives_with_its_marker(self):
+        out = render_conversation([_human(self.EPISODIC), _ai("RED - got it.")])
+        assert "Remember the word RED." in out
+        line = next(ln for ln in out.splitlines() if "Remember the word RED." in ln)
+        assert ">" in line  # the prompt marker, previously swallowed by the block
+
+    def test_the_steering_block_is_not_replayed(self):
+        out = render_conversation(
+            [_human("<steering>always use tabs</steering>\nfix the parser")]
+        )
+        assert "always use tabs" not in out
+        assert "fix the parser" in out
+
+    def test_the_plan_mode_reminder_is_not_replayed(self):
+        out = render_conversation(
+            [_human("<plan-mode-active>read only</plan-mode-active>\ndo research")]
+        )
+        assert "read only" not in out
+        assert "do research" in out
+
+    def test_an_auto_delivered_subagent_report_is_not_a_prompt(self):
+        # It carries role=user but it's the agent talking to itself.
+        out = render_conversation(
+            [_human("Your background sub-agent finished: here is the report")]
+        )
+        assert "background sub-agent" not in out
+
+    def test_an_injection_only_message_leaves_no_empty_marker(self):
+        assert render_conversation([_human("<steering>x</steering>")]) == ""
+
+    def test_an_ordinary_prompt_is_untouched(self):
+        out = render_conversation([_human("what does this function do?")])
+        assert "what does this function do?" in out
+
+
+class TestUserPromptText:
+    """The shared stripper — the single definition of "what the user typed"."""
+
+    def test_a_plain_prompt_passes_through(self):
+        assert user_prompt_text("hello") == "hello"
+
+    def test_episodic_context_is_dropped(self):
+        assert user_prompt_text('[Episodic Memory - x]\n1. "y"\n\nreal') == "real"
+
+    def test_an_episodic_block_with_no_prompt_yields_nothing(self):
+        assert user_prompt_text("[Episodic Memory - x] nothing follows") == ""
+
+    def test_both_ephemeral_block_kinds_are_dropped(self):
+        assert user_prompt_text("<steering>a</steering>b") == "b"
+        assert user_prompt_text("<plan-mode-active>a</plan-mode-active>b") == "b"
+
+    def test_a_background_report_yields_nothing(self):
+        assert user_prompt_text("Your background sub-agent finished") == ""
+
+    def test_empty_and_none_are_safe(self):
+        assert user_prompt_text("") == ""
+        assert user_prompt_text(None) == ""
+
+    def test_the_word_episodic_inside_a_real_prompt_is_kept(self):
+        # Only a LEADING injected block is stripped, not a mention of it.
+        text = "why does [Episodic Memory ...] show up in my transcript?"
+        assert user_prompt_text(text) == text
 
 
 class TestRenderAgentDetail:

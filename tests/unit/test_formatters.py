@@ -261,3 +261,60 @@ class TestMarkdownRendering:
         out = self._render_by_char(text)
         assert "\033[1;36m" in out  # inline code styled
         assert "`explore`" not in self._plain(out)  # no raw backticks
+
+
+class TestParserFailureFallback:
+    """When markdown-it itself raises, ``_render_pending`` falls back to emitting
+    the unrendered tail. That fallback called ``self._render_text_block()``, a
+    method that exists nowhere — so a recoverable render failure became an
+    ``AttributeError`` that lost the answer entirely. Only reachable via a parser
+    exception, which is why it was never hit in normal use.
+    """
+
+    def _formatter(self, buffer):
+        f = CodeFormatter()
+        f._buffer = buffer
+        f._rendered_lines = 0
+
+        class _Boom:
+            def parse(self, text):
+                raise RuntimeError("parser blew up")
+
+        f._md_inst = _Boom()
+        return f
+
+    def test_the_missing_method_is_never_called(self):
+        # Assert on CODE, not raw source: the name appears in the comment that
+        # explains the bug.
+        import inspect
+
+        from mnemoai.utils.formatting import code_formatter
+
+        code = [
+            line
+            for line in inspect.getsource(code_formatter).splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        assert not any("_render_text_block" in line for line in code)
+
+    def test_a_parser_failure_still_renders_the_tail(self, capsys):
+        self._formatter("line one\nline two")._render_pending(final=True)
+        out = capsys.readouterr().out
+        assert "line one" in out and "line two" in out
+
+    def test_markdown_in_the_tail_is_still_styled(self, capsys):
+        self._formatter("## a heading\n- a bullet")._render_pending(final=True)
+        out = capsys.readouterr().out
+        assert "a heading" in out and "a bullet" in out
+        assert "##" not in out  # prefix consumed, not printed
+        assert "•" in out
+
+    def test_nothing_is_double_rendered(self, capsys):
+        f = self._formatter("only line")
+        f._render_pending(final=True)
+        f._render_pending(final=True)
+        assert capsys.readouterr().out.count("only line") == 1
+
+    def test_a_blank_tail_emits_nothing(self, capsys):
+        self._formatter("   \n  ")._render_pending(final=True)
+        assert capsys.readouterr().out.strip() == ""

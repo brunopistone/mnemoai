@@ -103,11 +103,19 @@ def _format_session_label(entry: dict) -> str:
         when = f"{age // 3600}h ago"
     else:
         when = f"{age // 86400}d ago"
-    turns = entry.get("turns", 0)
+    # Size the row by the whole RESTORABLE conversation, not just the turns typed
+    # in this file: a resumed session inherits its history, so `turns` reported the
+    # longest conversation in the list as "1 turn".
+    count = entry.get("exchanges") or entry.get("turns", 0)
     forked = entry.get("branched_from") or {}
-    tag = f" (branch @ turn {forked['through_turn']})" if forked.get("through_turn") else ""
+    if forked.get("through_turn"):
+        tag = f" (branch @ turn {forked['through_turn']})"
+    elif entry.get("resumed_from"):
+        tag = " (continued)"
+    else:
+        tag = ""
     return (
-        f"{when:>8}  {turns:>3} turn{'s' if turns != 1 else ''}  "
+        f"{when:>8}  {count:>3} turn{'s' if count != 1 else ''}  "
         f"{entry.get('preview', '')}{tag}"
     )
 
@@ -153,10 +161,14 @@ def _resume_session(client: Any, resume: str, chat_interface: Any = None) -> str
         target = next((s for s in sessions if s["path"] == chosen), None)
     else:
         # An explicit id (or a path) — match the id, then fall back to a suffix
-        # match so a partial/abbreviated id still resolves.
+        # match so a partial/abbreviated id still resolves. Resolved against ALL
+        # sessions, including links the menu collapses away: naming an id asks for
+        # that exact point in a resume chain, so hiding a row from the picker must
+        # not make it unreachable.
+        candidates = list_sessions(limit=10_000, collapse_chains=False)
         target = next(
-            (s for s in sessions if resume in (s["session_id"], s["path"])), None
-        ) or next((s for s in sessions if s["session_id"].endswith(resume)), None)
+            (s for s in candidates if resume in (s["session_id"], s["path"])), None
+        ) or next((s for s in candidates if s["session_id"].endswith(resume)), None)
         if target is None:
             print_error(f"No session matching '{resume}' in this directory.")
             return "exit"

@@ -8,6 +8,7 @@ and the memory notebook stay allowed.
 
 import pytest
 
+from mnemoai.client.agent import plan_policy
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.utils.paths import plans_dir
 
@@ -133,3 +134,106 @@ def test_non_plan_file_write_blocked(tool):
     )
     # No path at all.
     assert a._is_blocked_by_plan_mode(tool, {}) is True
+
+
+class TestBothWriteToolArgSpellings:
+    """The write tools disagree on their target's argument name: ``fs_write``
+    takes ``path``, ``file_edit`` takes ``file_path``. Client-side readers must
+    accept both — reading only ``path`` meant ``file_edit`` presented NO target,
+    so ``is_plan_file("")`` was false and plan mode blocked every ``file_edit``
+    including one writing the plan itself.
+    """
+
+    def _plan_file(self):
+        from mnemoai.utils.paths import plans_dir
+
+        return str(plans_dir() / "plan_20260730_120000.md")
+
+    def test_file_edit_may_write_the_plan_file(self):
+        # The regression: this was blocked, so an approved plan couldn't be saved
+        # through file_edit at all.
+        assert (
+            _agent(True)._is_blocked_by_plan_mode(
+                "file_edit", {"file_path": self._plan_file()}
+            )
+            is False
+        )
+
+    def test_fs_write_may_write_the_plan_file(self):
+        assert (
+            _agent(True)._is_blocked_by_plan_mode(
+                "fs_write", {"path": self._plan_file()}
+            )
+            is False
+        )
+
+    def test_either_spelling_works_for_either_tool(self):
+        for tool in ("file_edit", "fs_write"):
+            for key in ("path", "file_path"):
+                assert (
+                    _agent(True)._is_blocked_by_plan_mode(
+                        tool, {key: self._plan_file()}
+                    )
+                    is False
+                ), f"{tool} with {key} was blocked"
+
+    def test_a_non_plan_file_is_still_blocked(self):
+        for key in ("path", "file_path"):
+            assert (
+                _agent(True)._is_blocked_by_plan_mode("file_edit", {key: "/tmp/src.py"})
+                is True
+            )
+
+    def test_a_call_with_no_target_is_blocked(self):
+        # Fail safe: an unparseable call must not be treated as the plan file.
+        assert _agent(True)._is_blocked_by_plan_mode("file_edit", {}) is True
+
+    def test_write_target_reads_both_names(self):
+        assert plan_policy.write_target({"path": "/a"}) == "/a"
+        assert plan_policy.write_target({"file_path": "/b"}) == "/b"
+        assert plan_policy.write_target({}) == ""
+        assert plan_policy.write_target(None) == ""
+
+    def test_write_target_prefers_a_populated_key(self):
+        # A tool that sends both (or an empty one) must not yield "".
+        assert plan_policy.write_target({"path": "", "file_path": "/b"}) == "/b"
+
+
+class TestTheConfirmationPromptNamesTheFile:
+    """A prompt that hides its target defeats the gate: the user was asked to
+    approve a bare "edit" with no filename."""
+
+    def _detail_for(self, tool_args, monkeypatch):
+        import sys
+
+        from mnemoai.client.agent.agent import LangGraphAgent
+
+        seen = []
+        agent = LangGraphAgent.__new__(LangGraphAgent)
+        agent._trusted_confirm_categories = set()
+        agent._confirm_lock = None
+        agent._headless_tl = None
+        agent._spawn_depth_plain = 0
+        agent._spawn_depth_tl = None
+        agent._prompt_confirm = lambda h, d, c: seen.append(d) or True
+        agent._spinner_snapshot = lambda: (False, "x")
+        agent._stop_spinner = lambda *a, **k: None
+        agent._start_spinner = lambda *a, **k: None
+        agent._is_preapproved_bash = lambda c: False
+        monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+        agent._confirm_tool("file_edit", tool_args)
+        return seen[0] if seen else ""
+
+    def test_file_edit_prompt_shows_the_path(self, monkeypatch):
+        detail = self._detail_for(
+            {"file_path": "/tmp/target.py", "old_string": "a", "new_string": "b"},
+            monkeypatch,
+        )
+        assert "/tmp/target.py" in detail
+
+    def test_the_spinner_label_shows_the_path(self):
+        from mnemoai.client.agent.agent import LangGraphAgent
+
+        agent = LangGraphAgent.__new__(LangGraphAgent)
+        label = agent._tool_progress_label("file_edit", {"file_path": "/tmp/x.py"})
+        assert "/tmp/x.py" in label

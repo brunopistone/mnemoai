@@ -9,8 +9,47 @@ from mnemoai.server.tools.git_safety import (
     DANGEROUS_PATTERNS,
     PROTECTED_BRANCHES,
     build_git_argv,
+    build_scan_string,
     check_dangerous_command,
 )
+
+
+class TestScanStringMatchesWhatGitSees:
+    """The danger patterns must run on the argv git will actually receive.
+
+    Scanning the raw string let quoting hide a flag from the check while `shlex`
+    still handed the real flag to git, and made a commit message that merely
+    NAMED a dangerous operation trip that operation's pattern.
+    """
+
+    def test_quoting_cannot_hide_a_flag(self):
+        assert build_scan_string('push origin main --for"ce"') == (
+            "push origin main --force"
+        )
+        assert check_dangerous_command('push origin main --for"ce"')["blocked"] is True
+
+    def test_fully_quoted_flag_is_seen(self):
+        assert check_dangerous_command('reset "--hard" HEAD~1')["dangerous"] is True
+        assert check_dangerous_command('branch "-D" old')["dangerous"] is True
+
+    def test_commit_message_is_not_scanned(self):
+        for command in (
+            "commit -m 'reset --hard fix'",
+            'commit -m "revert the push --force change"',
+            "commit -m'--no-verify in the message'",
+            "commit --message='clean -fd cleanup'",
+        ):
+            result = check_dangerous_command(command)
+            assert result["dangerous"] is False, command
+            assert result["blocked"] is False, command
+
+    def test_real_flags_alongside_a_message_still_caught(self):
+        assert check_dangerous_command("commit --amend -m 'x'")["dangerous"] is True
+        assert check_dangerous_command("commit --no-verify -m 'x'")["dangerous"] is True
+
+    def test_unparseable_quoting_falls_back_to_raw_string(self):
+        # build_git_argv refuses this separately; the scan must not crash.
+        assert build_scan_string("commit -m 'unterminated") == "commit -m 'unterminated"
 
 
 class TestBlockedCommands:

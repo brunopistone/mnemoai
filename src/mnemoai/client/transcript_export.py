@@ -29,10 +29,7 @@ from typing import Any, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from mnemoai.client.agent.agent import LangGraphAgent
-
-# Injected block the client prepends before storing a prompt; never user-typed.
-_EPISODIC_PREFIX = "[Episodic Memory"
+from mnemoai.client.ui import turn_view
 
 # Tool args worth showing inline. A tool call's value in a transcript is "what did
 # it do", and a whole file body pasted into an argument defeats that.
@@ -46,11 +43,12 @@ _FORMATS = ("md", "txt")
 
 
 def _clean_user_text(text: str) -> str:
-    """Strip injected context from a stored user prompt (see module docstring)."""
-    text = LangGraphAgent._strip_ephemeral(text or "")
-    if text.lstrip().startswith(_EPISODIC_PREFIX):
-        text = text.split("\n\n", 1)[1] if "\n\n" in text else ""
-    return text.strip()
+    """Strip injected context from a stored user prompt (see module docstring).
+
+    Shares :func:`turn_view.user_prompt_text` with the replay renderer and the
+    ``--resume`` picker so all three agree on what the user actually typed.
+    """
+    return turn_view.user_prompt_text(text)
 
 
 def _text_of(content: Any) -> str:

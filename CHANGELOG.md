@@ -34,11 +34,28 @@ transcript out of one.
   - The prompt guidance pushes toward acting on a sensible default — one question
     the user must answer costs more than a choice they can correct.
 
+- **`/usage` — token totals for the session, per model.** Reports input, output and
+  (where the provider offers them) cache tokens, accumulated across **every** model
+  call — including the ones you never see: sub-agents, orchestrator workers, and the
+  query router. Those are the point: a single delegated task measured **91,587 tokens
+  across 8 calls** in testing, none of it previously visible anywhere.
+  - **Distinct from `[Context: N]`.** That's the size of the prompt the next turn
+    re-sends; `/usage` is cumulative spend for the conversation. The report says so
+    explicitly, because conflating the two is the obvious misreading.
+  - **No dollar cost, deliberately.** Pricing doesn't apply uniformly across the
+    supported providers — Ollama and a local OpenAI-compatible server are
+    marginal-free, SageMaker bills by endpoint-hour, and LiteLLM proxies an open set
+    of models at prices this process can't know. A confidently wrong figure is worse
+    than none, so it reports tokens and says whose numbers they are.
+  - **A partial total can't masquerade as a complete one.** `usage_metadata` isn't
+    populated by every provider, so a call that reports nothing is counted separately
+    and the report flags the total as a lower bound rather than folding in zeros.
+  - Resets on `/clear`, since that starts a fresh conversation.
 - **`/export [md|txt] [path]` — a shareable transcript.** Writes the conversation
   as readable Markdown or plain text into the **current directory** (not the
   profile), for pasting into a bug report, a PR description, or a message. This is
   deliberately NOT `/save`: that writes re-importable JSON for `/load`, while an
-  export is a one-way artifact optimized for a human reader. Tool *calls* are kept
+  export is a one-way artifact optimized for a human reader. Tool _calls_ are kept
   as one-line summaries (a file body passed as an argument is replaced by its
   size); tool **results** are dropped, since a few thousand lines of file content
   is the single biggest source of noise. Injected context — the steering block and
@@ -56,6 +73,33 @@ transcript out of one.
 
 ### Fixed
 
+- **`--resume` listed one conversation as several rows.** Resuming writes a _new_
+  session file seeded with the whole prior conversation (so each file is
+  self-contained and a resume-of-a-resume can't truncate the chain). But the picker
+  listed one row per _file_, so a chat resumed three times appeared as **four
+  near-identical rows** — each a strict superset of the last, all sharing the same
+  opening prompt and therefore indistinguishable. On a real machine this turned 14
+  conversations into 18 rows. A session that another session resumed is now hidden:
+  its content lives entirely inside its successor, and the successor is the one you
+  want to continue. Nothing is deleted, and naming a superseded id explicitly
+  (`--resume <id>`) still resumes that exact point.
+- **The longest conversation in the list reported the fewest turns.** The count came
+  from turns taken in that _file_, which excludes inherited history — so a resumed
+  chat holding 243 messages displayed as **"1 turn"** and read as the shortest entry
+  in the list. Rows are now sized by the whole restorable conversation (that same
+  row now reads "26 turns"), and a continued session is tagged `(continued)`.
+- A `/branch` fork is deliberately **not** collapsed: it diverges from its parent
+  rather than superseding it, so both remain real conversations and both are offered.
+- **A resumed conversation opened with a wall of injected context.** The replay
+  printed each stored user message _raw_, but a stored prompt still carries what the
+  client prepended to it — so every `--resume` and `/load` began with a ~30-line dump
+  of the episodic-memory block (a paragraph of comma-separated tool names and a
+  similarity score), and the first real prompt lost its `>` marker inside it. The
+  replay now shows only what you typed. The stripping rule (episodic block,
+  `<steering>`/`<plan-mode-active>` reminders, auto-delivered sub-agent reports) moved
+  into one shared `turn_view.user_prompt_text` used by the replay, the `--resume`
+  picker label, and `/export` — it previously existed as three separate copies, and
+  the replay was the one that never got it.
 - **Arrow keys in every picker selected the wrong row.** A `RadioList` tracks the
   highlighted row separately from its committed value, and only its own
   enter/space binding reconciles the two — but the dialog overrides Enter to
@@ -65,6 +109,76 @@ transcript out of one.
   Space before Enter happened to work, which is why it went unnoticed. Found while
   driving the new picker through a real pty — no unit test could have caught it,
   since the bug lives in the widget's two-value split.
+
+### Security
+
+Four holes closed in the tool-safety layer. Each was reachable by the model
+itself, so none depended on a hostile user.
+
+- **The model could approve its own dangerous git operation.** A tool that can only
+  detect danger once it inspects the repo (is this branch pushed? is main
+  protected?) refuses and returns `requires_confirmation` — but that payload went to
+  the MODEL, whose documented next step was to re-call with
+  `allow_dangerous=True, reason="user confirmed"`. Nobody ever asked a human. The
+  refusal is now resolved with the **user** at the tool chokepoint, and
+  `allow_dangerous=True` is itself confirmed **before** the call, tool-agnostically —
+  so setting it on the first call prompts too, not just on a retry. A declined
+  operation returns a refusal that tells the model not to override it.
+- **`rm -rf / --no-preserve-root` was not blocked.** The root-target check required
+  the path at the END of the command, and `--no-preserve-root` is precisely the flag
+  GNU `rm` needs to actually erase `/`. Now blocked in any flag order, with or
+  without `sudo`, and for `-fr` as well as `-rf`.
+- **`execute_bash` bypassed the write-path policy entirely.** `sh -c 'echo x >
+  /etc/hosts'` isn't a "write tool" call, so neither the system-path floor nor the
+  read-before-write gate applied. Shell write targets are now extracted
+  (redirections, `tee`, `cp`/`mv`, `dd of=`, `chmod`, nested `sh -c`) and run through
+  the **same** `classify_write_path` the file tools use — one floor, not a second
+  copy. Ordinary writes to your home, project or temp dir are unaffected.
+- **Quoting hid a dangerous git flag.** The danger patterns matched the raw string
+  while execution used `shlex` argv, so `push origin main --for"ce"` reached git as
+  `--force` completely unwarned. Both now derive from the same tokenization, which
+  also removed the symmetric false positive (a commit message mentioning
+  `reset --hard` no longer trips the check).
+
+### Fixed (correctness)
+
+Six bugs found by auditing rather than by hitting them — several had been failing
+silently since they were written.
+
+- **`file_edit`'s confirmation prompt showed no filename.** The server takes
+  `file_path` but every client-side reader looked for `path`, so the gate asked you
+  to approve a bare "edit" with no target — and `is_plan_file("")` was false, which
+  meant plan mode blocked **every** `file_edit`, including one writing the plan
+  itself. All readers now go through one `plan_policy.write_target()` accepting both
+  spellings, and fail safe (no recognized key → still blocked).
+- **User profiling was recording garbage.** It received the whole conversation after
+  every turn, so turn N re-counted every earlier prompt: `interaction_count` grew as
+  N²/2 (a real profile reached **62,977**) and each trait's EMA washed out —
+  `technical_level` had collapsed to 0.0002 and `abstraction` sat pinned at 0.5.
+  Now scoped to the current turn via the same `current_turn_messages` the reflector
+  already used for this exact bug. An inflated profile is repaired once at load: the
+  count is re-estimated, saturated traits reset so they can re-learn, and
+  mid-range traits kept since they still carry signal.
+- **Reading a file counted as a tool failure.** The reflector flagged any result
+  containing `error:` / `failed:` / `traceback`, so a successful `fs_read` of almost
+  any source file was logged as a failure — inflating the failure metrics and writing
+  junk strategies into the playbook, which is injected into the system prompt. It now
+  trusts the structured `{"error": true}` that tools already return, and only falls
+  back to text matching when the result *is* an error message (short, led by the
+  indicator) rather than merely contains one.
+- **Chunk token counting never worked.** `tiktoken.get_encoding("gpt-4")` — a model
+  name, not an encoding name — raised on every call, and a bare `except` returned
+  `len(text)//4`. Every RAG chunk boundary was ~12% off, invisibly. Now uses the same
+  encoding as the rest of the app, so chunk sizes can't drift from the context budget
+  they're measured against.
+- **`clear_documents` could never work.** It assigned to `store.metadatas` and
+  `store.index`, which are getter-only properties — so it raised `AttributeError` on
+  every call, swallowed into a generic error message. Both backends already had a
+  correct `clear()`; the tool calls it.
+- **A renderer fallback called a method that doesn't exist.** When the markdown
+  parser raised, the recovery path called `self._render_text_block()` — turning a
+  recoverable render failure into an `AttributeError` that lost the whole answer. It
+  now renders the tail the same way the normal path does.
 
 ## [1.8.3] — 2026-07-29
 
@@ -86,7 +200,7 @@ nothing.
 - **Esc now cancels a tool call in progress instead of at its deadline.** The
   worker waited in a single `Future.result(timeout=…)`, which parks in
   `threading.Condition.wait` — a C-level acquire that only notices the injected
-  `KeyboardInterrupt` when it *returns*. So cancelling during a tool call showed
+  `KeyboardInterrupt` when it _returns_. So cancelling during a tool call showed
   `(cancelling…)` and then hung for the whole deadline, with the next message
   stuck in the queue behind it (measured: a cancel 1s into a 600s wait landed at
   600s). The wait is now sliced and consults the agent's existing cooperative
@@ -107,7 +221,7 @@ nothing.
   session contexts were entered in one coroutine and exited in another; since each
   runs as its own asyncio task, `anyio`'s task-affine cancel scopes rejected it
   with `RuntimeError: Attempted to exit cancel scope in a different task than it
-  was entered in`. Reconnection still worked, but printed an alarming stack trace
+was entered in`. Reconnection still worked, but printed an alarming stack trace
   and left the dead subprocess's pipes unreaped. A single long-lived task now owns
   both contexts for the life of the connection, so entry and exit are the same
   task by construction, and teardown is bounded so a wedged server can't hang exit.

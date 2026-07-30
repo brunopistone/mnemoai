@@ -28,6 +28,10 @@ REQUIRE_WRITE_CONFIRMATION: true
 # Ask for confirmation before each persistent-memory write (default off:
 # the agent curates MEMORY.md automatically, Hermes-style). Set true to gate.
 REQUIRE_MEMORY_CONFIRMATION: false
+# Ask for confirmation when a tool refuses a risky git operation and the call
+# asks to override it (unsafe amend, force push, hard reset). Set to false to
+# let the override through unprompted (trusted/automation setups).
+REQUIRE_GIT_CONFIRMATION: true
 # RAG Configuration
 ENABLE_RAG: true
 RAG:

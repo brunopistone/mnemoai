@@ -180,3 +180,71 @@ class TestPlaybookConfidence:
         reloaded = PlaybookStore(persist_path=str(tmp_path))
         assert len(reloaded.entries) == 1
         assert reloaded.entries[0]["strategy"] == "s"
+
+
+def _is_error(text):
+    """Run the failure classifier the way ``_analyze_tool_call`` does."""
+    return Reflector.__new__(Reflector)._is_actual_error(text.lower(), text)
+
+
+class TestFileContentIsNotAToolFailure:
+    """``_is_actual_error`` matched ``error:`` / ``failed:`` / ``traceback``
+    ANYWHERE in the result, so a SUCCESSFUL ``fs_read`` of any file containing a
+    log line was recorded as a tool failure — inflating the failure metrics and
+    writing junk strategies into the playbook, which is injected into the system
+    prompt. These are all successes whose content merely mentions failure.
+    """
+
+    def test_source_with_an_error_log_line(self):
+        assert _is_error('logger.error("error: could not open %s", path)\n' * 10) is False
+
+    def test_a_test_file_asserting_on_failed(self):
+        assert _is_error("def test_x():\n    assert 'failed:' not in out\n" * 10) is False
+
+    def test_docs_mentioning_a_traceback(self):
+        assert _is_error("If you see a traceback, read the last frame.\n" * 10) is False
+
+    def test_grep_output_full_of_error_strings(self):
+        body = "src/x.py:12: error: unused\nsrc/y.py:44: could not resolve\n" * 8
+        assert _is_error(body) is False
+
+    def test_a_structured_success_payload_mentioning_error(self):
+        import json
+
+        assert _is_error(json.dumps({"path": "/a.py", "content": "error: nope"})) is False
+
+    def test_clean_content(self):
+        assert _is_error("def add(a, b):\n    return a + b") is False
+
+
+class TestRealFailuresAreStillCaught:
+    """Precision must not cost recall — the structured flag is authoritative."""
+
+    def test_a_structured_tool_error(self):
+        import json
+
+        payload = json.dumps(
+            {"error": True, "error_type": "FileNotFoundError", "message": "nope"}
+        )
+        assert _is_error(payload) is True
+
+    def test_an_mcp_style_is_error_flag(self):
+        import json
+
+        assert _is_error(json.dumps({"isError": True, "message": "boom"})) is True
+
+    def test_a_plain_error_message(self):
+        assert _is_error("Error: file not found: /nope") is True
+
+    def test_a_failed_message(self):
+        assert _is_error("failed: command not found") is True
+
+    def test_an_unable_to_message(self):
+        assert _is_error("Unable to write file: permission denied") is True
+
+    def test_a_python_traceback(self):
+        assert _is_error("Traceback (most recent call last):\n  File x\nValueError") is True
+
+    def test_a_bulleted_error_line(self):
+        # Leading punctuation must not hide it.
+        assert _is_error("- Error: nope") is True

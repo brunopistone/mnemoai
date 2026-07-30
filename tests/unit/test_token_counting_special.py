@@ -43,6 +43,50 @@ def test_chunking_helper_count_tokens_handles_special():
     assert ct(SPECIAL) > 0  # must not raise / not fall back silently
 
 
+class TestChunkingUsesARealEncoding:
+    """The chunker asked tiktoken for encoding ``"gpt-4"`` — a MODEL name, not an
+    encoding name — so ``get_encoding`` raised on EVERY call and the bare
+    ``except`` silently returned ``len(text)//4``. Chunk sizes were ~12% off and
+    nothing ever reported a problem, which is why it survived: the fallback exists
+    for genuinely unavailable tokenizers, and it masked a permanent failure.
+    """
+
+    def _count(self, text):
+        # Fetched via getattr, not `from … import __count_tokens`: inside a class
+        # body a leading-dunder name is mangled to `_ClassName__count_tokens`.
+        import mnemoai.server.tools.readers.chunking_helper as ch
+
+        return getattr(ch, "__count_tokens")(text)
+
+    def test_the_configured_encoding_name_exists(self):
+        from mnemoai.server.tools.readers import chunking_helper as ch
+
+        tiktoken.get_encoding(ch._ENCODING_NAME)  # raised ValueError before
+
+    def test_the_count_is_tiktokens_not_the_crude_fallback(self):
+        from mnemoai.server.tools.readers import chunking_helper as ch
+
+        text = "The quick brown fox jumps over the lazy dog. " * 20
+        expected = len(
+            tiktoken.get_encoding(ch._ENCODING_NAME).encode(
+                text, disallowed_special=()
+            )
+        )
+        assert self._count(text) == expected
+        assert self._count(text) != len(text) // 4  # the old silent answer
+
+    def test_it_shares_one_encoding_with_the_rest_of_the_app(self):
+        # Two encodings would make chunk sizes disagree with the context budget
+        # they're measured against.
+        from mnemoai.server.tools.readers import chunking_helper as ch
+        from mnemoai.utils import tokenization
+
+        assert ch._ENCODING_NAME == tokenization._ENCODING_NAME
+
+    def test_empty_text_is_zero(self):
+        assert self._count("") == 0
+
+
 def test_episodic_memory_count_and_truncate_handle_special(monkeypatch):
     import mnemoai.client.memory.episodic_memory as em
     from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager

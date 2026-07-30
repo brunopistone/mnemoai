@@ -144,3 +144,65 @@ class TestRoundTripAndRecovery:
         store = FaissStore(4, session_id="s8", rag_dir=str(nested))
         store.add(_vec(4), [{"text": "ok"}])
         assert os.path.exists(store.metadata_path)
+
+
+class TestClearingTheStore:
+    """``clear_documents`` assigned to ``store.metadatas`` / ``store.index`` —
+    both getter-ONLY properties on ``VectorStoreController``. Every call raised
+    ``AttributeError`` into a bare ``except``, so clearing never once worked and
+    reported only a generic "Error clearing documents". Each backend already had
+    a correct ``clear()``; the tool now calls it.
+    """
+
+    def _store(self, tmp_path):
+        s = FaissStore(dim=4, persist_path=str(tmp_path / "idx"))
+        s.add(
+            np.array([[1.0, 0, 0, 0], [0, 1.0, 0, 0]], dtype="float32"),
+            [{"id": 1}, {"id": 2}],
+        )
+        return s
+
+    def test_assigning_the_property_is_what_used_to_fail(self):
+        from mnemoai.server.tools.rag.vector_store_controller import (
+            VectorStoreController,
+        )
+
+        c = VectorStoreController.__new__(VectorStoreController)
+
+        class _Fake:
+            metadatas = [1, 2]
+            index = "idx"
+
+        c.store = _Fake()
+        with pytest.raises(AttributeError):
+            c.metadatas = []  # exactly what clear_documents did
+
+    def test_clear_through_the_controller_empties_the_store(self, tmp_path):
+        from mnemoai.server.tools.rag.vector_store_controller import (
+            VectorStoreController,
+        )
+
+        store = self._store(tmp_path)
+        assert len(store.metadatas) == 2 and store.index.ntotal == 2
+
+        c = VectorStoreController.__new__(VectorStoreController)
+        c.store = store
+        c.clear()
+
+        assert store.metadatas == []
+        assert store.index.ntotal == 0
+
+    def test_the_cleared_state_is_persisted(self, tmp_path):
+        store = self._store(tmp_path)
+        store.clear()
+        with open(store.persist_path + ".meta.json") as f:
+            assert json.load(f) == []
+
+    def test_the_tool_no_longer_assigns_a_read_only_property(self):
+        import inspect
+
+        from mnemoai.server.tools import rag_tool
+
+        src = inspect.getsource(rag_tool)
+        assert "store.metadatas = []" not in src
+        assert "store.index = faiss" not in src

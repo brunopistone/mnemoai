@@ -22,6 +22,31 @@ _HEADER = "\033[38;5;63m"  # indigo, matches the launch banner
 _BAR = f"{_GREEN}▌{_RESET}"
 _CONNECTOR = "↳"
 
+# Context the client PREPENDS to a prompt before it is stored: the episodic-memory
+# block, and the ephemeral `<steering>`/`<plan-mode-active>` reminders. None of it
+# was typed by the user, so none of it belongs in anything a person reads back.
+_EPISODIC_PREFIX = "[Episodic Memory"
+_EPHEMERAL_RE = re.compile(r"<(plan-mode-active|steering)>.*?</\1>\s*", re.DOTALL)
+# A background sub-agent's report is auto-delivered AS a user message.
+_BG_REPORT_PREFIX = "Your background sub-agent"
+
+
+def user_prompt_text(text: str) -> str:
+    """The part of a stored user message the user actually typed ("" if none).
+
+    Strips the injected context listed above. Shared by the replay renderer, the
+    ``--resume`` picker label, and ``/export`` so all three agree on what "what the
+    user said" means — the replay used to print the raw episodic block, which
+    dumped a ~30-line wall of tool names above the first prompt on every resume.
+    """
+    text = _EPHEMERAL_RE.sub("", text or "")
+    if text.lstrip().startswith(_EPISODIC_PREFIX):
+        # Shape: "[Episodic Memory …]\n<entries>\n\n<the real prompt>".
+        text = text.split("\n\n", 1)[1] if "\n\n" in text else ""
+    if text.lstrip().startswith(_BG_REPORT_PREFIX):
+        return ""
+    return text.strip()
+
 
 def format_duration(seconds: float) -> str:
     """Compact duration: 0.4→"0s", 90→"1m30s", 3725→"1h2m5s"."""
@@ -366,7 +391,10 @@ def render_conversation(messages: list) -> str:
         )
         content = getattr(msg, "content", "")
         if cls == "HumanMessage":
-            text = _visible_text(content)
+            # Show only what the user typed: a stored prompt still carries the
+            # prepended episodic-memory block, which otherwise replayed as a wall
+            # of tool names above the first message on every resume.
+            text = user_prompt_text(_visible_text(content))
             if text:
                 out.append(f"{_USER_PROMPT}{text}")
         elif cls == "AIMessage":

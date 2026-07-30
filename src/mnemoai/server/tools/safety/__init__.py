@@ -12,13 +12,18 @@ file) are NOT blocked here; those remain gated by the client's ``_confirm_tool``
 prompt and plan mode.
 """
 
-from .bash_policy import BashPolicyResult, classify_shell_command
+from .bash_policy import (
+    BashPolicyResult,
+    classify_shell_command,
+    classify_shell_write_targets,
+)
 from .path_policy import PathPolicyResult, classify_write_path
 from .url_policy import UrlPolicyResult, classify_url
 
 __all__ = [
     "BashPolicyResult",
     "classify_shell_command",
+    "classify_shell_write_targets",
     "PathPolicyResult",
     "classify_write_path",
     "UrlPolicyResult",

@@ -1154,6 +1154,7 @@ def _build_config(
     # Memory-write confirmation defaults OFF (the agent auto-saves), so an absent
     # key means "not chosen" -> default the prompt to No.
     text = _set_bool(text, "REQUIRE_MEMORY_CONFIRMATION", _ask_bool("Ask for confirmation before each memory write?", _explicit_bool(_get_top_level(text, "REQUIRE_MEMORY_CONFIRMATION"))))
+    text = _set_bool(text, "REQUIRE_GIT_CONFIRMATION", _ask_bool("Ask for confirmation before overriding a git safety refusal?", _truthy(_get_top_level(text, "REQUIRE_GIT_CONFIRMATION"))))
 
     return text
 
