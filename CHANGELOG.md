@@ -9,6 +9,37 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+### Added
+
+- **`ask_user_question` — the model can put a decision back to you.** When it's
+  blocked on a choice that is genuinely yours to make, it now offers 2–8 concrete
+  options in a picker and continues from your answer, instead of guessing or
+  writing out every alternative for you to sort through. Thin MCP stub +
+  client-side interception (the same split as `exit_plan_mode`): the server is a
+  piped subprocess and can't prompt a terminal.
+  - **It can't be used where nobody would see it.** A sub-agent doesn't get the
+    tool bound at all, and refuses it even if it asks anyway — a background one
+    runs on a daemon thread with no terminal, so a picker there would block on a
+    prompt that never paints. Off-TTY it reports itself unavailable rather than
+    stalling a scripted run. Every refusal tells the model to decide and state its
+    assumption, so a blocked question never becomes a hung turn.
+  - Dismissing the picker (Esc) is a first-class answer: the model proceeds on its
+    own judgment and says what it assumed, rather than re-asking.
+  - The prompt guidance pushes toward acting on a sensible default — one question
+    the user must answer costs more than a choice they can correct.
+
+### Fixed
+
+- **Arrow keys in every picker selected the wrong row.** A `RadioList` tracks the
+  highlighted row separately from its committed value, and only its own
+  enter/space binding reconciles the two — but the dialog overrides Enter to
+  confirm directly (skipping the Tab-to-OK step). So ↓↓Enter returned the **first**
+  entry: `--resume` and `/load` opened a different conversation than the one
+  highlighted, and the `/load` Delete button deleted the wrong file. Pressing
+  Space before Enter happened to work, which is why it went unnoticed. Found while
+  driving the new picker through a real pty — no unit test could have caught it,
+  since the bug lives in the widget's two-value split.
+
 ## [1.8.3] — 2026-07-29
 
 MCP transport fixes, all traced back to one real session where a long-running

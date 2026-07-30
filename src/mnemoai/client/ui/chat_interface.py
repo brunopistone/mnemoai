@@ -595,6 +595,10 @@ class ChatInterface:
             # and, on approval, flips plan mode off + persists the plan.
             self.client.agent._plan_approval_ui = reader.plan_approval_ui
             self.client.agent._exit_plan_mode_provider = self.client._approve_plan
+            # ask_user_question: a model-initiated multiple-choice picker. Only
+            # wired here (TTY) — off-TTY the tool reports itself unavailable
+            # rather than blocking a scripted run on a prompt nobody sees.
+            self.client.agent._question_ui = reader.question_ui
             # Background sub-agent completion: auto-trigger a delivery-only turn
             # while idle so the finished report surfaces without the user typing.
             self.client.agent._on_background_complete = (

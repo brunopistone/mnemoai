@@ -21,6 +21,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
 from mnemoai.client.agent import (
+    ask_user,
     cancellation,
     confirmation_gate,
     message_sanitizer,
@@ -84,7 +85,7 @@ class LangGraphAgent:
     # (universal read), use_skill (a skill-matching query may be simple_qa).
     _ALWAYS_AVAILABLE_TOOLS = {
         "memory", "describe_image", "fs_read", "use_skill", "exit_plan_mode",
-        "spawn_agent", "resume_agent",
+        "spawn_agent", "resume_agent", "ask_user_question",
     }
 
     # Aliases keeping the historical class-attribute surface (used by unit tests
@@ -2085,9 +2086,10 @@ class LangGraphAgent:
         """Print one tool-call marker: the styled name + ↳arg block (pinned UI)
         or the plain ``[⚙ …]`` marker. Shared by both tool-exec chokepoints so
         the main loop and the worker loop render identically."""
-        # exit_plan_mode is a client-side meta tool — the approval UI renders the
-        # plan as a formatted block, so skip the flattened ↳ plan=… marker.
-        if tool_call.get("name") == "exit_plan_mode":
+        # Client-side meta tools whose own UI renders the content: the approval
+        # block for exit_plan_mode, the picker for ask_user_question. A flattened
+        # ↳ plan=… / ↳ question=… marker would just duplicate it.
+        if tool_call.get("name") in ("exit_plan_mode", "ask_user_question"):
             return
         if getattr(self, "styled_turn_view", False):
             print(
@@ -2197,6 +2199,10 @@ class LangGraphAgent:
             "The approved plan:\n\n" + plan + note
         )
 
+    def _handle_ask_user_question(self, question, options) -> str:
+        """Delegates to :func:`ask_user.ask`."""
+        return ask_user.ask(self, question, options)
+
     def _subagent_tools(self, agent) -> List[BaseTool]:
         """Delegates to :func:`subagent_runner.subagent_tools` (``agent`` here is
         the sub-agent type definition)."""
@@ -2303,15 +2309,19 @@ class LangGraphAgent:
         tool_id: str,
         spawn_results: Optional[Dict[str, str]] = None,
     ) -> Optional[ToolMessage]:
-        """Dispatch the three client-side stub tools (exit_plan_mode / spawn_agent
-        / resume_agent) that are intercepted here rather than routed via MCP.
+        """Dispatch the client-side stub tools (exit_plan_mode / spawn_agent /
+        resume_agent / ask_user_question) intercepted here rather than routed via MCP.
 
         Returns the ToolMessage to append for one of those, or None if ``tool_name``
         isn't client-side (the caller then runs it as a normal tool). When
         ``spawn_results`` holds ``tool_id`` (a batched, possibly parallel spawn),
         that precomputed result is used instead of spawning inline.
         """
-        if tool_name == "exit_plan_mode":
+        if tool_name == "ask_user_question":
+            content = self._handle_ask_user_question(
+                tool_args.get("question"), tool_args.get("options")
+            )
+        elif tool_name == "exit_plan_mode":
             content = self._handle_exit_plan_mode(
                 str(tool_args.get("plan", "")),
                 tool_args.get("allowed_bash"),

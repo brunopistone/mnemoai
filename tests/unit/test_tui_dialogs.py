@@ -87,6 +87,80 @@ class TestConfirmDialog:
         assert tui.confirm_dialog("Delete this?") is False
 
 
+class TestArrowKeysCommitTheHighlightedRow:
+    """A ``RadioList`` keeps the highlighted row (``_selected_index``) separate
+    from its committed ``current_value``, and only its OWN enter/space binding
+    reconciles them. ``_radio_pick`` overrides enter to confirm the dialog
+    directly, so without ``select_on_focus=True`` arrows moved the highlight while
+    ``current_value`` stayed on row 1 — ↓↓Enter returned the FIRST entry.
+
+    That silently opened the wrong conversation in ``--resume`` / ``/load`` and
+    made the Delete button delete the wrong one. Verified against a real
+    ``RadioList`` (a stub wouldn't model the two-value split).
+    """
+
+    def _radio(self, select_on_focus=True):
+        from prompt_toolkit.widgets import RadioList
+
+        return RadioList(
+            values=[("id1", "one"), ("id2", "two"), ("id3", "three")],
+            select_on_focus=select_on_focus,
+        )
+
+    @staticmethod
+    def _press_down(radio, times=1):
+        """Invoke the widget's own ``down`` handler (not via key lookup, which also
+        matches its catch-all type-to-search binding)."""
+        from prompt_toolkit.keys import Keys
+
+        handler = next(
+            b.handler
+            for b in radio.control.key_bindings.bindings
+            if b.keys == (Keys.Down,)
+        )
+        for _ in range(times):
+            handler(None)
+
+    def test_moving_the_highlight_updates_the_value_read_on_enter(self):
+        radio = self._radio()
+        assert radio.current_value == "id1"
+        self._press_down(radio)
+        assert radio._selected_index == 1
+        # The assertion that matters: _radio_pick exits with current_value.
+        assert radio.current_value == "id2"
+
+    def test_it_still_tracks_after_several_moves(self):
+        radio = self._radio()
+        self._press_down(radio, times=2)
+        assert radio.current_value == "id3"
+
+    def test_without_select_on_focus_the_value_would_lag(self):
+        # Pins WHY the flag is required: this is the old, broken behavior.
+        radio = self._radio(select_on_focus=False)
+        self._press_down(radio)
+        assert radio._selected_index == 1
+        assert radio.current_value == "id1"  # highlight moved, value did not
+
+    def test_the_picker_asks_for_select_on_focus(self, monkeypatch):
+        # Guards the call site itself: the flag lives in _radio_pick, and a future
+        # refactor dropping it would silently restore the wrong-row bug.
+        seen = {}
+        import prompt_toolkit.widgets as widgets
+
+        real = widgets.RadioList
+
+        def _spy(values, **kwargs):
+            seen.update(kwargs)
+            return real(values, **kwargs)
+
+        monkeypatch.setattr(tui, "RadioList", _spy)
+        monkeypatch.setattr(tui, "Application", lambda **k: type(
+            "_A", (), {"run": lambda self: tui._CANCEL}
+        )())
+        tui._radio_pick("t", [("a", "a"), ("b", "b")])
+        assert seen.get("select_on_focus") is True
+
+
 class TestSelectAllowDelete:
     """allow_delete adds a Delete button on a TTY (returns (_DELETE, value)); the
     non-TTY fallback just picks and ignores the delete affordance."""
@@ -98,6 +172,70 @@ class TestSelectAllowDelete:
         assert tui.select_from_list("Pick", self.OPTIONS, allow_delete=True) == (
             "/a/one.json"
         )
+
+
+class TestQuestionUi:
+    """``question_ui`` backs the ``ask_user_question`` tool: a picker raised from
+    the WORKER thread mid-turn, so it goes through ``run_dialog`` (a full-screen
+    dialog can't nest inside the running pinned app)."""
+
+    def _reader(self, dialog=None):
+        r = tui.PinnedPromptReader.__new__(tui.PinnedPromptReader)
+        r._app = object()
+        r._loop = object()
+        if dialog is not None:
+            r.run_dialog = dialog
+        return r
+
+    def test_it_goes_through_run_dialog(self, not_a_tty, monkeypatch):
+        # Calling select_from_list directly would try to nest a full-screen app
+        # inside the running one.
+        seen = {}
+        monkeypatch.setattr(builtins, "input", lambda *_: "2")
+
+        def _run_dialog(func):
+            seen["called"] = True
+            return func()
+
+        got = self._reader(_run_dialog).question_ui("Which?", ["a", "b"])
+        assert seen.get("called") is True
+        assert got == "b"
+
+    def test_no_running_app_yields_none(self):
+        # Off-TTY / plain loop: there is no app to suspend, so there is no one to
+        # ask — None means "dismissed", which the tool turns into decide-yourself.
+        r = tui.PinnedPromptReader.__new__(tui.PinnedPromptReader)
+        r._app = None
+        r._loop = None
+        assert r.question_ui("Which?", ["a", "b"]) is None
+
+    def test_a_dismissed_picker_returns_none(self):
+        assert self._reader(lambda func: None).question_ui("Q", ["a", "b"]) is None
+
+    def test_the_answer_is_echoed_to_scrollback(self, capsys, monkeypatch):
+        # The picker is full-screen, so without this echo the turn would leave no
+        # trace of what was asked or chosen.
+        monkeypatch.setattr(tui, "select_from_list", lambda *a, **k: "SQLite")
+        self._reader(lambda func: func()).question_ui("Which db?", ["x", "y"])
+        out = capsys.readouterr().out
+        assert "Which db?" in out and "SQLite" in out
+
+    def test_a_dismissal_is_echoed_too(self, capsys, monkeypatch):
+        monkeypatch.setattr(tui, "select_from_list", lambda *a, **k: None)
+        self._reader(lambda func: func()).question_ui("Which db?", ["x", "y"])
+        assert "dismissed" in capsys.readouterr().out
+
+    def test_options_are_passed_as_value_label_pairs(self, monkeypatch):
+        seen = {}
+
+        def _pick(title, opts, **k):
+            seen["title"], seen["opts"] = title, opts
+            return None
+
+        monkeypatch.setattr(tui, "select_from_list", _pick)
+        self._reader(lambda func: func()).question_ui("Q", ["a", "b"])
+        assert seen["opts"] == [("a", "a"), ("b", "b")]
+        assert "Q" in seen["title"]
 
 
 class TestAgentsPanelVisibility:

@@ -939,6 +939,33 @@ class PinnedPromptReader:
             decision = "keep_planning" if verdict in ("keep_planning", "no") else "approve"
             return (decision, plan)
 
+    def question_ui(self, question: str, options: List[str]) -> Optional[str]:
+        """Ask the user to pick one of ``options`` (worker thread); None = dismissed.
+
+        Runs through :meth:`run_dialog` because a full-screen picker can't be
+        nested inside the running pinned app — the same exit → run → relaunch
+        path the plan-approval "edit" branch already uses mid-turn.
+
+        The chosen answer is echoed to scrollback from INSIDE the dialog function,
+        i.e. while the app is down and the terminal is cooked. That is the one
+        window where a plain ``print`` is safe, and it's needed: the picker is
+        full-screen, so without the echo the conversation would show a tool call
+        whose question and answer left no trace.
+        """
+        if self._app is None or self._loop is None:
+            return None
+
+        def _pick() -> Optional[str]:
+            choice = select_from_list(f"? {question}", [(o, o) for o in options])
+            print(f"\n\033[93m? {question}\033[0m")
+            print(
+                f"  \033[1m{choice}\033[0m" if choice
+                else "  \033[90m(dismissed)\033[0m"
+            )
+            return choice
+
+        return self.run_dialog(_pick)
+
     def run_dialog(self, func):
         """Run a blocking full-screen dialog command by EXITING the app first.
 
@@ -1371,8 +1398,17 @@ def _radio_pick(title: str, options: List[tuple], *, allow_delete: bool = False)
     confirms the highlighted row directly (no Tab-to-button step).
 
     With ``allow_delete``, a **Delete** button returns ``(_DELETE, value)`` for the
-    highlighted row so the caller can delete it and reopen."""
-    radio = RadioList(values=options)
+    highlighted row so the caller can delete it and reopen.
+
+    ``select_on_focus`` is REQUIRED, not cosmetic: a ``RadioList`` tracks the
+    highlighted row (``_selected_index``) separately from its committed
+    ``current_value``, and only its own enter/space binding commits the two. We
+    override enter to confirm the dialog directly (no Tab-to-OK step), so without
+    this every arrow key moved the highlight while ``current_value`` stayed on the
+    FIRST row — ↓↓Enter silently returned row 1. That made the ``--resume`` and
+    ``/load`` pickers open the wrong conversation, and the Delete button delete
+    the wrong one."""
+    radio = RadioList(values=options, select_on_focus=True)
 
     def _ok() -> None:
         get_app().exit(result=radio.current_value)

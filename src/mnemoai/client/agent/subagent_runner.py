@@ -36,9 +36,11 @@ def subagent_tools(agent, subagent) -> List[BaseTool]:
     """Resolve a spawned sub-agent's tool objects from its type's allowlist.
 
     ``subagent.tools`` is a name allowlist (or None = all). Meta tools (fs_read,
-    describe_image) are always included, and ``spawn_agent`` is always removed
-    so a sub-agent can't spawn its own sub-agents. Mirrors the route/worker
-    tool-subset selection in ``_orchestrate``."""
+    describe_image) are always included; ``spawn_agent`` is always removed so a
+    sub-agent can't spawn its own sub-agents, and ``ask_user_question`` because a
+    sub-agent has no direct user — a background one has no terminal at all, so a
+    picker would block its daemon thread on a prompt that never paints. Mirrors
+    the route/worker tool-subset selection in ``_orchestrate``."""
     meta = {"fs_read", "describe_image"}
     if subagent.tools is None:
         allowed = None  # all tools
@@ -48,8 +50,8 @@ def subagent_tools(agent, subagent) -> List[BaseTool]:
     deny_all = "*" in denied  # the deny-everything sentinel
     subset = []
     for t in agent.tools:
-        if t.name == "spawn_agent":
-            continue  # no nested spawning
+        if t.name in ("spawn_agent", "ask_user_question"):
+            continue  # no nested spawning; no user to ask
         if deny_all or t.name in denied:
             continue  # per-agent denylist, applied AFTER the allowlist
         if allowed is None or t.name in allowed:
