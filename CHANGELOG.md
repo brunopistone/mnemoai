@@ -129,7 +129,7 @@ itself, so none depended on a hostile user.
   GNU `rm` needs to actually erase `/`. Now blocked in any flag order, with or
   without `sudo`, and for `-fr` as well as `-rf`.
 - **`execute_bash` bypassed the write-path policy entirely.** `sh -c 'echo x >
-  /etc/hosts'` isn't a "write tool" call, so neither the system-path floor nor the
+/etc/hosts'` isn't a "write tool" call, so neither the system-path floor nor the
   read-before-write gate applied. Shell write targets are now extracted
   (redirections, `tee`, `cp`/`mv`, `dd of=`, `chmod`, nested `sh -c`) and run through
   the **same** `classify_write_path` the file tools use — one floor, not a second
@@ -164,7 +164,7 @@ silently since they were written.
   any source file was logged as a failure — inflating the failure metrics and writing
   junk strategies into the playbook, which is injected into the system prompt. It now
   trusts the structured `{"error": true}` that tools already return, and only falls
-  back to text matching when the result *is* an error message (short, led by the
+  back to text matching when the result _is_ an error message (short, led by the
   indicator) rather than merely contains one.
 - **Chunk token counting never worked.** `tiktoken.get_encoding("gpt-4")` — a model
   name, not an encoding name — raised on every call, and a bare `except` returned
@@ -179,6 +179,50 @@ silently since they were written.
   parser raised, the recovery path called `self._render_text_block()` — turning a
   recoverable render failure into an `AttributeError` that lost the whole answer. It
   now renders the tail the same way the normal path does.
+
+Follow-ups from a second review of those fixes — three were incomplete and one of
+them was a regression I introduced:
+
+- **A failed shell command was being recorded as a success.** Trusting the JSON
+  envelope meant `execute_bash` — which reports the command's failure as an
+  `exit_status` and carries no `error` key — read as a win. So a `pytest` run exiting
+  2 with a stderr full of tracebacks taught the playbook nothing, losing the most
+  common real failure in a coding session. A non-zero `exit_status`/`return_code` is
+  now a failure. (Introduced by the reflector fix above; caught before release.)
+- **A turn's tool calls were cut off mid-analysis.** The turn boundary was "the last
+  message with role `user`", but an encoded tool RESULT also carries that role — so a
+  turn with tool calls was truncated at its last result. The boundary is now a real
+  prompt.
+- **Tool results counted as interactions.** Same root cause on the profile side: one
+  turn with three tool calls scored four, which also tripped the "enough data" gate in
+  the profile summary after a single tool-heavy turn. `record_tool_outcome` and
+  episodic storage were fed the whole session too, so `tool_patterns` totals kept
+  growing quadratically — both are now scoped to the turn.
+- **`clear_documents` left the keyword index intact.** It dropped the vectors but not
+  the separately-built BM25 corpus, which kept a tokenized copy of every "cleared"
+  document for the life of the process. Nothing was served from it only because a
+  bounds check discarded indices past the emptied metadata list — isolation resting
+  on an accident. `SessionRAG.clear()` now drops both, and clearing before any ingest
+  says "nothing to clear" instead of claiming the backend doesn't support it.
+- **An ambiguous write target now fails closed.** `file_edit(path=<plan>, file_path=<other>)`
+  had plan mode check one path while the server wrote the other. Conflicting spellings
+  resolve to "no target", which the gate blocks.
+- **A legacy profile could replace an answer with an error.** A profile predating
+  `interaction_count` raised `KeyError` during the post-turn hook — after the answer
+  had already streamed — surfacing as "Something went wrong". Profiling failures are
+  now contained.
+- **Your writing style was being profiled from text you didn't write, with the sign
+  inverted.** Every trait is scored from the message text, and that text was the RAW
+  stored message — so with a five-entry episodic block prepended, "fix it" (6 chars)
+  measured 496 and pushed `verbosity` toward "detailed". A terse user was profiled as
+  verbose on every turn episodic memory injected, and `technical_level` /
+  `abstraction` were keyword-scored over a paragraph of tool names. Traits are now
+  scored on what you actually typed.
+- **An inflated `interaction_count` resets instead of being estimated.** Inverting
+  N²/2 assumed the old increment was one per turn when it was one per *message*, so
+  the estimate overshot by √(1+tools) — 2-3× for a tool-heavy user. Its only consumer
+  is the "enough data to profile you" gate, and a confidently wrong number there is
+  worse than starting over, so the count resets to 0 and re-accrues honestly.
 
 ## [1.8.3] — 2026-07-29
 

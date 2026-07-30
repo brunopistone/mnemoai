@@ -177,14 +177,37 @@ class SessionRAG:
         return f"{profile_name}_{timestamp}"
 
     def _rebuild_bm25(self) -> None:
-        """Rebuild the BM25 index from the current store's metadata."""
+        """Rebuild the BM25 index from the current store's metadata.
+
+        An EMPTY corpus drops the index rather than leaving the previous one in
+        place — a stale BM25 outlives the vectors it was built from, and its
+        tokenized copy of every document is then still searchable.
+        """
         if self.store is None or not hasattr(self.store, "metadatas"):
             return
         texts = [m.get("text", "") for m in self.store.metadatas]
-        if texts:
-            self.bm25 = BM25()
-            self.bm25.fit(texts)
-            logger.debug(f"BM25 index built with {len(texts)} documents")
+        if not texts:
+            self.bm25 = None
+            return
+        self.bm25 = BM25()
+        self.bm25.fit(texts)
+        logger.debug(f"BM25 index built with {len(texts)} documents")
+
+    def clear(self) -> None:
+        """Drop every indexed document: vectors AND the keyword index.
+
+        Clearing only the vector store left the BM25 corpus holding the tokenized
+        text of every "cleared" document for the life of the process. Nothing was
+        served from it only because ``normalized_bm25_candidates`` discards indices
+        past the (now-empty) metadata list — i.e. the isolation rested on a bounds
+        check, not on the data being gone. Both halves are dropped here.
+        """
+        if self.store is not None:
+            clear = getattr(self.store, "clear", None)
+            if callable(clear):
+                clear()
+        self.bm25 = None
+        logger.debug("Session RAG cleared (vectors + BM25)")
 
     def _embed_batch(self, texts: List[str]) -> np.ndarray:
         """Embed texts using the embeddings controller.

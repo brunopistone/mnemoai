@@ -194,6 +194,24 @@ class TestBothWriteToolArgSpellings:
         assert plan_policy.write_target({}) == ""
         assert plan_policy.write_target(None) == ""
 
+    def test_conflicting_targets_fail_closed(self):
+        # A call carrying BOTH keys with DIFFERENT paths is ambiguous: we can't
+        # know which one the server honors. Picking one is exploitable — with
+        # path=<plan file> and file_path=/etc/x, plan mode checked the plan while
+        # file_edit wrote /etc/x. Returning "" makes the gate block it.
+        plan = self._plan_file()
+        assert plan_policy.write_target({"path": plan, "file_path": "/etc/x.py"}) == ""
+        assert (
+            _agent(True)._is_blocked_by_plan_mode(
+                "file_edit", {"path": plan, "file_path": "/etc/x.py"}
+            )
+            is True
+        )
+
+    def test_the_same_path_under_both_names_is_not_a_conflict(self):
+        plan = self._plan_file()
+        assert plan_policy.write_target({"path": plan, "file_path": plan}) == plan
+
     def test_write_target_prefers_a_populated_key(self):
         # A tool that sends both (or an empty one) must not yield "".
         assert plan_policy.write_target({"path": "", "file_path": "/b"}) == "/b"
