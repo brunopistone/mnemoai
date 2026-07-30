@@ -481,7 +481,8 @@ RAG:
 LLM:
   ENABLE_THINKING: true # Enable thinking tags (verbose mode)
   RETRY_ENABLED: true # Retry failed LLM calls
-  MAX_RETRIES: 3 # Maximum retry attempts
+  MAX_RETRIES: 5 # Maximum retry attempts; also caps retries of a
+  # transient *empty* model response
   RETRY_DELAY: 1.0 # Seconds between retries
   RETRY_BACKOFF: 2.0 # Exponential backoff multiplier
   MAX_OUTPUT_CONTINUE_RETRIES: 3 # Auto-continue a turn cut off by MAX_TOKENS
@@ -493,8 +494,8 @@ LLM:
   # 0 disables. See below.
   SUMMARIZATION_THINK: false # Include thinking in summarization
   TOKEN_COUNTING:
-    OLLAMA_APPROXIMATION: 1.3 # Chars-to-tokens multiplier for Ollama
-    FALLBACK_MODEL: "o200k_base" # Tiktoken model for fallback counting
+    OLLAMA_CHARS_PER_TOKEN: 3.0 # Ollama: chars per token (no tokenizer available)
+    ANTHROPIC_MULTIPLIER: 1.5 # Per-provider safety multiplier; see below
   # --- Context management (compaction + overflow protection) ---
   KEEP_RECENT_MESSAGES: 6 # Turns kept verbatim on auto-compaction
   MANUAL_COMPACT_KEEP_RECENT: 2 # Smaller window for the manual /compact command
@@ -514,6 +515,32 @@ LLM:
   RECURSION_LIMIT: 200 # Max model<->tool steps per query (runaway guard)
   MCP_CALL_TIMEOUT: 300 # Transport-layer timeout for one MCP tool call (s)
 ```
+
+**Token counting.** `TOKEN_COUNTING` only tunes the _pre-flight estimate_ for a
+prompt that hasn't been sent yet. Once a turn completes, the size comes from the
+provider's own `usage_metadata`, which is ground truth and needs no estimate —
+that is what `/usage` and the `[Context: N tokens]` line report.
+
+The estimate is deliberately conservative, because undercounting overflows the
+window while overcounting only compacts a little early. Text is tokenized with
+tiktoken's `o200k_base`, then scaled per provider family:
+
+| Provider `TYPE`                   | Multiplier              | Override key                                |
+| --------------------------------- | ----------------------- | ------------------------------------------- |
+| `openai`                          | 1.0 (tiktoken is exact) | `OPENAI_MULTIPLIER`                         |
+| `anthropic`, `mantle`             | 1.5                     | `ANTHROPIC_MULTIPLIER`, `MANTLE_MULTIPLIER` |
+| `bedrock`, `sagemaker`, `litellm` | 1.35                    | `BEDROCK_MULTIPLIER`, …                     |
+| anything else                     | 1.35                    | `<TYPE>_MULTIPLIER`                         |
+
+`ollama` is the exception: no tokenizer is available, so the count is
+`len(text) / OLLAMA_CHARS_PER_TOKEN` (default `3.0`).
+
+!!! note "Two vestigial keys under `TOKEN_COUNTING`"
+
+    Older config templates list `FALLBACK_MODEL` and `OLLAMA_APPROXIMATION`.
+    `FALLBACK_MODEL` is no longer read by anything and can be deleted.
+    `OLLAMA_APPROXIMATION` (default `1.3`) still applies, but only to the
+    episodic-memory size budget — not to conversation token counting.
 
 **Context management.** The conversation is kept under `MAX_CONVERSATION_TOKENS`
 by summarizing older turns into the system prompt while keeping recent ones
@@ -564,7 +591,7 @@ own recovery:
 
 ### Prompts (`prompts.yaml`)
 
-All model-facing prompts live in **`prompts.yaml`** — a sibling of `config.yaml` in the same `config/` directory, kept separate from settings. `config.yaml` is never consulted for prompts (as of 0.8.16, prompt keys left there are ignored with a migration warning).
+All model-facing prompts live in **`prompts.yaml`** — a sibling of `config.yaml` in the same `config/` directory, kept separate from settings. `config.yaml` is never consulted for prompts — prompt keys left there are ignored with a migration warning.
 
 Resolution order (first match wins): `$MNEMOAI_PROMPTS` → `~/.mnemoai/config/prompts.yaml` → the bundled package defaults.
 

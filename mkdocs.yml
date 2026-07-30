@@ -44,18 +44,22 @@ nav:
       - Installation & first run: getting-started/installation.md
       - Core concepts:
           - Architecture: getting-started/architecture.md
+          - The ~/.mnemoai directory: getting-started/mnemoai-directory.md
   - Guides:
       - guides/index.md
       - Everyday use:
           - Usage & commands: guides/usage.md
+          - Everyday tools: guides/productivity-tools.md
+          - Safety & permissions: guides/safety.md
           - Agent skills: guides/agent-skills.md
       - Extending & advanced:
           - Orchestration & sub-agents: guides/orchestration.md
           - Memory & learning: guides/memory.md
           - Knowledge & web tools: guides/knowledge-and-web.md
           - External MCP servers: guides/mcp.md
-          - Productivity tools: guides/productivity-tools.md
-  - Configuration: configuration.md
+  - Reference:
+      - Configuration: configuration.md
+      - Tools reference: reference/tools.md
   - Development:
       - development/index.md
       - Ollama utilities: development/ollama-utilities.md

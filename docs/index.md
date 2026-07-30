@@ -44,7 +44,10 @@ You only need Python 3.11+ and access to at least one model provider. For the ea
 | Give the assistant memory: profiles, MEMORY.md, steering, episodic, playbook | [Memory & learning](guides/memory.md)                                                       |
 | Add knowledge: RAG, web search, and web crawling                             | [Knowledge & web tools](guides/knowledge-and-web.md)                                        |
 | Connect external MCP servers                                                 | [External MCP servers](guides/mcp.md)                                                       |
-| Understand file editing, search, git safety, plan mode, and background tasks | [Productivity Tools](guides/productivity-tools.md)                                          |
+| Use todos, fast search, precise edits, and background tasks                  | [Everyday tools](guides/productivity-tools.md)                                              |
+| Control what runs without asking, and what is refused outright               | [Safety & permissions](guides/safety.md)                                                    |
+| Look up a tool's exact parameters                                            | [Tools reference](reference/tools.md)                                                       |
+| Find where config, memory, and session state live on disk                    | [The `~/.mnemoai` directory](getting-started/mnemoai-directory.md)                          |
 | Contribute or run tests                                                      | [Development](development/index.md)                                                         |
 | Understand the internal design                                               | [Architecture](getting-started/architecture.md)                                             |
 | Browse the detailed per-file map (repo-only, agent/contributor reference)    | [Architecture Reference](https://github.com/brunopistone/mnemoai/blob/main/ARCHITECTURE.md) |
