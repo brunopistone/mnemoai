@@ -350,10 +350,20 @@ def render_conversation(messages: list) -> str:
     Duck-types LangChain messages by attributes (no import) so this stays pure:
     HumanMessage → ``> text``; AIMessage → reasoning block + tool blocks +
     ``● answer``; ToolMessage results are omitted (their call is already shown).
+
+    Matches on the class name AND its bases, because a *streamed* reply is an
+    ``AIMessageChunk`` (an ``AIMessage`` subclass): an exact-name check drops it.
+    Today's callers only replay decoded history (plain ``AIMessage``), so this is
+    a guard against a caller that hands over live messages, not an active fix.
     """
     out = []
     for msg in messages:
-        cls = type(msg).__name__
+        names = {c.__name__ for c in type(msg).__mro__}
+        cls = (
+            "HumanMessage" if "HumanMessage" in names
+            else "AIMessage" if "AIMessage" in names
+            else type(msg).__name__
+        )
         content = getattr(msg, "content", "")
         if cls == "HumanMessage":
             text = _visible_text(content)

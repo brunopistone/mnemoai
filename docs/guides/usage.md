@@ -53,6 +53,8 @@ Assistant: [Uses fs_read tool and displays content]
 | `/clear`           | Clear conversation history and RAG index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `/save`            | Save the current conversation. After a `/load` (or an earlier `/save`), a bare `/save` **overwrites that same file**; `/save <path>` saves to a specific file/dir; a fresh conversation (after `/clear`) saves to a new timestamped file                                                                                                                                                                                                                                                                                                                 |
 | `/load <path>`     | Load a saved conversation (no path → pick from a list; the picker has a **Delete** button to remove a saved conversation after a Yes/No confirm, then reopens). The loaded file becomes the one a later `/save` writes back to                                                                                                                                                                                                                                                                                                                           |
+| `/export [md\|txt] [path]` | Write the conversation as a **shareable transcript** — readable Markdown (default) or plain text — into the **current directory** unless you give a path. Not the same as `/save`: an export is a one-way artifact for pasting into a bug report or PR, not something `/load` can read back. Tool *calls* appear as one-line summaries; tool *results* and injected context are left out. Add `reasoning` to include thinking blocks ([details](#exporting-a-transcript))                                                                          |
+| `/branch [turn]`   | **Fork this session** and carry on in the copy. No argument → pick the turn to branch after; `/branch 3` branches directly. The original session is **never modified** — it stays resumable with `--resume` ([details](#branching-a-session))                                                                                                                                                                                                                                                                                                              |
 | `/compact [focus]` | Summarize older turns to shrink context (optional focus instructions)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `/config`          | Re-run the interactive configurator — chat, vision (with a "same as chat?" shortcut + provider choice), and embeddings models, then feature toggles. `Ctrl+B` steps back within a model section. Overwrites `config.yaml` and restarts in place                                                                                                                                                                                                                                                                                                          |
 | `/model`           | Set up one model — chat (LLM), vision, or embeddings. Vision offers a "use the same model as Chat?" shortcut. Inference params reset to model defaults on a change (re-tune with `/params`); restarts in place                                                                                                                                                                                                                                                                                                                                           |
@@ -167,3 +169,75 @@ when you exit — only sessions with at least one exchange are offered, which al
 means a resume you didn't ask anything in won't appear as a duplicate of the
 session it restored. If this directory has no sessions yet, `--resume` says so
 and starts a normal session.
+
+### Branching a session
+
+`/branch` **forks the current conversation** so you can try a different direction
+without losing the one you have. Use it when a conversation has gone somewhere you
+don't want — a wrong assumption three turns back, a tangent that ate the context —
+and you'd rather rewind than start over and re-explain everything.
+
+```
+/branch          # pick the turn to branch after
+/branch 3        # branch straight after turn 3
+```
+
+With no argument you get a list of this session's turns, labelled by what you
+asked:
+
+```
+1. refactor the FSDP config parser
+2. also handle the sharding edge case
+3. now add tests for it  (latest)
+```
+
+Branching after turn 2 gives you a session containing turns 1–2, and you continue
+from there — turn 3 stays behind in the original. **The original session is copied,
+never changed**, so it remains resumable exactly as it was; if the branch turns out
+to be a dead end, `--resume` the original and nothing is lost. That also means
+branching is cheap: there's no "are you sure", because nothing is destroyed.
+
+Forks are marked in the `--resume` picker, since a branch inherits its parent's
+opening prompt and the two rows would otherwise look identical:
+
+```
+   2m ago    1 turn   refactor the FSDP config parser (branch @ turn 2)
+   9m ago    3 turns  refactor the FSDP config parser
+```
+
+!!! note "Branching moves the conversation, not your files"
+
+    A branch rewinds the **conversation only**. Files the abandoned turns wrote are
+    still on disk — mnemoai doesn't snapshot and restore your working tree. So after
+    branching past a turn that edited code, the assistant's picture of those files
+    comes from the branch's history: say what you want undone, or check `git diff`
+    before continuing.
+
+### Exporting a transcript
+
+`/export` writes the conversation as a **readable transcript** — the thing you paste
+into a bug report, a PR description, or a message to someone else:
+
+```
+/export                  # Markdown, into the current directory
+/export txt              # plain text instead
+/export ~/notes/         # into a directory (name generated from your first prompt)
+/export bug-report.md    # to an exact file
+/export reasoning        # include the assistant's thinking blocks
+```
+
+This is **not** `/save`. `/save` writes JSON that `/load` can read back; an export is
+one-way and optimized for a human reader:
+
+- **Tool calls** appear as one-line summaries (`fs_read(path=…, mode=Search)`); a
+  file body passed as an argument is replaced by its size rather than pasted in.
+- **Tool results are left out.** A few thousand lines of file content is the single
+  biggest source of noise in a transcript, and the answer already says what mattered.
+- **Injected context is stripped** — retrieved memories and steering instructions
+  were never something you typed, and unstripped they dominate the export.
+- **Reasoning is off by default** (thinking blocks usually dwarf the conversation);
+  `/export reasoning` includes them, collapsed in Markdown.
+
+The filename is derived from your opening prompt
+(`conversation_20260730_161738_reply-with-exactly-red.md`), so exports are
+identifiable in a directory listing instead of being one of many timestamps.

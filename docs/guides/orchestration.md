@@ -150,8 +150,11 @@ bugs, edge cases, and style issues, then return a concise prioritized report.
 - `description` is required (it's what the assistant reads to decide when to
   spawn the type); `name` and `tools` are optional.
 - `tools` may be a YAML list or a comma-separated string; omit it (or use `*`)
-  for the full toolset. `fs_read`/`describe_image` are always available and
-  `spawn_agent` is always removed (no nested spawning), regardless of the list.
+  for the full toolset. `fs_read`/`describe_image` are always available;
+  `spawn_agent` (no nested spawning) and `ask_user_question` (a sub-agent has no
+  direct user — see [Questions the Assistant Asks
+  You](productivity-tools.md#questions-the-assistant-asks-you)) are always
+  removed, regardless of the list.
 - The markdown body is the sub-agent's system prompt.
 - A custom type **overrides** a built-in of the same name.
 - Bad or incomplete files are skipped (reported, never fatal).

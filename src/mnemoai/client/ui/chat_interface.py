@@ -85,6 +85,8 @@ class ChatInterface:
             ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
             ("/save [path]", "Save conversation (optional file/dir path)"),
             ("/load [path]", "Load a saved conversation (lists saved if no path)"),
+            ("/export [md|txt]", "Export a shareable transcript to this directory"),
+            ("/branch [turn]", "Fork this session at a turn and continue there"),
         ]),
         ("Exit", [
             ("/exit, /quit", "Exit the application"),
@@ -106,6 +108,8 @@ class ChatInterface:
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/save", "Save conversation (/save [path])"),
         ("/load", "Load a saved conversation (/load lists saved)"),
+        ("/export", "Export a shareable transcript (/export [md|txt] [path])"),
+        ("/branch", "Fork this session at a turn and continue there"),
         ("/exit", "Exit the application"),
         ("/quit", "Exit the application"),
     ]
@@ -369,6 +373,91 @@ class ChatInterface:
 
             return choice  # a chosen path, or None (cancelled)
 
+    def _handle_export_command(self, arg: str) -> None:
+        """Handle ``/export [md|txt] [path]`` — a shareable, one-way transcript.
+
+        Distinct from ``/save``: that writes re-importable JSON into the profile;
+        this writes readable Markdown/text into the CURRENT directory, for pasting
+        into a bug report or PR. ``reasoning`` opts the thinking blocks in (off by
+        default — they usually dwarf the conversation).
+        """
+        parts = arg.split()
+        fmt = None
+        include_reasoning = False
+        rest = []
+        for token in parts:
+            low = token.lower()
+            if low in ("md", "markdown", "txt", "text") and fmt is None:
+                fmt = "txt" if low in ("txt", "text") else "md"
+            elif low in ("reasoning", "--reasoning", "thinking"):
+                include_reasoning = True
+            else:
+                rest.append(token)
+        path = " ".join(rest) or None
+
+        written = self.client.export_transcript(
+            path=path, fmt=fmt, include_reasoning=include_reasoning
+        )
+        if written:
+            print(f"Exported transcript to {written}")
+        else:
+            print(
+                "Nothing to export yet — the conversation has no messages, or the "
+                "path could not be written."
+            )
+
+    def _handle_branch_command(self, arg: str) -> None:
+        """Handle ``/branch [turn]`` — fork this session and continue in the copy.
+
+        With no argument it shows a turn picker (branch *after* the chosen turn);
+        with a number it branches directly. The original session is copied, never
+        modified, so it stays resumable exactly as it was.
+        """
+        turns = self.client.session_turns()
+        if not turns:
+            print(
+                "Nothing to branch yet — no turns have been recorded in this "
+                "session (session recording is off if SESSION_MAX_AGE_DAYS is 0)."
+            )
+            return
+
+        through = None
+        raw = arg.strip()
+        if raw:
+            try:
+                through = int(raw)
+            except ValueError:
+                print(f"Not a turn number: {raw}. Use /branch or /branch <n>.")
+                return
+            if not 1 <= through <= len(turns):
+                print(f"Pick a turn between 1 and {len(turns)}.")
+                return
+        else:
+            options = [
+                (
+                    t["n"],
+                    f"{t['n']}. {t['preview'][:70]}"
+                    + ("  (latest)" if t["n"] == len(turns) else ""),
+                )
+                for t in turns
+            ]
+            through = select_from_list(
+                "Branch after which turn?  (the branch keeps turns 1..n)", options
+            )
+            if through is None:
+                return  # cancelled
+
+        new_path = self.client.branch_conversation(through)
+        if not new_path:
+            print("Could not create the branch.")
+            return
+        dropped = len(turns) - through
+        note = f" ({dropped} later turn{'s' if dropped != 1 else ''} left behind)" if dropped else ""
+        print(
+            f"Branched after turn {through}{note}. You're now in the branch — the "
+            "original session is untouched and still resumable with --resume."
+        )
+
     def _handle_memory_command(self, arg: str) -> None:
         """Handle ``/memory`` (view) and ``/memory clear`` over ``MemoryStore``."""
         store = MemoryStore()
@@ -533,7 +622,11 @@ class ChatInterface:
         # Commands that open a full-screen dialog (or execv): a nested full-screen
         # app can't run inside the pinned app, so they go through
         # reader.run_dialog (exit → run → relaunch). Others run inline.
-        dialog_cmds = ("/load", "/config", "/model", "/params", "/features", "/memory")
+        # /branch is here only for its bare form (it opens a turn picker);
+        # `/branch 3` still routes through the same handler, which skips the dialog.
+        dialog_cmds = (
+            "/load", "/config", "/model", "/params", "/features", "/memory", "/branch",
+        )
 
         def _dispatch(line: str):
             first = line.strip().split(maxsplit=1)[0].lower() if line.strip() else ""
@@ -595,6 +688,10 @@ class ChatInterface:
             # and, on approval, flips plan mode off + persists the plan.
             self.client.agent._plan_approval_ui = reader.plan_approval_ui
             self.client.agent._exit_plan_mode_provider = self.client._approve_plan
+            # ask_user_question: a model-initiated multiple-choice picker. Only
+            # wired here (TTY) — off-TTY the tool reports itself unavailable
+            # rather than blocking a scripted run on a prompt nobody sees.
+            self.client.agent._question_ui = reader.question_ui
             # Background sub-agent completion: auto-trigger a delivery-only turn
             # while idle so the finished report surfaces without the user typing.
             self.client.agent._on_background_complete = (
@@ -667,6 +764,16 @@ class ChatInterface:
             timestamp = self.client.session_id.split("_", 1)[1]
             save_path = query[len("/save"):].strip() or None
             self.client.save_conversation(timestamp, path=save_path)
+            return None
+
+        # /export [md|txt] [path] — a shareable transcript, not a reloadable file.
+        if query.lower() == "/export" or query.lower().startswith("/export "):
+            self._handle_export_command(query[len("/export"):].strip())
+            return None
+
+        # /branch [turn] — fork this session and continue in the copy.
+        if query.lower() == "/branch" or query.lower().startswith("/branch "):
+            self._handle_branch_command(query[len("/branch"):].strip())
             return None
 
         # /config, /model, /params rewrite config.yaml then restart in place so

@@ -9,6 +9,63 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.4] — 2026-07-30
+
+Three ways to get a conversation unstuck: let the assistant ask you when it's
+genuinely blocked, fork a session that went the wrong way, and get a readable
+transcript out of one.
+
+### Added
+
+- **`ask_user_question` — the model can put a decision back to you.** When it's
+  blocked on a choice that is genuinely yours to make, it now offers 2–8 concrete
+  options in a picker and continues from your answer, instead of guessing or
+  writing out every alternative for you to sort through. Thin MCP stub +
+  client-side interception (the same split as `exit_plan_mode`): the server is a
+  piped subprocess and can't prompt a terminal.
+  - **It can't be used where nobody would see it.** A sub-agent doesn't get the
+    tool bound at all, and refuses it even if it asks anyway — a background one
+    runs on a daemon thread with no terminal, so a picker there would block on a
+    prompt that never paints. Off-TTY it reports itself unavailable rather than
+    stalling a scripted run. Every refusal tells the model to decide and state its
+    assumption, so a blocked question never becomes a hung turn.
+  - Dismissing the picker (Esc) is a first-class answer: the model proceeds on its
+    own judgment and says what it assumed, rather than re-asking.
+  - The prompt guidance pushes toward acting on a sensible default — one question
+    the user must answer costs more than a choice they can correct.
+
+- **`/export [md|txt] [path]` — a shareable transcript.** Writes the conversation
+  as readable Markdown or plain text into the **current directory** (not the
+  profile), for pasting into a bug report, a PR description, or a message. This is
+  deliberately NOT `/save`: that writes re-importable JSON for `/load`, while an
+  export is a one-way artifact optimized for a human reader. Tool *calls* are kept
+  as one-line summaries (a file body passed as an argument is replaced by its
+  size); tool **results** are dropped, since a few thousand lines of file content
+  is the single biggest source of noise. Injected context — the steering block and
+  the prepended episodic-memory block — is stripped, because the user never typed
+  it. Reasoning is opt-in (`/export reasoning`). The filename is derived from the
+  opening prompt, so exports are identifiable in a directory listing.
+- **`/branch [turn]` — fork a session and continue in the copy.** With no argument
+  it shows a turn picker; `/branch 3` branches directly. The transcript up to that
+  turn is copied to a new session, the live history is truncated to match, and this
+  run continues writing into the fork. **The original is never modified** — that's
+  the whole safety property: it stays resumable exactly as it was, so a branch that
+  goes nowhere costs nothing. Forks are tagged `(branch @ turn N)` in the `--resume`
+  picker, since a fork inherits its parent's opening prompt and the two rows would
+  otherwise be indistinguishable.
+
+### Fixed
+
+- **Arrow keys in every picker selected the wrong row.** A `RadioList` tracks the
+  highlighted row separately from its committed value, and only its own
+  enter/space binding reconciles the two — but the dialog overrides Enter to
+  confirm directly (skipping the Tab-to-OK step). So ↓↓Enter returned the **first**
+  entry: `--resume` and `/load` opened a different conversation than the one
+  highlighted, and the `/load` Delete button deleted the wrong file. Pressing
+  Space before Enter happened to work, which is why it went unnoticed. Found while
+  driving the new picker through a real pty — no unit test could have caught it,
+  since the bug lives in the widget's two-value split.
+
 ## [1.8.3] — 2026-07-29
 
 MCP transport fixes, all traced back to one real session where a long-running

@@ -12,7 +12,7 @@ from typing import Optional
 
 from mcp import StdioServerParameters
 
-from mnemoai.client import context_injection, session_artifacts
+from mnemoai.client import context_injection, session_artifacts, transcript_export
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
@@ -29,7 +29,13 @@ from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector
-from mnemoai.client.session_log import SessionLog, first_user_prompt, read_session
+from mnemoai.client.session_log import (
+    SessionLog,
+    branch_session,
+    first_user_prompt,
+    read_session,
+    turn_summaries,
+)
 from mnemoai.client.ui import turn_view
 from mnemoai.client.ui.spinner import Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
@@ -983,6 +989,123 @@ class LangGraphClient:
             log.seed_history(messages, source=source)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Session log seed failed: {e}")
+
+    def export_transcript(
+        self, path: str = None, fmt: str = None, include_reasoning: bool = False
+    ) -> Optional[str]:
+        """Write a shareable Markdown/text transcript; returns the path written.
+
+        Unlike ``save_conversation`` (re-importable JSON for ``/load``), this is a
+        one-way human-readable artifact for pasting into a bug report or PR — so it
+        defaults to the CURRENT DIRECTORY, not the profile's conversations dir: an
+        export you can't find is useless. Returns None when there's nothing
+        visible to export, so the caller can say so rather than write an empty file.
+        """
+        if not self.agent:
+            logger.error("Agent not initialized")
+            return None
+        messages = list(self.agent.messages or [])
+        # An explicit extension picks the format; otherwise Markdown.
+        if not fmt and path:
+            suffix = os.path.splitext(os.path.expanduser(path))[1].lstrip(".").lower()
+            if suffix in ("md", "txt"):
+                fmt = suffix
+        fmt = (fmt or "md").lower().lstrip(".")
+
+        # Title from the LIVE messages (conversation_title reads a saved FILE).
+        try:
+            title = first_user_prompt(
+                convert_langchain_messages_to_strands(messages), max_len=60
+            )
+        except Exception:  # noqa: BLE001 — a title is cosmetic
+            title = ""
+
+        text = transcript_export.render(
+            messages,
+            fmt,
+            title=title,
+            model=self.model_name_for_log(),
+            include_reasoning=include_reasoning,
+        )
+        if not text.strip():
+            return None
+
+        default_name = transcript_export.suggest_filename(messages, fmt)
+        try:
+            if path:
+                expanded = os.path.expanduser(path)
+                if os.path.isdir(expanded) or path.endswith(("/", os.sep)):
+                    os.makedirs(expanded, exist_ok=True)
+                    filepath = os.path.join(expanded, default_name)
+                else:
+                    parent = os.path.dirname(expanded)
+                    if parent:
+                        os.makedirs(parent, exist_ok=True)
+                    filepath = (
+                        expanded
+                        if os.path.splitext(expanded)[1]
+                        else f"{expanded}.{fmt}"
+                    )
+            else:
+                filepath = os.path.join(os.getcwd(), default_name)
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(text)
+            return filepath
+        except OSError as e:
+            logger.error(f"Failed to export transcript: {e}")
+            return None
+
+    def branch_conversation(self, through_turn: int = None) -> Optional[str]:
+        """Fork THIS session at ``through_turn`` and switch the live chat to it.
+
+        Returns the new session's path. The current transcript is copied (the
+        source file is never modified, so the original stays resumable), the live
+        history is truncated to the branch point, and this run keeps writing into
+        the new file — so continuing here diverges without disturbing what came
+        before.
+
+        Requires a session log: with ``SESSION_MAX_AGE_DAYS: 0`` there is no
+        transcript to fork, and a branch of nothing would silently look like it
+        worked.
+        """
+        log = getattr(self.agent, "session_log", None) if self.agent else None
+        if log is None or log.path is None:
+            return None
+        try:
+            new_path = branch_session(log.path, through_turn)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to branch session: {e}")
+            return None
+        if new_path is None:
+            return None
+
+        # Re-point this run at the branch and rehydrate the truncated history, so
+        # the live context matches the file we're now appending to.
+        try:
+            data = read_session(new_path)
+            raw = [m for m in data["messages"] if m.get("role") != "system"]
+            messages = convert_strands_messages_to_langchain(raw)
+            self.agent.messages.clear()
+            self.agent.messages.extend(messages)
+            self.agent.session_log = SessionLog.reopen(new_path)
+            # A branch is not the open /save file — a bare /save must not
+            # overwrite the conversation this was forked from.
+            self.current_conversation_path = None
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Branch created but could not be opened: {e}")
+            return None
+        return str(new_path)
+
+    def session_turns(self) -> list:
+        """Per-turn labels for the ``/branch`` picker (empty when not recording)."""
+        log = getattr(self.agent, "session_log", None) if self.agent else None
+        if log is None or log.path is None:
+            return []
+        try:
+            return turn_summaries(log.path)
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not read turn summaries: {e}")
+            return []
 
     def resume_session(self, path: str) -> bool:
         """Rehydrate a session transcript into the live agent; True on success.

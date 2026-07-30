@@ -83,6 +83,7 @@ class ToolManager:
         Args:
             mcp: MCP server instance
         """
+        from .ask_user_question import register_ask_user_tools
         from .background_tasks import register_background_tasks_tools
         from .describe_image import register_image_tools
         from .execute_bash import register_execute_bash_tools
@@ -101,6 +102,7 @@ class ToolManager:
         from .web_search import register_web_search_tools
 
         # Register all tool categories
+        register_ask_user_tools(mcp)
         register_background_tasks_tools(mcp)
         register_execute_bash_tools(mcp)
         register_edit_tools(mcp)
