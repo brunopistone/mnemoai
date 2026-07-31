@@ -2441,7 +2441,7 @@ wheels = [
 
 [[package]]
 name = "mnemoai-assistant"
-version = "1.8.6"
+version = "1.8.7"
 source = { editable = "." }
 dependencies = [
     { name = "aws-bedrock-token-generator" },

@@ -12,13 +12,21 @@ from .. import validate_file_path
 from .chunking_helper import __count_tokens as count_tokens
 from .chunking_helper import process_large_content
 
-try:
-    from ..rag.session import get_rag_session
 
-    _rag_available = True
-except ImportError:
-    _rag_available = False
-    logger.debug("RAG module not available")
+def _rag_session():
+    """Return ``get_rag_session`` if the RAG extra is installed, else None.
+
+    Resolved per call rather than probed at import time: the probe reached
+    ``..rag`` → faiss, so merely importing this reader loaded faiss's OpenMP
+    runtime even with ``ENABLE_RAG`` off — and ``fs_read`` imports every reader
+    unconditionally, so that was every process touching the tools package.
+    """
+    try:
+        from ..rag.session import get_rag_session
+    except ImportError:
+        logger.debug("RAG module not available")
+        return None
+    return get_rag_session
 
 
 async def read_pdf(file_path: str) -> str:
@@ -58,7 +66,10 @@ async def read_pdf(file_path: str) -> str:
                 )
 
             # If RAG enabled, ingest into session store instead of summarizing everything
-            if config.get("ENABLE_RAG", False) and _rag_available:
+            get_rag_session = (
+                _rag_session() if config.get("ENABLE_RAG", False) else None
+            )
+            if get_rag_session is not None:
                 tokens = count_tokens(full_text)
                 if tokens > config.get("RAG", {}).get("MAX_TOKENS", 1024 * 8):
                     try:

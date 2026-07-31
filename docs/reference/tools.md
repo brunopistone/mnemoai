@@ -40,15 +40,14 @@ ignored.
 | `"Search"`    | Literal, **case-insensitive** substring search with N lines of context per hit. Not a regex.                                                                      | `pattern`, `context_lines` |
 | `"Directory"` | Recursive listing. Skips dot-entries. `depth: 0` is the current level only.                                                                                       | `depth`                    |
 | `"CSV"`       | Sniffs the delimiter — `,` first, then `;`, tab, or pipe — and returns columns plus rows up to the token cap.                                                     | —                          |
-| `"JSON"`      | Reads the whole file, **validates the syntax**, then applies the line range.                                                                                      | `start_line`, `end_line`   |
+| `"JSON"`      | Reads the file, applies the line range, then **validates the syntax** of what is left.                                                                            | `start_line`, `end_line`   |
 | `"JSONL"`     | Same reader as `"JSON"`; per-line validation is chosen by the `.jsonl` **file extension**, not by this value.                                                     | `start_line`, `end_line`   |
 | `"PDF"`       | Page-marked text extraction. Large documents are offloaded to RAG or chunk-summarized.                                                                            | —                          |
 | `"DOCX"`      | Paragraph text. Rejects any file not ending in `.docx`. Tables, headers, and footnotes are not extracted.                                                         | —                          |
 
-Any other value returns an error. Two things to know about it: the message lists
-only `Line`, `Search`, `Directory`, `CSV`, and `JSON` — it omits the three that
-work — and a partial line range on a `.json` file fails validation, because the
-syntax check runs _after_ the slice.
+Any other value returns an error listing all eight. One thing to know: a partial
+line range on a `.json` file fails validation, because the syntax check runs
+_after_ the slice — half an object is not valid JSON.
 
 **Limits.** Output is capped by `DOC_MAX_TOKENS` (`16384` in the shipped config;
 `8192` when the key is absent) and truncation appends `[TRUNCATED - Content
