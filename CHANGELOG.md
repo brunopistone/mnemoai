@@ -54,6 +54,15 @@ model nobody was about to call. No public-surface change.
   process outright (`OMP: Error #15`) as soon as faiss runs a search — which is
   what episodic-memory search does. Vision initialization is now deferred to
   first use, so the import stays light regardless of what the config says.
+  Its regression test has to hold where there is neither torch nor a
+  `config.yaml` — every CI runner and every fresh clone — which ruled out the two
+  obvious ways to write it: asserting `"torch" not in sys.modules` proves nothing
+  where torch was never installed (it is not a dependency of this project), and
+  the initialization is skipped entirely unless `VISION_MODEL_ID` is set, so a
+  run with no config never reaches the path under test. Each subprocess therefore
+  injects a vision config plus a sentinel controller that records its own
+  construction, needing no heavy packages; confirmed by restoring the eager
+  initialization and checking the suite fails for it under those conditions.
 
 ### Changed
 
@@ -66,7 +75,7 @@ model nobody was about to call. No public-surface change.
   callers are parameters (`quiet`, the activity sink, batched spawns, the log
   label), not branches. `agent.py` is 160 lines shorter.
 - **The safety gates now have tests that would notice them being removed.**
-  Neither chokepoint had ever been *called* by a test — both were pinned only by
+  Neither chokepoint had ever been _called_ by a test — both were pinned only by
   a source-text substring check, so deleting the confirmation gate from either
   one left the entire suite green. Verified the way the hole was found: each
   gate was broken on purpose and the suite now fails for every one, from both
