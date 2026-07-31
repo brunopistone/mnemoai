@@ -6,7 +6,11 @@ from typing import Dict, List, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
-from mnemoai.client.agent.reasoning_utils import disable_reasoning, restore_reasoning
+from mnemoai.client.agent.reasoning_utils import (
+    disable_reasoning,
+    restore_reasoning,
+    without_reasoning,
+)
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
@@ -194,28 +198,26 @@ class QueryRouter:
         messages.append(HumanMessage(content=query))
 
         try:
-            # Temporarily suppress instance-level callbacks so the
-            # spinner keeps running during classification, and disable
-            # reasoning so the route lands in response.content (reasoning
-            # models otherwise leave content empty).
-            saved_callbacks = getattr(self.model, "callbacks", None)
-            self.model.callbacks = None
-            saved_reasoning = disable_reasoning(self.model)
-            try:
-                # Some endpoints (e.g. Mantle reasoning models) intermittently
-                # return an empty/null response. A single retry recovers the
-                # common case before we fall back to "full".
-                route = ""
-                for _ in range(2):
-                    response = self.model.invoke(messages, config={"callbacks": []})
-                    if self.usage is not None:
-                        self.usage.record(response, self.usage_model_name)
-                    route = self._parse_route(response.content)
-                    if route:
-                        break
-            finally:
-                restore_reasoning(self.model, saved_reasoning)
-                self.model.callbacks = saved_callbacks
+            # Callbacks suppressed so the spinner keeps running during
+            # classification, and reasoning off so the route lands in
+            # response.content (reasoning models otherwise leave content empty).
+            # Prefer a throwaway twin: classification runs on the SAME model
+            # object the agent is streaming with, so mutating it here was visible
+            # to a concurrent turn — and an interleaved restore could leave
+            # reasoning off for the rest of the session.
+            aux = without_reasoning(self.model)
+            if aux is not None:
+                aux.callbacks = None
+                route = self._classify_with(aux, messages)
+            else:
+                saved_callbacks = getattr(self.model, "callbacks", None)
+                self.model.callbacks = None
+                saved_reasoning = disable_reasoning(self.model)
+                try:
+                    route = self._classify_with(self.model, messages)
+                finally:
+                    restore_reasoning(self.model, saved_reasoning)
+                    self.model.callbacks = saved_callbacks
 
             if not route:
                 # Empty classification is recoverable (we route to "full", which
@@ -231,6 +233,21 @@ class QueryRouter:
         except Exception as e:
             logger.error(f"Router classification failed: {e}")
             return "full"
+
+    def _classify_with(self, model, messages: List[BaseMessage]) -> str:
+        """Ask ``model`` for a route; "" if it never answered with a valid one."""
+        # Some endpoints (e.g. Mantle reasoning models) intermittently return an
+        # empty/null response. A single retry recovers the common case before the
+        # caller falls back to "full".
+        route = ""
+        for _ in range(2):
+            response = model.invoke(messages, config={"callbacks": []})
+            if self.usage is not None:
+                self.usage.record(response, self.usage_model_name)
+            route = self._parse_route(response.content)
+            if route:
+                break
+        return route
 
     def _parse_route(self, content: str) -> str:
         """Parse the model response into a valid route (thinking tags/quotes

@@ -7,6 +7,7 @@ field, leaving ``response.content`` empty. Disabling reasoning for these calls
 keeps the visible content populated.
 """
 
+import copy
 import re
 from typing import Any, Dict
 
@@ -82,6 +83,51 @@ def restore_reasoning(model, saved: Dict[str, Any]) -> None:
         model.model_kwargs["temperature"] = saved["temperature"]
     if "reasoning_effort" in saved:
         model.reasoning_effort = saved["reasoning_effort"]
+
+
+def without_reasoning(model):
+    """A reasoning-disabled TWIN of ``model``, or None if one can't be built.
+
+    The safe alternative to disable/restore around an auxiliary call. That pair
+    mutates in place, which is wrong twice over on a shared model:
+
+    * The chat model is shared — with ``QueryRouter`` and with every
+      ``model_copy`` sub-agent clone — so a disable is visible to whatever else
+      is mid-call on another thread, and interleaved restores can leave the
+      scalar-attribute providers (Ollama ``reasoning``, ``reasoning_effort``)
+      permanently disabled for the session.
+    * Several call sites mutate ``self.model`` but then invoke a DIFFERENT object
+      (a worker's clone, a tool-bound binding), so on those providers the disable
+      never reached the model actually being called.
+
+    ``model_copy`` is a pydantic SHALLOW copy, so the twin would still share the
+    ``model_kwargs`` / ``additional_model_request_fields`` dicts that
+    :func:`disable_reasoning` pops ``thinking`` out of — hence the explicit
+    deepcopy of those two fields before disabling. A tool-bound model (a
+    ``RunnableBinding``) is handled by copying the model it wraps and rebinding,
+    so the bound tools survive. Returns None when the model can't be copied;
+    callers then fall back to disable/restore.
+    """
+    try:
+        inner = getattr(model, "bound", None)
+        if inner is not None and hasattr(inner, "model_copy"):
+            peer = _detach_field_dicts(inner.model_copy())
+            disable_reasoning(peer)
+            return model.model_copy(update={"bound": peer})
+        peer = _detach_field_dicts(model.model_copy())
+        disable_reasoning(peer)
+        return peer
+    except Exception:
+        return None
+
+
+def _detach_field_dicts(peer):
+    """Give a shallow copy its OWN provider-parameter dicts (see above)."""
+    for field in ("model_kwargs", "additional_model_request_fields"):
+        value = getattr(peer, field, None)
+        if isinstance(value, dict):
+            setattr(peer, field, copy.deepcopy(value))
+    return peer
 
 
 def extract_visible_text(content) -> str:

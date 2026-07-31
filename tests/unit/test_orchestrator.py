@@ -1,5 +1,9 @@
 """Unit tests for subtask parsing (client/orchestrator.py)."""
 
+from langchain_core.messages import AIMessage
+from pydantic import BaseModel
+
+from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.orchestrator import parse_subtasks
 
 VALID = {"simple_qa", "code", "research", "knowledge", "full"}
@@ -110,3 +114,53 @@ class TestParseSubtasksDependsOn:
         content = '[{"description": "a", "category": "code", "depends_on": "0"}]'
         result = parse_subtasks(content, FALLBACK, VALID)
         assert result[0]["depends_on"] == []
+
+
+class _DecomposerModel(BaseModel):
+    """A copyable stand-in for the shared chat model the decomposer borrows."""
+
+    reasoning: bool = True
+    callbacks: object = None
+    seen: list = []
+
+    def invoke(self, messages, config=None):
+        self.seen.append(self.reasoning)
+        return AIMessage(content='[{"description": "a", "category": "code"}]')
+
+
+class TestDecomposeDoesNotMutateTheSharedModel:
+    """Decomposition borrows self.model, which a concurrent worker may be using.
+
+    The old save/disable/restore ran on that shared object: the disable was
+    visible mid-call elsewhere, and on the scalar-attribute providers interleaved
+    restores could leave reasoning off for the whole session.
+    """
+
+    def test_decomposes_on_a_twin_and_leaves_the_parent_alone(self):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        sentinel = object()
+        a.model = _DecomposerModel(reasoning=True, callbacks=sentinel, seen=[])
+        a._disable_reasoning = lambda: (_ for _ in ()).throw(
+            AssertionError("must not mutate the shared model when a twin is available")
+        )
+        out = a._decompose_task("do a thing", "decompose", VALID)
+        assert out == [{"description": "a", "category": "code", "depends_on": []}]
+        assert a.model.seen == [False]  # the call ran with reasoning off...
+        assert a.model.reasoning is True  # ...but on a twin
+        assert a.model.callbacks is sentinel
+
+    def test_falls_back_to_in_place_disable_when_untwinnable(self):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+
+        class _M:
+            callbacks = None
+
+            def invoke(self, messages, config=None):
+                return AIMessage(content='[{"description": "a", "category": "code"}]')
+
+        a.model = _M()
+        disabled = []
+        a._disable_reasoning = lambda: disabled.append(True) or {"reasoning": True}
+        a._restore_reasoning = lambda saved: None
+        assert a._decompose_task("do a thing", "decompose", VALID)
+        assert disabled == [True]

@@ -9,6 +9,76 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.6] — 2026-07-31
+
+Four latent bugs, all found by asking a different question than "do the tests
+pass?" — mutation-testing the safety-critical paths, i.e. breaking each one on
+purpose and checking whether anything failed. Two gates and one whole tool loop
+turned out to be unprotected, and the reasoning-disable helper was mutating a
+model nobody was about to call. No public-surface change.
+
+### Fixed
+
+- **Turning reasoning off for an internal call mutated a model that was often
+  not the one being called.** Five call sites — the query classifier, task
+  decomposition, both empty-turn salvages, and the main model call — disabled
+  reasoning in place on `self.model`, then invoked something else: a worker's
+  clone, or the tool-bound binding that actually receives the request. On the
+  providers where reasoning is a plain attribute (Ollama's `reasoning`,
+  `reasoning_effort`) the disable therefore never reached the object being
+  invoked, so the retry ran with reasoning still on — the exact failure the
+  disable exists to prevent, since a reasoning model leaves `content` empty and
+  the salvage produces nothing to show. On `ChatBedrockConverse` it was worse
+  than a no-op: applied to a bound model it raised **after** already popping
+  `thinking`, so the saved state was discarded and reasoning stayed off for the
+  rest of the session. All five now build a reasoning-disabled **twin**
+  (`reasoning_utils.without_reasoning`) and invoke that, leaving the shared model
+  untouched — which also removes a real thread-safety hazard, since parallel
+  orchestrator waves and background sub-agents ran these on pool threads while
+  the main turn was mid-call. The twin deep-copies `model_kwargs` /
+  `additional_model_request_fields` before disabling, because `model_copy()` is
+  shallow and would otherwise reach through into the shared model's own dicts;
+  a model that cannot be copied falls back to the previous save/restore.
+- **A sub-agent's tool failure could log an empty error.** The fix for an
+  exception whose `str()` is empty — a bare `TimeoutError` — had been applied to
+  the foreground tool loop only, so for a release a worker's timed-out tool call
+  logged `Worker tool error:` and nothing after it. The same tool loop also
+  never logged the tool-not-found warning the foreground logged, so a sub-agent
+  calling a tool it had not been given left no trace in the log at all. Both
+  paths now run one implementation, so neither can drift again.
+- **Importing the tools package could abort the interpreter.** With a
+  `VISION_MODEL_ID` configured, `server/tools/__init__` initialized the vision
+  model at **import** time, pulling `BaseChatModel`→transformers→torch into any
+  process that touched `mnemoai.server.tools`. Beyond costing ~3s, torch and
+  faiss each vendor their own OpenMP runtime, and loading both aborts the
+  process outright (`OMP: Error #15`) as soon as faiss runs a search — which is
+  what episodic-memory search does. Vision initialization is now deferred to
+  first use, so the import stays light regardless of what the config says.
+
+### Changed
+
+- **The two tool-execution chokepoints are one loop.** Running a tool existed as
+  two near-identical ~70-line copies — one for the main graph, one for
+  sub-agents and orchestrator waves — of which ~39 lines were byte-identical.
+  Both carried the plan-mode hard block and the destructive-tool confirmation
+  gate, the two pieces of logic that must never differ between the paths. They
+  now share `client/agent/tool_loop.py`; the remaining differences between the
+  callers are parameters (`quiet`, the activity sink, batched spawns, the log
+  label), not branches. `agent.py` is 160 lines shorter.
+- **The safety gates now have tests that would notice them being removed.**
+  Neither chokepoint had ever been *called* by a test — both were pinned only by
+  a source-text substring check, so deleting the confirmation gate from either
+  one left the entire suite green. Verified the way the hole was found: each
+  gate was broken on purpose and the suite now fails for every one, from both
+  paths. Two of those checks had also been asserting against captured log
+  output that could never arrive, since the application logger does not
+  propagate to the root handler.
+- **Three documentation corrections.** The tools reference said fourteen of the
+  31 tools are always available; the real split is twenty-three always
+  available and eight behind a feature toggle. `fs_read` accepts eight `mode`
+  values, not seven. The README's link to the everyday-tools guide now matches
+  the page's own title.
+
 ## [1.8.5] — 2026-07-30
 
 Documentation release: the capability docs are rewritten task-first, every tool

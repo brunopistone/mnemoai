@@ -22,7 +22,7 @@ Full documentation is available at **https://brunopistone.github.io/mnemoai/**
 - [Configuration](https://brunopistone.github.io/mnemoai/configuration/)
 - [Orchestration & sub-agents](https://brunopistone.github.io/mnemoai/guides/orchestration/)
 - [Memory & learning](https://brunopistone.github.io/mnemoai/guides/memory/)
-- [Productivity Tools](https://brunopistone.github.io/mnemoai/guides/productivity-tools/)
+- [Everyday tools](https://brunopistone.github.io/mnemoai/guides/productivity-tools/)
 - [Architecture](https://brunopistone.github.io/mnemoai/getting-started/architecture/)
 - [Development](https://brunopistone.github.io/mnemoai/development/)
 

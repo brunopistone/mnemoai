@@ -7,6 +7,7 @@ silently (no scary WARNING every turn).
 """
 
 from langchain_core.messages import AIMessage
+from pydantic import BaseModel
 
 from mnemoai.client.agent.router import QueryRouter, is_trivial_query
 
@@ -103,6 +104,64 @@ class TestClassifyRecovery:
         r = _router(["research"])
         assert r.classify("search the web") == "research"
         assert r.model.calls == 1
+
+
+class _CopyableStubModel(BaseModel):
+    """A stub the router can twin: pydantic, with a scalar `reasoning` toggle.
+
+    `contents`/`calls` are shared mutable lists, so the shallow copy the router
+    makes still reports back here — each call records which object ran it.
+    """
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    reasoning: bool = True
+    callbacks: object = None
+    contents: list = []
+    calls: list = []
+
+    def invoke(self, messages, config=None):
+        content = self.contents.pop(0) if self.contents else ""
+        self.calls.append({"on": id(self), "reasoning": self.reasoning})
+        return AIMessage(content=content)
+
+
+class TestClassifyDoesNotMutateTheSharedModel:
+    """Classification runs on the same model object the agent streams with.
+
+    So it must not classify ON that object: disabling reasoning in place was
+    visible to a concurrent turn, and on the scalar-attribute providers two
+    interleaved restores could leave reasoning off for the whole session. A
+    save/restore pair looks identical once the call is over — which is why these
+    assert on the object the call actually ran on, not just the state afterwards.
+    """
+
+    def test_classification_runs_on_a_twin_not_the_shared_model(self):
+        model = _CopyableStubModel(reasoning=True, contents=["code"], calls=[])
+        r = QueryRouter(model)
+        assert r.classify("edit a file") == "code"
+        assert len(model.calls) == 1
+        assert model.calls[0]["on"] != id(model)  # never the shared object
+        assert model.calls[0]["reasoning"] is False  # but reasoning was off
+        assert model.reasoning is True
+
+    def test_callbacks_on_the_shared_model_are_left_alone(self):
+        sentinel = object()
+        model = _CopyableStubModel(callbacks=sentinel, contents=["code"], calls=[])
+        QueryRouter(model).classify("edit a file")
+        assert model.callbacks is sentinel
+
+    def test_the_retry_also_stays_off_the_shared_model(self):
+        # The empty-content retry is a second invoke: it must reuse the twin
+        # rather than fall back to the shared model.
+        model = _CopyableStubModel(reasoning=True, contents=["", "code"], calls=[])
+        assert QueryRouter(model).classify("edit a file") == "code"
+        assert [c["on"] != id(model) for c in model.calls] == [True, True]
+
+    def test_an_uncopyable_model_still_classifies_in_place(self):
+        # The fallback path: a model that can't be twinned must keep working.
+        r = _router(["research"])
+        assert r.classify("search the web") == "research"
 
 
 class TestFastRoute:

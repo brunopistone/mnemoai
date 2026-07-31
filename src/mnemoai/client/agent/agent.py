@@ -30,6 +30,7 @@ from mnemoai.client.agent import (
     stream_policy,
     subagent_runner,
     tool_formatting,
+    tool_loop,
 )
 from mnemoai.client.agent.agent_activity import ActivitySink, AgentActivityStore
 from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
@@ -38,7 +39,11 @@ from mnemoai.client.agent.orchestrator import (
     get_orchestrator_prompt,
     parse_subtasks,
 )
-from mnemoai.client.agent.reasoning_utils import disable_reasoning, restore_reasoning
+from mnemoai.client.agent.reasoning_utils import (
+    disable_reasoning,
+    restore_reasoning,
+    without_reasoning,
+)
 from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
 from mnemoai.client.ui import turn_view
 from mnemoai.client.usage_tracker import UsageTracker
@@ -823,9 +828,23 @@ class LangGraphAgent:
             messages.extend(message_sanitizer.flatten_tool_blocks(history))
         messages.append(HumanMessage(content=query))
 
-        # Suppress callbacks (keeps the spinner up) and disable reasoning so the
-        # JSON subtask list lands in response.content (reasoning models else
-        # leave content empty and parsing fails).
+        # Reasoning off so the JSON subtask list lands in response.content
+        # (reasoning models otherwise leave content empty and parsing fails), and
+        # callbacks suppressed so this internal call doesn't drive the spinner.
+        # On a twin both are just fields on a throwaway object; the in-place
+        # fallback has to save and restore them on the shared model.
+        aux = self._non_reasoning()
+        if aux is not None:
+            aux.callbacks = None
+            try:
+                response = aux.invoke(messages, config={"callbacks": []})
+                return parse_subtasks(response.content, query, valid_categories)
+            except Exception as e:
+                # A failed decomposition shouldn't crash the turn: fall back to
+                # treating the whole query as a single 'full' subtask.
+                logger.warning(f"Task decomposition failed: {e}; using single subtask")
+                return [{"description": query, "category": "full"}]
+
         saved_callbacks = getattr(self.model, "callbacks", None)
         saved_reasoning = None
         try:
@@ -834,8 +853,6 @@ class LangGraphAgent:
             response = self.model.invoke(messages, config={"callbacks": []})
             return parse_subtasks(response.content, query, valid_categories)
         except Exception as e:
-            # A failed decomposition shouldn't crash the turn: fall back to
-            # treating the whole query as a single 'full' subtask.
             logger.warning(f"Task decomposition failed: {e}; using single subtask")
             return [{"description": query, "category": "full"}]
         finally:
@@ -984,79 +1001,17 @@ class LangGraphAgent:
                         f"{tool_calls_made} tool call"
                         f"{'s' if tool_calls_made != 1 else ''}…"
                     )
-            for tc in response.tool_calls:
-                tool_name = tc["name"]
-                tool_id = tc["id"]
-                tool_args = self._normalize_tool_args(tc["args"])
-
-                # exit_plan_mode / spawn_agent / resume_agent are client-side stubs
-                # (no batch here — a worker runs any spawn inline).
-                client_msg = self._client_side_tool_message(
-                    tool_name, tool_args, tool_id
-                )
-                if client_msg is not None:
-                    worker_messages.append(client_msg)
-                    continue
-
-                # Feed the live activity panel (no-op when activity is None).
-                if activity is not None:
-                    activity.tool_call(tool_name, tool_args)
-
-                tool = next((t for t in worker_tools if t.name == tool_name), None)
-                # Fall back to all tools if not in the worker subset.
-                if not tool:
-                    tool = next((t for t in self.tools if t.name == tool_name), None)
-
-                if tool and self._is_blocked_by_plan_mode(tool_name, tool_args):
-                    worker_messages.append(
-                        ToolMessage(
-                            content=self._plan_mode_block_message(tool_name),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-                elif tool and not self._confirm_tool(tool_name, tool_args):
-                    worker_messages.append(
-                        ToolMessage(
-                            content="User declined to run this command.",
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-                elif tool:
-                    try:
-                        logger.debug(f"Worker tool: {tool_name} args: {tool_args}")
-                        result = self._invoke_tool(
-                            tool, tool_name, tool_args, quiet=quiet
-                        )
-                        worker_messages.append(
-                            ToolMessage(
-                                content=self._truncate_tool_result(str(result)),
-                                tool_call_id=tool_id,
-                                name=tool_name,
-                            )
-                        )
-                        if activity is not None:
-                            activity.tool_result(tool_name, str(result))
-                    except Exception as e:
-                        logger.error(f"Worker tool error: {e}")
-                        if activity is not None:
-                            activity.tool_error(tool_name, str(e))
-                        worker_messages.append(
-                            ToolMessage(
-                                content=self._tool_error_message(tool_name, e),
-                                tool_call_id=tool_id,
-                                name=tool_name,
-                            )
-                        )
-                else:
-                    worker_messages.append(
-                        ToolMessage(
-                            content=f"Tool not found: {tool_name}",
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
+            # The SAME loop the main graph runs (gates included) — a sub-agent must
+            # not be a way around the confirmation gate. A worker runs any spawn
+            # inline, so no batched spawn_results here.
+            self._run_tool_calls(
+                response.tool_calls,
+                worker_tools,
+                worker_messages,
+                quiet=quiet,
+                activity=activity,
+                log_label="Worker tool",
+            )
 
         if not quiet:
             self._stop_spinner()
@@ -1089,19 +1044,25 @@ class LangGraphAgent:
             )
         ]
         self._start_spinner()
-        saved = self._disable_reasoning()
+        # Disable reasoning on the model we're about to CALL. Mutating self.model
+        # here reached a different object entirely — on the scalar-attribute
+        # providers the retry then ran with reasoning still on, i.e. the exact
+        # failure it exists to fix, while corrupting the shared model.
+        retry_model = self._non_reasoning(worker_model)
+        saved = None if retry_model is not None else self._disable_reasoning()
         try:
             retry_response, _ = self._stream_response(
                 retry_messages,
                 config,
                 print_reasoning=False,
-                model=worker_model,
+                model=retry_model or worker_model,
                 mark_answer=True,
             )
         except _ContextOverflow:
             retry_response = None  # fall through to the fallback message below
         finally:
-            self._restore_reasoning(saved)
+            if saved is not None:
+                self._restore_reasoning(saved)
 
         if retry_response is not None:
             visible = self._extract_visible(retry_response.content)
@@ -1134,15 +1095,19 @@ class LangGraphAgent:
                 )
             )
         ]
-        saved = self._disable_reasoning()
+        # A twin, not a mutation: this runs on a pool/daemon thread, so touching
+        # the shared self.model would reach into whatever the main turn is doing.
+        retry_model = self._non_reasoning(worker_model)
+        saved = None if retry_model is not None else self._disable_reasoning()
         try:
             retry_response, _ = self._stream_response(
-                retry_messages, {}, model=worker_model, quiet=True
+                retry_messages, {}, model=retry_model or worker_model, quiet=True
             )
         except Exception:
             retry_response = None
         finally:
-            self._restore_reasoning(saved)
+            if saved is not None:
+                self._restore_reasoning(saved)
 
         if retry_response is not None:
             visible = self._extract_visible(retry_response.content)
@@ -1459,19 +1424,24 @@ class LangGraphAgent:
                 ),
             ]
 
-            saved = self._disable_reasoning()
+            # `active_model` is the TOOL-BOUND model, not self.model — so the old
+            # in-place disable never reached the object being invoked on the
+            # scalar-attribute providers, and the retry re-ran with reasoning on.
+            retry_model = self._non_reasoning(active_model)
+            saved = None if retry_model is not None else self._disable_reasoning()
             try:
                 retry_response, _ = self._stream_response(
                     retry_messages,
                     config,
                     print_reasoning=False,
-                    model=active_model,
+                    model=retry_model or active_model,
                     mark_answer=True,
                 )
             except _ContextOverflow:
                 retry_response = None  # degrade: keep the reasoning-only response
             finally:
-                self._restore_reasoning(saved)
+                if saved is not None:
+                    self._restore_reasoning(saved)
 
             if retry_response is not None:
                 retry_visible = self._extract_visible(retry_response.content)
@@ -2106,6 +2076,18 @@ class LangGraphAgent:
         """Restore reasoning settings saved by _disable_reasoning()."""
         restore_reasoning(self.model, saved)
 
+    def _non_reasoning(self, model=None):
+        """A reasoning-disabled twin of ``model`` (default ``self.model``).
+
+        Preferred over the ``_disable_reasoning``/``_restore_reasoning`` pair for
+        an auxiliary call: it mutates nothing, so a concurrent worker or the
+        shared ``QueryRouter`` can't see the disable — and it applies to the model
+        actually being invoked. Returns None when no twin can be built; callers
+        fall back to the in-place pair. See
+        :func:`reasoning_utils.without_reasoning`.
+        """
+        return without_reasoning(self.model if model is None else model)
+
     def _extract_content(self, chunk) -> tuple[str, str]:
         """Delegates to :func:`response_parsing.extract_content`."""
         return response_parsing.extract_content(chunk)
@@ -2312,6 +2294,28 @@ class LangGraphAgent:
         """Delegates to :func:`tool_formatting.tool_error_message`."""
         return tool_formatting.tool_error_message(tool_name, exc)
 
+    def _run_tool_calls(
+        self,
+        tool_calls,
+        tools,
+        messages: List[BaseMessage],
+        quiet: bool = False,
+        activity: Optional[ActivitySink] = None,
+        spawn_results: Optional[Dict[str, str]] = None,
+        log_label: str = "Tool execution",
+    ) -> None:
+        """Delegates to :func:`tool_loop.run_tool_calls` (appends in place)."""
+        tool_loop.run_tool_calls(
+            self,
+            tool_calls,
+            tools,
+            messages,
+            quiet=quiet,
+            activity=activity,
+            spawn_results=spawn_results,
+            log_label=log_label,
+        )
+
     def _is_preapproved_bash(self, command: str) -> bool:
         """Delegates to :func:`confirmation_gate.is_preapproved_bash`."""
         return confirmation_gate.is_preapproved_bash(self, command)
@@ -2413,78 +2417,13 @@ class LangGraphAgent:
         # inline by the loop (no pool overhead).
         spawn_results = self._run_spawn_batch(last_message.tool_calls)
 
-        tool_results = []
-        for tool_call in last_message.tool_calls:
-            tool_name = tool_call["name"]
-            tool_args = self._normalize_tool_args(tool_call["args"])
-            tool_id = tool_call["id"]
-
-            # exit_plan_mode / spawn_agent / resume_agent are handled client-side
-            # (not via MCP); spawn_agent may reuse a batched parallel result.
-            client_msg = self._client_side_tool_message(
-                tool_name, tool_args, tool_id, spawn_results
-            )
-            if client_msg is not None:
-                tool_results.append(client_msg)
-                continue
-
-            # Route tools first, then fall back to all tools.
-            tool = next((t for t in route_tools if t.name == tool_name), None)
-            if not tool:
-                tool = next((t for t in self.tools if t.name == tool_name), None)
-
-            if tool:
-                # Plan mode: hard-block mutating/exec tools (read-only planning).
-                if self._is_blocked_by_plan_mode(tool_name, tool_args):
-                    tool_results.append(
-                        ToolMessage(
-                            content=self._plan_mode_block_message(tool_name),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-                    continue
-                # Hard gate: confirm destructive tools before running.
-                if not self._confirm_tool(tool_name, tool_args):
-                    tool_results.append(
-                        ToolMessage(
-                            content="User declined to run this command.",
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-                    continue
-                try:
-                    logger.debug(f"Executing tool: {tool_name} with args: {tool_args}")
-                    result = self._invoke_tool(tool, tool_name, tool_args)
-                    tool_results.append(
-                        ToolMessage(
-                            content=self._truncate_tool_result(str(result)),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-                except Exception as e:
-                    # `str(e) or repr(e)` — a bare TimeoutError has an empty
-                    # str(), so this logged "Tool execution error:" and nothing
-                    # else. (`e or …` would NOT work: an exception is truthy.)
-                    logger.error(f"Tool execution error: {str(e) or repr(e)}")
-                    tool_results.append(
-                        ToolMessage(
-                            content=self._tool_error_message(tool_name, e),
-                            tool_call_id=tool_id,
-                            name=tool_name,
-                        )
-                    )
-            else:
-                logger.warning(f"Tool not found: {tool_name}")
-                tool_results.append(
-                    ToolMessage(
-                        content=f"Tool not found: {tool_name}",
-                        tool_call_id=tool_id,
-                        name=tool_name,
-                    )
-                )
+        tool_results: List[BaseMessage] = []
+        self._run_tool_calls(
+            last_message.tool_calls,
+            route_tools,
+            tool_results,
+            spawn_results=spawn_results,
+        )
 
         self._start_spinner()
 
