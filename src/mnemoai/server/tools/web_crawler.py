@@ -10,13 +10,19 @@ from mnemoai.utils.logger import logger
 
 from .safety import classify_url
 
-try:
-    from .rag.session import get_rag_session
 
-    _rag_available = True
-except ImportError:
-    _rag_available = False
-    logger.debug("RAG module not available")
+def _rag_session():
+    """Return ``get_rag_session`` if the RAG extra is installed, else None.
+
+    Resolved per call rather than probed at import time, so importing this tool
+    doesn't drag in ``.rag`` → faiss (and its OpenMP runtime) when RAG is off.
+    """
+    try:
+        from .rag.session import get_rag_session
+    except ImportError:
+        logger.debug("RAG module not available")
+        return None
+    return get_rag_session
 
 # crawl4ai drives a headless Chromium via Playwright. The browser binary is a
 # separate download that pip / `uv tool install` don't fetch, so the first
@@ -144,7 +150,10 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
             content = result.markdown
 
             # If RAG enabled and content is large, ingest into vector DB
-            if config.get("ENABLE_RAG", False) and _rag_available:
+            get_rag_session = (
+                _rag_session() if config.get("ENABLE_RAG", False) else None
+            )
+            if get_rag_session is not None:
                 from .readers.chunking_helper import __count_tokens as count_tokens
 
                 tokens = count_tokens(content)

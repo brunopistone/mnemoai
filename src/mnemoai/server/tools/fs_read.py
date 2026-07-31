@@ -111,7 +111,11 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
                 return json.dumps(
                     {
                         "error": True,
-                        "message": f"Invalid mode '{mode}'. Use 'Line', 'Search', 'Directory', 'CSV', or 'JSON'",
+                        "message": (
+                            f"Invalid mode '{mode}'. Use 'Line', 'Search', "
+                            "'Directory', 'CSV', 'JSON', 'JSONL', 'PDF', or "
+                            "'DOCX' (case-sensitive)"
+                        ),
                     }
                 )
 

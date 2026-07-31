@@ -9,6 +9,80 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.8.7] — 2026-07-31
+
+The lazy vision initialization shipped in 1.8.6 was correct but ineffective: it
+fixed the one import path that never needed fixing. An adversarial re-check of
+that release — agents told to refute its claims rather than confirm them —
+found that the MCP server still loaded both OpenMP runtimes on every start,
+through three import chains nobody had traced. Also a silent-failure mode in
+the same code, plus the documentation and reporting gaps the review turned up.
+No public-surface change.
+
+### Fixed
+
+- **A disabled tool group no longer pays for its dependencies.**
+  `register_tools` gates `describe_image` (which reaches transformers/torch) and
+  the RAG tools (which reach faiss) behind `VISION_MODEL_ID` and `ENABLE_RAG`,
+  but both were imported unconditionally at the top of the function — and an
+  import is what creates the module and registers its OpenMP runtime, so
+  declining to _register_ the group bought nothing. torch and faiss each vendor
+  their own OpenMP, and a process holding both aborts (`OMP: Error #15`) as soon
+  as faiss searches, which is the whole reason for the gate. Two further chains
+  defeated it independently of that: `pdf_reader`/`docx_reader` imported
+  `..rag` at module scope purely to set an `_rag_available` boolean — and
+  `fs_read` imports every reader unconditionally, so that was every process
+  touching the tools package — and `web_crawler` did the same. Measured with
+  both features off: previously torch, faiss, and transformers all loaded;
+  now none does, and the 25 tools that don't need them still register. The
+  probes became a `_rag_session()` helper resolved at call time.
+- **A failed vision initialization is no longer silent.** `_ensure_vision` set
+  its "done" flag _before_ building, so a raising provider was remembered as
+  complete. For one exception type that lost the error entirely: `describe_image`
+  binds the model through the package's `__getattr__`, and importlib's
+  `_handle_fromlist` probes with `hasattr`, which swallows an `AttributeError`
+  — the pre-set flag then let the retry return `None`, permanently binding a
+  dead model and dropping the tool from the registered set with nothing logged
+  anywhere. The flag now goes up only after a successful build, and the
+  controller is assembled in a local so a raise can't leave a half-built one
+  behind for the next caller. No reachable trigger existed in the shipped code
+  (every misconfiguration raises `TypeError`/`KeyError`/`ValueError`/
+  `RuntimeError`, all of which were already loud), so this was latent — but the
+  cost of being wrong was a capability that fails invisibly.
+- **`fs_read`'s invalid-mode error listed five of its eight modes.** A model
+  told to use `Line`, `Search`, `Directory`, `CSV`, or `JSON` had no way to learn
+  that `JSONL`, `PDF`, and `DOCX` also work — the error taught it a smaller
+  tool than it has. All eight are listed now, noted as case-sensitive.
+
+### Changed
+
+- **`tool_loop.py` is documented.** The module introduced in 1.8.6 to unify the
+  two tool-execution chokepoints was absent from `ARCHITECTURE.md` and
+  `CLAUDE.md`, which still described a shape the code no longer had — the
+  failure mode that produced the drift it was written to fix. Both now record
+  it, including the two properties that are load-bearing rather than incidental:
+  plan-mode blocking sits _above_ the confirmation prompt, and every branch
+  answers through one helper so each `tool_call_id` gets exactly one
+  `ToolMessage`. The collaborator sections now also distinguish the pure modules
+  from the two that take the agent as their first argument.
+- **The `fs_read` "JSON" mode row said validate-then-slice; the code slices
+  first.** The page contradicted itself four lines later, where the correct
+  order was already explained. Corrected, and the note about the misleading
+  error message was dropped along with the message itself.
+- **`.ruff_cache/` is ignored.** It was excluded only by the directory's own
+  self-ignoring file, so any tooling not honoring that saw it as untracked.
+
+### Internal
+
+- Regression tests for each fix, verified by mutation rather than by passing:
+  reverting any one of the six changes (each of the three import chains, the
+  flag ordering, the local-assignment, the hoisted imports) fails the suite.
+  The gate tests assert on `sys.modules` rather than on where the `import`
+  statement sits, and stay meaningful whether or not torch and faiss are
+  installed — an absent module can't be in `sys.modules`, so the "stays out"
+  direction cannot false-pass, and the "loads when enabled" direction is
+  skipped rather than asserted vacuously when the package is missing.
+
 ## [1.8.6] — 2026-07-31
 
 Four latent bugs, all found by asking a different question than "do the tests

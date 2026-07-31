@@ -181,3 +181,55 @@ def test_unknown_package_attribute_still_raises():
         """
     )
     assert _last_line(proc) == "raised"
+
+
+def test_a_failed_vision_init_stays_loud():
+    """A raising init must NOT be remembered as "done".
+
+    ``_vision_ready`` used to be set BEFORE the build, which made a failure both
+    permanent and silent for the one exception type that matters: ``describe_image``
+    binds these names through the package ``__getattr__``, and importlib's
+    ``_handle_fromlist`` probes with ``hasattr``, which SWALLOWS an AttributeError.
+    The pre-set flag then let the retry return None — binding a dead model forever
+    and dropping the tool from the registered set with nothing logged. The flag now
+    goes up only after success, so every access re-raises.
+    """
+    proc = _run(
+        """
+        import mnemoai.server.tools as t
+
+        def boom(self):
+            raise AttributeError("provider surface changed")
+        VisionModelController.initialize_model = boom
+
+        seen = []
+        for _ in range(2):
+            try:
+                t.tool_manager.vision_model
+                seen.append("silent-None")
+            except AttributeError:
+                seen.append("raised")
+        print(seen)
+        """
+    )
+    assert _last_line(proc) == "['raised', 'raised']"
+
+
+def test_a_failed_init_leaves_no_half_built_controller():
+    """A raise must not leave a partly-initialized controller for the next caller."""
+    proc = _run(
+        """
+        import mnemoai.server.tools as t
+
+        def boom(self):
+            raise RuntimeError("no credentials")
+        VisionModelController.initialize_model = boom
+
+        try:
+            t.tool_manager.vision_model
+        except RuntimeError:
+            pass
+        print([t.tool_manager._vision_model, t.tool_manager._vision_model_controller])
+        """
+    )
+    assert _last_line(proc) == "[None, None]"

@@ -38,19 +38,31 @@ class ToolManager:
         which aborts the process (``OMP: Error #15``) as soon as faiss — which
         vendors another — runs a search in the same interpreter. Import-time
         side effects here must stay config-independent.
+
+        The "done" flag is set only AFTER a successful build, so a failure stays
+        loud on every subsequent access. Setting it first made failure sticky
+        and SILENT: ``describe_image`` binds these names through the package's
+        ``__getattr__``, and ``_handle_fromlist`` probes with ``hasattr``, which
+        swallows an ``AttributeError`` — a pre-set flag then let the retry
+        return None, permanently binding a dead model and dropping the tool
+        from the registered set with no error anywhere.
         """
         if self._vision_ready:
             return
-        self._vision_ready = True
         if not self.model_id:
+            self._vision_ready = True
             return
         from mnemoai.models.controllers.vision_model_controller import (
             VisionModelController,
         )
 
-        self._vision_model_controller = VisionModelController()
-        self._vision_model_controller.initialize_model()
-        self._vision_model = self._vision_model_controller.get_model()
+        # Build into locals first: a raise must not leave a half-initialized
+        # controller behind for the next caller to find.
+        controller = VisionModelController()
+        controller.initialize_model()
+        self._vision_model_controller = controller
+        self._vision_model = controller.get_model()
+        self._vision_ready = True
 
     @property
     def vision_model_controller(self) -> Optional[Any]:
@@ -111,7 +123,6 @@ class ToolManager:
         """
         from .ask_user_question import register_ask_user_tools
         from .background_tasks import register_background_tasks_tools
-        from .describe_image import register_image_tools
         from .execute_bash import register_execute_bash_tools
         from .file_edit import register_edit_tools
         from .file_search import register_search_tools
@@ -120,7 +131,6 @@ class ToolManager:
         from .git_safety import register_git_safety_tools
         from .memory_tool import register_memory_tools
         from .plan_mode_exit import register_plan_mode_exit_tools
-        from .rag import register_rag_tools
         from .skill_tool import register_skill_tools
         from .subagent_tool import register_subagent_tools
         from .todo_manager import register_todo_tools
@@ -140,7 +150,16 @@ class ToolManager:
         register_subagent_tools(mcp)
         register_todo_tools(mcp)
 
+        # The two heavy groups are imported INSIDE their gate, not above with the
+        # rest. describe_image reaches transformers/torch and .rag reaches faiss,
+        # each vendoring an OpenMP runtime, and a process holding both aborts
+        # (``OMP: Error #15``) once faiss searches. Importing them
+        # unconditionally made the gates dead weight for that cost: the module
+        # object — and its OpenMP registration — is created by the import, so
+        # only a gated import can decline to pay it.
         if self.get_vision_model() is not None:
+            from .describe_image import register_image_tools
+
             register_image_tools(mcp)
 
         if config.get("ENABLE_MEMORY", True):
@@ -150,6 +169,8 @@ class ToolManager:
             register_skill_tools(mcp)
 
         if config.get("ENABLE_RAG", False):
+            from .rag import register_rag_tools
+
             register_rag_tools(mcp)
 
         if config.get("ENABLE_WEB_CRAWL", None):
