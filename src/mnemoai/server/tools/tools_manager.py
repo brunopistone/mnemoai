@@ -25,18 +25,44 @@ class ToolManager:
         self.model_id = config.get("VISION_MODEL_ID")
         self.encoder = tiktoken.encoding_for_model(MODEL_ID)
 
-        self.vision_model_controller = None
-        self.vision_model = None
-        if self.model_id:
-            # Deferred: the import pulls BaseChatModel→transformers/torch (~3s);
-            # only paid when a vision model is actually configured.
-            from mnemoai.models.controllers.vision_model_controller import (
-                VisionModelController,
-            )
+        self._vision_model_controller = None
+        self._vision_model = None
+        self._vision_ready = False
 
-            self.vision_model_controller = VisionModelController()
-            self.vision_model_controller.initialize_model()
-            self.vision_model = self.vision_model_controller.get_model()
+    def _ensure_vision(self) -> None:
+        """Initialize the vision model on first use, at most once.
+
+        Constructing this eagerly would make *importing* the tools package load
+        BaseChatModel→transformers→torch whenever a VISION_MODEL_ID is
+        configured. Besides costing ~3s, torch vendors its own OpenMP runtime,
+        which aborts the process (``OMP: Error #15``) as soon as faiss — which
+        vendors another — runs a search in the same interpreter. Import-time
+        side effects here must stay config-independent.
+        """
+        if self._vision_ready:
+            return
+        self._vision_ready = True
+        if not self.model_id:
+            return
+        from mnemoai.models.controllers.vision_model_controller import (
+            VisionModelController,
+        )
+
+        self._vision_model_controller = VisionModelController()
+        self._vision_model_controller.initialize_model()
+        self._vision_model = self._vision_model_controller.get_model()
+
+    @property
+    def vision_model_controller(self) -> Optional[Any]:
+        """The vision controller, initialized on first access."""
+        self._ensure_vision()
+        return self._vision_model_controller
+
+    @property
+    def vision_model(self) -> Optional[Any]:
+        """The vision model, initialized on first access."""
+        self._ensure_vision()
+        return self._vision_model
 
     def get_encoder(self) -> tiktoken.Encoding:
         """Get the tiktoken encoder.
@@ -60,7 +86,7 @@ class ToolManager:
         Returns:
             Vision model instance or None
         """
-        return self.vision_model
+        return self.vision_model  # property: initializes on first access
 
     def count_tokens(self, text: str) -> int:
         """Count tokens with model-specific approximation.

@@ -8,8 +8,8 @@ was refused, and knowing which parameters exist. For the toggles and prompts tha
 govern whether a call runs at all, see [Control what Mnemo AI can
 do](../guides/safety.md).
 
-**31 tools in 17 groups.** Fourteen are always available; the rest appear only
-when a feature is enabled.
+**31 tools in 17 groups.** Twenty-three are always available; the remaining
+eight appear only when a feature is enabled.
 
 | I want to know                    | Go to                                                           |
 | --------------------------------- | --------------------------------------------------------------- |
@@ -24,7 +24,7 @@ when a feature is enabled.
 
 | Tool      | Parameters                                                                                                                              | Purpose                                                    |
 | --------- | --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `fs_read` | `path` **(required)**, `mode` = `"Line"`, `start_line` = `1`, `end_line` = `-1`, `pattern` = `""`, `context_lines` = `2`, `depth` = `0` | Read a file — or list a directory — in one of seven modes. |
+| `fs_read` | `path` **(required)**, `mode` = `"Line"`, `start_line` = `1`, `end_line` = `-1`, `pattern` = `""`, `context_lines` = `2`, `depth` = `0` | Read a file — or list a directory — in one of eight modes. |
 
 A successful read also _records_ that the file was read, which is what later
 permits a write to it. Listing a directory records nothing.

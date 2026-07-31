@@ -64,5 +64,18 @@ tool_manager = ToolManager()
 register_tools = tool_manager.register_tools
 validate_file_path = tool_manager.validate_file_path
 count_tokens = tool_manager.count_tokens
-vision_model = tool_manager.get_vision_model()
-vision_model_controller = tool_manager.vision_model_controller
+
+
+def __getattr__(name: str):
+    """Resolve the vision exports lazily.
+
+    Binding these at import time would call into ToolManager's vision
+    initialization, which pulls transformers/torch as a side effect of merely
+    importing this package -- see ToolManager._ensure_vision for why that
+    aborts the interpreter alongside faiss.
+    """
+    if name == "vision_model":
+        return tool_manager.vision_model
+    if name == "vision_model_controller":
+        return tool_manager.vision_model_controller
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

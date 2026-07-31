@@ -12,6 +12,7 @@ Both halves are tested here: the refusal payload is resolved with the user, and
 
 import json
 
+from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import create_model
 
 from mnemoai.client.agent.agent import LangGraphAgent
@@ -237,9 +238,55 @@ class TestTheGateIsActuallyReachable:
 
     def test_both_tool_chokepoints_call_invoke_tool(self):
         # _execute_tools (main loop) and _run_worker_loop (sub-agents/orchestrator)
-        # must both go through _invoke_tool, which is where the gate lives.
-        import inspect
+        # must both go through _invoke_tool, which is where the gate lives. This
+        # DRIVES both loops with a tool that counts direct .invoke() calls: the
+        # earlier version asserted `"_invoke_tool(" in inspect.getsource(...)`,
+        # which never ran either chokepoint, short-circuited on the first of the
+        # two, and broke the moment the shared loop moved to its own module.
+        direct = []
 
-        for name in ("_execute_tools", "_run_worker_loop"):
-            src = inspect.getsource(getattr(LangGraphAgent, name))
-            assert "_invoke_tool(" in src, f"{name} bypasses _invoke_tool"
+        class _Tool:
+            name = "git_safe"
+
+            def invoke(self, args):
+                direct.append(args)  # a bypass — the gate never sees this
+                return REFUSAL
+
+        for path in ("main", "worker"):
+            gated = []
+            a = LangGraphAgent.__new__(LangGraphAgent)
+            a.verbose = False
+            a.tools = [_Tool()]
+            a.tools_by_route = None
+            a._start_spinner = lambda *x, **k: None
+            a._stop_spinner = lambda *x, **k: None
+            a._effective_route = lambda state: None
+            a._run_spawn_batch = lambda tool_calls: {}
+            a._is_blocked_by_plan_mode = lambda *x: False
+            a._confirm_tool = lambda *x: True
+
+            def _invoke_tool(tool, name, args, quiet=False, _seen=gated):
+                _seen.append(name)
+                return "gated"
+
+            a._invoke_tool = _invoke_tool
+            ai = AIMessage(
+                content="", tool_calls=[{"name": "git_safe", "args": ARGS, "id": "t1"}]
+            )
+
+            if path == "main":
+                out = a._execute_tools({"messages": [ai]})["messages"]
+            else:
+                a.system_prompt = "SYS"
+                a.callbacks = []
+                a._extract_visible = lambda c: c if isinstance(c, str) else ""
+                a._worker_messages_seen = lambda: None
+                turns = iter([ai, AIMessage(content="done")])
+                a._stream_response = lambda *x, **k: (next(turns), False)
+                out = a._run_worker_loop(object(), [], "task", quiet=True)[1]
+
+            results = [m for m in out if isinstance(m, ToolMessage)]
+            assert [m.content for m in results] == ["gated"], path
+            assert gated == ["git_safe"], f"{path} bypasses _invoke_tool"
+
+        assert direct == []  # neither chokepoint called the tool directly

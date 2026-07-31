@@ -1,10 +1,14 @@
 """Unit tests for reasoning model helpers (client/reasoning_utils.py)."""
 
+from pydantic import BaseModel
+
 from mnemoai.client.agent.reasoning_utils import (
     disable_reasoning,
     extract_visible_text,
     restore_reasoning,
+    without_reasoning,
 )
+from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
 
 
 class FakeOllamaModel:
@@ -190,6 +194,73 @@ class TestDisableRestorePlainModel:
         assert saved == {}
         # Should not raise.
         restore_reasoning(model, saved)
+
+
+class PydOllamaModel(BaseModel):
+    """Scalar-attribute shape, copyable (pydantic, like the real chat models)."""
+
+    reasoning: bool = True
+
+
+class PydBedrockModel(BaseModel):
+    """Dict-shaped provider params — the fields model_copy only SHALLOW-copies."""
+
+    model_kwargs: dict = {}
+
+
+class PydConverseModel(BaseModel):
+    additional_model_request_fields: dict = {}
+    temperature: float = 0.8
+
+
+class TestWithoutReasoning:
+    """The twin must be disabled and the parent untouched — on every shape.
+
+    Both halves of the bug this replaces were real: the shared model was mutated
+    for the duration of an auxiliary call (visible to a concurrent worker and to
+    QueryRouter), and on the dict-shaped providers a pydantic shallow copy would
+    still have aliased the very dicts `disable_reasoning` pops `thinking` out of.
+    """
+
+    def test_scalar_attribute_twin_leaves_the_parent_alone(self):
+        parent = PydOllamaModel(reasoning=True)
+        peer = without_reasoning(parent)
+        assert peer.reasoning is False
+        assert parent.reasoning is True
+
+    def test_model_kwargs_dict_is_detached_not_aliased(self):
+        parent = PydBedrockModel(model_kwargs={"thinking": {"type": "enabled"}})
+        peer = without_reasoning(parent)
+        assert "thinking" not in peer.model_kwargs
+        assert parent.model_kwargs["thinking"] == {"type": "enabled"}
+        assert peer.model_kwargs is not parent.model_kwargs
+
+    def test_converse_fields_dict_is_detached_not_aliased(self):
+        parent = PydConverseModel(
+            additional_model_request_fields={"thinking": {"type": "enabled"}}
+        )
+        peer = without_reasoning(parent)
+        assert "thinking" not in peer.additional_model_request_fields
+        assert parent.additional_model_request_fields["thinking"] == {"type": "enabled"}
+        assert parent.temperature == 0.8  # the parent's temperature is untouched too
+
+    def test_a_tool_bound_model_keeps_its_tools(self):
+        # The site that matters most (_call_model) invokes the tool-BOUND model, a
+        # RunnableBinding with no reasoning knobs of its own. Copying the binding
+        # naively would return a twin with reasoning still on; dropping down to
+        # `.bound` without rebinding would lose the tools.
+        parent = ChatOllamaWrapper(model="qwen3", reasoning=True)
+        bound = parent.bind_tools([])
+        peer = without_reasoning(bound)
+        assert peer.bound.reasoning is False
+        assert parent.reasoning is True
+        assert bound.bound.reasoning is True
+        assert peer.kwargs == bound.kwargs  # tools survived the copy
+
+    def test_an_uncopyable_model_returns_none_for_the_fallback(self):
+        # Callers fall back to the in-place disable/restore pair on None, so this
+        # must not raise.
+        assert without_reasoning(FakePlainModel()) is None
 
 
 class TestExtractVisibleText:

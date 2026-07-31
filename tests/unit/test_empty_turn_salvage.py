@@ -7,6 +7,7 @@ or fall back to a message, never an empty string.
 """
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from pydantic import BaseModel
 
 from mnemoai.client.agent.agent import LangGraphAgent
 
@@ -450,6 +451,57 @@ def _salvage_agent():
     return a
 
 
+class _CopyableModel(BaseModel):
+    """A worker/bound model the agent can twin (scalar `reasoning`, like Ollama)."""
+
+    reasoning: bool = True
+
+
+class _CopyableBoundModel(BaseModel):
+    """Stands in for the tool-BOUND model _call_model streams with."""
+
+    reasoning: bool = True
+
+    def invoke(self, messages, config=None):
+        return AIMessage(content="")  # still reasoning-only
+
+
+def test_call_model_reasoning_retry_uses_a_twin_of_the_bound_model():
+    # _call_model streams with the tool-BOUND model, which has no reasoning knob of
+    # its own — so the old in-place disable of self.model never reached the object
+    # being invoked and the retry re-ran with reasoning on.
+    a = _agent()
+    a.system_prompt = None
+    a.callbacks = []
+    a._start_spinner = lambda label="Thinking": None
+    a._stop_spinner = lambda: None
+    a._sanitize_tool_pairs = lambda msgs: list(msgs)
+    a._extract_thinking = lambda r: "pondering"
+    a._extract_visible = lambda c: c if isinstance(c, str) else ""
+    a._was_truncated_by_tokens = lambda r: False
+    a._capture_input_tokens = lambda r: None
+    a._disable_reasoning = lambda: (_ for _ in ()).throw(
+        AssertionError("must not mutate the shared model when a twin is available")
+    )
+    bound = _CopyableBoundModel(reasoning=True)
+    a._get_route_model = lambda state: bound
+
+    seen = []
+
+    def _stream(msgs, config, model=None, **kw):
+        seen.append(model)
+        # First (reasoning-only) turn, then the retry answers.
+        return AIMessage(content="ANSWER" if len(seen) > 1 else ""), True
+
+    a._stream_response = _stream
+    out = a._call_model({"messages": [HumanMessage("hi")]})
+
+    assert out["messages"][0].content == "ANSWER"
+    assert seen[0] is bound  # the real turn ran on the real model
+    assert seen[1] is not bound and seen[1].reasoning is False  # the retry, twinned
+    assert bound.reasoning is True
+
+
 def test_worker_salvage_retries_and_recovers_visible_answer():
     a = _salvage_agent()
     # The retry stream yields a real answer.
@@ -459,6 +511,62 @@ def test_worker_salvage_retries_and_recovers_visible_answer():
     assert out == "RECOVERED"
     # The recovered message is appended for saving.
     assert any(getattr(m, "content", "") == "RECOVERED" for m in msgs)
+
+
+def test_worker_salvage_retries_on_a_twin_of_the_model_it_calls():
+    # The retry must disable reasoning on the model actually being INVOKED. The
+    # in-place version mutated self.model while calling the worker's own clone, so
+    # on the scalar-attribute providers the retry re-ran with reasoning still on —
+    # exactly the failure it exists to fix — and left the shared model corrupted.
+    a = _salvage_agent()
+    a._disable_reasoning = lambda: (_ for _ in ()).throw(
+        AssertionError("must not mutate the shared model when a twin is available")
+    )
+    worker_model = _CopyableModel(reasoning=True)
+    called = {}
+
+    def _stream(msgs, config, model=None, **kw):
+        called["model"] = model
+        return AIMessage(content="RECOVERED"), False
+
+    a._stream_response = _stream
+    assert a._salvage_empty_worker_turn([], {}, worker_model) == "RECOVERED"
+    assert called["model"].reasoning is False
+    assert called["model"] is not worker_model
+    assert worker_model.reasoning is True  # the worker's own model is untouched
+
+
+def test_worker_quiet_salvage_retries_on_a_twin_too():
+    # Same on the quiet path, which runs on a pool/daemon thread — where an
+    # in-place mutation reaches into whatever the main turn is doing.
+    a = _salvage_agent()
+    a._disable_reasoning = lambda: (_ for _ in ()).throw(
+        AssertionError("must not mutate a shared model from a worker thread")
+    )
+    worker_model = _CopyableModel(reasoning=True)
+    called = {}
+
+    def _stream(msgs, config, model=None, **kw):
+        called["model"] = model
+        return AIMessage(content="RECOVERED"), False
+
+    a._stream_response = _stream
+    assert a._salvage_empty_worker_quiet([], worker_model) == "RECOVERED"
+    assert called["model"].reasoning is False
+    assert worker_model.reasoning is True
+
+
+def test_worker_salvage_falls_back_to_in_place_disable_when_untwinnable():
+    # A model that can't be copied must still get reasoning disabled the old way.
+    a = _salvage_agent()
+    disabled = []
+    a._disable_reasoning = lambda: disabled.append(True) or {"reasoning": True}
+    restored = []
+    a._restore_reasoning = lambda saved: restored.append(saved)
+    a._stream_response = lambda *args, **kw: (AIMessage(content="RECOVERED"), False)
+    assert a._salvage_empty_worker_turn([], {}, object()) == "RECOVERED"
+    assert disabled == [True]
+    assert restored == [{"reasoning": True}]
 
 
 def test_worker_salvage_falls_back_when_retry_still_empty():
