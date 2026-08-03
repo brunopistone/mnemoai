@@ -52,7 +52,8 @@ def register_memory_tools(mcp: FastMCP) -> None:
         WHEN TO SKIP (don't save what the repo already records):
         - Trivia or one-off details that won't matter next session
         - Anything easily re-discovered (file contents, command output, git log)
-        - Code structure, past fixes, or conventions already in the codebase/CLAUDE.md
+        - Code structure, or conventions already in the codebase or an always-on
+          instructions file (STEERING.md / CLAUDE.md)
         - Raw data dumps; long narratives — store the conclusion, not the log
         - Facts already visible in the current context
 

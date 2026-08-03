@@ -124,6 +124,14 @@ MEMORY:
 # writes WITHOUT a confirmation prompt (confined to MEMORY.md). Costs one extra
 # background model call per turn when on.
 ENABLE_MEMORY_AUTO_EXTRACTION: false
+# Always-on user instructions (STEERING.md, or CLAUDE.md where that is the file a
+# project already has): read from the app home and from every directory between the
+# CWD and the repo root, and prepended to EVERY turn. There is no enable toggle —
+# the file's presence is the switch. Because the block is re-sent each turn and is
+# deliberately never summarized by compaction, a very large file is a permanent
+# per-turn cost, so each file's contribution is capped:
+STEERING:
+  MAX_CHARS: 45000  # per file; content past this is dropped with a visible note (0 = no cap)
 # Agent Skills: authored SKILL.md instruction packs under ~/.mnemoai/skills/
 # (one <name>/SKILL.md per skill). Only each skill's name+description is injected
 # into the system prompt; the model loads a full skill body on demand via the

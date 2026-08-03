@@ -129,9 +129,10 @@ class LangGraphAgent:
     # idle window. Small enough to feel instant, large enough to be cheap.
     _CANCEL_POLL_SECONDS = 0.25
 
-    # Ephemeral per-turn reminder blocks (the plan-mode banner, the STEERING.md
-    # block) the client prepends: sent to the model this turn but stripped before
-    # storage, so a reloaded conversation never carries a stale banner and
+    # Ephemeral per-turn reminder blocks (the plan-mode banner, the steering block
+    # from STEERING.md/CLAUDE.md) the client prepends: sent to the model this turn
+    # but stripped before storage, so a reloaded conversation never carries a
+    # stale banner and
     # compaction never summarizes always-on instructions into a lossy paraphrase
     # (they're re-injected verbatim from disk each turn instead).
     _EPHEMERAL_BLOCK_RE = re.compile(
@@ -432,12 +433,20 @@ class LangGraphAgent:
         workflow.add_edge("tools", "agent")
         return workflow.compile()
 
-    @staticmethod
-    def _last_human_query(messages: Sequence[BaseMessage]) -> str:
-        """The content of the most recent HumanMessage, or "" if there is none."""
+    @classmethod
+    def _last_human_query(cls, messages: Sequence[BaseMessage]) -> str:
+        """The most recent HumanMessage's content, minus the ephemeral blocks.
+
+        Routing must see what the USER asked. The graph runs on the full prompt
+        (injected steering included, by design), so a routing decision made on
+        the raw text is really made on the instruction file: an always-on block
+        of any size buries a short query, and its file paths and extensions trip
+        the deterministic signal patterns. "Hello" then stops looking trivial —
+        so it is decomposed instead of answered.
+        """
         for msg in reversed(messages or []):
             if isinstance(msg, HumanMessage):
-                return str(msg.content)
+                return cls._strip_ephemeral(str(msg.content)).strip()
         return ""
 
     def _route_after_classify(self, state: AgentState) -> str:
@@ -488,7 +497,11 @@ class LangGraphAgent:
                 if hasattr(m, "content") and m.content
             )
 
-        query = str(messages[-1].content) if messages else ""
+        # Classify the user's actual question: the last message still carries the
+        # per-turn injected blocks (steering/plan-mode), which the model must see
+        # but which would otherwise dominate the classification (see
+        # _last_human_query).
+        query = self._strip_ephemeral(str(messages[-1].content)) if messages else ""
         route = self.router.classify(query, context)
         logger.debug(f"Query routed to: {route}")
         return {"route": route}

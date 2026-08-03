@@ -56,9 +56,9 @@ Step-by-step instructions the model follows once this skill is loaded...
 - Skills are seeded on first run: a `commit-message` example to copy, a
   **`skill-creator`** skill (just ask the assistant to "create a skill for X" and
   it writes a well-formed `SKILL.md` for you), and a **`steering-creator`** skill
-  (ask it to "create a STEERING.md" or "document how to work in this project" and
-  it investigates the repo and writes a well-formed `STEERING.md` following best
-  practices).
+  (ask it to "create a STEERING.md", "improve my CLAUDE.md", or "document how to
+  work in this project" and it investigates the repo and writes a well-formed
+  instructions file following best practices).
 
 ### Using and managing skills
 

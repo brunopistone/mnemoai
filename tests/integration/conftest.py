@@ -105,15 +105,76 @@ def _isolated_app_home(tmp_path_factory):
 
 
 @pytest.fixture(scope="session")
-def live_client(_isolated_app_home):
-    """Start a real LangGraphClient once for the whole integration session."""
+def _neutral_root(tmp_path_factory):
+    """The throwaway directory this tier runs from. Shared by both halves.
+
+    Session-scoped because the MCP server subprocess inherits its cwd ONCE, at
+    spawn time (see ``live_client``), and keeps it for the whole tier.
+    """
+    return tmp_path_factory.mktemp("workdir")
+
+
+@pytest.fixture(autouse=True)
+def _neutral_cwd(_neutral_root):
+    """Run each test in this tier from a throwaway directory, not the checkout.
+
+    ``$MNEMOAI_HOME`` covers the app home, but project-scoped discovery walks
+    ``Path.cwd()`` — which no env var redirects. Run from the repo root, the tier
+    therefore discovers this project's OWN instructions file (``CLAUDE.md``, tens
+    of KB) and prepends it to every live query: real tokens against the
+    configured provider, and the routing guards silently stop testing what they
+    were written for (a long prefix makes "Hello" no longer look trivial, so it
+    is decomposed instead of taking the simple_qa path the test is asserting on).
+    The tests themselves write into ``tmp_path``, so cwd is free to move.
+
+    Deliberately FUNCTION-scoped, and the restore is in a ``finally``. A
+    session-scoped version leaks: this ``conftest.py``'s autouse fixtures apply to
+    the whole session once any test here is collected, so a plain ``pytest`` run
+    (integration collected before unit, alphabetically) left the UNIT tier running
+    from the temp dir too — where ``git`` has no repo, so the shipped-hash guards
+    in ``test_paths.py`` saw zero tags, skipped themselves, and reported green
+    while checking nothing. Per-test scope keeps the chdir inside this tier, and
+    the ``finally`` guarantees the restore even if a test errors (pytest itself
+    resolves ``rootdir`` before any of this, and the tests write to ``tmp_path``).
+
+    This covers the CLIENT half only. The MCP server is a separate process that
+    inherits cwd at spawn and never re-reads it, so ``live_client`` must do its
+    own chdir around the spawn — hence the shared ``_neutral_root``.
+    """
+    previous = os.getcwd()
+    os.chdir(_neutral_root)
+    try:
+        yield _neutral_root
+    finally:
+        os.chdir(previous)
+
+
+@pytest.fixture(scope="session")
+def live_client(_isolated_app_home, _neutral_root):
+    """Start a real LangGraphClient once for the whole integration session.
+
+    Started from ``_neutral_root``, because the MCP server runs as a SUBPROCESS
+    that inherits the parent's cwd at spawn and keeps it for its whole life — no
+    env var redirects it, and the per-test ``_neutral_cwd`` chdir cannot reach
+    back into an already-running process. Since this fixture is session-scoped,
+    pytest builds it BEFORE any function-scoped chdir, so without this the server
+    spawned with cwd = the checkout: a relative-path ``fs_write`` then created
+    files in the developer's repo (observed), and every server-side
+    project-scoped lookup resolved against it. The chdir must therefore wrap the
+    ``start()`` call, not just the tests.
+    """
     if _SKIP_REASON:
         pytest.skip(_SKIP_REASON)
 
     from mnemoai.client.client import LangGraphClient
 
-    client = LangGraphClient(verbose=False)
-    client.start()
+    previous = os.getcwd()
+    os.chdir(_neutral_root)
+    try:
+        client = LangGraphClient(verbose=False)
+        client.start()
+    finally:
+        os.chdir(previous)
     yield client
     # Best-effort teardown; the MCP wrapper also registers an atexit shutdown.
     try:

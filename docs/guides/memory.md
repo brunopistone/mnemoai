@@ -52,7 +52,14 @@ MEMORY:
 - **Global:** `~/.mnemoai/STEERING.md` — applies in every session, everywhere.
 - **Project:** `./STEERING.md` — discovered by walking up from your working directory to the repository root (the first ancestor containing `.git`). Put project-specific conventions here and check it into the repo so your whole team shares them.
 
-When both exist they're **combined**, global first then project (so project instructions take precedence by appearing last). Nothing above the repo root is picked up.
+When both exist they're **combined**, global first then project (so project instructions take precedence by appearing last). Nothing above the repo root is picked up. If a directory isn't in a repository at all, the search stops just below your home directory rather than continuing to `/` — so a stray instructions file in your home folder never becomes always-on for everything. (A repository checked out directly at your home directory — a dotfiles repo — is a deliberate choice and still counts as a project root.)
+
+**`CLAUDE.md` works too.** At every level the file may be named either `STEERING.md` or `CLAUDE.md`, so a repo that already keeps its agent instructions under that name is picked up with no extra file and nothing to configure. The two names are read identically — only the precedence differs:
+
+- **Within one directory, `STEERING.md` wins** and a `CLAUDE.md` sitting beside it is ignored. That's what lets a project keep both: shared instructions in `CLAUDE.md`, and the parts meant for this assistant in `STEERING.md`, without the two being concatenated or contradicting each other.
+- **The choice is per directory, not global.** A global `CLAUDE.md` still applies alongside a project `STEERING.md`, and a subdirectory's `CLAUDE.md` still applies if it has no `STEERING.md` beside it. Finding one name in one directory never switches the other name off elsewhere.
+
+Only the app home is searched for the global file — `~/.mnemoai/STEERING.md`, else `~/.mnemoai/CLAUDE.md`. Files belonging to other tools outside that directory are never read.
 
 **How it's applied:**
 
@@ -64,9 +71,18 @@ When both exist they're **combined**, global first then project (so project inst
 
 **Let the assistant write it for you.** You don't have to author `STEERING.md` by hand. A bundled **`steering-creator`** skill ships out of the box: ask the assistant to _"create a STEERING.md for this project"_ (or _"document how to work in this repo"_) and it investigates the codebase — README, build/test config, layout — and writes a well-formed file following best practices (specific rules, scannable structure, only durable always-on facts). Ask it to _"improve my STEERING.md"_ and it refines the existing one.
 
-There's no config toggle: the file's presence is the switch. If neither `STEERING.md` exists, nothing is injected. It's distinct from `MEMORY.md` (facts the agent learns), skills (on-demand procedures), and the base system prompt.
+There's no config toggle: the file's presence is the switch. If no instruction file exists at either level, nothing is injected. It's distinct from `MEMORY.md` (facts the agent learns), skills (on-demand procedures), and the base system prompt.
 
-**Storage Location:** `~/.mnemoai/STEERING.md` (global) and/or `./STEERING.md` (per project)
+One consequence worth knowing: because the content is applied verbatim every turn, a large instructions file costs its full size in context on **every** turn. A 50 KB file is roughly 13k tokens per turn, and compaction can never reclaim it. So each file's contribution is capped at `STEERING.MAX_CHARS` (default 45000 characters, per file; `0` disables the cap):
+
+```yaml
+STEERING:
+  MAX_CHARS: 45000 # Per file; content past this is dropped with a visible note
+```
+
+The cut is never silent — the injected block says the file was truncated and names it, so the assistant reads the rest with its file tools instead of assuming the omitted part was empty. If a repo's file is that big, the better fix is to trim it, or to put the parts you want this assistant to follow in a `STEERING.md`, which takes precedence in that directory.
+
+**Storage Location:** `~/.mnemoai/STEERING.md` (global) and/or `./STEERING.md` (per project) — `CLAUDE.md` accepted at either level
 
 ## Episodic Memory
 

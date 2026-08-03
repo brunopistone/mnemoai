@@ -15,11 +15,18 @@ Start here if you know what you want to change but not where.
 | Change model, provider, or a feature toggle | `config/config.yaml`        | Everything          | [Configuration](../configuration.md)                                |
 | Change how the assistant behaves or speaks  | `config/prompts.yaml`       | Everything          | [Prompts](../configuration.md#prompts-promptsyaml)                  |
 | State a rule for **one project**            | `./STEERING.md` in the repo | That directory tree | [Steering](../guides/memory.md#steering-steeringmd)                 |
-| State a rule for **every** project          | `STEERING.md`               | Everything          | [Steering](../guides/memory.md#steering-steeringmd)                 |
+| State a rule for **every** project          | `STEERING.md` (this folder) | Everything          | [Steering](../guides/memory.md#steering-steeringmd)                 |
 | Record a durable fact about you             | `<profile>/MEMORY.md`       | One profile         | [Persistent memory](../guides/memory.md#persistent-memory-memorymd) |
 | Add a repeatable procedure                  | `skills/<name>/SKILL.md`    | Everything          | [Agent skills](../guides/agent-skills.md)                           |
 | Define a custom sub-agent                   | `agents/<name>.md`          | Everything          | [Sub-agents](../guides/orchestration.md)                            |
 | Connect an external tool server             | `mcp/mcp.json`              | Everything          | [External MCP servers](../guides/mcp.md)                            |
+
+For the two steering rows, `CLAUDE.md` is read as an equivalent filename, so a repo
+that already keeps its instructions under that name needs no second file. Within a
+single directory `STEERING.md` wins and its sibling `CLAUDE.md` is skipped — which is
+what lets one repo hold both and give this assistant different instructions. The
+global tier is **this folder only** (`STEERING.md`, else `CLAUDE.md`): no other
+tool's instructions file is picked up as your always-on rules.
 
 ## The tree
 
@@ -30,7 +37,7 @@ Start here if you know what you want to change but not where.
 │   └── prompts.yaml          # ← you edit; model-facing prompts
 ├── mcp/
 │   └── mcp.json              # ← you edit; external MCP servers
-├── STEERING.md               # ← you edit; global project rules
+├── STEERING.md               # ← you edit; global project rules (or CLAUDE.md)
 ├── skills/
 │   └── <name>/SKILL.md       # ← you edit; on-demand procedures
 ├── agents/
@@ -62,7 +69,7 @@ because the next turn overwrites it.
 | Path                                                        | Written by                           | Safe to hand-edit?                          |
 | ----------------------------------------------------------- | ------------------------------------ | ------------------------------------------- |
 | `config/config.yaml`, `config/prompts.yaml`, `mcp/mcp.json` | You                                  | **Yes** — this is the intended interface    |
-| `STEERING.md`, `skills/`, `agents/`                         | You                                  | **Yes**                                     |
+| `STEERING.md` (or `CLAUDE.md`), `skills/`, `agents/`        | You                                  | **Yes**                                     |
 | `<profile>/MEMORY.md`                                       | The assistant, via the `memory` tool | Yes — it's Markdown, and `/memory` shows it |
 | `<profile>/<profile>.json`                                  | The assistant, every turn            | No — EMAs and counters are recomputed       |
 | `models/*/episodic_memory/`, `models/*/playbook/`           | The assistant, every turn            | No — delete the directory to reset instead  |
@@ -73,8 +80,8 @@ because the next turn overwrites it.
 `episodic_memory/` and `playbook/` sit under `models/<model-name>/` because both
 are keyed to the embedding model that produced their vectors. Switching model
 starts a fresh store rather than searching vectors from a different embedding
-space, which would return nonsense. `MEMORY.md` and `STEERING.md` are plain text
-and so are shared across models.
+space, which would return nonsense. `MEMORY.md` and `STEERING.md` (or
+`CLAUDE.md`) are plain text and so are shared across models.
 
 ## What is cleaned up automatically
 
