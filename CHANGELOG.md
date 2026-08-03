@@ -7,6 +7,20 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.9.1] — 2026-08-03
+
+### Fixed
+
+- **The shipped-`prompts.yaml` hash guard no longer fails on the release that
+  cuts it.** `test_previously_shipped_prompts_hashes_are_tracked` enumerates every
+  release tag and requires each shipped `prompts.yaml` to be registered as
+  pristine — but the CURRENTLY bundled content is deliberately not in that set
+  (it's compared against the bundle at runtime). The moment a release tag exists
+  it ships the current file, so the guard failed on its own release, every time.
+  It now skips the currently-bundled hash, the exemption the sibling `SKILL.md`
+  guard already had. Test-only; no runtime behavior changes, and the guard still
+  fails on a genuinely unregistered hash (verified by removing one).
+
 ## [1.9.0] — 2026-08-03
 
 An always-on instructions file may now be named `CLAUDE.md`, so a repository that

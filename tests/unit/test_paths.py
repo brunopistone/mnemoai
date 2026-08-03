@@ -288,10 +288,18 @@ class TestSubdirs:
         # the 1.8.4–1.8.7 hash went four releases unregistered while this test
         # stayed green.
         import hashlib
+        from pathlib import Path
 
         tags = _shipped_tags()
         if not tags:
             pytest.skip("no tags available (shallow or exported checkout)")
+
+        # The CURRENTLY bundled content is deliberately absent from the set — it
+        # is compared against the bundle at runtime instead. Skipping it matters
+        # once the release tag exists: the tag we just cut ships this very file,
+        # so without this the test fails on every release (and the same rule is
+        # already applied by the SKILL.md guard above).
+        current = paths._sha256(Path(paths.__file__).resolve().parent / "prompts.yaml")
 
         missing = []
         for tag in tags:
@@ -299,6 +307,8 @@ class TestSubdirs:
             if out.returncode != 0 or not out.stdout:
                 continue  # tag not present in a shallow/exported checkout
             digest = hashlib.sha256(out.stdout).hexdigest()
+            if digest == current:
+                continue
             if digest not in paths._PRISTINE_BUNDLED_PROMPTS_HASHES:
                 missing.append(f"{tag} ({digest[:12]}…)")
         assert not missing, (
