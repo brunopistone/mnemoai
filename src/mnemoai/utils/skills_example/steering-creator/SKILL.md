@@ -1,6 +1,6 @@
 ---
 name: Steering Creator
-description: Use when the user asks to create, write, author, set up, generate, or improve a STEERING.md file, or asks the assistant to "init" / "learn this project" / "document how to work here" / "remember these conventions". Guides writing a well-formed STEERING.md of always-on user instructions.
+description: Use when the user asks to create, write, author, set up, generate, or improve a STEERING.md or CLAUDE.md file of always-on instructions, or asks the assistant to "init" / "learn this project" / "document how to work here" / "remember these conventions". Guides writing a well-formed instructions file (either name is read; STEERING.md is the one to author).
 version: 1
 ---
 
@@ -25,6 +25,15 @@ Two optional levels, combined global-first then project (project wins):
 Pick the level from the user's intent: project conventions → project file;
 personal always-on preferences → global file. When unsure, ask. Default to the
 **project root** for anything project-specific.
+
+`CLAUDE.md` is read as an equivalent at either level, so a project that already
+keeps its agent instructions under that name is picked up as-is. Within one
+directory `STEERING.md` wins and its sibling `CLAUDE.md` is ignored — which is
+how a repo keeps both and gives this assistant different instructions from
+whatever wrote the other file. **Always author `STEERING.md`**, not the
+fallback; when a directory already has a `CLAUDE.md` and the user wants it
+edited rather than shadowed, update that file in place instead of creating a
+`STEERING.md` beside it that would silently take precedence.
 
 It's applied verbatim on every turn (re-read from disk, never summarized), so it
 must stay tight — aim for **under ~200 lines**. Everything in it costs context
@@ -82,6 +91,8 @@ Adapt to the project; drop sections that don't apply.
 ## Steps
 
 1. **Confirm scope** — global vs. project, and (for a project) the repo root path.
+   Check whether the target directory already has a `STEERING.md` or a `CLAUDE.md`
+   so you extend the right file rather than shadowing one.
 2. **Investigate** (init-style requests) — read README/build config/layout so the
    content is accurate; incorporate any conventions already stated in this
    conversation.
@@ -94,7 +105,8 @@ Adapt to the project; drop sections that don't apply.
 
 ## Improving an existing STEERING.md
 
-Read the current file, then refine to the user's feedback: tighten vague rules
+Read the current file (a `CLAUDE.md` serving as the instructions file counts —
+improve it where it is), then refine to the user's feedback: tighten vague rules
 into specific ones, remove stale or redundant guidance, split bulky detail into a
 referenced file, and cut anything that isn't an always-on instruction. Keep it
 general enough to serve many future sessions, not just the request in front of you.

@@ -14,6 +14,7 @@ find, back up, or relocate:
     ├── plans/plan_<ts>.md                  # approved plan-mode plans
     ├── skills                              # skills folder
     ├── STEERING.md                         # user-authored always-on instructions
+    │                                       #   (or CLAUDE.md; STEERING.md wins)
     ├── tasks/                              # background-task output
     └── {profile}/                          # per-user-profile data
         ├── conversations/  todos/  rag_store_*  chunk_cache_*  profile JSON
@@ -32,6 +33,9 @@ import re
 import shutil
 import time
 from pathlib import Path
+from typing import Optional
+
+from mnemoai.utils.logger import logger
 
 DEFAULT_HOME_DIRNAME = ".mnemoai"
 
@@ -131,6 +135,7 @@ _PRISTINE_BUNDLED_SKILL_HASHES = {
     },
     "steering-creator": {
         "78b29bffef4368f5e065ed833e62b6a0a9e9b2aac9958235078ef5c26d1f5301",  # ≤1.2.2
+        "98bf72d8e5a1add8d3f7a640324686900e8a2459e6f4ab7ced05189eace2e82d",  # 1.3.0–1.8.7
     },
     "commit-message": {
         "8c5addd5dfc7fab5adbd9af28b92cc0ce1544af1730185c9196d674afd783409",  # ≤1.2.2
@@ -145,11 +150,14 @@ _PRISTINE_BUNDLED_SKILL_HASHES = {
 # other hash means the user customized it, and we never touch it. **Maintenance:**
 # when the bundled ``prompts.yaml`` changes, append its PREVIOUS shipped hash here.
 _PRISTINE_BUNDLED_PROMPTS_HASHES = {
-    "fe423553bed74ced37b53503e7249fb1981528d8fdda206341782968699f2267",  # ≤1.5.0
+    "0951767d17358af6bfaa2c41769731809e0fdd2115dda2c68743e3e4ec2259e0",  # 0.8.17–1.3.0
+    "40467d047e7364e2cdc696e0dc6d935423c7ae3615fae8422ef9f2834659cb2e",  # 1.4.0–1.4.5
+    "fe423553bed74ced37b53503e7249fb1981528d8fdda206341782968699f2267",  # 1.5.0
     "4efc9492288fbc386b0e71adfae3482b6698b04990674ffcb92f3d1b53074adf",  # 1.5.1–1.5.2
     "caf01cee0cd0051de383f3650724e6f3d7f30b9b1a3ea5e56a48b5a71c68eff2",  # 1.5.3–1.6.2
     "6ad25a24549ccf27ac6839ec5ed82163e7b50b33b96ac259a02d0456470792a3",  # 1.6.3–1.7.6
     "0e6bd83143f72544979196c3d278f3216aedf6b5e3e6e9b7b0e7af5d3027de8f",  # 1.7.7–1.8.3
+    "0490170eda28a2a0f44bda552329cd02d7c250eceefdbad08b693dcfb56ccc29",  # 1.8.4–1.8.7
 }
 
 
@@ -586,46 +594,148 @@ def memory_file_path(profile: str = None) -> Path:
     return profile_dir(profile) / "MEMORY.md"
 
 
+# Accepted names for a user-authored always-on instructions file, in
+# per-directory precedence order. Two names are honored so a repo that already
+# carries agent instructions under the widely-used ``CLAUDE.md`` needs no second
+# file to be picked up; ``STEERING.md`` is this app's own name and wins when a
+# directory holds both, which is what lets a project keep the two side by side
+# and steer this assistant differently from whatever wrote the other file.
+STEERING_FILENAMES = ("STEERING.md", "CLAUDE.md")
+
+
 def global_steering_path() -> Path:
-    """The user-level ``STEERING.md`` at the app-home root (not auto-created)."""
+    """Where a global steering file is WRITTEN: ``<app_home>/STEERING.md``.
+
+    The canonical target for authoring (not auto-created). Reading is broader —
+    :func:`steering_files` also accepts the other names in
+    :data:`STEERING_FILENAMES` — so use that for discovery, not this.
+    """
     return app_home() / "STEERING.md"
 
 
+def instruction_file_in(directory: Path) -> Optional[Path]:
+    """The one instructions file a single directory contributes, or None.
+
+    Applies :data:`STEERING_FILENAMES` in order: the first name that is a
+    READABLE file wins and the others are ignored **for that directory only**.
+    Shadowing is deliberately per-directory rather than global, so a project
+    ``STEERING.md`` doesn't suppress a global ``CLAUDE.md`` and a parent's choice
+    doesn't constrain a child's.
+
+    Readability is part of the choice, not an afterthought: a candidate that
+    exists but can't be read must fall through to the next name, or an
+    unreadable ``STEERING.md`` would shadow a perfectly good ``CLAUDE.md`` beside
+    it and the directory would contribute nothing.
+    """
+    for name in STEERING_FILENAMES:
+        f = directory / name
+        try:
+            # is_file() (never exists()): a DIRECTORY with the accepted name, or a
+            # broken symlink, must not be chosen. os.access is a cheap probe that
+            # avoids opening the file here.
+            if f.is_file() and os.access(f, os.R_OK):
+                return f
+        except OSError:
+            continue  # unreadable parent, bad symlink, etc. — try the next name
+    return None
+
+
+def _walk_boundary_dirs() -> set:
+    """Dirs that never contribute an instructions file when there's no ``.git``.
+
+    The home dir and everything above it: a file that high up is not "this
+    project's conventions", and treating one as always-on would make an unrelated
+    tool's file silently govern every session. Realpath-keyed to match how the
+    walk spells its dirs.
+    """
+    out = set()
+    try:
+        home = Path.home().resolve()
+        for d in [home, *home.parents]:
+            out.add(d)
+    except Exception:  # no resolvable home: fall back to no boundary
+        logger.debug("Could not resolve the home dir for the walk boundary")
+    return out
+
+
 def steering_files(cwd: Path = None) -> list:
-    """Discover STEERING.md files in precedence order (low → high priority).
+    """Discover always-on instruction files in precedence order (low → high).
 
-    User-authored, always-on instructions. Resolution, broadest to most
-    specific:
+    User-authored, always-on instructions. Every directory contributes AT MOST
+    one file — see :func:`instruction_file_in` for the name precedence within a
+    directory. Resolution, broadest to most specific:
 
-      1. ``<app_home>/STEERING.md`` — global/user (applies everywhere)
-      2. ``./STEERING.md`` walking from ``cwd`` UP to the project root (the first
-         ancestor containing ``.git``, else the filesystem root), collected
-         root-first so a deeper (more specific) file is applied last.
+      1. ``<app_home>/`` — global/user (applies everywhere)
+      2. ``cwd`` walked UP to the project root (the first ancestor containing
+         ``.git``, else the filesystem root), collected root-first so a deeper
+         (more specific) file is applied last.
 
-    Returns only existing files, de-duplicated, in apply order. Tolerant: any
-    resolution error yields an empty list rather than raising.
+    Returns only existing files, de-duplicated by real path, in apply order.
+    Tolerant: any resolution error yields what was collected so far rather than
+    raising.
     """
     found: list = []
-    try:
-        g = global_steering_path()
-        if g.is_file():
-            found.append(g)
+    seen: set = set()
 
+    def _add(f: Path) -> None:
+        """Collect ``f`` unless the same real file was already collected."""
+        # Keyed on the real path, not the spelling: app_home() is unresolved
+        # while the project walk resolves, so a symlinked home would otherwise
+        # be injected twice when the walk passes through it.
+        key = os.path.normcase(os.path.realpath(f))
+        if key not in seen:
+            seen.add(key)
+            found.append(f)
+
+    # The global tier gets its own guard so an unreadable app home can't cost the
+    # project tier (the files are independent; one failing is not the other's
+    # problem).
+    try:
+        g = instruction_file_in(app_home())
+        if g is not None:
+            _add(g)
+    except Exception:
+        logger.debug("Could not resolve a global instruction file", exc_info=True)
+
+    try:
         start = Path(cwd).expanduser() if cwd else Path.cwd()
         start = start.resolve()
         # Walk up collecting dirs until a .git root (inclusive) or the fs root.
+        # ``.exists()`` deliberately, not is_dir(): a git worktree or submodule
+        # writes .git as a FILE, and the walk must still stop there.
         chain = [start] + list(start.parents)
         project_root_idx = None
         for i, d in enumerate(chain):
-            if (d / ".git").exists():
-                project_root_idx = i
-                break
-        ancestors = chain[: project_root_idx + 1] if project_root_idx is not None else chain
-        # Apply root-first (broadest) → cwd-last (most specific).
+            try:
+                if (d / ".git").exists():
+                    project_root_idx = i
+                    break
+            except OSError:
+                continue  # unreadable ancestor: keep looking for the root
+        if project_root_idx is not None:
+            # An explicit project root wins, even if it IS the home dir — a
+            # dotfiles repo checked out at ``$HOME`` is a deliberate choice.
+            ancestors = chain[: project_root_idx + 1]
+        else:
+            # No .git anywhere: bound the walk at the home dir instead of running
+            # to the filesystem root. Unbounded, a single ``~/CLAUDE.md`` (or one
+            # in ``/``) would silently become always-on instructions for EVERY
+            # non-git directory under it — and a home-level instructions file is
+            # something other tools already create, so this is likely, not
+            # theoretical. The global tier is the app home alone; nothing else
+            # gets to be global by accident.
+            ancestors = [d for d in chain if d not in _walk_boundary_dirs()]
+        # Apply root-first (broadest) → cwd-last (most specific). Per-directory
+        # guard: one unreadable ancestor must not abandon the walk, which would
+        # silently drop the MOST SPECIFIC files (the deeper ones come last).
         for d in reversed(ancestors):
-            f = d / "STEERING.md"
-            if f.is_file() and f not in found:
-                found.append(f)
+            try:
+                f = instruction_file_in(d)
+            except Exception:
+                logger.debug("Skipping instruction lookup in %s", d, exc_info=True)
+                continue
+            if f is not None:
+                _add(f)
     except Exception:
         return found
     return found

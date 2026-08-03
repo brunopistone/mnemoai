@@ -24,13 +24,20 @@ class TestAgentEndToEnd:
         )
         assert "paris" in resp.lower()
 
-    def test_tool_backed_query_lists_files(self, live_client):
+    def test_tool_backed_query_lists_files(self, live_client, _neutral_cwd):
         # Should route to a tool-using path and actually invoke a file tool.
-        # Point at a directory that definitely contains a known .py file and ask
-        # a yes/no question, so the assertion is model-agnostic (it doesn't
-        # depend on how the model phrases a file listing, or on CWD contents).
+        # Ask a yes/no question so the assertion is model-agnostic (it doesn't
+        # depend on how the model phrases a file listing).
+        #
+        # The file is CREATED here rather than named from the checkout: this tier
+        # runs from a neutral directory, so a repo-relative path resolves to
+        # nothing and the honest answer becomes "no" — the agent passes while the
+        # test reads as a failure.
+        (_neutral_cwd / "pkg").mkdir(exist_ok=True)
+        (_neutral_cwd / "pkg" / "widget_probe.py").write_text("VALUE = 1\n")
+
         resp = live_client.query(
-            "Using a file tool, does the file 'tests/unit/test_bm25.py' exist "
+            "Using a file tool, does the file 'pkg/widget_probe.py' exist "
             "in this project? Answer yes or no."
         )
         assert resp.strip() != ""

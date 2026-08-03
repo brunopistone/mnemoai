@@ -348,7 +348,8 @@ MEMORY_EXTRACTION_PROMPT: |
   Do NOT save:
   - Trivia or one-off details that won't matter next session.
   - Anything easily re-discovered (file contents, command output, git log).
-  - Code structure, past fixes, or conventions already in the codebase / STEERING.md.
+  - Code structure, past fixes, or conventions already in the codebase or in an
+    always-on instructions file (STEERING.md / CLAUDE.md).
   - Raw data dumps or long narratives — store the conclusion, not the log.
   - Anything already present in EXISTING MEMORY below (no duplicates or restatements).
 

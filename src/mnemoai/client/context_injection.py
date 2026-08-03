@@ -3,7 +3,8 @@
 Assembles the frozen session-start system prompt (base prompt + profile summary +
 curated MEMORY.md + skill/sub-agent metadata) and the per-turn context the client
 prepends to a query: episodic-memory recall, the plan-mode banner, and the
-STEERING.md block. Also the similarity helper and the context-token count.
+steering block (STEERING.md/CLAUDE.md). Also the similarity helper and the
+context-token count.
 
 Functions take the ``LangGraphClient`` as the first arg and reach its
 collaborators (``profile_manager``/``playbook``/``episodic_memory``/``agent``)
@@ -231,13 +232,13 @@ def plan_mode_reminder(client) -> str:
 
 
 def steering_reminder(client) -> str:
-    """User-authored STEERING.md, prepended to every prompt as a leading
-    ``<steering>`` block.
+    """User-authored instructions (``STEERING.md``/``CLAUDE.md``), prepended to
+    every prompt as a leading ``<steering>`` block.
 
     Re-read from disk each turn (edits apply immediately) and stripped before
     storage, so it never enters history and is never summarized by
-    compaction — it always reaches the model verbatim. "" when no STEERING.md
-    exists (its absence is the off switch — no config toggle needed)."""
+    compaction — it always reaches the model verbatim. "" when no instruction
+    file exists (its absence is the off switch — no config toggle needed)."""
     from mnemoai.client.memory.steering_store import SteeringStore
 
     contents = SteeringStore().read().strip()

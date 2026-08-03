@@ -358,9 +358,9 @@ class LangGraphClient:
             if not delivery_only and self.plan_mode_active:
                 prompt = self._plan_mode_reminder() + prompt
 
-            # STEERING.md: user-authored always-on instructions, prepended last so
-            # they LEAD the prompt (highest priority). Re-read each turn; stripped
-            # before storage, so compaction never summarizes them away.
+            # STEERING.md/CLAUDE.md: user-authored always-on instructions, prepended
+            # last so they LEAD the prompt (highest priority). Re-read each turn;
+            # stripped before storage, so compaction never summarizes them away.
             if not delivery_only:
                 steering = self._steering_reminder()
                 if steering:

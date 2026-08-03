@@ -7,7 +7,123 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
-## [Unreleased]
+## [1.9.0] — 2026-08-03
+
+An always-on instructions file may now be named `CLAUDE.md`, so a repository that
+already keeps its agent instructions under that name is picked up with nothing to
+write and nothing to configure. Two rules make the second name safe rather than
+surprising: within one directory `STEERING.md` wins, and that choice is per
+directory rather than global.
+
+Accepting a filename other tools also write turned four latent weaknesses into
+likely ones, so they are fixed here too: a large file corrupted query routing, a
+non-UTF-8 file broke every turn, an unreadable file shadowed a readable one, and
+the injected block had no size ceiling despite being re-sent verbatim forever.
+Separately, the walk no longer treats a file in your home directory as always-on
+instructions for everything beneath it — and the test tier that was quietly
+reading this project's own instructions file (in both of its processes) now runs
+isolated.
+
+### Added
+
+- **An always-on instructions file may be named `CLAUDE.md`.** Discovery accepts
+  either name at every level it already searched — the app home, and each
+  directory from the CWD up to the repo root — so a project whose agent
+  instructions already live in a `CLAUDE.md` is picked up with no second file to
+  write and nothing to configure. Two rules define the precedence, and both are
+  deliberate:
+  - **Within one directory `STEERING.md` wins**, and a `CLAUDE.md` beside it is
+    skipped rather than appended. That is what lets a repo keep both: shared
+    instructions in one file, the parts meant for this assistant in the other,
+    without the two being concatenated into contradictions.
+  - **The choice is per directory, never global.** A global `CLAUDE.md` still
+    applies alongside a project `STEERING.md`, and a subdirectory's `CLAUDE.md`
+    still applies when nothing shadows it. Finding one name in one directory
+    must not switch the other name off everywhere else — the alternative reads
+    identically in the common case and diverges exactly where a user has both.
+
+  The global tier reads the app home only (`~/.mnemoai/STEERING.md`, else
+  `~/.mnemoai/CLAUDE.md`); files belonging to other tools elsewhere on the
+  machine are never read. Reading accepts both names, **writing** still has one
+  target (`STEERING.md`), so the bundled `steering-creator` skill can't be talked
+  into authoring the fallback name. Files reached twice under different spellings
+  (a symlinked app home inside the walked chain) are de-duplicated by real path,
+  so one file is never injected — or billed — twice.
+
+- **`STEERING.MAX_CHARS` caps each instructions file's contribution** (default
+  45000 chars per file; `0` disables). This block is re-sent verbatim every turn
+  and is deliberately kept out of stored history so compaction can never reclaim
+  it — an oversized file is therefore a permanent per-turn cost, not a one-off
+  (~14k tokens/turn for a 56 KB file, every turn, forever). Accepting `CLAUDE.md`
+  made that reachable in practice, since those files already exist and are
+  routinely tens of KB. The cut is never silent: the injected text says the file
+  was truncated and names it, so the model reads the rest with its file tools
+  instead of assuming the omitted part said nothing. **Note if you already run a
+  `STEERING.md` larger than 45000 characters:** it was previously injected whole
+  and is now truncated at that boundary. Raise `STEERING.MAX_CHARS`, or set it to
+  `0`, to keep the old behavior.
+
+### Fixed
+
+- **A large instructions file corrupted query routing.** Every routing decision
+  reads the last message's text, which carries the injected block — so an
+  always-on file of any size buried the actual question: `"Hello"` exceeded the
+  word-count gate and the file's own paths and extensions tripped the
+  deterministic content signals, flipping it from trivial chit-chat to a
+  decomposed multi-worker task. Both the classifier and the trivial-query gate
+  now read the user's text with the ephemeral blocks stripped. Latent since
+  `STEERING.md` shipped; accepting `CLAUDE.md` is what made it common.
+- **A non-UTF-8 instructions file broke every turn.** `UnicodeDecodeError` is a
+  `ValueError`, not an `OSError`, so it escaped the read guard, propagated out of
+  the per-turn injection, and surfaced as the generic "something went wrong" on
+  every single turn with nothing pointing at the file. Files are now read with
+  `errors="replace"` behind a widened guard: a stray byte degrades one character
+  instead of ending the conversation. More likely with the second name, which is
+  authored by other tooling.
+- **An unreadable `STEERING.md` no longer shadows a readable `CLAUDE.md`.**
+  Readability is part of the per-directory choice, so a permission-blocked file
+  falls through to the other name instead of leaving that directory contributing
+  nothing.
+- **The walk survives an unreadable directory.** One `PermissionError` mid-chain
+  previously abandoned the whole resolution, which silently dropped the MOST
+  specific files — the deeper ones are collected last. Each directory is now
+  guarded on its own, and the project root is detected with `.exists()` so a git
+  worktree or submodule (where `.git` is a FILE) still terminates the walk.
+- **Prompt and skill improvements can now reach installs from the last four
+  releases.** `_PRISTINE_BUNDLED_PROMPTS_HASHES` was missing the `prompts.yaml`
+  shipped by 1.8.4–1.8.7 (and, further back, 0.8.17–1.4.5), so those installs
+  read as "user-customized" and the in-place refresh skipped them — meaning an
+  edit to an EXISTING prompt key would never have arrived (the bundled fallback
+  only fills MISSING keys). Both guard tests now **enumerate tags from git**
+  instead of a hardcoded list, which is precisely how the gap went unnoticed for
+  four releases while the test stayed green, and the same guard now exists for
+  bundled skills, which had none.
+- **An instructions file in your home directory is no longer always-on
+  everywhere.** With no `.git` in any ancestor the walk ran to the filesystem
+  root, so a single `~/CLAUDE.md` (a file other tooling readily creates) became
+  permanent instructions for every non-repository directory beneath it —
+  contradicting the rule that only the app home is global. The unrooted walk now
+  stops below the home directory; an explicit `.git` **at** `$HOME` is still an
+  ordinary project root, so a dotfiles repo keeps working. Reachable before with
+  one filename, but a stray `STEERING.md` there was unlikely in a way that a
+  `CLAUDE.md` is not.
+- **The integration tier no longer runs from the checkout — in either process.**
+  `$MNEMOAI_HOME` is redirected for that tier, but project discovery walks
+  `Path.cwd()`, which no env var touches — so the tier read this project's own
+  56 KB instructions file and prepended it to every live query: real tokens
+  against the configured provider, and the routing guards quietly stopped
+  exercising the paths they were written to protect while still passing. The fix
+  needs two halves, because the MCP server is a **subprocess** that inherits cwd
+  once at spawn and keeps it for life: the client is moved per test, and the
+  client/server pair is now started from the neutral directory too — previously
+  the server ran with the checkout as its cwd, so a relative-path `fs_write`
+  created files inside the developer's repository. The per-test chdir is
+  deliberately function-scoped: a session-scoped version applied to the whole
+  pytest session, moving the **unit** tier as well, where `git` then found no
+  repository and both shipped-hash guards skipped themselves — green while
+  checking nothing. Those guards now locate the repo from their own file rather
+  than the process cwd, so no future fixture can disarm them, and the tier's
+  isolation is asserted by tests of its own.
 
 ## [1.8.7] — 2026-07-31
 

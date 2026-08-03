@@ -6,10 +6,31 @@ $MNEMOAI_HOME).
 """
 
 import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
 from mnemoai.utils import paths
+
+# The repo, located from THIS file — never from the process cwd. The
+# shipped-hash guards below query git history, and a test that trusts cwd stops
+# checking anything the moment something moves it (the integration tier chdirs
+# for its own isolation): `git tag` then returns nothing, both guards skip, and
+# the suite still reports green while protecting nothing.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _git(*args, text=True):
+    """Run git against this repo regardless of the process cwd."""
+    return subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), *args], capture_output=True, text=text
+    )
+
+
+def _shipped_tags():
+    """Every release tag, or [] in a shallow/exported checkout (no git history)."""
+    return [t for t in _git("tag", "--list", "v*").stdout.split() if t]
 
 
 @pytest.fixture
@@ -175,6 +196,47 @@ class TestSubdirs:
             )
             assert known, f"{skill_dir.name} has an empty pristine-hash set"
 
+    def test_previously_shipped_skill_hashes_are_tracked(self):
+        # The check above only proves each skill HAS an entry — it cannot notice a
+        # missing version, which is the failure that actually costs users: an
+        # installed SKILL.md whose hash we shipped but never registered reads as
+        # "user-edited", so the refresh skips it and an improved skill never
+        # reaches that install. Tags are enumerated from git rather than
+        # hardcoded, for the same reason as the prompts.yaml guard below.
+        import hashlib
+        from pathlib import Path
+
+        tags = _shipped_tags()
+        if not tags:
+            pytest.skip("no tags available (shallow or exported checkout)")
+
+        root = Path(paths.__file__).resolve().parent / "skills_example"
+        names = [d.name for d in root.iterdir() if (d / "SKILL.md").is_file()]
+        current = {n: paths._sha256(root / n / "SKILL.md") for n in names}
+
+        missing = []
+        for tag in tags:
+            for name in names:
+                out = _git(
+                    "show",
+                    f"{tag}:src/mnemoai/utils/skills_example/{name}/SKILL.md",
+                    text=False,
+                )
+                if out.returncode != 0 or not out.stdout:
+                    continue  # skill didn't exist at that tag
+                digest = hashlib.sha256(out.stdout).hexdigest()
+                # The hash still bundled today needn't be listed (it's compared
+                # live against the bundle), only superseded ones.
+                if digest == current[name]:
+                    continue
+                if digest not in paths._PRISTINE_BUNDLED_SKILL_HASHES.get(name, set()):
+                    missing.append(f"{name}@{tag} ({digest[:12]}…)")
+        assert not missing, (
+            "these shipped SKILL.md versions are not in "
+            f"_PRISTINE_BUNDLED_SKILL_HASHES, so the refresh will treat them as "
+            f"user-edited and skip them: {sorted(set(missing))}"
+        )
+
     def test_prompts_seeded_when_absent(self, tmp_home):
         # A fresh install gets prompts.yaml copied out of the box.
         paths.seed_example_files()
@@ -220,17 +282,20 @@ class TestSubdirs:
         # so an edit to an existing prompt key would silently never reach those
         # installs (the bundled-fallback loader only fills MISSING keys). Every
         # version we have shipped must be recognized as pristine.
-        import subprocess
-
-        tags = ["v1.6.3", "v1.7.0", "v1.7.4", "v1.7.6"]
+        #
+        # Tags are ENUMERATED from git, never hardcoded: a fixed list stops
+        # covering the releases made after it was written, which is exactly how
+        # the 1.8.4–1.8.7 hash went four releases unregistered while this test
+        # stayed green.
         import hashlib
+
+        tags = _shipped_tags()
+        if not tags:
+            pytest.skip("no tags available (shallow or exported checkout)")
 
         missing = []
         for tag in tags:
-            out = subprocess.run(
-                ["git", "show", f"{tag}:src/mnemoai/utils/prompts.yaml"],
-                capture_output=True,
-            )
+            out = _git("show", f"{tag}:src/mnemoai/utils/prompts.yaml", text=False)
             if out.returncode != 0 or not out.stdout:
                 continue  # tag not present in a shallow/exported checkout
             digest = hashlib.sha256(out.stdout).hexdigest()
