@@ -7,6 +7,63 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.10.0] — 2026-08-04
+
+Tuning a parameter no longer costs you the conversation. `/params` used to restart
+the app to apply a temperature — throwing away the chat you were tuning it for,
+and worst right after a `--resume`, where the restored history lived only in the
+file the restart abandoned. It now applies in place, and the turn after it is the
+next turn of the same conversation. The restart the other settings commands rely
+on is unchanged, and it no longer leaves an abandoned session file behind.
+
+The source distribution also stops shipping the 10.5 MB demo GIF, which was 96%
+of the download and read by nothing.
+
+### Changed
+
+- **`/params` no longer restarts the app — the conversation continues.** Tuning
+  temperature (or top_p, reasoning effort, stop, stream, …) used to re-exec the
+  process, which threw away the chat you were tuning it for. That restart existed
+  because `/config`, `/model` and `/features` genuinely need one — they can change
+  the provider, the model, or a toggle that gates MCP tool registration at
+  subprocess boot — but `/params` edits inference knobs only, and nothing the MCP
+  server fixed at boot can have changed. It now rebuilds the model in place and
+  the turn after it is the next turn of the same conversation. The rebuild is a
+  fresh controller, not a re-`initialize_model()` on the existing one, because the
+  controller snapshots every parameter at construction; every holder of a built
+  model is re-pointed with it (the tool-bound model, each per-route binding, the
+  router, and the cached summary/sub-agent variants), so the new value can't
+  half-apply. If the rebuild fails, the old restart still happens rather than
+  leaving the session running on a config that was only partly applied.
+
+  Worst before this change: right after `--resume`. Resuming writes a _new_
+  session file seeded with the restored history, so a `/params` restart at that
+  point discarded the live conversation _and_ left the only copy of it in a file
+  the restart abandoned — the way out was to quit and `--resume` again. `/config`,
+  `/model` and `/features` are deliberately unchanged.
+
+### Fixed
+
+- **A restart no longer leaves an abandoned session file behind.**
+  `_restart_in_place` re-execs with `os.execv`, which _replaces_ the process — no
+  `atexit`, no `finally` — so the end-of-run cleanup that unlinks a turn-less
+  transcript never ran. Every restart before the user had typed anything (the
+  normal case for a `/config` or `/model` right after startup, and for every
+  `--resume` followed immediately by a settings change) left an empty session file
+  to sit on disk until it aged out. The restart now discards it itself, and a
+  failure to do so is logged rather than allowed to block the restart.
+
+### Packaging
+
+- **The source distribution no longer ships the `images/` directory** (12.87 MB →
+  1.93 MB). The demo GIF alone was 10.5 MB — 96% of the archive — for a file
+  nothing in the distribution reads: the README and docs reference it by absolute
+  `raw.githubusercontent.com` URL, so the rendered PyPI page is unchanged and the
+  file still lives in the repository. Wheels never contained it, so
+  `pip install mnemoai-assistant` was already unaffected; this only shrinks the
+  sdist. The documentation site uses its own copy of the logo under
+  `docs/assets/`, which is untouched.
+
 ## [1.9.1] — 2026-08-03
 
 ### Fixed

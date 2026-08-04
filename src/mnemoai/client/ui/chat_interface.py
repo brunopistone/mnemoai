@@ -572,6 +572,16 @@ class ChatInterface:
         ``os.execv`` doesn't reap children.
         """
         print("\nRestarting to apply the new configuration...\n")
+        # os.execv REPLACES this process: no atexit, no finally, so main()'s
+        # end-of-run cleanup never runs and a turn-less session file (always the
+        # case when the restart follows a `--resume` the user hadn't typed into
+        # yet) would linger on disk until it aged out. Discard it here instead.
+        try:
+            log = getattr(getattr(self.client, "agent", None), "session_log", None)
+            if log is not None:
+                log.discard_if_empty()
+        except Exception as e:  # cleanup must never block the restart
+            logger.debug(f"Session cleanup before restart failed: {e}")
         try:
             self.client.mcp_client.shutdown()
         except Exception as e:
@@ -836,9 +846,22 @@ class ChatInterface:
                 self._restart_in_place()
             return None
 
+        # /params only edits inference knobs (temperature, top_p, …) — nothing the
+        # MCP subprocess fixed at boot — so it reloads in place and KEEPS the
+        # conversation. A restart here used to discard the chat (and, after a
+        # `--resume`, left the restored history only in an abandoned file).
         if query.lower() == "/params":
             if run_params_override() is not None:
-                self._restart_in_place()
+                if self.client.reload_inference_params():
+                    print(
+                        "\n\033[92mNew inference parameters applied.\033[0m "
+                        "This conversation continues.\n"
+                    )
+                else:
+                    # Rebuilding failed: the old model is still live and correct,
+                    # so fall back to the restart rather than run on a half-applied
+                    # config.
+                    self._restart_in_place()
             return None
 
         if query.lower() == "/features":
