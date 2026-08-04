@@ -327,6 +327,24 @@ class LangGraphAgent:
 
         self.graph = self._build_graph()
 
+    def rebind_model(self, model: BaseChatModel) -> None:
+        """Swap in a rebuilt model, re-deriving every binding that came off the old one.
+
+        For an in-place config reload (``/params``), which must not disturb the
+        conversation. Reassigning ``self.model`` alone is not enough: the tool-bound
+        model and the per-route bindings are SEPARATE objects derived from it, and a
+        stale one keeps calling the old model — so they are rebuilt from the tool
+        subsets computed at construction. The graph holds no model reference of its
+        own (it dispatches through these attributes), so it needs no rebuild.
+        """
+        self.model = model
+        self.model_with_tools = model.bind_tools(self.tools) if self.tools else model
+        if self.models_by_route is not None and self.tools_by_route is not None:
+            self.models_by_route = {
+                route: (model.bind_tools(route_tools) if route_tools else model)
+                for route, route_tools in self.tools_by_route.items()
+            }
+
     @property
     def messages(self) -> List[BaseMessage]:
         """The message history."""

@@ -429,6 +429,52 @@ class LangGraphClient:
             )
         )
 
+    def reload_inference_params(self) -> bool:
+        """Re-read config and rebuild the model in place; True if it took effect.
+
+        Backs ``/params``, which edits ONLY inference knobs (temperature, top_p, …)
+        and leaves provider, model name, and connection alone — so nothing the MCP
+        subprocess fixed at boot can have changed, and re-exec'ing the process just
+        to apply a temperature would discard the conversation with it.
+
+        A fresh controller is REQUIRED, not an ``initialize_model()`` on the
+        existing one: ``LangChainLLMController.__init__`` snapshots every param off
+        config, while ``initialize_model`` only dispatches on the already-captured
+        values — so reusing the controller silently keeps the OLD temperature.
+
+        Every holder of a built model must be re-pointed or the change half-applies:
+        the tool-bound ``model_with_tools`` and each entry of ``models_by_route``
+        are derived bindings, the router keeps its own reference, and the summary
+        twin + sub-agent overrides are separate cached builds (dropped so they
+        rebuild lazily off the new config).
+        """
+        if not self.agent:
+            return False
+        try:
+            config.reload()
+            controller = LangChainLLMController(verbose=self.verbose_mode)
+            # Same streaming handler the boot path wires in, so tokens keep
+            # reaching the UI on the rebuilt model.
+            cbs = [self.callback_handler] if self.callback_handler else None
+            controller.initialize_model(callbacks=cbs)
+            model = controller.get_model()
+        except Exception as e:
+            logger.error(f"Could not apply the new inference params: {e}")
+            return False
+
+        self.llm_controller = controller
+        self.model = model
+        self.agent.rebind_model(model)
+        router = getattr(self.agent, "router", None)
+        if router is not None:
+            router.model = model
+        # Both are lazily rebuilt from the (now reloaded) config on next use.
+        self._subagent_model_cache.clear()
+        if hasattr(self, "_summary_model_cached"):
+            del self._summary_model_cached
+        logger.info("Applied new inference params without restarting")
+        return True
+
     def _summary_model(self):
         """The model used for compaction summaries.
 
