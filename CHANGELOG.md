@@ -7,6 +7,23 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.10.1] — 2026-08-10
+
+### Fixed
+
+- **A bold word next to a markdown link no longer prints stray `1m` / `[0m`.**
+  `**Bold** of [a link](https://example.com)` rendered as
+  `1mBold of [a link (https://example.com[0m)`, losing both the emphasis and the
+  link. Link formatting runs after emphasis is already ANSI, and its patterns
+  treated escapes as ordinary text: the markdown-link pattern matched the `[`
+  *inside* `ESC[1m` as a link start, stranding the ESC; and the plain-URL pass
+  re-matched an already-wrapped URL with a trailing class that didn't exclude
+  ESC, eating the ESC of the following reset. Links and plain URLs are now
+  rewritten in one alternation pass, ESC is excluded from every URL class, and a
+  lookbehind makes re-formatting a no-op. Emphasis inside link text still
+  renders, and the OSC 8 clickable path (which was double-wrapping plain URLs)
+  is fixed too.
+
 ## [1.10.0] — 2026-08-04
 
 Tuning a parameter no longer costs you the conversation. `/params` used to restart
