@@ -75,6 +75,65 @@ class TestMakeUrlsClickable:
         assert OSC8 in out
         assert "docs" in out
 
+    def test_reformatting_is_a_noop(self, hyperlink_term):
+        """A URL already inside an OSC 8 link is not wrapped a second time."""
+        once = make_urls_clickable("see https://example.com/x now")
+        assert make_urls_clickable(once) == once
+
+
+class TestNoAnsiLeaksIntoVisibleText:
+    """Link formatting runs over text emphasis has ALREADY turned into ANSI, so
+    its patterns must treat escapes as structure. Both leaks below were live: a
+    literal `1m` printed before a bold name (the markdown-link `[` matched the
+    `[` of `\\x1b[1m`, stranding the ESC), and a literal `[0m` after a URL (the
+    plain-URL pass re-matched an already-wrapped URL and its trailing character
+    class ate the ESC of the following reset)."""
+
+    # Text a terminal would show: every valid SGR sequence removed. Anything
+    # escape-shaped still left is something the user sees as garbage.
+    @staticmethod
+    def _visible(rendered: str) -> str:
+        import re
+
+        return re.sub(r"\x1b\[[0-9;]*m", "", rendered)
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "**Bold text** before [a link](https://example.com), then more",
+            "text with **[a bold link](https://example.com)** in it",
+            "- **Bold item** — see [the docs](https://example.org/guide)",
+            "See [a link](https://example.com) and https://example.org/x too",
+            "*[italic link](https://example.com)* with `code` and https://a.bc/d.",
+        ],
+    )
+    def test_emphasis_next_to_links_leaves_no_escape_fragments(
+        self, source, no_hyperlink_term
+    ):
+        visible = self._visible(CodeFormatter.render_to_string(source))
+        assert "\x1b" not in visible
+        # The tell-tales: an SGR body that lost its ESC.
+        for fragment in ("[0m", "[1m", "[3m", "[36;4m", "1mBold", "1ma link"):
+            assert fragment not in visible
+
+    def test_markdown_link_url_is_highlighted_once(self, no_hyperlink_term):
+        """The URL inside a markdown link must not be re-wrapped by the plain
+        pass — doubling the opening code is what stranded the reset's ESC."""
+        out = highlight_urls("[a link](https://example.com) tail")
+        assert out.count("\033[36;4m") == 2  # display text + URL, not 3
+        assert "\033[36;4m\033[36;4m" not in out
+
+    def test_highlighting_twice_is_a_noop(self, no_hyperlink_term):
+        once = highlight_urls("see https://example.com/x now")
+        assert highlight_urls(once) == once
+
+    def test_bold_link_text_keeps_its_emphasis(self, no_hyperlink_term):
+        """Guarding against escapes must not stop emphasis INSIDE link text from
+        surviving — the display text may legitimately contain SGR runs."""
+        out = CodeFormatter.render_to_string("[**bold link**](https://example.com)")
+        assert "\033[1m" in out
+        assert "bold link" in self._visible(out)
+
 
 class TestCodeFormatter:
     def test_plain_text_passthrough(self, capsys):
