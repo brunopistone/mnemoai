@@ -7,6 +7,29 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.10.2] — 2026-08-24
+
+### Fixed
+
+- **The agents panel no longer drops older sub-agents — it scrolls.** With more
+  runs than the panel's 6 rows, the renderer sliced off everything but the last
+  6, so in an 11-agent fan-out the earlier ones couldn't be selected, opened or
+  stopped, and a still-running early agent was invisible with no way to reach it.
+  The panel is now a viewport over every retained run: ↑/↓ in nav-mode moves the
+  cursor through the whole list and scrolls the view. Idle it still shows the
+  newest rows, but the header says what's hidden (`+5 more (1 running)`), and
+  Ctrl+A jumps the cursor straight to the oldest agent still working.
+- **Ctrl+A reopens the list after the panel hides.** The panel disappears once
+  every agent has finished, which also blocked Ctrl+A — leaving the finished
+  agents' reports unreadable. Their runs are still retained, so the key now works
+  whenever any run exists.
+
+### Changed
+
+- Retained sub-agent runs raised from 32 to 64, since that limit is now what
+  decides how far back the panel's list reaches. A running agent is still never
+  evicted.
+
 ## [1.10.1] — 2026-08-10
 
 ### Fixed
@@ -16,7 +39,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   `1mBold of [a link (https://example.com[0m)`, losing both the emphasis and the
   link. Link formatting runs after emphasis is already ANSI, and its patterns
   treated escapes as ordinary text: the markdown-link pattern matched the `[`
-  *inside* `ESC[1m` as a link start, stranding the ESC; and the plain-URL pass
+  _inside_ `ESC[1m` as a link start, stranding the ESC; and the plain-URL pass
   re-matched an already-wrapped URL with a trailing class that didn't exclude
   ESC, eating the ESC of the following reset. Links and plain URLs are now
   rewritten in one alternation pass, ESC is excluded from every URL class, and a
