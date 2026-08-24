@@ -217,7 +217,8 @@ class PinnedPromptReader:
         self._agents_stop = agents_stop or (lambda rid: False)
         self._agents_stop_all = agents_stop_all or (lambda: 0)
         self._nav_mode = False  # Ctrl+A: navigate the agents panel
-        self._nav_index = 0     # highlighted row in the panel
+        self._nav_index = 0     # highlighted row, in FULL-list coordinates
+        self._panel_offset = 0  # first row the (scrolling) panel viewport shows
         self._busy = False
         self._pending = 0  # queued-but-not-started lines (for the status line)
         self._queued_lines = []  # queued text, shown live in the pinned region
@@ -280,7 +281,7 @@ class PinnedPromptReader:
 
     # --- live agents panel ----------------------------------------------------
 
-    _PANEL_MAX_ROWS = 6  # cap so the panel can't eat scrollback
+    _PANEL_MAX_ROWS = 6  # VIEWPORT height — not a cap on the list (see _agent_rows)
 
     def _panel_showable(self) -> bool:
         """When the agents panel should be visible.
@@ -288,7 +289,8 @@ class PinnedPromptReader:
         Shown while ANY agent is still running (finished ones stay listed with a
         ✓ so a multi-agent run reads as "2 done, 1 still going"), or while the
         user is actively navigating it. Hidden once ALL agents have finished —
-        the whole panel (incl. the "Ctrl+A: agents" line) disappears.
+        the whole panel (incl. the "Ctrl+A: agents" line) disappears, but the runs
+        are still there: Ctrl+A re-opens the list (:meth:`_agents_navigable`).
         """
         if self._nav_mode:
             return True
@@ -322,20 +324,78 @@ class PinnedPromptReader:
         except Exception:
             return False
 
+    def _agents_navigable(self) -> bool:
+        """True while there is ANY run to navigate — running or long finished.
+
+        Deliberately weaker than :meth:`_panel_showable`: the panel hides itself
+        once everything is done (it must not eat rows forever), but every agent
+        this session spawned stays in the store, so Ctrl+A brings the list back
+        to read a finished agent's report instead of losing it on completion."""
+        return bool(self._agent_rows())
+
     def _agent_rows(self) -> list:
-        """Snapshot rows for the panel (bounded), newest last. Each is the
-        ActivityRun snapshot; the UI reads only immutable copied fields."""
+        """ALL retained runs, newest last. Each is the ActivityRun snapshot; the
+        UI reads only immutable copied fields.
+
+        The full list is the model the nav cursor indexes — the panel only
+        *displays* a `_PANEL_MAX_ROWS` viewport of it (`_panel_window`). Slicing
+        here instead made everything older than the last 6 rows unreachable:
+        it couldn't be selected, viewed, or stopped, so a still-running early
+        agent was invisible with no way to get at it. The memory bound belongs to
+        the store (``agent_activity.MAX_RUNS``, which never evicts a running run),
+        not to the renderer."""
         try:
-            rows = list(self._agents_provider() or [])
+            return list(self._agents_provider() or [])
         except Exception:
-            rows = []
-        # Keep the most recent _PANEL_MAX_ROWS so a long session doesn't overflow.
-        return rows[-self._PANEL_MAX_ROWS:]
+            return []
+
+    def _panel_window(self, rows: list) -> int:
+        """Index of the first row the viewport shows, remembered in
+        ``_panel_offset``.
+
+        Nav mode follows the cursor, so ↑/↓ scrolls through every retained run.
+        Otherwise it stays anchored to the newest rows — a viewport that jumped
+        to an old row whenever one stayed running would hide exactly the fresh
+        activity a glance is for. What the hint then owes the user is that the
+        hidden rows EXIST and how many are still running (:meth:`_panel_hint`),
+        and Ctrl+A lands the cursor straight on the oldest running one."""
+        max_rows = self._PANEL_MAX_ROWS
+        total = len(rows)
+        if total <= max_rows:
+            start = 0
+        elif self._nav_mode:
+            start = self._panel_offset
+            if self._nav_index < start:
+                start = self._nav_index
+            elif self._nav_index > start + max_rows - 1:
+                start = self._nav_index - max_rows + 1
+        else:
+            start = total - max_rows
+        self._panel_offset = max(0, min(start, max(0, total - max_rows)))
+        return self._panel_offset
+
+    def _panel_hint(self, rows: list, start: int, shown: int) -> str:
+        """The panel's header line: the key hints plus what the viewport is
+        cutting off — ``+N more`` with a running count, because an unlisted agent
+        that is still working is the one the user needs to know about."""
+        if self._nav_mode:
+            hint = "↑↓ select · Enter view · x stop · Ctrl+X Ctrl+K stop all · Esc exit"
+        else:
+            hint = "Ctrl+A: agents"
+        hidden = rows[:start] + rows[start + shown:]
+        if not hidden:
+            return hint
+        if self._nav_mode:  # the cursor position already implies the rest
+            return f"{hint} · {self._nav_index + 1}/{len(rows)}"
+        running = sum(1 for r in hidden if getattr(r, "status", "") == "running")
+        more = f" · +{len(hidden)} more"
+        return hint + more + (f" ({running} running)" if running else "")
 
     def _agents_text(self):
         """FormattedText for the bottom agents panel: a header hint + one row per
         hidden sub-agent (dot + type + description + tool-count + elapsed),
-        highlighting the nav cursor. Painted at 10 Hz, so elapsed advances live."""
+        highlighting the nav cursor. Painted at 10 Hz, so elapsed advances live.
+        Only the `_PANEL_MAX_ROWS` viewport is drawn; ↑/↓ scrolls the rest."""
         import time
 
         rows = self._agent_rows()
@@ -344,18 +404,17 @@ class PinnedPromptReader:
         # Clamp the nav cursor to the current row set.
         if self._nav_index >= len(rows):
             self._nav_index = max(0, len(rows) - 1)
+        start = self._panel_window(rows)
+        view = rows[start:start + self._PANEL_MAX_ROWS]
         now = time.monotonic()
-        hint = (
-            "↑↓ select · Enter view · x stop · Ctrl+X Ctrl+K stop all · Esc exit"
-            if self._nav_mode
-            else "Ctrl+A: agents"
-        )
-        out = [("class:pinned-panel-hint", f"{hint}\n")]
+        out = [
+            ("class:pinned-panel-hint", f"{self._panel_hint(rows, start, len(view))}\n")
+        ]
         dot = {"running": "●", "done": "✓", "failed": "✗", "stopped": "✗"}
         # Animated dots for a stop-in-progress row (matches the spinner cadence:
         # 10 Hz tick, dots cycle 0→3 every ~0.3s).
         cancel_dots = "." * ((int(time.time() * 10) // 3) % 4)
-        for i, r in enumerate(rows):
+        for i, r in enumerate(view):
             status = getattr(r, "status", "?")
             cancelling = hasattr(r, "is_cancelling") and r.is_cancelling()
             glyph = dot.get(status, "○")
@@ -373,10 +432,11 @@ class PinnedPromptReader:
                 f" {glyph} {getattr(r, 'agent_type', '?')}  {desc}"
                 f"  ({suffix})"
             )
-            selected = self._nav_mode and i == self._nav_index
+            # The cursor lives in FULL-list coordinates; the viewport is a slice.
+            selected = self._nav_mode and (start + i) == self._nav_index
             cls = "class:pinned-panel-sel" if selected else "class:pinned-panel"
             cursor = "›" if selected else " "
-            nl = "" if i == len(rows) - 1 else "\n"
+            nl = "" if i == len(view) - 1 else "\n"
             out.append((cls, f"{cursor}{line}{nl}"))
         return out
 
@@ -432,9 +492,10 @@ class PinnedPromptReader:
             ),
             filter=Condition(lambda: bool(self._reasoning_text())),
         )
-        # Live "agents" panel pinned BELOW the input (Claude-Code style): one row
-        # per hidden sub-agent. Height-capped (_PANEL_MAX_ROWS + hint) so it can't
-        # eat scrollback; shown while any run exists or the user is navigating.
+        # Live "agents" panel pinned BELOW the input: one row per hidden sub-agent.
+        # Height-capped (_PANEL_MAX_ROWS + hint) so it can't eat scrollback — with
+        # more runs than that the panel SCROLLS (↑/↓ in nav mode) rather than
+        # dropping them. Shown while any run is going or the user is navigating.
         agents_window = ConditionalContainer(
             Window(
                 FormattedTextControl(self._agents_text),
@@ -601,7 +662,7 @@ class PinnedPromptReader:
         # emacs beginning-of-line. Nav keys are gated on _nav_mode + eager so they
         # win over history/menu/self-insert only while navigating.
         nav_toggle_ok = Condition(
-            lambda: self._panel_showable()
+            lambda: self._agents_navigable()
             and not self._confirm_pending
             and self._pending_dialog is None
         )
@@ -611,7 +672,18 @@ class PinnedPromptReader:
         def _(event) -> None:
             self._nav_mode = not self._nav_mode
             if self._nav_mode:
-                self._nav_index = 0
+                # Land on the OLDEST still-running agent — the one the tail-
+                # anchored viewport may have scrolled out of sight, and the only
+                # row with a pending decision (view it / stop it). Else the newest.
+                rows = self._agent_rows()
+                self._nav_index = next(
+                    (
+                        i
+                        for i, r in enumerate(rows)
+                        if getattr(r, "status", "") == "running"
+                    ),
+                    max(0, len(rows) - 1),
+                )
 
         @kb.add("up", filter=navigating, eager=True)
         def _(event) -> None:

@@ -20,6 +20,46 @@ def not_a_tty(monkeypatch):
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False, raising=False)
 
 
+def _drive_keys(reader, keys: str):
+    """Run the reader's real merged key bindings against a pipe input on a dummy
+    output, feed `keys`, then exit — no real terminal."""
+    import asyncio
+
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.input.defaults import create_pipe_input
+    from prompt_toolkit.key_binding import merge_key_bindings
+    from prompt_toolkit.key_binding.defaults import load_key_bindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import HSplit, Window
+    from prompt_toolkit.layout.controls import BufferControl
+    from prompt_toolkit.output import DummyOutput
+
+    inp = Window(BufferControl(buffer=reader._buffer))
+    with create_pipe_input() as pipe:
+        app = Application(
+            layout=Layout(HSplit([inp]), focused_element=inp),
+            key_bindings=merge_key_bindings(
+                [load_key_bindings(), reader._make_bindings()]
+            ),
+            full_screen=False,
+            input=pipe,
+            output=DummyOutput(),
+        )
+        reader._app = app
+
+        async def run():
+            async def feed():
+                await asyncio.sleep(0.1)
+                pipe.send_text(keys)
+                await asyncio.sleep(0.2)
+                app.exit()
+
+            asyncio.ensure_future(feed())
+            await app.run_async()
+
+        asyncio.run(run())
+
+
 class TestSelectFromList:
     OPTIONS = [("/a/one.json", "one"), ("/a/two.json", "two")]
 
@@ -291,6 +331,125 @@ class TestAgentsPanelVisibility:
         assert r._panel_showable() is True
 
 
+class TestAgentsPanelScrolling:
+    """The panel is a VIEWPORT over every retained run, not the last 6.
+
+    It used to slice ``rows[-6:]`` when rendering, so in a run with 11 sub-agents
+    the older 5 were not merely off-screen: they could not be selected, viewed or
+    stopped, and a still-running early agent was invisible with no way to reach it.
+    """
+
+    def _reader(self, store):
+        return tui.PinnedPromptReader(
+            prompt_text=lambda: ">",
+            commands=[],
+            dispatch=lambda q: None,
+            agents_provider=store.snapshot,
+            agents_get=store.get,
+            agents_stop=store.request_stop,
+            agents_stop_all=store.request_stop_all,
+        )
+
+    def _store(self, n=11, running=()):
+        """A store with `n` runs named a0..a{n-1}; only indexes in `running` are
+        left running. Returns (store, sinks)."""
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        store = AgentActivityStore()
+        sinks = [store.open_run("explore", f"a{i}", "spawn") for i in range(n)]
+        for i, s in enumerate(sinks):
+            if i not in running:
+                s.finish("done")
+        return store, sinks
+
+    def _rows_text(self, reader):
+        return "".join(txt for _cls, txt in reader._agents_text())
+
+    def test_every_run_stays_in_the_list(self):
+        store, _ = self._store(11, running={0})
+        r = self._reader(store)
+        assert len(r._agent_rows()) == 11
+
+    def test_the_viewport_draws_only_max_rows(self):
+        store, _ = self._store(11, running={0})
+        r = self._reader(store)
+        # hint line + at most _PANEL_MAX_ROWS agent rows.
+        assert len(r._agents_text()) == r._PANEL_MAX_ROWS + 1
+
+    def test_idle_panel_reports_the_hidden_running_agent(self):
+        store, _ = self._store(11, running={0})  # the OLDEST is still going
+        r = self._reader(store)
+        hint = r._agents_text()[0][1]
+        assert "+5 more" in hint and "(1 running)" in hint
+
+    def test_no_running_suffix_when_the_hidden_ones_are_done(self):
+        store, _ = self._store(11, running={10})
+        r = self._reader(store)
+        hint = r._agents_text()[0][1]
+        assert "+5 more" in hint and "running" not in hint
+
+    def test_hint_is_bare_when_everything_fits(self):
+        store, _ = self._store(3, running={0})
+        r = self._reader(store)
+        assert r._agents_text()[0][1].strip() == "Ctrl+A: agents"
+
+    def test_nav_scrolls_the_viewport_up_to_the_cursor(self):
+        store, _ = self._store(11, running={0})
+        r = self._reader(store)
+        r._nav_mode = True
+        r._nav_index = 0
+        body = self._rows_text(r)
+        assert " a0 " in body.replace("›", " ")  # oldest now on screen…
+        assert "a10" not in body  # …and the newest scrolled off
+        assert "1/11" in r._agents_text()[0][1]
+
+    def test_the_cursor_marks_the_selected_row_after_scrolling(self):
+        store, _ = self._store(11, running={0})
+        r = self._reader(store)
+        r._nav_mode = True
+        r._nav_index = 7
+        selected = [
+            txt for cls, txt in r._agents_text() if cls == "class:pinned-panel-sel"
+        ]
+        assert len(selected) == 1 and " a7 " in selected[0]
+
+    def test_x_stops_an_agent_the_old_panel_could_not_reach(self):
+        store, sinks = self._store(11, running={0})
+        r = self._reader(store)
+        r._nav_mode = True
+        r._nav_index = 0  # oldest run — outside the 6-row viewport
+        r._stop_selected_agent()
+        assert sinks[0].is_cancelled() is True
+
+    def test_ctrl_a_lands_on_the_oldest_running_agent(self):
+        store, _ = self._store(11, running={2, 9})
+        r = self._reader(store)
+        _drive_keys(r, "\x01")  # Ctrl+A
+        assert r._nav_mode is True
+        assert r._nav_index == 2
+
+    def test_ctrl_a_lands_on_the_newest_when_none_run(self):
+        store, _ = self._store(11, running=())
+        r = self._reader(store)
+        _drive_keys(r, "\x01")
+        assert r._nav_index == 10
+
+    def test_finished_runs_stay_navigable_after_the_panel_hides(self):
+        store, _ = self._store(4, running=())
+        r = self._reader(store)
+        assert r._panel_showable() is False  # nothing running → panel gone
+        assert r._agents_navigable() is True  # but the reports are still there
+        _drive_keys(r, "\x01")
+        assert r._nav_mode is True and r._panel_showable() is True
+
+    def test_nothing_to_navigate_with_no_runs(self):
+        store, _ = self._store(0)
+        r = self._reader(store)
+        assert r._agents_navigable() is False
+        _drive_keys(r, "\x01")
+        assert r._nav_mode is False
+
+
 class TestStopAgentBindings:
     """x stops the selected agent (nav-mode); Ctrl+X Ctrl+K stops ALL — the
     latter is GLOBAL (armed whenever any agent runs, no nav-mode needed) to match
@@ -302,43 +461,7 @@ class TestStopAgentBindings:
         return AgentActivityStore()
 
     def _drive(self, reader, keys: str):
-        # Run the reader's real merged key bindings against a pipe input on a
-        # dummy output, feed `keys`, then exit — no real terminal.
-        import asyncio
-
-        from prompt_toolkit.application import Application
-        from prompt_toolkit.input.defaults import create_pipe_input
-        from prompt_toolkit.key_binding import merge_key_bindings
-        from prompt_toolkit.key_binding.defaults import load_key_bindings
-        from prompt_toolkit.layout import Layout
-        from prompt_toolkit.layout.containers import HSplit, Window
-        from prompt_toolkit.layout.controls import BufferControl
-        from prompt_toolkit.output import DummyOutput
-
-        inp = Window(BufferControl(buffer=reader._buffer))
-        with create_pipe_input() as pipe:
-            app = Application(
-                layout=Layout(HSplit([inp]), focused_element=inp),
-                key_bindings=merge_key_bindings(
-                    [load_key_bindings(), reader._make_bindings()]
-                ),
-                full_screen=False,
-                input=pipe,
-                output=DummyOutput(),
-            )
-            reader._app = app
-
-            async def run():
-                async def feed():
-                    await asyncio.sleep(0.1)
-                    pipe.send_text(keys)
-                    await asyncio.sleep(0.2)
-                    app.exit()
-
-                asyncio.ensure_future(feed())
-                await app.run_async()
-
-            asyncio.run(run())
+        _drive_keys(reader, keys)
 
     def _reader(self, store):
         return tui.PinnedPromptReader(

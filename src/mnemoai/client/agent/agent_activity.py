@@ -28,8 +28,10 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, List, Optional
 
-# Bounds so a long session / chatty agent can't grow memory without limit.
-MAX_RUNS = 32  # retained runs (running always kept; oldest FINISHED evicted first)
+# Bounds so a long session / chatty agent can't grow memory without limit. MAX_RUNS
+# is also how far back the panel's scrollable list reaches, so it's sized for a
+# conversation's worth of fan-outs (a single turn can spawn a dozen), not one turn's.
+MAX_RUNS = 64  # retained runs (running always kept; oldest FINISHED evicted first)
 EVENTS_PER_RUN = 200  # ring-buffered activity events per run
 _TEXT_CAP = 300  # tool result/error text truncated to this in the live feed
 
