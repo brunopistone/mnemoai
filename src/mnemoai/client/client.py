@@ -15,6 +15,8 @@ from mcp import StdioServerParameters
 from mnemoai.client import (
     context_injection,
     context_report,
+    doctor,
+    hooks,
     session_artifacts,
     transcript_export,
     usage_tracker,
@@ -97,6 +99,11 @@ class LangGraphClient:
         # launched alongside it and their tools merged.
         external_servers = load_external_servers()
         self.mcp_client = MultiMCPClient(self.server_params, external_servers)
+
+        # Snapshot the tool hooks now: any complaint about the file belongs at
+        # startup, not in the middle of a turn, and the snapshot is what runs for
+        # the rest of the session (see client/hooks.py).
+        hooks.active()
 
         self.profile_manager = UserProfileManager()
         self.system_prompt = self._build_system_prompt()
@@ -1032,7 +1039,7 @@ class LangGraphClient:
         except Exception:  # noqa: BLE001
             return ""
 
-    def _seed_session_log(self, messages: list, source: str = "") -> None:
+    def _seed_session_log(self, messages: list, source: str = "", label: str = "") -> None:
         """Copy a just-restored conversation into THIS run's transcript.
 
         Both ``--resume`` and ``/load`` replace the live history wholesale, so
@@ -1040,12 +1047,20 @@ class LangGraphClient:
         resuming it later would restore a fragment of the conversation the user
         can plainly see on screen. Best-effort: a transcript must never break a
         restore that already succeeded.
+
+        A ``/rename`` title carries across with the history: a resume continues the
+        SAME conversation in a new file, so a name the user gave it must not be lost
+        the first time they resume (a ``/branch`` deliberately doesn't inherit it —
+        that's a different conversation, and it would then be indistinguishable
+        from its parent in the picker).
         """
         log = getattr(self.agent, "session_log", None)
         if log is None:
             return
         try:
             log.seed_history(messages, source=source)
+            if label:
+                log.set_label(label)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Session log seed failed: {e}")
 
@@ -1083,6 +1098,14 @@ class LangGraphClient:
         one is the standing cost of the window right now.
         """
         return context_report.report(self)
+
+    def hooks_report(self) -> str:
+        """The ``/hooks`` report: which tool hooks this session is running."""
+        return hooks.render()
+
+    def doctor_report(self) -> str:
+        """The ``/doctor`` report: is anything about this install broken."""
+        return doctor.report(self)
 
     def usage_report(self) -> str:
         """The ``/usage`` report: reported token totals for this session."""
@@ -1208,6 +1231,34 @@ class LangGraphClient:
             logger.debug(f"Could not read turn summaries: {e}")
             return []
 
+    def session_label(self) -> str:
+        """This session's ``/rename`` title, or "" (also "" when not recording)."""
+        log = getattr(self.agent, "session_log", None) if self.agent else None
+        if log is None or log.path is None:
+            return ""
+        try:
+            return read_session(log.path).get("label", "")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not read session label: {e}")
+            return ""
+
+    def rename_session(self, title: str) -> bool:
+        """Name this session for the ``--resume`` picker; True if recorded.
+
+        The picker otherwise labels every row with its first prompt, which is the
+        one thing a resumed conversation and its parent have in common — so after a
+        few sessions in one project the rows stop being distinguishable. An empty
+        ``title`` clears the name (back to the first-prompt preview).
+        """
+        log = getattr(self.agent, "session_log", None) if self.agent else None
+        if log is None or log.path is None:
+            return False
+        try:
+            return log.set_label(" ".join(str(title).split()))
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not rename session: {e}")
+            return False
+
     def resume_session(self, path: str) -> bool:
         """Rehydrate a session transcript into the live agent; True on success.
 
@@ -1234,7 +1285,7 @@ class LangGraphClient:
 
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
-            self._seed_session_log(messages, str(path))
+            self._seed_session_log(messages, str(path), label=data.get("label", ""))
             logger.info(f"Resumed {len(messages)} messages from {path}")
 
             transcript = turn_view.render_conversation(messages)

@@ -339,6 +339,15 @@ def render_tool_call(name: str, args: dict) -> str:
     return "\n".join(lines)
 
 
+def render_hook_notice(text: str) -> str:
+    """One dim line for something a user hook did (fired, blocked, errored).
+
+    Hooks are invisible by nature — a command in a config file, firing on a tool
+    call the user didn't watch — so every consequence of one gets a line here.
+    """
+    return f"  {_GRAY}⇢ {' '.join(text.split())}{_RESET}"
+
+
 _ANSWER_MARKER = "\033[36m●\033[0m "
 _USER_PROMPT = "\033[34m>\033[0m "
 

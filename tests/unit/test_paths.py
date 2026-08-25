@@ -76,8 +76,29 @@ class TestSubdirs:
         # Examples land in the subfolders; live files are NOT created.
         assert (tmp_home / "config" / "config.yaml.example").is_file()
         assert (tmp_home / "mcp" / "mcp.json.example").is_file()
+        assert (tmp_home / "hooks" / "hooks.json.example").is_file()
         assert not (tmp_home / "config" / "config.yaml").exists()
         assert not (tmp_home / "mcp" / "mcp.json").exists()
+        assert not (tmp_home / "hooks" / "hooks.json").exists()
+
+    def test_hooks_example_reaches_populated_home(self, tmp_home):
+        # A new bundled example must reach an install that ALREADY exists — the
+        # per-item "seed if absent" rule, not a first-run-only condition.
+        (tmp_home / "config").mkdir(parents=True)
+        (tmp_home / "config" / "config.yaml").write_text("MY LIVE CONFIG")
+        paths.seed_example_files()
+        assert (tmp_home / "hooks" / "hooks.json.example").is_file()
+
+    def test_hooks_config_is_app_home_only(self, tmp_home):
+        # Hooks are arbitrary code: the path must be under the app home, so a
+        # hooks.json arriving with a git clone can never be picked up.
+        assert paths.hooks_config_path() == tmp_home / "hooks" / "hooks.json"
+
+    def test_seeding_never_creates_a_live_hooks_file(self, tmp_home):
+        # Presence is the switch — seeding a live hooks.json would silently arm it.
+        paths.seed_example_files()
+        paths.seed_example_files()
+        assert not paths.hooks_config_path().exists()
 
     def test_example_files_refreshed_from_bundle(self, tmp_home):
         # .example files are read-only reference (never loaded as config), so they

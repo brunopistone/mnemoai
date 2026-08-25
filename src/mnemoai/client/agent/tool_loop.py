@@ -1,10 +1,12 @@
 """The shared model↔tool execution loop (agent-arg helper).
 
 One tool call, start to finish: normalize the args, short-circuit the client-side
-stubs, resolve the tool, then the two hard gates in their required order — plan
-mode blocks BEFORE the confirmation prompt (a blocked tool must never even ask) —
-and finally ``_invoke_tool``, where the post-call gate lives. Every branch emits
-exactly one ``ToolMessage`` per ``tool_call_id``: an unanswered id is a
+stubs, resolve the tool, then the gates in their required order — plan mode blocks
+BEFORE anything else (a blocked tool must never even ask), then the user's
+``PreToolUse`` hooks, then the confirmation prompt — and finally ``_invoke_tool``,
+where the post-call gate lives. A hook's ``deny`` ends the call; its ``allow``
+satisfies only the confirmation prompt, never the block above it. Every branch
+emits exactly one ``ToolMessage`` per ``tool_call_id``: an unanswered id is a
 provider-level error, so there is no path out of here that skips the reply.
 
 This existed as two near-identical copies, in ``_execute_tools`` (main loop) and
@@ -37,6 +39,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from langchain_core.messages import BaseMessage, ToolMessage
 
+from mnemoai.client import hooks
 from mnemoai.client.agent.agent_activity import ActivitySink
 from mnemoai.utils.logger import logger
 
@@ -82,15 +85,25 @@ def run_tool_calls(
             _reply(messages, tool_id, name, agent._plan_mode_block_message(name))
             continue
 
+        # User hooks, BELOW plan mode and ABOVE the prompt: a deny is final, but an
+        # allow only satisfies the confirmation gate — it can't reach past the
+        # block above it or the server-side floors.
+        pre = agent._run_hooks(hooks.PRE_TOOL_USE, name, args, quiet=quiet)
+        if pre.denied:
+            _reply(messages, tool_id, name, agent._hook_deny_message(name, pre.reason))
+            continue
+
         # Hard gate: confirm destructive tools before running.
-        if not agent._confirm_tool(name, args):
+        if not (pre.allowed or agent._confirm_tool(name, args)):
             _reply(messages, tool_id, name, "User declined to run this command.")
             continue
 
         try:
             logger.debug(f"{log_label}: {name} with args: {args}")
             result = agent._invoke_tool(tool, name, args, quiet=quiet)
-            _reply(messages, tool_id, name, agent._truncate_tool_result(str(result)))
+            content = agent._truncate_tool_result(str(result))
+            post = agent._run_hooks(hooks.POST_TOOL_USE, name, args, str(result), quiet=quiet)
+            _reply(messages, tool_id, name, _with_context(content, post))
             if activity is not None:
                 activity.tool_result(name, str(result))
         except Exception as e:
@@ -100,7 +113,15 @@ def run_tool_calls(
             logger.error(f"{log_label} error: {str(e) or repr(e)}")
             if activity is not None:
                 activity.tool_error(name, str(e))
-            _reply(messages, tool_id, name, agent._tool_error_message(name, e))
+            failed = agent._run_hooks(
+                hooks.POST_TOOL_USE_FAILURE, name, args, str(e) or repr(e), quiet=quiet
+            )
+            _reply(messages, tool_id, name, _with_context(agent._tool_error_message(name, e), failed))
+
+
+def _with_context(content: str, outcome) -> str:
+    """Append a hook's ``additionalContext`` to a tool result, if it added any."""
+    return f"{content}\n\n[Hook] {outcome.context}" if outcome.context else content
 
 
 def _reply(messages: List[BaseMessage], tool_id: str, name: str, content: str) -> None:

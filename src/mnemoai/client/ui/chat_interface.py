@@ -87,12 +87,14 @@ class ChatInterface:
             ("/load [path]", "Load a saved conversation (lists if no path)"),
             ("/export [md|txt]", "Write a shareable transcript here"),
             ("/branch [turn]", "Fork this session and continue there"),
+            ("/rename [title]", "Name this session in the --resume picker"),
         ]),
         ("Assistant", [
             ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
             ("/memory [clear]", "View (or clear) persistent memory"),
             ("/skills [name]", "List installed skills (or preview one)"),
             ("/mcp", "List configured MCP servers & tools"),
+            ("/hooks", "List the tool hooks this session runs"),
         ]),
         ("Configure", [
             ("/config", "Reconfigure config.yaml (overwrites it)"),
@@ -101,6 +103,7 @@ class ChatInterface:
             ("/features", "Enable/disable features (RAG, memory, web, …)"),
         ]),
         ("Help", [
+            ("/doctor", "Check this install for problems"),
             ("/help", "This command reference + keyboard keys"),
         ]),
         ("Exit", [
@@ -116,6 +119,7 @@ class ChatInterface:
         ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/features", "Enable/disable features (RAG, memory, web search, …)"),
         ("/mcp", "List configured MCP servers & their tools"),
+        ("/hooks", "List the tool hooks this session runs"),
         ("/skills", "List installed skills (/skills <name> to preview)"),
         ("/clear", "Clear conversation context"),
         ("/compact", "Summarize & shrink context (optional focus)"),
@@ -127,6 +131,8 @@ class ChatInterface:
         ("/context", "Show what's using the context window"),
         ("/export", "Export a shareable transcript (/export [md|txt] [path])"),
         ("/branch", "Fork this session at a turn and continue there"),
+        ("/rename", "Name this session for the --resume picker"),
+        ("/doctor", "Check this install for problems"),
         ("/help", "Show the command reference and keyboard keys"),
         ("/exit", "Exit the application"),
         ("/quit", "Exit the application"),
@@ -547,6 +553,43 @@ class ChatInterface:
             "original session is untouched and still resumable with --resume."
         )
 
+    def _handle_rename_command(self, arg: str) -> None:
+        """Handle ``/rename [title]`` — name this session in the ``--resume`` picker.
+
+        No argument shows the current name; ``clear`` removes it (the picker falls
+        back to the first prompt).
+        """
+        raw = arg.strip()
+        current = self.client.session_label()
+
+        if not raw:
+            if current:
+                print(f'This session is named "{current}". /rename <title> to change it.')
+            else:
+                print(
+                    "This session has no name — the --resume picker labels it with its "
+                    "first prompt. /rename <title> to name it."
+                )
+            return
+
+        if raw.lower() == "clear":
+            if not current:
+                print("This session has no name to clear.")
+                return
+            if self.client.rename_session(""):
+                print("Name cleared — the picker will show the first prompt again.")
+            else:
+                print("Could not clear the name (session recording is off).")
+            return
+
+        if self.client.rename_session(raw):
+            print(f'Session named "{" ".join(raw.split())[:80]}".')
+        else:
+            print(
+                "Could not name this session — nothing is being recorded "
+                "(SESSION_MAX_AGE_DAYS is 0)."
+            )
+
     def _handle_memory_command(self, arg: str) -> None:
         """Handle ``/memory`` (view) and ``/memory clear`` over ``MemoryStore``."""
         store = MemoryStore()
@@ -924,6 +967,19 @@ class ChatInterface:
 
         if query.lower() == "/mcp":
             self._print_mcp_status()
+            return None
+
+        if query.lower() == "/hooks":
+            print("\n" + self.client.hooks_report() + "\n")
+            return None
+
+        if query.lower() == "/doctor":
+            print("\n" + self.client.doctor_report() + "\n")
+            return None
+
+        # /rename [title] — label this session in the --resume picker.
+        if query.lower() == "/rename" or query.lower().startswith("/rename "):
+            self._handle_rename_command(query[len("/rename"):].strip())
             return None
 
         if query.lower() == "/skills" or query.lower().startswith("/skills "):

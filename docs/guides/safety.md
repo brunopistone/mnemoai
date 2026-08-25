@@ -44,6 +44,13 @@ subprocess and cannot prompt you.
 Set any to `false` for a trusted or automated setup. Non-interactive runs (no TTY
 — tests, pipes, CI) auto-proceed so they can't hang waiting for a keypress.
 
+**Tired of confirming the same harmless command?** A [tool hook](hooks.md) can
+answer the prompt for you — a `PreToolUse` hook that prints
+`{"decision": "allow"}` for `git status` waives that one prompt without turning
+the whole `execute_bash` gate off. A hook can also **deny** a call outright, which
+is enforced everywhere the prompt is. What it can't do is reach past plan mode or
+the safety floor below.
+
 !!! note "Sub-agents can't approve on your behalf"
 
     A background [sub-agent](orchestration.md) has no terminal, so it cannot
@@ -94,10 +101,12 @@ a floor that is **always on** and lives inside the MCP server, so it holds even
 with confirmations disabled, in non-interactive runs, or if the server is driven
 by a different client.
 
-| Layer                        | What it does                                                         | Can be disabled?  |
-| ---------------------------- | -------------------------------------------------------------------- | ----------------- |
-| Client confirmation prompt   | Asks `Proceed? (y/N/a)` before each shell, file, or memory operation | Yes (`REQUIRE_*`) |
-| **Server-side safety floor** | Refuses system-destroying commands and system-directory writes       | **No**            |
+| Layer                        | What it does                                                         | Can be disabled?     |
+| ---------------------------- | -------------------------------------------------------------------- | -------------------- |
+| Your [tool hooks](hooks.md)  | Whatever you scripted — can deny a call, or waive its prompt         | Yes (it's your file) |
+| Client confirmation prompt   | Asks `Proceed? (y/N/a)` before each shell, file, or memory operation | Yes (`REQUIRE_*`)    |
+| Plan mode, while on          | Hard-blocks every mutating and executing tool                        | Yes (`/plan`)        |
+| **Server-side safety floor** | Refuses system-destroying commands and system-directory writes       | **No**               |
 
 Shell commands (`execute_bash`, `start_background_task`) are refused when they
 would:
@@ -181,6 +190,7 @@ discards someone else's work — including your own edits in another editor.
 ## See also
 
 - [Configuration](../configuration.md): the `REQUIRE_*` toggles and every other key
+- [Tool hooks](hooks.md): script your own allow/deny rules around tool calls
 - [Tools reference](../reference/tools.md): every tool and its parameters
 - [Sub-agents & orchestration](orchestration.md): how confirmations behave in a delegated run
 - [Troubleshooting](../development/troubleshooting.md): diagnosing a refused write

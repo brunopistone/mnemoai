@@ -7,6 +7,77 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.0] — 2026-08-25
+
+### Added
+
+- **Tool hooks: your own commands run around every tool call.** A prompt is a
+  request, not a rule — "always format what you write", "never touch that
+  directory", "stop asking me to confirm `git status`" hold right up until the
+  model decides otherwise. `~/.mnemoai/hooks/hooks.json` declares shell commands
+  that run **before** a tool (`PreToolUse`), **after it succeeds**
+  (`PostToolUse`), or **after it fails** (`PostToolUseFailure`), matched against
+  the tool name with a glob (`fs_*`, `execute_bash`, `*`). The hook gets the call
+  as JSON on stdin (event, tool name, arguments, and the result or error where
+  there is one), and answers with its exit code or a JSON object: **exit 2 blocks
+  the call** and its stderr becomes the reason the model is told, `additionalContext`
+  hands the model a note alongside the tool result, `{"decision": "allow"}` waves
+  a call past the confirmation prompt. Anything printed plainly is shown to you
+  and never sent to the model. `/hooks` lists what is loaded, from where, and what
+  didn't parse.
+- **Where a hook sits is the whole design: below the existing gates, never above
+  them.** The server-side safety floor runs first, then the plan-mode block, then
+  the hook, then the confirmation prompt. So a `deny` is honored anywhere, but an
+  `allow` reaches exactly one gate — the prompt for that single call. It cannot
+  unblock a tool plan mode blocked, and it cannot reach the floors inside the MCP
+  server, which still refuse a catastrophic command. A config file must not become
+  a way to widen what the app is allowed to do, and a `deny` wins over an `allow`
+  regardless of which one you wrote first.
+- Hooks are read from the **app home only** and **snapshotted at startup** — both
+  deliberate, both unlike `STEERING.md`. A `hooks.json` arriving with a `git clone`
+  would be remote code execution on your first edit in that repo, so nothing
+  outside `~/.mnemoai/` is read; and hooks are code, so editing the file
+  mid-session cannot change what is already running (restart to apply). A hook
+  that crashes, exits non-zero for any other reason, or overruns its `timeout` is
+  **reported and skipped** — a broken hook must never be able to wedge a turn, and
+  hooks fire from sub-agent and parallel-wave threads too, so none of them can ask
+  you a question. They run under real bash, and a commented `hooks.json.example`
+  is seeded next to the live file.
+- **`/doctor` — is anything about this install broken, or about to be.** Every
+  other report describes the conversation; this one describes the machine, because
+  this app fails in places you cannot see: the MCP server is a piped subprocess,
+  so a missing `ripgrep` surfaces as one tool erroring mid-task; a feature toggle
+  is a line in a YAML file, so `ENABLE_RAG: true` with no vector store installed
+  looks like the model ignoring you; prompt caching is silently provider-gated, so
+  a config that cannot cache reads as one that does. It reports the config and
+  prompts files that actually **loaded** (not the ones you expected — four
+  resolution tiers make "I edited config.yaml and nothing changed" a real
+  outcome), the provider with its credentials resolved or its local port probed,
+  the external binaries, declared-versus-connected MCP servers, the optional
+  dependency behind each switched-on feature, and the two files re-sent every turn
+  — `MEMORY.md` against its cap and each steering file at its injected size. Every
+  check is local, cheap, and read-only, with the fix printed under the failure.
+- **`/rename <title>` names a session in the `--resume` picker.** The picker
+  labelled every row with its first prompt — the one thing a resumed conversation
+  and its parent have in common — so after a few sessions in one project the rows
+  stopped being distinguishable. A name is recorded like every other entry
+  (append-only, last one wins) and survives a resume, since that continues the
+  same conversation in a new file. A `/branch` fork deliberately does _not_ inherit
+  it: a fork already shares its parent's opening prompt, and inheriting the name
+  too would put the two rows right back to identical. `/rename` alone shows the
+  current name, `/rename clear` drops it.
+- **Docs for all three:** a new [Tool hooks](docs/guides/hooks.md) guide (the
+  file, the events, the stdin/exit-code contract, the gate order and why the file
+  is app-home-only), plus `/doctor` and `/rename` sections in the usage guide, a
+  `hooks/` row in the `~/.mnemoai` map, and a "run `/doctor` first" opener on the
+  troubleshooting page.
+
+### Fixed
+
+- `/params` no longer ends with "Reload to apply" — it applies the change in
+  place and says so on the next line. The note was left behind when `/params`
+  stopped restarting the app.
+
 ## [1.11.0] — 2026-08-25
 
 ### Added
@@ -52,7 +123,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   `STEERING.MAX_CHARS` budget — with anything dropped stated in the block rather
   than silently missing.
 - **`/context` — where the context window actually goes.** `/usage` answers what
-  the session has spent; this answers what the *next* turn is paying for and which
+  the session has spent; this answers what the _next_ turn is paying for and which
   part of it can be shrunk. A gauge plus a breakdown: the system prompt segmented
   into its real parts (learned profile, MEMORY.md, skills listing, sub-agent
   types, playbook strategies, compaction summary), one row per steering file at

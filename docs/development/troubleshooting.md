@@ -2,6 +2,13 @@
 
 Diagnose the failures you're most likely to hit, by symptom.
 
+**Run `/doctor` first.** It checks this install for the usual causes — which
+`config.yaml` is actually loaded, whether the provider's credentials resolve and
+its endpoint answers, whether `rg`/`git`/`bash` are on `PATH`, how many MCP tools
+came up and whether every declared server connected, and whether an enabled
+feature is missing its dependency. Most of the sections below start with a check
+it already performed for you ([details](../guides/usage.md#checking-your-install)).
+
 | Symptom                                            | Go to                                                                             |
 | -------------------------------------------------- | --------------------------------------------------------------------------------- |
 | Startup hangs, or tools are missing entirely       | [The assistant starts but has no tools](#the-assistant-starts-but-has-no-tools)   |

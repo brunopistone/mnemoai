@@ -50,15 +50,18 @@ Assistant: [Uses fs_read tool and displays content]
 
 | Command                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/help`                    | Show the command reference and keyboard keys — the same box the launch banner prints, brought back after it has scrolled away                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `/help`                    | Show the command reference and keyboard keys — the same box the launch banner prints, brought back after it has scrolled away                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `/exit` or `/quit`         | Exit the application                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `/clear`                   | Clear conversation history and RAG index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `/context`                 | Break down **what is filling the context window** right now — system prompt, steering files, tool schemas, conversation — with each part's share and how much room is left ([details](#seeing-where-the-context-goes))                                                                                                                                                                                                                                                                                                                                                    |
+| `/context`                 | Break down **what is filling the context window** right now — system prompt, steering files, tool schemas, conversation — with each part's share and how much room is left ([details](#seeing-where-the-context-goes))                                                                                                                                                                                                                                                                                                                                                  |
 | `/save`                    | Save the current conversation. After a `/load` (or an earlier `/save`), a bare `/save` **overwrites that same file**; `/save <path>` saves to a specific file/dir; a fresh conversation (after `/clear`) saves to a new timestamped file                                                                                                                                                                                                                                                                                                                                |
 | `/load <path>`             | Load a saved conversation (no path → pick from a list; the picker has a **Delete** button to remove a saved conversation after a Yes/No confirm, then reopens). The loaded file becomes the one a later `/save` writes back to                                                                                                                                                                                                                                                                                                                                          |
 | `/usage`                   | Token totals for this session, per model — input, output and cache tokens, counting **every** model call including sub-agents, orchestrator workers and the query router. Cumulative spend, not the size of your conversation ([details](#checking-token-usage))                                                                                                                                                                                                                                                                                                        |
 | `/export [md\|txt] [path]` | Write the conversation as a **shareable transcript** — readable Markdown (default) or plain text — into the **current directory** unless you give a path. Not the same as `/save`: an export is a one-way artifact for pasting into a bug report or PR, not something `/load` can read back. Tool _calls_ appear as one-line summaries; tool _results_ and injected context are left out. Add `reasoning` to include thinking blocks ([details](#exporting-a-transcript))                                                                                               |
 | `/branch [turn]`           | **Fork this session** and carry on in the copy. No argument → pick the turn to branch after; `/branch 3` branches directly. The original session is **never modified** — it stays resumable with `--resume` ([details](#branching-a-session))                                                                                                                                                                                                                                                                                                                           |
+| `/rename [title]`          | **Name this session** so it's recognizable in the `--resume` picker instead of being labelled by its first prompt. No argument shows the current name; `/rename clear` removes it ([details](#naming-a-session))                                                                                                                                                                                                                                                                                                                                                        |
+| `/doctor`                  | **Check this install for problems** — config, provider credentials, required binaries, MCP servers, enabled features and their dependencies, and the files that grow. Local and read-only ([details](#checking-your-install))                                                                                                                                                                                                                                                                                                                                           |
+| `/hooks`                   | List the **tool hooks** this session runs — your own commands fired before or after each tool call, from `~/.mnemoai/hooks/hooks.json`. See [Tool hooks](hooks.md)                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `/compact [focus]`         | Summarize older turns to shrink context (optional focus instructions)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `/config`                  | Re-run the interactive configurator — chat, vision (with a "same as chat?" shortcut + provider choice), and embeddings models, then feature toggles. `Ctrl+B` steps back within a model section. Overwrites `config.yaml` and restarts in place                                                                                                                                                                                                                                                                                                                         |
 | `/model`                   | Set up one model — chat (LLM), vision, or embeddings. Vision offers a "use the same model as Chat?" shortcut. Inference params reset to model defaults on a change (re-tune with `/params`); restarts in place                                                                                                                                                                                                                                                                                                                                                          |
@@ -186,6 +189,31 @@ when you exit — only sessions with at least one exchange are offered, which al
 means a resume you didn't ask anything in won't appear as a duplicate of the
 session it restored. If this directory has no sessions yet, `--resume` says so
 and starts a normal session.
+
+### Naming a session
+
+The picker labels every session with its opening prompt, which stops being enough
+once a project has a few of them — especially after a `--resume` or a `/branch`,
+where several rows legitimately share the same first question. `/rename` gives the
+current session a name of your own:
+
+```
+/rename hooks phase 1        # name it
+/rename                      # show the current name
+/rename clear                # back to the first-prompt label
+```
+
+```
+   4m ago    6 turns  hooks phase 1
+  2h ago    2 turns  why does the loader crash on startup?
+```
+
+The name is appended to the session file like everything else, so renaming twice
+just means the last name wins, and it **survives a resume** — same conversation,
+new file, same name. A [`/branch`](#branching-a-session) fork deliberately does
+**not** inherit it: the fork and its parent already share an opening prompt, and
+sharing the name too would put you back where you started. Naming a session you
+never type into doesn't keep its empty file alive.
 
 ### Branching a session
 
@@ -344,3 +372,67 @@ one-way and optimized for a human reader:
 The filename is derived from your opening prompt
 (`conversation_20260730_161738_reply-with-exactly-red.md`), so exports are
 identifiable in a directory listing instead of being one of many timestamps.
+
+### Checking your install
+
+`/doctor` inspects this install and reports what's wrong with it — the first thing
+to run when something behaves strangely, and the thing to paste into an issue:
+
+```
+Doctor — 1 problem, 1 warning
+
+  Install
+    · mnemoai  1.12.0
+    · python  3.12.14 (/opt/homebrew/opt/python@3.12/bin/python3.12)
+    · platform  Darwin 25.6.0
+    ✓ app home  ~/.mnemoai
+
+  Configuration
+    ✓ config.yaml  ~/.mnemoai/config/config.yaml
+    ✓ prompts.yaml  ~/.mnemoai/config/prompts.yaml
+
+  Provider
+    ✓ model  bedrock: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+    ✓ aws credentials  resolved, region us-east-1
+    ✓ prompt cache  on, 1h TTL
+
+  Tools
+    ✗ rg  not on PATH — grep_search will not work
+      → Install rg.
+    ✓ git  /opt/homebrew/bin/git
+    ✓ bash  /opt/homebrew/bin/bash
+    ✓ MCP tools  41 registered
+
+  Features
+    ✓ chromadb (chromadb)  installed
+
+  State
+    ✓ sessions here  10 recorded, kept 30 days
+    ! MEMORY.md  2192 / 2200 chars (~/.mnemoai/bpistone/MEMORY.md)
+      → Nearly full; the next entry may push an older one out.
+    · steering  ~/dev/project/CLAUDE.md — 14240 chars, injected every turn
+```
+
+Each line is `✓` fine, `!` worth knowing, `✗` broken, or `·` informational, and a
+problem comes with the command that fixes it. What it covers:
+
+- **Configuration** — which `config.yaml` and `prompts.yaml` are **actually loaded**.
+  ("I edited `config.yaml` and nothing changed" is nearly always a different file
+  being live — an `MNEMOAI_CONFIG` override or a checkout fallback — and this is the
+  only place that tells you.)
+- **Provider** — the model and protocol in use, whether its credentials resolve,
+  whether the endpoint answers (a 2-second local probe for Ollama and
+  OpenAI-compatible servers), and whether prompt caching applies to it. Keys are
+  never printed, only whether one was found.
+- **Tools** — `rg` (required by `grep_search`, with no fallback), `git`, `bash`, how
+  many MCP tools loaded, and whether every server declared in `mcp.json` actually
+  connected. A server that **failed** is a warning rather than being reported as "not
+  configured", which is the distinction that sends you looking in the right place.
+- **Features** — for each feature you switched on, whether what it needs is present:
+  the vector store package for RAG, a `BRAVE_API_KEY` for web search.
+- **State** — the files that grow and then bite: `MEMORY.md` near its cap (it starts
+  dropping older entries), steering files and the size each one injects **every**
+  turn, and how many sessions this directory has recorded.
+
+It's local, cheap and read-only: no model call, nothing written, no network beyond
+that one local port probe.

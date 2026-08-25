@@ -1,0 +1,107 @@
+{
+  "//": [
+    "Tool-call hooks. Copy this file to hooks.json (same directory) and edit.",
+    "",
+    "A hook is a shell command run around a tool call. The call's JSON is written",
+    "to the hook's stdin: {session_id, cwd, hook_event_name, tool_name, tool_input,",
+    "tool_response}. MNEMOAI_HOOK_EVENT and MNEMOAI_TOOL_NAME are also exported, so",
+    "a one-liner needn't parse JSON at all.",
+    "",
+    "Events (this release): PreToolUse (before the call), PostToolUse (after a",
+    "successful one), PostToolUseFailure (after one that raised).",
+    "",
+    "'matcher' is a glob over the tool name ('*' matches every tool). Every hook",
+    "whose matcher matches runs, in the order written.",
+    "",
+    "What a hook's exit code and stdout mean:",
+    "  exit 0            -> the call proceeds. Plain stdout is shown to you and",
+    "                       logged, NOT sent to the model.",
+    "  exit 2            -> DENY: the call is blocked and stderr is handed to the",
+    "                       model as the reason.",
+    "  any other code    -> non-blocking error: logged, the call proceeds.",
+    "  timeout           -> non-blocking: logged, the call proceeds (a slow hook",
+    "                       must not be able to wedge your edits).",
+    "  JSON on stdout    -> honored: {\"decision\": \"deny\"|\"allow\", \"reason\": ...,",
+    "                       \"additionalContext\": ...}. additionalContext IS sent to",
+    "                       the model, appended to the tool result.",
+    "",
+    "'decision': 'allow' satisfies the confirmation prompt for that one call — it",
+    "cannot reach past plan mode or the server-side safety floors, which block",
+    "catastrophic commands and system-path writes no matter what a hook says.",
+    "'deny' is honored everywhere.",
+    "",
+    "This file is read ONLY from the app home and is snapshotted at startup: hooks",
+    "are arbitrary code, so a hooks.json arriving with a git clone must never fire,",
+    "and an edit mid-session must never change what is running. Restart to apply.",
+    "",
+    "Hooks run on tool-calling threads (parallel sub-agents included), so they must",
+    "be thread-safe and must never wait for input — a hook that prompts hangs on a",
+    "terminal it doesn't have.",
+    "",
+    "Delete the '//' keys below (they are ignored, but they are noise in a live file)."
+  ],
+
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "fs_write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys,subprocess; p=json.load(sys.stdin).get('tool_input',{}).get('path',''); p.endswith('.py') and subprocess.run(['ruff','format',p])\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "file_edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys,subprocess; p=json.load(sys.stdin).get('tool_input',{}).get('file_path',''); p.endswith('.py') and subprocess.run(['ruff','format',p])\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+
+    "PreToolUse": [
+      {
+        "//": "Deny any write under a directory you never want touched.",
+        "matcher": "fs_write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys; p=json.load(sys.stdin).get('tool_input',{}).get('path',''); sys.exit(0) if '/secrets/' not in p else (sys.stderr.write('Writes under /secrets/ are blocked by a local hook.'), sys.exit(2))\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "//": "Auto-approve read-only git commands so they stop prompting.",
+        "matcher": "execute_bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python -c \"import json,sys; c=json.load(sys.stdin).get('tool_input',{}).get('command','').strip(); print(json.dumps({'decision':'allow'}) if c.startswith(('git status','git log','git diff')) else '')\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+
+    "PostToolUseFailure": [
+      {
+        "//": "Tell the model something it can act on when a tool raised.",
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"additionalContext\": \"A tool just failed. Re-read the file before retrying — it may have changed on disk.\"}'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
