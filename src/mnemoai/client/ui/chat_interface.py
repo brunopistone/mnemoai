@@ -77,6 +77,7 @@ class ChatInterface:
     # answers why you'd reach for it; split the group before letting one pass ~5.
     _COMMAND_GROUPS = [
         ("Context", [
+            ("/context", "What's using the context window"),
             ("/clear", "Clear conversation context"),
             ("/compact [focus]", "Summarize & shrink context"),
             ("/usage", "Token usage for this session (per model)"),
@@ -99,6 +100,9 @@ class ChatInterface:
             ("/params", "Tune inference params (temp, top_p, …)"),
             ("/features", "Enable/disable features (RAG, memory, web, …)"),
         ]),
+        ("Help", [
+            ("/help", "This command reference + keyboard keys"),
+        ]),
         ("Exit", [
             ("/exit, /quit", "Exit the application"),
         ]),
@@ -120,8 +124,10 @@ class ChatInterface:
         ("/save", "Save conversation (/save [path])"),
         ("/load", "Load a saved conversation (/load lists saved)"),
         ("/usage", "Show token usage for this session"),
+        ("/context", "Show what's using the context window"),
         ("/export", "Export a shareable transcript (/export [md|txt] [path])"),
         ("/branch", "Fork this session at a turn and continue there"),
+        ("/help", "Show the command reference and keyboard keys"),
         ("/exit", "Exit the application"),
         ("/quit", "Exit the application"),
     ]
@@ -145,33 +151,80 @@ class ChatInterface:
         # 3J scrollback, H home, 2J visible screen.
         print("\033[3J\033[H\033[2J", end="", flush=True)
 
+    @classmethod
+    def _vlen(cls, s: str) -> int:
+        """Visible length (ANSI escapes don't occupy columns)."""
+        return len(cls._ANSI_RE.sub("", s))
+
+    @classmethod
+    def _command_box(cls, footer: list) -> str:
+        """The framed, grouped command list, with ``footer`` rows under a separator.
+
+        Shared by the launch banner and ``/help``: the box IS the command
+        reference, and ``/help`` exists because the banner scrolls away — two
+        renderers would drift apart the first time a command was added.
+        """
+        C = cls._C
+        vlen = cls._vlen
+
+        # Inner width: wordmark width (64), widened to fit the longest row. A
+        # command row is "<heading gutter>  <command>  <description>", so the
+        # gutter that holds the inlined group heading counts toward the width too;
+        # the footer rows count as well, or a long hint breaks the frame.
+        cmd_w = max(vlen(c) for _, items in cls._COMMAND_GROUPS for c, _ in items)
+        gutter_w = max(vlen(h) for h, _ in cls._COMMAND_GROUPS)
+        widest = max(
+            gutter_w + 2 + cmd_w + 2 + vlen(desc)
+            for _, items in cls._COMMAND_GROUPS for _, desc in items
+        )
+        W = max(64, widest, *(vlen(f) for f in footer)) if footer else max(64, widest)
+
+        def row(content: str = "") -> str:
+            """One framed row, padded to the visible inner width."""
+            pad = " " * max(0, W - vlen(content))
+            return f"{C['border']}│{C['reset']} {content}{pad} {C['border']}│{C['reset']}"
+
+        lines = [f"{C['border']}╭{'─' * (W + 2)}╮{C['reset']}"]
+
+        # Group headings sit on the SAME row as their first command rather than on
+        # their own line. Five groups × (heading + spacer) is ten lines of pure
+        # chrome in a box that's already the tallest thing on screen at launch;
+        # inlining the heading buys all of it back and still reads as grouped,
+        # because the headings are the only text in the left column.
+        for heading, items in cls._COMMAND_GROUPS:
+            for idx, (cmd, desc) in enumerate(items):
+                label = heading if idx == 0 else ""
+                gutter = f"{C['head']}{label}{C['reset']}" + " " * (
+                    gutter_w - vlen(label)
+                )
+                padded_cmd = cmd + " " * (cmd_w - vlen(cmd))
+                lines.append(
+                    row(
+                        f"{gutter}  {C['cmd']}{padded_cmd}{C['reset']}  "
+                        f"{C['text']}{desc}{C['reset']}"
+                    )
+                )
+
+        if footer:
+            lines.append(f"{C['border']}├{'─' * (W + 2)}┤{C['reset']}")
+            lines.extend(row(f) for f in footer)
+        lines.append(f"{C['border']}╰{'─' * (W + 2)}╯{C['reset']}")
+        return "\n".join(lines)
+
     def __welcome_message(self) -> None:
         """Display the launch banner + a framed, grouped command list."""
         C = self._C
-
-        def vlen(s: str) -> int:
-            """Visible length (ANSI escapes don't occupy columns)."""
-            return len(self._ANSI_RE.sub("", s))
-
-        # Inner width: banner width (64), widened to fit the longest command row.
-        # A row is "<heading gutter>  <command>  <description>", so the gutter that
-        # holds the inlined group heading counts toward the width too.
-        cmd_w = max(vlen(c) for _, items in self._COMMAND_GROUPS for c, _ in items)
-        gutter_w = max(vlen(h) for h, _ in self._COMMAND_GROUPS)
-        longest_row = max(
-            gutter_w + 2 + cmd_w + 2 + vlen(desc)
-            for _, items in self._COMMAND_GROUPS for _, desc in items
-        )
-        W = max(64, longest_row)
-
-        def row(content: str = "") -> None:
-            """Print one framed row, padding to the visible inner width."""
-            pad = " " * max(0, W - vlen(content))
-            print(f"{C['border']}│{C['reset']} {content}{pad} {C['border']}│{C['reset']}")
-
-        top = f"{C['border']}╭{'─' * (W + 2)}╮{C['reset']}"
-        sep = f"{C['border']}├{'─' * (W + 2)}┤{C['reset']}"
-        bot = f"{C['border']}╰{'─' * (W + 2)}╯{C['reset']}"
+        # Mention the completion menu and /help: they're how you find a command
+        # WITHOUT this box, which is what keeps the banner from having to be the
+        # whole reference.
+        # Two rows, not one: the frame widens to its widest row, and a single
+        # combined hint pushed it past 80 columns.
+        box = self._command_box([
+            f"{C['dim']}Ctrl+J{C['reset']} for new lines · "
+            f"{C['dim']}Enter{C['reset']} to submit · "
+            f"{C['dim']}/{C['reset']} to search commands",
+            f"{C['dim']}/help{C['reset']} brings this box back, with the keys",
+        ])
 
         # --- Wordmark banner (indigo ≈ #5f5fff via 256-color 63) ---
         # Center the wordmark AND its tagline over the command box. The box widens
@@ -179,8 +232,8 @@ class ChatInterface:
         # left-aligning both left the logo visibly adrift of the frame below it.
         # Indent the block by half the difference; the tagline is then centered
         # within the wordmark's own width so it stays under the letters.
-        banner_w = max(vlen(line) for line in self._BANNER)
-        box_w = W + 4  # inner width + the "│ " / " │" frame on each side
+        banner_w = max(self._vlen(line) for line in self._BANNER)
+        box_w = self._vlen(box.split("\n")[0])  # the frame's own outer width
         indent = " " * max(0, (box_w - banner_w) // 2)
         print()
         for line in self._BANNER:
@@ -188,37 +241,29 @@ class ChatInterface:
         tagline = "local agentic AI assistant · learns & remembers"
         print(f"{indent}{C['dim']}" + tagline.center(banner_w) + C["reset"])
         print()
+        print(box + "\n")
 
-        # --- Framed command list ---
-        print(top)
-
-        # Group headings sit on the SAME row as their first command rather than on
-        # their own line. Five groups × (heading + spacer) is ten lines of pure
-        # chrome in a box that's already the tallest thing on screen at launch;
-        # inlining the heading buys all of it back and still reads as grouped,
-        # because the headings are the only text in the left column.
-        head_w = max(vlen(h) for h, _ in self._COMMAND_GROUPS)
-        for heading, items in self._COMMAND_GROUPS:
-            for idx, (cmd, desc) in enumerate(items):
-                label = heading if idx == 0 else ""
-                gutter = f"{C['head']}{label}{C['reset']}" + " " * (
-                    head_w - vlen(label)
-                )
-                padded_cmd = cmd + " " * (cmd_w - vlen(cmd))
-                row(
-                    f"{gutter}  {C['cmd']}{padded_cmd}{C['reset']}  "
-                    f"{C['text']}{desc}{C['reset']}"
-                )
-
-        print(sep)
-        # Mention the completion menu: it's how you find a command WITHOUT this box,
-        # so it's what keeps the banner from having to be the whole reference.
-        row(
-            f"{C['dim']}Ctrl+J{C['reset']} for new lines · "
-            f"{C['dim']}Enter{C['reset']} to submit · "
-            f"{C['dim']}/{C['reset']} to search commands"
-        )
-        print(bot + "\n")
+    def _help_text(self) -> str:
+        """The ``/help`` screen: the command box plus the keys that aren't commands."""
+        C = self._C
+        # Keys, not commands: nothing else surfaces them once the banner is gone,
+        # and Esc-to-interrupt in particular is the one a user needs mid-turn.
+        keys = [
+            ("Enter", "submit"),
+            ("Ctrl+J", "new line"),
+            ("↑ / ↓", "history"),
+            ("/", "command menu"),
+            ("Esc", "interrupt the current turn"),
+            ("Ctrl+A", "agents panel (↑↓ move · Enter view · x stop · Esc leave)"),
+            ("Ctrl+X Ctrl+K", "stop every running agent"),
+            ("Ctrl+C / Ctrl+D", "exit (twice)"),
+        ]
+        key_w = max(self._vlen(k) for k, _ in keys)
+        footer = [f"{C['dim']}Keys{C['reset']}"] + [
+            f"  {C['cmd']}{k.ljust(key_w)}{C['reset']}  {C['text']}{what}{C['reset']}"
+            for k, what in keys
+        ]
+        return self._command_box(footer)
 
     def _store_success_episode(self, task: str, tools_used: list) -> None:
         """Persist a successful episode and record the profiling outcome.
@@ -820,8 +865,16 @@ class ChatInterface:
             self.client.save_conversation(timestamp, path=save_path)
             return None
 
+        if query.lower() == "/help":
+            print("\n" + self._help_text() + "\n")
+            return None
+
         if query.lower() == "/usage":
             print("\n" + self.client.usage_report() + "\n")
+            return None
+
+        if query.lower() == "/context":
+            print("\n" + self.client.context_report() + "\n")
             return None
 
         # /export [md|txt] [path] — a shareable transcript, not a reloadable file.

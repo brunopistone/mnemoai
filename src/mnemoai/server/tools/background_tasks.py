@@ -22,6 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from mnemoai.utils.paths import tasks_dir
 
 from .safety import classify_shell_command, classify_write_path
+from .shell_state import bash_path, current_cwd
 
 # Store for background tasks
 _background_tasks: Dict[str, dict] = {}
@@ -89,10 +90,14 @@ def run_background_command(task_id: str, command: str, cwd: str):
 
         # start_new_session puts the shell (and its children) in their own
         # process group so cancel_background_task can kill the whole tree via
-        # killpg, not just the shell — same discipline as execute_bash.
+        # killpg, not just the shell — same discipline as execute_bash, as are
+        # the bash executable and the DEVNULL stdin (a task outlives its call, so
+        # inheriting the server's MCP protocol pipe would be worse still).
         process = subprocess.Popen(
             command,
             shell=True,
+            executable=bash_path(),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             cwd=cwd,
@@ -162,7 +167,8 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         Args:
             command: Shell command to execute
             description: Brief description of what this task does
-            working_directory: Directory to run in (default: current directory)
+            working_directory: Directory to run in (default: the shell's current
+                directory, i.e. wherever the last execute_bash left off)
 
         Returns:
             JSON string with task_id to check status later
@@ -190,7 +196,10 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         ensure_task_dir()
 
         task_id = str(uuid.uuid4())[:8]
-        cwd = working_directory if working_directory else os.getcwd()
+        # Default to the shell session's tracked directory, not the process cwd:
+        # after `cd project` in execute_bash, a background task with no explicit
+        # working_directory has to start where the model believes it is.
+        cwd = working_directory if working_directory else current_cwd()
 
         # Expand user directory
         cwd = os.path.expanduser(cwd)

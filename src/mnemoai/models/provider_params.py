@@ -56,7 +56,13 @@ _LLM = {
             _p("STOP", "stop", "stop"),
         ],
         "connection": {"REGION", "ENDPOINT_URL"},
-        "special": {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM"},
+        "special": {
+            "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+            # Prompt-cache breakpoints (models/prompt_cache.py): on by default
+            # where supported, so these only ever opt out or lengthen the TTL.
+            # Registered so a /model provider switch doesn't prune them.
+            "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+        },
     },
     "mantle": {
         # Delegates to mantle_factory (temperature/max_tokens/top_p/streaming +
@@ -65,7 +71,11 @@ _LLM = {
         # responses, a thinking budget on anthropic).
         "params": [],
         "connection": {"REGION", "API_PROTOCOL", "ENDPOINT_URL", "API_KEY"},
-        "special": {"TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM", "REASONING_EFFORT"},
+        "special": {
+            "TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM", "REASONING_EFFORT",
+            # Only honored on API_PROTOCOL: anthropic (see prompt_cache.policy).
+            "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+        },
     },
     "openai": {
         "params": [
@@ -95,7 +105,10 @@ _LLM = {
             _p("STOP", "stop", "stop_sequences"),
         ],
         "connection": {"API_KEY", "ENDPOINT_URL"},
-        "special": {"REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM"},
+        "special": {
+            "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+            "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+        },
     },
     "sagemaker": {
         "params": [

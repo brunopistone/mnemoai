@@ -348,6 +348,8 @@ exactly what each provider's init path forwards. (`mantle` reads
 | `REASONING`          | Enable extended thinking (boolean)                                                          | bedrock, anthropic                                             |
 | `THINKING_TOKENS`    | Thinking token budget (default `2048`)                                                      | bedrock, anthropic                                             |
 | `REASONING_EFFORT`   | reasoning effort (provider-dependent: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`) | openai, anthropic, bedrock, mantle, litellm                    |
+| `PROMPT_CACHE`       | Cache the stable prompt prefix (boolean, default **on** where supported)                     | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)         |
+| `PROMPT_CACHE_TTL`   | How long a cached prefix lives: `5m` (default) or `1h`                                      | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)         |
 
 `VISION_MODEL_ID` supports the same seven providers as `MODEL_ID`. It accepts a
 subset of params: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` across providers, plus
@@ -368,6 +370,44 @@ keys follow the provider (host/port, region, Mantle protocol, SageMaker
 > backend). When thinking is enabled this way, `temperature`/`top_p`/`top_k` are
 > dropped automatically (the providers reject them). For finer control, set the
 > raw provider parameter via `EXTRA_PARAMS` (below), which overrides this.
+
+##### `PROMPT_CACHE` — reuse the prompt prefix instead of re-paying for it
+
+Every call in a turn re-sends the same opening: the system prompt, the tool
+definitions, and the conversation so far. Where the provider supports prompt
+caching, mnemoai marks that prefix so it is stored server-side and **read** on the
+next call at a fraction of the input price — and, just as usefully, without being
+re-processed, which is what a long prompt spends most of its time-to-first-token
+on. An agentic turn makes one call per tool round, so the prefix is re-sent many
+times before you see an answer.
+
+It is **on by default** wherever it applies, needs no config change on an existing
+install, and appears in `/usage` as the `cache: N read · N written` line. Two keys
+tune it, under `MODEL_ID`:
+
+```yaml
+MODEL_ID:
+  NAME: global.anthropic.claude-opus-4-8
+  TYPE: bedrock
+  # PROMPT_CACHE: false     # opt out entirely
+  # PROMPT_CACHE_TTL: 1h    # 5m (default) | 1h — 1h costs more to write
+```
+
+What it applies to is deliberately narrow, because a cache marker sent where it
+isn't understood is an error on **every** call rather than a missed saving: `TYPE:
+bedrock`, `TYPE: anthropic`, and `TYPE: mantle` **only** on `API_PROTOCOL:
+anthropic`, and only for model families that cache (Claude, Nova). Everything else
+ignores the setting — `PROMPT_CACHE: true` cannot force it on, since Ollama has no
+such concept and OpenAI-compatible servers do it automatically. A prompt shorter
+than the model's own minimum (1024 tokens for most Claude models) simply isn't
+cached; nothing fails.
+
+Caching pays off when the prefix is **stable**, which is why mnemoai keeps it that
+way: the system prompt is assembled once per session, and the per-turn injections
+(steering, episodic memory, plan reminders) ride the newest message rather than
+being spliced into the middle of the history. A `/compact`, a `/params` reload, or
+a `/model` switch rewrites the prefix and the next call re-writes the cache entry
+once.
 
 ##### `EXTRA_PARAMS` — generic passthrough for anything else
 

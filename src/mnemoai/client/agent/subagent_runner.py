@@ -356,7 +356,7 @@ def run_one_subagent(
     # (not mutating the shared agent.model) is concurrency-safe.
     sub_tools = agent._subagent_tools(subagent)
     base = agent._subagent_base_model(subagent)
-    sub_model = base.bind_tools(sub_tools) if sub_tools else base
+    sub_model = agent._bind_tools(base, sub_tools)
     sys_prompt = subagents.subagent_system_prompt(subagent)
     # A spawned sub-agent is handed a whole self-contained task (esp. the
     # search-heavy explore/plan types), so it needs the same generous turn

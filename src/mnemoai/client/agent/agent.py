@@ -47,6 +47,7 @@ from mnemoai.client.agent.reasoning_utils import (
 from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
 from mnemoai.client.ui import turn_view
 from mnemoai.client.usage_tracker import UsageTracker
+from mnemoai.models import prompt_cache
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
@@ -285,7 +286,16 @@ class LangGraphAgent:
             1, int(config.get("LLM", {}).get("SUBAGENT_MAX_CONCURRENCY", 4))
         )
 
-        self.model_with_tools = model.bind_tools(tools) if tools else model
+        # Prompt-cache breakpoints for the providers that take them (see
+        # models/prompt_cache.py). Read once here so every model binding below —
+        # and every worker/sub-agent binding — carries the same policy.
+        self._cache_policy = prompt_cache.policy(config.get("MODEL_ID"))
+        if self._cache_policy.enabled:
+            logger.info(
+                "Prompt caching enabled (ttl=%s)", self._cache_policy.control.get("ttl")
+            )
+
+        self.model_with_tools = self._bind_tools(model, tools)
 
         # External (mcp.json) tools aren't in any route allowlist; tracked so the
         # orchestrator can describe them and they can be bound on every route.
@@ -321,11 +331,30 @@ class LangGraphAgent:
                     matched = [t for t in tools if t.name in tool_names]
                     route_tools = matched + external_tools + always_tools
                 self.tools_by_route[route_name] = route_tools
-                self.models_by_route[route_name] = (
-                    model.bind_tools(route_tools) if route_tools else model
-                )
+                self.models_by_route[route_name] = self._bind_tools(model, route_tools)
 
         self.graph = self._build_graph()
+
+    def _bind_tools(self, model: BaseChatModel, tools: Optional[Sequence[BaseTool]]):
+        """Bind a tool subset plus this provider's prompt-cache breakpoint.
+
+        The single place tools are bound (main loop, per-route models, orchestrator
+        workers, sub-agents), so the cache marker can't reach some request shapes
+        and miss others. A bare test stub built via ``__new__`` has no policy and
+        gets the plain binding.
+        """
+        bound = model.bind_tools(list(tools)) if tools else model
+        return prompt_cache.bind(
+            bound, getattr(self, "_cache_policy", prompt_cache.OFF)
+        )
+
+    def _system_message(self, text: str = None) -> SystemMessage:
+        """The system prompt as a message, carrying a cache breakpoint where the
+        transport wants one (see :func:`prompt_cache.system_message`)."""
+        return prompt_cache.system_message(
+            self.system_prompt if text is None else text,
+            getattr(self, "_cache_policy", prompt_cache.OFF),
+        )
 
     def rebind_model(self, model: BaseChatModel) -> None:
         """Swap in a rebuilt model, re-deriving every binding that came off the old one.
@@ -338,10 +367,14 @@ class LangGraphAgent:
         own (it dispatches through these attributes), so it needs no rebuild.
         """
         self.model = model
-        self.model_with_tools = model.bind_tools(self.tools) if self.tools else model
+        # Re-read the cache policy too: the reload may have changed the model
+        # name or PROMPT_CACHE, and a stale policy would mark a request the new
+        # provider rejects (or silently drop caching).
+        self._cache_policy = prompt_cache.policy(config.get("MODEL_ID"))
+        self.model_with_tools = self._bind_tools(model, self.tools)
         if self.models_by_route is not None and self.tools_by_route is not None:
             self.models_by_route = {
-                route: (model.bind_tools(route_tools) if route_tools else model)
+                route: self._bind_tools(model, route_tools)
                 for route, route_tools in self.tools_by_route.items()
             }
 
@@ -759,7 +792,7 @@ class LangGraphAgent:
             worker_tools = []
         else:
             worker_tools = self.tools_by_route.get(category, self.tools)
-        worker_model = base.bind_tools(worker_tools) if worker_tools else base
+        worker_model = self._bind_tools(base, worker_tools)
 
         # Prepend ONLY the results this subtask declared a dependency on (falls
         # back to all completed steps when it declared none but some ran first,
@@ -926,7 +959,7 @@ class LangGraphAgent:
         worker_messages: List[BaseMessage] = []
         sys_prompt = system_prompt if system_prompt is not None else self.system_prompt
         if sys_prompt:
-            worker_messages.append(SystemMessage(content=sys_prompt))
+            worker_messages.append(self._system_message(sys_prompt))
         # Real prior-conversation messages (uncapped; passed ONLY by the
         # orchestrator via _run_subtask — spawn/resume sub-agents pass None, so
         # their context isolation is preserved) sit BETWEEN the system prompt and
@@ -1279,7 +1312,7 @@ class LangGraphAgent:
         if self.system_prompt and (
             not messages or not isinstance(messages[0], SystemMessage)
         ):
-            messages = [SystemMessage(content=self.system_prompt)] + messages
+            messages = [self._system_message()] + messages
 
         config = {"callbacks": self.callbacks} if self.callbacks else {}
 
@@ -1607,7 +1640,7 @@ class LangGraphAgent:
         # the split so strict providers accept the retry.
         rebuilt = self._sanitize_tool_pairs(list(self._messages))
         if self.system_prompt:
-            rebuilt = [SystemMessage(content=self.system_prompt)] + rebuilt
+            rebuilt = [self._system_message()] + rebuilt
         return rebuilt
 
     def _stream_response(
@@ -2566,9 +2599,9 @@ class LangGraphAgent:
         }
 
         if self.system_prompt:
-            initial_state["messages"] = [
-                SystemMessage(content=self.system_prompt)
-            ] + list(initial_state["messages"])
+            initial_state["messages"] = [self._system_message()] + list(
+                initial_state["messages"]
+            )
 
         # recursion_limit is a runaway guard; hitting it means a likely stuck loop.
         #

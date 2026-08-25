@@ -13,11 +13,20 @@ import time
 
 import pytest
 
+from mnemoai.server.tools import shell_state
 from mnemoai.server.tools.execute_bash import (
     MAX_OUTPUT_CHARS,
     _truncate_output,
     register_execute_bash_tools,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clean_tracked_cwd():
+    """The shell's tracked directory is process-wide state; isolate each test."""
+    shell_state.reset_cwd()
+    yield
+    shell_state.reset_cwd()
 
 
 class _CapturingMCP:
@@ -97,6 +106,94 @@ class TestExecuteBash:
         finally:
             if os.path.exists(marker):
                 os.remove(marker)
+
+
+class TestShellIsBash:
+    """The tool is documented as bash, so bash is what runs it. Under /bin/sh
+    these constructs fail or behave differently depending on the host (dash on
+    Debian/Ubuntu, bash in POSIX mode on macOS)."""
+
+    def test_double_bracket_test_works(self, execute_bash):
+        result = json.loads(run(execute_bash("[[ abc == a* ]] && echo matched", timeout=5)))
+        assert result["stdout"].strip() == "matched"
+        assert result["exit_status"] == 0
+
+    def test_arrays_work(self, execute_bash):
+        cmd = "arr=(one two three); echo ${arr[1]}"
+        result = json.loads(run(execute_bash(cmd, timeout=5)))
+        assert result["stdout"].strip() == "two"
+
+    def test_process_substitution_works(self, execute_bash):
+        result = json.loads(run(execute_bash("cat <(echo inner)", timeout=5)))
+        assert result["stdout"].strip() == "inner"
+
+
+class TestTrackedWorkingDirectory:
+    """A `cd` used to evaporate: each call is a fresh shell, so the next command
+    ran back at the spawn directory — silently operating on the wrong tree."""
+
+    def test_cwd_is_reported(self, execute_bash):
+        result = json.loads(run(execute_bash("echo hi", timeout=5)))
+        assert result["cwd"] == os.getcwd()
+
+    def test_a_cd_carries_over_to_the_next_call(self, execute_bash, tmp_path):
+        target = tmp_path / "project"
+        target.mkdir()
+        first = json.loads(run(execute_bash(f"cd {target}", timeout=5)))
+        assert os.path.realpath(first["cwd"]) == os.path.realpath(str(target))
+        second = json.loads(run(execute_bash("pwd", timeout=5)))
+        assert os.path.realpath(second["stdout"].strip()) == os.path.realpath(str(target))
+
+    def test_a_relative_path_resolves_against_the_tracked_directory(
+        self, execute_bash, tmp_path
+    ):
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub" / "marker.txt").write_text("found me")
+        run(execute_bash(f"cd {tmp_path}", timeout=5))
+        result = json.loads(run(execute_bash("cat sub/marker.txt", timeout=5)))
+        assert "found me" in result["stdout"]
+
+    def test_a_failed_cd_leaves_the_directory_alone(self, execute_bash):
+        before = json.loads(run(execute_bash("pwd", timeout=5)))["cwd"]
+        result = json.loads(run(execute_bash("cd /definitely/not/here", timeout=5)))
+        assert result["exit_status"] != 0
+        assert result["cwd"] == before
+
+    def test_a_subshell_cd_does_not_move_the_session(self, execute_bash, tmp_path):
+        # `(cd x)` deliberately scopes the change; the session must agree.
+        run(execute_bash(f"(cd {tmp_path})", timeout=5))
+        assert json.loads(run(execute_bash("pwd", timeout=5)))["cwd"] == os.getcwd()
+
+    def test_the_probe_does_not_pollute_stdout(self, execute_bash, tmp_path):
+        result = json.loads(run(execute_bash(f"cd {tmp_path} && echo only-this", timeout=5)))
+        assert result["stdout"].strip() == "only-this"
+        assert result["stderr"].strip() == ""
+
+    def test_a_command_that_exits_the_shell_keeps_the_old_directory(
+        self, execute_bash, tmp_path
+    ):
+        # The probe never runs, which must fail open rather than lose the cwd.
+        result = json.loads(run(execute_bash(f"cd {tmp_path}; exit 7", timeout=5)))
+        assert result["exit_status"] == 7
+        assert result["cwd"] == os.getcwd()
+
+    def test_a_timed_out_command_does_not_move_the_directory(self, execute_bash, tmp_path):
+        result = json.loads(run(execute_bash(f"cd {tmp_path}; sleep 10", timeout=1)))
+        assert result["error"] is True
+        assert result["cwd"] == os.getcwd()
+
+
+class TestStdinIsNotInherited:
+    """The server's stdin IS the MCP protocol pipe. A command reading stdin would
+    otherwise eat the client's JSON-RPC stream, and one waiting on input that can
+    never arrive would burn the whole timeout instead of seeing EOF."""
+
+    def test_a_command_reading_stdin_gets_eof_immediately(self, execute_bash):
+        start = time.time()
+        result = json.loads(run(execute_bash("cat", timeout=10)))
+        assert result.get("exit_status") == 0
+        assert result["stdout"] == ""
+        assert time.time() - start < 5  # EOF, not a wait on a pipe
 
 
 class TestOutputCap:

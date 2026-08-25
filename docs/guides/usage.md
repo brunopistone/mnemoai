@@ -50,8 +50,10 @@ Assistant: [Uses fs_read tool and displays content]
 
 | Command                    | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/help`                    | Show the command reference and keyboard keys — the same box the launch banner prints, brought back after it has scrolled away                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `/exit` or `/quit`         | Exit the application                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `/clear`                   | Clear conversation history and RAG index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `/context`                 | Break down **what is filling the context window** right now — system prompt, steering files, tool schemas, conversation — with each part's share and how much room is left ([details](#seeing-where-the-context-goes))                                                                                                                                                                                                                                                                                                                                                    |
 | `/save`                    | Save the current conversation. After a `/load` (or an earlier `/save`), a bare `/save` **overwrites that same file**; `/save <path>` saves to a specific file/dir; a fresh conversation (after `/clear`) saves to a new timestamped file                                                                                                                                                                                                                                                                                                                                |
 | `/load <path>`             | Load a saved conversation (no path → pick from a list; the picker has a **Delete** button to remove a saved conversation after a Yes/No confirm, then reopens). The loaded file becomes the one a later `/save` writes back to                                                                                                                                                                                                                                                                                                                                          |
 | `/usage`                   | Token totals for this session, per model — input, output and cache tokens, counting **every** model call including sub-agents, orchestrator workers and the query router. Cumulative spend, not the size of your conversation ([details](#checking-token-usage))                                                                                                                                                                                                                                                                                                        |
@@ -228,6 +230,45 @@ opening prompt and the two rows would otherwise look identical:
     comes from the branch's history: say what you want undone, or check `git diff`
     before continuing.
 
+### Seeing where the context goes
+
+`/usage` answers "what has this session spent". `/context` answers the other
+question — "what is my next turn paying for, and which part of it can I shrink":
+
+```
+Context window — 48,120 tokens of 1,000,000 (5%)
+  [█░░░░░░░░░░░░░░░░░░░░░░░]
+
+  System prompt                                 9,930   21%
+  Persistent memory (MEMORY.md)                   430    1%
+  Skills listing                                  210    0%
+
+  Steering: 2 files                            14,880   31%
+    ~/.mnemoai/STEERING.md                        640
+    ~/dev/project/CLAUDE.md                    14,240
+
+  Tool schemas: 41 tools                       11,300   23%
+
+  Conversation: 38 messages                    11,370   24%
+    tool results                                8,960
+    assistant replies                           1,880
+    your prompts                                  530
+
+  Free: 951,880 tokens  ·  compaction starts at 800,000
+```
+
+The two rows worth looking at are the ones nothing else surfaces: **steering files**
+and **tool schemas** are re-sent verbatim on every single call and
+[compaction](#commands) can never reclaim them, so a 14k-token repo `CLAUDE.md` is a
+permanent tax on every turn — trimming the file is the only thing that helps. The
+conversation row is the part `/compact` shrinks.
+
+The **total** is exact (the provider's own count for the last turn, the same number
+as the `[Context: N tokens]` line); the **split** is estimated and scaled onto it,
+so the percentages are meaningful even though the per-part counts are approximate.
+Before the first turn of a session there is nothing to scale to and the report says
+so.
+
 ### Checking token usage
 
 `/usage` shows what this session has actually cost in tokens:
@@ -246,6 +287,13 @@ Token usage this session (as reported by the provider)
 router are all real model calls, and they're usually where the tokens go — a single
 delegated research task can spend an order of magnitude more than the turn that
 triggered it. Those are exactly the numbers worth surfacing, so they're included.
+
+**The cache line is prompt caching at work.** On the providers that support it the
+stable start of every request — system prompt, tool definitions, prior turns — is
+cached and re-read instead of re-charged, so `cache: … read` grows as a turn makes
+tool calls. See
+[`PROMPT_CACHE`](../configuration.md#prompt_cache-reuse-the-prompt-prefix-instead-of-re-paying-for-it)
+for what it applies to and how to turn it off.
 
 **`/usage` and `[Context: N]` measure different things.** The context line after each
 turn is how big the prompt is _right now_ — what the next turn re-sends, and what

@@ -75,6 +75,24 @@ def _int(value: Any) -> int:
     return n if n > 0 else 0
 
 
+# Per-TTL cache-write keys. LangChain's normalized `cache_creation` is NOT filled
+# by every provider: both Bedrock and Mantle reported a write of several thousand
+# tokens under these keys with `cache_creation: 0`, which showed a prompt-cache
+# session as "0 written" — the one number that proves caching engaged.
+_CACHE_WRITE_KEYS = ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+
+
+def _cache_write(details: Dict[str, Any]) -> int:
+    """Cache-creation tokens from a report, per-TTL keys as the fallback."""
+    raw = details.get("cache_creation")
+    if isinstance(raw, dict):  # some providers nest the per-TTL breakdown here
+        return sum(_int(v) for v in raw.values())
+    normalized = _int(raw)
+    if normalized:
+        return normalized
+    return sum(_int(details.get(k)) for k in _CACHE_WRITE_KEYS)
+
+
 class UsageTracker:
     """Accumulates reported token usage per model for this session."""
 
@@ -105,7 +123,7 @@ class UsageTracker:
                 details = um.get("input_token_details")
                 if isinstance(details, dict):
                     entry.cache_read += _int(details.get("cache_read"))
-                    entry.cache_write += _int(details.get("cache_creation"))
+                    entry.cache_write += _cache_write(details)
         except Exception:  # noqa: BLE001 — accounting must never break a turn
             pass
 

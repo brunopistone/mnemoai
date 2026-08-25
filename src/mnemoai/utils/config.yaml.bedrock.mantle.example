@@ -45,6 +45,12 @@ MODEL_ID:
 #   # (the older enabled+budget form is rejected by these models); Claude <=4.5
 #   # uses thinking={type: enabled, budget_tokens: …}.
 #   REASONING_EFFORT: high
+#   # The stable prompt prefix (system prompt + tool definitions + prior turns)
+#   # is cached, so every later call in a turn re-reads it instead of re-paying
+#   # for it. On by default on this protocol (the OpenAI-shaped ones don't take
+#   # the marker); set false to opt out.
+#   # PROMPT_CACHE: true
+#   # PROMPT_CACHE_TTL: 5m     # 5m | 1h (1h costs more to write)
 #   # Override the raw block yourself via EXTRA_PARAMS if version detection is
 #   # wrong for your model (overrides the above):
 #   # EXTRA_PARAMS:

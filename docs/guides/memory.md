@@ -69,6 +69,19 @@ Only the app home is searched for the global file — `~/.mnemoai/STEERING.md`, 
 
 **What to put in it:** build/test commands, code-style rules, project layout notes, a commit-message format, "prefer X over Y" preferences — anything you'd tell a new collaborator. Keep it focused (a couple hundred lines at most); it's in context every turn, so brevity helps adherence.
 
+**Pull in another file with `@path`.** Rather than one long file, reference others and they're injected alongside it:
+
+```markdown
+Follow the conventions in @docs/style-guide.md.
+Release steps live in @~/.mnemoai/release-checklist.md.
+```
+
+A path is resolved relative to the file that mentions it (so a project file means its own neighbours, wherever you launched the app); `~` and absolute paths work too. The reference stays in the sentence and the referenced file is appended under its own `Contents of …` header, so the assistant knows exactly what it's reading. Details worth knowing:
+
+- **Only real files are inlined.** A reference to something missing — or to a directory — is left as plain text, which is also why an `@staticmethod` in a code example or an `@handle` in prose is harmless.
+- **Chains are followed** (a referenced file may reference more), up to three levels deep and 20 files per turn, and each file is injected once no matter how often it's named — a cycle is safe.
+- **References share the referencing file's `STEERING.MAX_CHARS` budget**, so splitting a large ruleset across files doesn't sidestep the cap. Anything dropped is reported in the block rather than silently omitted.
+
 **Let the assistant write it for you.** You don't have to author `STEERING.md` by hand. A bundled **`steering-creator`** skill ships out of the box: ask the assistant to _"create a STEERING.md for this project"_ (or _"document how to work in this repo"_) and it investigates the codebase — README, build/test config, layout — and writes a well-formed file following best practices (specific rules, scannable structure, only durable always-on facts). Ask it to _"improve my STEERING.md"_ and it refines the existing one.
 
 There's no config toggle: the file's presence is the switch. If no instruction file exists at either level, nothing is injected. It's distinct from `MEMORY.md` (facts the agent learns), skills (on-demand procedures), and the base system prompt.

@@ -14,6 +14,7 @@ from mcp import StdioServerParameters
 
 from mnemoai.client import (
     context_injection,
+    context_report,
     session_artifacts,
     transcript_export,
     usage_tracker,
@@ -1074,6 +1075,14 @@ class LangGraphClient:
             # Profiling is a side effect of a turn the user has ALREADY seen
             # answered; it must never surface as "something went wrong".
             logger.debug(f"Profiling this turn failed: {e}")
+
+    def context_report(self) -> str:
+        """The ``/context`` report: what the next turn's prompt is made of.
+
+        The counterpart to ``usage_report`` — that one is cumulative spend, this
+        one is the standing cost of the window right now.
+        """
+        return context_report.report(self)
 
     def usage_report(self) -> str:
         """The ``/usage`` report: reported token totals for this session."""
