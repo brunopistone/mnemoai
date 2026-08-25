@@ -55,7 +55,7 @@ def register_todo_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def todo_write(todos: str, scope: str = "default") -> str:
+    def todo_write(todos: str, scope: str = "default") -> str:
         """Update the current todo list.
 
         Use this for tasks with 3 or more steps; skip it for simple, single-step
@@ -153,7 +153,7 @@ def register_todo_tools(mcp: FastMCP) -> None:
             )
 
     @mcp.tool()
-    async def todo_read(scope: str = "default") -> str:
+    def todo_read(scope: str = "default") -> str:
         """Read the current todo list.
 
         Args:
@@ -178,7 +178,7 @@ def register_todo_tools(mcp: FastMCP) -> None:
             )
 
     @mcp.tool()
-    async def todo_clear(scope: str = "default") -> str:
+    def todo_clear(scope: str = "default") -> str:
         """Clear the current todo list.
 
         Use this when starting a completely new task or when

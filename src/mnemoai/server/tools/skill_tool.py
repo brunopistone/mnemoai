@@ -27,7 +27,7 @@ def register_skill_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def use_skill(name: str, arguments: str = "") -> str:
+    def use_skill(name: str, arguments: str = "") -> str:
         """Load a skill's full step-by-step instructions into context.
 
         Call this the MOMENT the user's request matches one of the skills listed

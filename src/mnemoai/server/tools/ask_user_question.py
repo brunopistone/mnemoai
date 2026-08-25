@@ -28,7 +28,7 @@ def register_ask_user_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def ask_user_question(question: str, options: list[str]) -> str:
+    def ask_user_question(question: str, options: list[str]) -> str:
         """Ask the user to choose between concrete options, and wait for the answer.
 
         Use this ONLY when you are blocked on a decision that is genuinely the

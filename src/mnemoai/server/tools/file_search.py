@@ -46,7 +46,7 @@ def register_search_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def glob_search(
+    def glob_search(
         pattern: str,
         path: str = None,
         max_results: int = 1000,
@@ -182,7 +182,7 @@ def register_search_tools(mcp: FastMCP) -> None:
             return json.dumps({"error": True, "message": str(e)})
 
     @mcp.tool()
-    async def grep_search(
+    def grep_search(
         pattern: str,
         path: str = None,
         file_pattern: str = None,

@@ -7,6 +7,57 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.10.3] — 2026-08-25
+
+### Fixed
+
+- **One agent's tool call no longer freezes every other agent's.** With several
+  agents in flight — an orchestrator wave, `spawn_agent` sub-agents — tool calls
+  failed in bursts with `'<tool>' did not respond within 300s`, including ones
+  whose real work takes milliseconds (`glob_search`, `memory`), leaving the run to
+  be cancelled by hand. The MCP server is one subprocess with one event loop and
+  the SDK dispatches requests concurrently, but 24 of the 31 tools were declared
+  `async def` with no `await` anywhere in the body, so each ran start-to-finish on
+  that loop: while one blocked, the server could not dispatch another call, read a
+  request, or even hand back a response it had already finished. A single
+  `execute_bash` was enough to kill every other in-flight call at
+  `LLM.MCP_CALL_TIMEOUT`, and a long wait the client explicitly supports —
+  `wait_for_task(timeout_seconds=1500)`, which polls with `time.sleep` — made it
+  certain. A tool with a blocking body is now a plain `def` and runs on a worker
+  thread, applied once where the tools are registered so one added later is
+  covered by construction; only genuinely-awaiting tools (`fs_read`, `web_search`,
+  `web_crawler`) still run on the loop. Measured on the real server subprocess,
+  a `glob_search` issued during an 8s `execute_bash`: **7.03s before, 0.00s after**.
+- The one-time Playwright Chromium download (~260 MB, triggered by the first
+  `web_crawler` call after a fresh install) also ran on the event loop, blocking
+  every other agent's tool call for the length of the download. It now runs on a
+  thread.
+
+### Security
+
+- **`PyPDF2` replaced by `pypdf`.** PyPDF2 was retired at 3.0.1 (the project was
+  renamed to `pypdf`), so its open advisory — an infinite loop on a malformed
+  comment, reachable by reading a hostile PDF through `fs_read` — can never be
+  patched there. `pypdf` carries the fix and the reader's API use is unchanged;
+  extraction on real PDFs is byte-identical, and it additionally preserves the
+  line breaks PyPDF2 flattened into runs of spaces.
+- `h2` raised to 4.4.1 (duplicate-`Host` request-smuggling advisory, reached
+  through `httpx`'s HTTP/2 support).
+- `cryptography` deliberately **not** raised, and `langchain-litellm` floored at
+  0.7.0 to keep a resolver from doing it silently: 0.7.0 requires
+  `cryptography<49`, so pulling cryptography past its advisory range (`<50.0.0`)
+  downgrades that provider integration by two minor versions instead. The
+  advisory concerns PKCS#7 `EnvelopedData` decryption, which nothing in this
+  project calls.
+- The open `chromadb` advisories have **no patched release** — 1.5.9 is the
+  latest and every vulnerable range includes it. All of them require a running
+  Chroma HTTP server: its `/api/v2` collection endpoints, cross-tenant
+  permissions, or `SimpleRBACAuthorizationProvider`. Both call sites here
+  construct `chromadb.PersistentClient(path=…)` — an embedded, single-user store
+  on the local filesystem — and nothing starts a server or configures an
+  authorization provider, so none of them is reachable in this application. To be
+  raised when upstream ships a fix.
+
 ## [1.10.2] — 2026-08-24
 
 ### Fixed

@@ -32,7 +32,7 @@ def register_edit_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def file_edit(
+    def file_edit(
         file_path: str, old_string: str, new_string: str, replace_all: bool = False
     ) -> str:
         """Perform exact string replacement in a file.

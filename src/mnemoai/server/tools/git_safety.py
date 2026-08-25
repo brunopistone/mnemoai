@@ -356,7 +356,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def git_safe(
+    def git_safe(
         command: str, allow_dangerous: bool = False, reason: str = ""
     ) -> str:
         """Execute git commands with safety checks.
@@ -528,7 +528,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
             )
 
     @mcp.tool()
-    async def git_status_safe() -> str:
+    def git_status_safe() -> str:
         """Get comprehensive git status with safety information.
 
         Returns current branch, uncommitted changes, push/pull status,
@@ -635,7 +635,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
             )
 
     @mcp.tool()
-    async def git_commit_safe(
+    def git_commit_safe(
         message: str,
         add_all: bool = False,
         add_files: str = "",

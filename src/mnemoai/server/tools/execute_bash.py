@@ -48,7 +48,7 @@ def register_execute_bash_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def execute_bash(command: str, timeout: int = 30) -> str:
+    def execute_bash(command: str, timeout: int = 30) -> str:
         """Execute bash/shell commands and return the output.
 
         Use this tool when users ask to run commands, list directories recursively, check system info, or perform shell operations.

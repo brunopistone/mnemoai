@@ -90,6 +90,10 @@ All configuration flows through `Config()` (`Config().get("SECTION.KEY", default
 
 Two pure classifiers enforce, **inside the MCP server**, a hard floor that holds even if the server is driven directly. Narrow: they block only **catastrophic, irreversible** actions (root/home `rm -rf`, `mkfs`, raw-device `dd`, power-state changes, fork bomb; system-dir writes), NOT ordinary scoped mutations (those stay gated by the client `_confirm_tool` gate + plan mode). `bash_policy.classify_shell_command` (in `execute_bash` + `start_background_task`) and `path_policy.classify_write_path` (in `fs_write` + `file_edit`); config-independent, unit-tested.
 
+### Blocking tools off the event loop (`server/tools/thread_offload.py`) ★
+
+The server is ONE subprocess with ONE event loop and the SDK dispatches requests **concurrently**, so parallel agents really do have several tool calls in flight. A synchronous tool body never yields, so while it runs the loop can't dispatch, read, or even answer anything else — **one blocking tool freezes the tool layer for every agent** until the client's `MCP_CALL_TIMEOUT` kills their calls. `async def` does not help: it's the body that matters, and FastMCP runs a plain `def` inline too. **The convention, enforced at the single registration chokepoint by the `ThreadedToolServer` proxy (`ToolManager.register_tools`): a tool is `async def` only if it really awaits** — everything else is a plain `def` and `offload_blocking` runs it on a worker thread (`anyio.to_thread`, matching the SDK's backend). Hence `tool_error_handler` is sync-in/sync-out as well as async-in/async-out over one shared except-chain. Never pair `functools.wraps` with an explicit `__signature__` here (it would break FastMCP's schema generation). `fs_read` is the known remaining on-loop path, deliberately. An AST scan in `tests/unit/test_thread_offload.py` fails on the next await-free `async def` tool.
+
 ### Read-before-write / staleness gate (`server/tools/read_state.py`) ★
 
 A third server-side floor, distinct from the safety classifiers: an in-process registry that records the on-disk mtime of every file the model reads via `fs_read` (`record_read`), and blocks `fs_write`/`file_edit` from modifying an **existing** file that was never read or that **changed on disk since it was last read** (`check_write_allowed` → an `error`/`must_read_first`/`stale_read` payload). Creating a brand-new file is exempt; a successful write re-baselines the file (chained same-turn edits are fine). Keyed by `normcase(realpath(path))` so different spellings/case map to one entry. It never prompts (returns a normal tool error, so non-TTY / directly-driven servers can't deadlock) and is purely additive to the client `_confirm_tool` gate and the `path_policy` floor.
@@ -271,7 +275,7 @@ ruff check --select I .                      # import-sort gate (same as CI); --
 ## Adding a New MCP Tool
 
 1. Create `server/tools/my_tool.py`
-2. Define function with `@mcp.tool()` decorator (receives `mcp` from registration)
+2. Define function with `@mcp.tool()` decorator (receives `mcp` from registration). **Write it as a plain `def` unless the body really `await`s something** — a blocking `async def` runs inline on the server's single event loop and stalls every other agent's tool call (see the thread-offload pattern); a sync tool is offloaded to a thread automatically at registration
 3. Add `@tool_error_handler` for standardized error responses
 4. Register in `server/tools/tools_manager.py` → `register_tools()` method
 5. If conditionally enabled, gate behind a config toggle

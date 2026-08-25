@@ -3,7 +3,7 @@
 import json
 import os
 
-import PyPDF2
+import pypdf
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
@@ -46,7 +46,7 @@ async def read_pdf(file_path: str) -> str:
 
         # Read PDF
         with open(normalized_path, "rb") as file:
-            reader = PyPDF2.PdfReader(file)
+            reader = pypdf.PdfReader(file)
             total_pages = len(reader.pages)
 
             full_text = ""
