@@ -27,7 +27,7 @@ def register_subagent_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def spawn_agent(
+    def spawn_agent(
         agent_type: str,
         prompt: str,
         description: str = "",
@@ -88,7 +88,7 @@ def register_subagent_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def resume_agent(
+    def resume_agent(
         agent_id: str, prompt: str, run_in_background: bool = True
     ) -> str:
         """Resume a previously-run sub-agent with a follow-up instruction.

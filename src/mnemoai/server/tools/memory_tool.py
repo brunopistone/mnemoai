@@ -26,7 +26,7 @@ def register_memory_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def memory(action: str, text: str = "", old_text: str = "") -> str:
+    def memory(action: str, text: str = "", old_text: str = "") -> str:
         """Maintain durable, cross-session memory about the user and environment.
 
         This is your long-term notebook. Its full contents are injected into your

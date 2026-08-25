@@ -33,7 +33,7 @@ All Python dependencies are listed in `requirements.txt`. The new productivity t
 - `boto3`: AWS Bedrock/SageMaker
 - `tiktoken`: Token counting
 - `chromadb`, `faiss-cpu`: Vector stores for RAG
-- `PyPDF2`, `python-docx`: Document readers
+- `pypdf`, `python-docx`: Document readers
 - `Pygments`: Code syntax highlighting
 - `prompt_toolkit`: Interactive CLI
 - `brave-search-python-client`: Web search

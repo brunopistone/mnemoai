@@ -2,6 +2,7 @@ import json
 import sys
 from io import StringIO
 
+import anyio.to_thread
 from crawl4ai import *
 from mcp.server.fastmcp import FastMCP
 
@@ -131,7 +132,11 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                 # missing. Install it once, then retry.
                 if _is_missing_browser_error(e) and not _browser_install_attempted:
                     _browser_install_attempted = True
-                    if _install_playwright_chromium():
+                    # On a thread: this is a ~260MB download, and it's the one
+                    # blocking call left inside a genuinely-async tool — run on
+                    # the event loop it would freeze every other agent's tool
+                    # call for minutes (see thread_offload).
+                    if await anyio.to_thread.run_sync(_install_playwright_chromium):
                         result = await _crawl()
                     else:
                         return json.dumps({

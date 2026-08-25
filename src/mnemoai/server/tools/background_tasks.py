@@ -143,7 +143,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
     sweep_old_task_logs()
 
     @mcp.tool()
-    async def start_background_task(
+    def start_background_task(
         command: str, description: str = "", working_directory: str = ""
     ) -> str:
         """Start a command running in the background.
@@ -252,7 +252,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
-    async def get_task_status(task_id: str) -> str:
+    def get_task_status(task_id: str) -> str:
         """Get the status of a background task.
 
         Args:
@@ -292,7 +292,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
-    async def get_task_output(task_id: str, tail_lines: int = 50) -> str:
+    def get_task_output(task_id: str, tail_lines: int = 50) -> str:
         """Get the output of a background task.
 
         Args:
@@ -339,7 +339,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
-    async def list_background_tasks(include_completed: bool = True) -> str:
+    def list_background_tasks(include_completed: bool = True) -> str:
         """List all background tasks.
 
         Args:
@@ -384,7 +384,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
-    async def cancel_background_task(task_id: str) -> str:
+    def cancel_background_task(task_id: str) -> str:
         """Cancel a running background task.
 
         Args:
@@ -458,7 +458,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         )
 
     @mcp.tool()
-    async def wait_for_task(task_id: str, timeout_seconds: int = 300) -> str:
+    def wait_for_task(task_id: str, timeout_seconds: int = 300) -> str:
         """Wait for a background task to complete.
 
         Args:
@@ -523,7 +523,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
             time.sleep(1)
 
     @mcp.tool()
-    async def clear_completed_tasks() -> str:
+    def clear_completed_tasks() -> str:
         """Remove completed, failed, and cancelled tasks from the list.
 
         Returns:

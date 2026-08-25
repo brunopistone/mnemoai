@@ -18,7 +18,7 @@ def register_image_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
-    async def describe_image(
+    def describe_image(
         image_path: str, question: str = "Describe this image in detail."
     ) -> str:
         """Read the content of an image using AI vision model.

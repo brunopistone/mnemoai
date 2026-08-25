@@ -41,8 +41,14 @@ def execute_bash():
     return mcp.registered["execute_bash"]
 
 
-def run(coro):
-    return asyncio.run(coro)
+def run(result):
+    """Resolve a tool result: await a coroutine, else pass the value through.
+
+    A tool with a blocking body is a plain ``def`` (server/tools/thread_offload.py
+    offloads it to a thread at registration), so calling it directly here returns
+    the string rather than a coroutine.
+    """
+    return asyncio.run(result) if asyncio.iscoroutine(result) else result
 
 
 class TestExecuteBash:

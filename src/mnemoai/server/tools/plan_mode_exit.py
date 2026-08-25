@@ -28,7 +28,7 @@ def register_plan_mode_exit_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def exit_plan_mode(plan: str, allowed_bash: list[str] = None) -> str:
+    def exit_plan_mode(plan: str, allowed_bash: list[str] = None) -> str:
         """Present your finished plan for approval and exit read-only plan mode.
 
         Call this the MOMENT your plan is ready while plan mode is active — pass

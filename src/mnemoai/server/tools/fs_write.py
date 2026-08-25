@@ -57,7 +57,7 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    async def fs_write(
+    def fs_write(
         path: str,
         command: str,
         file_text: str = "",
@@ -137,13 +137,13 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
                 return json.dumps(read_verdict)
 
             if command == "create":
-                result = await _create_file(resolved_path, file_text, summary)
+                result = _create_file(resolved_path, file_text, summary)
             elif command == "str_replace":
-                result = await _str_replace(resolved_path, old_str, new_str, summary)
+                result = _str_replace(resolved_path, old_str, new_str, summary)
             elif command == "insert":
-                result = await _insert_line(resolved_path, insert_line, new_str, summary)
+                result = _insert_line(resolved_path, insert_line, new_str, summary)
             elif command == "append":
-                result = await _append_file(resolved_path, new_str, summary)
+                result = _append_file(resolved_path, new_str, summary)
             else:
                 return json.dumps(
                     {
@@ -168,7 +168,7 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
             )
 
 
-async def _create_file(path: str, content: str, summary: str) -> str:
+def _create_file(path: str, content: str, summary: str) -> str:
     """Create a new file with content.
 
     Args:
@@ -204,7 +204,7 @@ async def _create_file(path: str, content: str, summary: str) -> str:
         )
 
 
-async def _str_replace(path: str, old_str: str, new_str: str, summary: str) -> str:
+def _str_replace(path: str, old_str: str, new_str: str, summary: str) -> str:
     """Replace specific text in a file.
 
     Args:
@@ -265,7 +265,7 @@ async def _str_replace(path: str, old_str: str, new_str: str, summary: str) -> s
         )
 
 
-async def _insert_line(path: str, line_number: int, content: str, summary: str) -> str:
+def _insert_line(path: str, line_number: int, content: str, summary: str) -> str:
     """Insert text after a specific line number.
 
     Args:
@@ -324,7 +324,7 @@ async def _insert_line(path: str, line_number: int, content: str, summary: str) 
         )
 
 
-async def _append_file(path: str, content: str, summary: str) -> str:
+def _append_file(path: str, content: str, summary: str) -> str:
     """Append content to end of existing file.
 
     Args:
