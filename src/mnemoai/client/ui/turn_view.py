@@ -4,6 +4,7 @@ Pure string builders (no I/O, no prompt_toolkit) written into native scrollback
 above the pinned input; colors degrade harmlessly where unsupported.
 """
 
+import difflib
 import re
 import threading
 
@@ -17,6 +18,8 @@ _RESET = "\033[0m"
 # Diff colors for file edits (added / removed lines), like a git diff.
 _ADD = "\033[32m"   # green
 _DEL = "\033[31m"   # red
+# Unchanged lines kept on each side of a change in a file-edit diff.
+_DIFF_CONTEXT = 3
 _HEADER = "\033[38;5;63m"  # indigo, matches the launch banner
 
 _BAR = f"{_GREEN}▌{_RESET}"
@@ -198,16 +201,65 @@ def _short_path(path: str) -> str:
     return p
 
 
-def _diff_lines(old: str, new: str) -> list:
-    """Render an old→new change as colored ``-``/``+`` diff lines (whole-block).
+def _context_lines(lines: list, leading: bool, trailing: bool) -> list:
+    """Unchanged lines as gray context, collapsing a long run to its useful ends.
 
-    Not a line-level LCS diff (we don't have the file); we show the removed text
-    in red and the added text in green, which is what a str-replace edit is."""
+    Only the side of the run that FACES a change carries information, so the
+    unchanged head of an edit (``leading``) keeps its LAST few lines and the
+    unchanged tail (``trailing``) keeps its FIRST few. An interior run keeps both
+    ends and elides the middle.
+    """
+    head = 0 if leading else _DIFF_CONTEXT
+    tail = 0 if trailing else _DIFF_CONTEXT
+    gray = [f"  {_GRAY}  {line}{_RESET}" for line in lines]
+    if len(gray) <= head + tail:
+        return gray
+    dropped = len(gray) - head - tail
+    return (
+        gray[:head]
+        + [f"  {_GRAY}  … {dropped} unchanged line{'s' if dropped != 1 else ''}{_RESET}"]
+        + (gray[len(gray) - tail:] if tail else [])
+    )
+
+
+def _diff_lines(old: str, new: str) -> list:
+    """Render an old→new change as a line-level diff (red ``-`` / green ``+``).
+
+    Pairs the two blobs line-by-line (``difflib`` LCS) so an edit buried in a
+    large block shows only the lines that actually changed, with the surrounding
+    unchanged lines kept as gray context and long runs of them elided. The naive
+    version printed every old line then every new line, which for a one-word fix
+    in a 40-line replacement made the reader diff it by eye.
+    """
+    old_lines = (old or "").split("\n")
+    new_lines = (new or "").split("\n")
+    # Whole-block insert/delete: nothing to pair, and no context to keep.
+    if not old:
+        return [f"  {_ADD}+ {line}{_RESET}" for line in new_lines]
+    if not new:
+        return [f"  {_DEL}- {line}{_RESET}" for line in old_lines]
+
+    opcodes = difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes()
+    # Identical blobs: there is no change to point at, so show the text plainly
+    # rather than eliding it down to a bare "N unchanged lines".
+    if all(tag == "equal" for tag, *_ in opcodes):
+        return [f"  {_GRAY}  {line}{_RESET}" for line in old_lines]
+
     out = []
-    for line in (old or "").split("\n"):
-        out.append(f"  {_DEL}- {line}{_RESET}")
-    for line in (new or "").split("\n"):
-        out.append(f"  {_ADD}+ {line}{_RESET}")
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            out.extend(
+                _context_lines(
+                    old_lines[i1:i2],
+                    leading=(i1 == 0),
+                    trailing=(i2 == len(old_lines)),
+                )
+            )
+            continue
+        if tag in ("replace", "delete"):
+            out.extend(f"  {_DEL}- {line}{_RESET}" for line in old_lines[i1:i2])
+        if tag in ("replace", "insert"):
+            out.extend(f"  {_ADD}+ {line}{_RESET}" for line in new_lines[j1:j2])
     return out
 
 

@@ -410,6 +410,7 @@ def test_provider_params_registry_shape():
         "TEMPERATURE", "MAX_TOKENS", "TOP_P", "TOP_K", "STOP",
         "API_KEY", "ENDPOINT_URL",
         "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+        "PROMPT_CACHE", "PROMPT_CACHE_TTL",
         "EXTRA_PARAMS",
     }
     # Bedrock must offer STREAM like the other streaming providers, so /params can
@@ -419,6 +420,8 @@ def test_provider_params_registry_shape():
         "TEMPERATURE", "TOP_P", "MAX_TOKENS", "STOP",
         "REGION", "ENDPOINT_URL",
         "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+        # Prompt-cache breakpoints: registered so /model pruning keeps an opt-out.
+        "PROMPT_CACHE", "PROMPT_CACHE_TTL",
         "EXTRA_PARAMS",
     }
     assert supported_keys("VISION_MODEL_ID", "litellm") == {
@@ -469,7 +472,10 @@ def test_tunable_params_excludes_connection_keys():
     # including REASONING_EFFORT (translated per protocol by the factory).
     tm = tunable_params("MODEL_ID", "mantle")
     assert "REGION" not in tm and "API_PROTOCOL" not in tm
-    assert {"TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM", "REASONING_EFFORT"} == tm
+    assert {
+        "TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM", "REASONING_EFFORT",
+        "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+    } == tm
     # It's exactly supported minus the connection set and the generic
     # EXTRA_PARAMS passthrough (which is not a /params-tunable scalar).
     from mnemoai.models.provider_params import _TABLES  # type: ignore

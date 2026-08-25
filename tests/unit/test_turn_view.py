@@ -138,6 +138,82 @@ class TestFileOpRendering:
         assert home not in out.replace("~/proj/file.py", "")  # no full home path
 
 
+class TestLineLevelDiff:
+    """A file-edit diff pairs old/new LINE BY LINE, so an edit buried in a large
+    replacement shows only the lines that changed. The previous renderer printed
+    every old line then every new line, leaving the reader to diff by eye."""
+
+    @staticmethod
+    def _plain(out):
+        import re
+
+        return re.sub(r"\x1b\[[0-9;]*m", "", out)
+
+    def _diff(self, old, new):
+        return self._plain(
+            render_tool_call(
+                "file_edit",
+                {"file_path": "m.py", "old_string": old, "new_string": new},
+            )
+        )
+
+    def test_unchanged_lines_appear_once_as_context(self):
+        old = "def f():\n    return 1\n\nprint(f())"
+        new = "def f():\n    return 2\n\nprint(f())"
+        out = self._diff(old, new)
+        assert "-     return 1" in out
+        assert "+     return 2" in out
+        # The surrounding lines are context: neither removed nor added.
+        assert "- def f():" not in out and "+ def f():" not in out
+        assert "- print(f())" not in out and "+ print(f())" not in out
+        assert "def f():" in out and "print(f())" in out
+
+    def test_only_the_changed_line_is_marked(self):
+        old = "\n".join(f"line {i}" for i in range(6))
+        new = old.replace("line 3", "line THREE")
+        out = self._diff(old, new)
+        assert "- line 3" in out and "+ line THREE" in out
+        for i in (0, 1, 2, 4, 5):
+            assert f"- line {i}" not in out and f"+ line {i}" not in out
+
+    def test_a_long_unchanged_run_is_elided_with_a_count(self):
+        # 20 identical middle lines between two edits: kept ends + a count.
+        middle = "\n".join(f"pad {i}" for i in range(20))
+        old = f"first old\n{middle}\nlast old"
+        new = f"first new\n{middle}\nlast new"
+        out = self._diff(old, new)
+        assert "unchanged line" in out
+        assert "pad 0" in out and "pad 19" in out   # kept ends
+        assert "pad 10" not in out                  # elided middle
+
+    def test_leading_and_trailing_context_is_trimmed_to_the_change(self):
+        # 20 unchanged lines BEFORE the only change: only the ones next to it
+        # are worth showing, so the far end is elided.
+        pad = "\n".join(f"pad {i}" for i in range(20))
+        out = self._diff(f"{pad}\nold tail", f"{pad}\nnew tail")
+        assert "- old tail" in out and "+ new tail" in out
+        assert "pad 19" in out      # adjacent to the change
+        assert "pad 0" not in out   # far from it
+
+    def test_whole_block_insert_and_delete_are_all_one_sign(self):
+        inserted = self._diff("", "a\nb")
+        assert "+ a" in inserted and "+ b" in inserted and "- " not in inserted
+        deleted = self._diff("a\nb", "")
+        assert "- a" in deleted and "- b" in deleted and "+ " not in deleted
+
+    def test_identical_old_and_new_shows_the_text_not_an_elision(self):
+        out = self._diff("same line", "same line")
+        assert "same line" in out
+        assert "unchanged line" not in out
+
+    def test_a_pure_insertion_keeps_the_original_lines_as_context(self):
+        old = "a\nc"
+        new = "a\nb\nc"
+        out = self._diff(old, new)
+        assert "+ b" in out
+        assert "- a" not in out and "- c" not in out
+
+
 class TestRenderPlan:
     def test_empty_plan_shows_header(self):
         out = render_plan("")

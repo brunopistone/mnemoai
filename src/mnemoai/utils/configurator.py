@@ -1433,6 +1433,11 @@ _PARAM_META = {
         "reasoning effort (provider-dependent; e.g. low|medium|high)",
     ),
     "THINKING_TOKENS": ("int", "budget for thinking tokens"),
+    "PROMPT_CACHE": ("bool", "cache the stable prompt prefix (on where supported)"),
+    "PROMPT_CACHE_TTL": (
+        "enum:5m,1h",
+        "how long a cached prefix lives (1h costs more to write)",
+    ),
     "DIMENSION": ("int", "embedding vector size (match your embedder; for the fallback)"),
 }
 
@@ -1441,6 +1446,7 @@ _PARAM_ORDER = [
     "TEMPERATURE", "TOP_P", "TOP_K", "MAX_TOKENS",
     "PRESENCE_PENALTY", "FREQUENCY_PENALTY", "REPETITION_PENALTY",
     "STOP", "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+    "PROMPT_CACHE", "PROMPT_CACHE_TTL",
     "DIMENSION",
 ]
 

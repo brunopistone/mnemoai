@@ -36,6 +36,10 @@ class _StubClient:
         self.calls.append(("compact", focus))
         return True
 
+    def context_report(self):
+        self.calls.append("context_report")
+        return "Context window — 10 tokens"
+
 
 @pytest.fixture
 def ci():
@@ -97,6 +101,20 @@ def test_normal_query_does_not_print_stopped(ci, capsys):
     ci.client.query_return = "here is your answer"
     ci._dispatch("a question")
     assert "Stopped" not in capsys.readouterr().out
+
+
+def test_help_prints_the_command_reference(ci, capsys):
+    assert ci._dispatch("/help") is None
+    out = capsys.readouterr().out
+    assert "/context" in out and "Ctrl+J" in out
+    # It must not reach the model — the box is rendered locally.
+    assert not any(isinstance(c, tuple) and c[0] == "query" for c in ci.client.calls)
+
+
+def test_context_prints_the_client_report(ci, capsys):
+    assert ci._dispatch("/context") is None
+    assert "context_report" in ci.client.calls
+    assert "Context window" in capsys.readouterr().out
 
 
 class _BoomEpisodic:

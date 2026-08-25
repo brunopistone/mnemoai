@@ -9,6 +9,11 @@ MODEL_ID:
   # Omit TEMPERATURE for newer Claude models that reject it as deprecated.
   # REASONING: true            # enable extended thinking
   # REASONING_EFFORT: medium   # low | medium | high | xhigh | max
+  # The stable prompt prefix (system prompt + tool definitions + prior turns) is
+  # cached, so every later call in a turn re-reads it instead of re-paying for
+  # it. On by default for the Claude/Nova families; set false to opt out.
+  # PROMPT_CACHE: true
+  # PROMPT_CACHE_TTL: 5m       # 5m | 1h (1h costs more to write)
 VISION_MODEL_ID:
   NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock

@@ -107,6 +107,10 @@ class TestTheBoxStaysReadable:
         # box to stay short.
         assert "to search commands" in self._rendered(capsys)
 
+    def test_the_hint_points_at_help(self, capsys):
+        # The banner scrolls away; /help is how the box comes back.
+        assert "/help" in self._rendered(capsys)
+
     def test_a_group_heading_labels_only_its_first_row(self, capsys):
         # The heading is inlined into the gutter of its first command's row, so it
         # must not repeat down the group (that's what the blank-line spacers used
@@ -121,3 +125,46 @@ class TestTheBoxStaysReadable:
         ]
         labelled = [g for g in gutters if g in headings]
         assert sorted(labelled) == sorted(headings)
+
+
+class TestHelpScreen:
+    """``/help`` re-renders the SAME box as the banner, plus the keys.
+
+    The banner is only shown once and then scrolls away, so ``/help`` is the only
+    lasting reference — and it shares ``_command_box`` precisely so it can't fall
+    behind the banner when a command is added.
+    """
+
+    MAX_COLS = 80
+
+    def _rendered(self):
+        return ChatInterface._help_text(ChatInterface.__new__(ChatInterface))
+
+    def test_it_fits_an_80_column_terminal(self):
+        widths = [len(_ANSI.sub("", line)) for line in self._rendered().split("\n")]
+        assert max(widths) <= self.MAX_COLS, f"widest row is {max(widths)} cols"
+
+    def test_every_frame_row_is_the_same_width(self):
+        rows = [
+            _ANSI.sub("", line)
+            for line in self._rendered().split("\n")
+            if "│" in line
+        ]
+        widths = {len(r) for r in rows if r.strip()}
+        assert len(widths) == 1, f"ragged frame widths: {sorted(widths)}"
+
+    def test_it_lists_every_command_the_banner_does(self):
+        rendered = _ANSI.sub("", self._rendered())
+        missing = [c for c in _box_commands() if c not in rendered]
+        assert not missing, f"missing from /help: {missing}"
+
+    def test_it_documents_the_keys_that_are_not_commands(self):
+        rendered = _ANSI.sub("", self._rendered())
+        # Esc (interrupt) and Ctrl+A (agents panel) have no slash command at all,
+        # so /help is the only place they are ever shown.
+        for key in ("Enter", "Ctrl+J", "Esc", "Ctrl+A", "Ctrl+C"):
+            assert key in rendered, f"{key} is undocumented"
+
+    def test_help_is_itself_listed(self):
+        # Otherwise the one command you needed to find this screen is invisible.
+        assert "/help" in _ANSI.sub("", self._rendered())

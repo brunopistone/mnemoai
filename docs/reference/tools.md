@@ -143,9 +143,20 @@ install hint.
 | -------------- | ------------------------------------------ | --------------------------------------------------------------- |
 | `execute_bash` | `command` **(required)**, `timeout` = `30` | Run a shell command, returning stdout, stderr, and exit status. |
 
+Commands run under **bash** (not `/bin/sh`, which is dash on some systems), so
+`[[ … ]]`, arrays, `source` and process substitution behave as written.
+
+The shell also **remembers where it is**: the directory a command ends in becomes
+the starting directory of the next one, so a `cd` carries over between calls like
+in an interactive session, and the directory in force is returned as `cwd`
+alongside the output. A command killed by its timeout doesn't move it (it never
+finished anywhere), and a tracked directory that later disappears falls back to the
+directory mnemoai was launched from.
+
 The command runs in its own process group, so a timeout kills the whole tree
-rather than just the shell. Output is capped at 30,000 characters, middle-truncated
-to keep the beginning and the end.
+rather than just the shell, and its stdin is closed — a command that waits for
+input fails fast instead of burning the whole timeout. Output is capped at 30,000
+characters, middle-truncated to keep the beginning and the end.
 
 Every command passes the [safety floor](../guides/safety.md#understand-the-safety-floor)
 first, and — unless you turn it off — asks you to confirm.
@@ -167,7 +178,9 @@ Seven tools, for commands too slow to wait on.
 Statuses are `pending`, `running`, `completed`, `failed`, `error`, and
 `cancelled`. Output goes to `~/.mnemoai/tasks/<task_id>.log`; logs older than
 **7 days** are swept at startup. The working directory is checked against the
-same path policy as a file write.
+same path policy as a file write, and with none given a task starts in the shell's
+current directory — wherever the last `execute_bash` left off, not necessarily
+where mnemoai was launched.
 
 ## Track multi-step work
 

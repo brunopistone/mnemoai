@@ -7,6 +7,106 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.11.0] — 2026-08-25
+
+### Added
+
+- **Prompt caching: a turn stops re-paying for the prefix it already sent.** One
+  turn is many model calls over a prompt that only grows — system prompt, tool
+  definitions, steering, memory, every prior message and tool result — and each
+  call re-billed and re-prefilled all of it from scratch. The stable prefix now
+  carries a cache breakpoint, so subsequent calls read it at a fraction of the
+  input price and the provider skips prefill it has already done. That second
+  part is latency, not just cost: prefill is what dominates time-to-first-byte
+  (a ~440k-token turn at `REASONING_EFFORT: max` measured ~123s before its first
+  byte). Enabled where the provider and model family support it — `bedrock`,
+  `anthropic`, and `mantle` on `API_PROTOCOL: anthropic`, for the Claude and Nova
+  families — and deliberately nowhere else, because the marker is a per-call
+  keyword an OpenAI-shaped endpoint rejects outright. Below the provider's cache
+  minimum (~1024 tokens) a request is simply not cached, so there is nothing to
+  configure for short sessions. `PROMPT_CACHE: false` opts out per model,
+  `PROMPT_CACHE_TTL` chooses `5m` or `1h`, and both are tunable live from
+  `/params` (they survive a `/model` provider switch instead of being pruned).
+  `/usage` shows reads and writes.
+- **The system prompt carries its own breakpoint on the Anthropic-shaped
+  transports** — the difference between caching that looks enabled and caching
+  that lands. The per-turn injections (`<steering>`, the episodic block, the plan
+  reminder) ride the newest user message and are stripped before storage, so the
+  tail of one request is never a prefix of the next and a single end-of-prompt
+  marker matches nothing on the following turn. Measured on the same request: **0
+  cached tokens read with only the tail marker, the whole 4812-token system
+  prefix read with the system one.** Bedrock's Converse format places its own
+  breakpoint after the system blocks and rejects an Anthropic-style key inside
+  one, so it deliberately doesn't get the extra marker.
+- **A steering file can pull in another with an `@path` reference.** A long
+  ruleset can now be split into focused files (`See @rules/testing.md`) instead of
+  one wall of text, and referenced files are appended after the file that
+  mentioned them under their own header — the reference stays in the prose, so the
+  sentence still reads. Resolved against the referencing file's own directory (not
+  the process cwd, so a project's rules mean its neighbours regardless of where
+  the app was launched); `~` expands, absolute paths are taken as-is. A reference
+  that doesn't name a readable file is left alone, which is what makes a Python
+  decorator, an `@handle` or an email address harmless. Bounded three ways, since
+  every byte here is paid on every turn and compaction can never reclaim it:
+  3 levels deep, 20 files, and the remaining share of the referencing file's
+  `STEERING.MAX_CHARS` budget — with anything dropped stated in the block rather
+  than silently missing.
+- **`/context` — where the context window actually goes.** `/usage` answers what
+  the session has spent; this answers what the *next* turn is paying for and which
+  part of it can be shrunk. A gauge plus a breakdown: the system prompt segmented
+  into its real parts (learned profile, MEMORY.md, skills listing, sub-agent
+  types, playbook strategies, compaction summary), one row per steering file at
+  the size actually injected, the tool schemas, and the conversation. It exists
+  for the two costs nothing else surfaces — a large steering file, re-sent
+  verbatim every turn and never reclaimable, and the tool schemas, bound on every
+  call before a word of the conversation. The total is the provider's exact
+  reported input size (the same number as `[Context: N]`) with the parts scaled
+  onto it, and the system prompt is segmented from the live string rather than
+  re-derived, so the report can't drift from what is really being sent.
+- **`/help`** prints the full command reference plus the keys that aren't
+  commands — Esc to interrupt, Ctrl+J for a newline, Ctrl+A for the agents panel.
+  The launch banner shows the same box (one renderer, so they can't drift), but it
+  scrolls away, and until now nothing brought it back.
+
+### Changed
+
+- **`execute_bash` runs under bash, and remembers where it left off.**
+  `shell=True` runs `/bin/sh`, which is not bash everywhere — dash on
+  Debian/Ubuntu, bash in POSIX mode on macOS — so `[[ ]]`, arrays, `source` and
+  process substitution failed or behaved differently depending on the host, on a
+  tool documented as bash. Bash is now what runs them, falling back to the default
+  shell only where no bash exists. And each call used to be a fresh shell at the
+  launch directory, so a `cd` evaporated: the model would `cd project` and the next
+  command silently operated on the wrong tree. The directory a command ends in is
+  now where the next one starts, as in an interactive session, and is reported back
+  as `cwd`. A killed (timed-out) command doesn't move it — it didn't finish
+  anywhere — and a tracked directory that has since been deleted falls back to the
+  launch directory instead of failing every command. Background tasks
+  (`start_background_task`) start in the same tracked directory when no
+  `working_directory` is given.
+- **`execute_bash` and background tasks no longer inherit the server's stdin.**
+  It is the MCP protocol pipe: a command that reads stdin (`cat`, an interactive
+  prompt) could consume the client's JSON-RPC stream. With stdin closed such a
+  command sees EOF and fails immediately instead of burning the full timeout
+  waiting for input that can never arrive.
+- **A file edit shows a line-level diff.** The old→new block was printed whole —
+  every removed line in red, then every added line in green — so a one-word fix
+  inside a 40-line replacement left the reader to diff it by eye. The two sides
+  are now paired line-by-line, only the lines that actually changed are marked,
+  the surrounding lines stay as gray context, and a long unchanged run is elided
+  to its ends (`… 12 unchanged lines`). A pure insertion or deletion still prints
+  whole, since there is nothing to pair.
+
+### Fixed
+
+- **`/usage` reported `0` cache writes on providers that break them out per
+  TTL.** Both Bedrock and Mantle report a cache write of several thousand tokens
+  under `ephemeral_5m_input_tokens` while leaving LangChain's normalized
+  `cache_creation` at `0`, so a session that was caching correctly displayed as
+  having written nothing — the one number that proves caching engaged. Writes are
+  now read from the normalized field, a nested per-TTL breakdown, or the per-TTL
+  keys, whichever the provider filled.
+
 ## [1.10.3] — 2026-08-25
 
 ### Fixed

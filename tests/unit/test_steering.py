@@ -454,6 +454,205 @@ class TestSteeringStore:
         assert SteeringStore(files=[]).read() == ""
 
 
+class TestSteeringSizes:
+    """``sizes()`` backs the per-file rows of ``/context``, so what it reports has
+    to be what is actually injected — the capped text, not the file on disk."""
+
+    def test_one_entry_per_file_in_apply_order(self, tmp_path):
+        a = tmp_path / "a" / "STEERING.md"
+        a.parent.mkdir()
+        a.write_text("short")
+        b = tmp_path / "b" / "STEERING.md"
+        b.parent.mkdir()
+        b.write_text("a much longer rule set")
+        sizes = SteeringStore(files=[a, b]).sizes()
+        assert [path for path, _ in sizes] == [a, b]
+        assert len(sizes[1][1]) > len(sizes[0][1])
+
+    def test_empty_and_missing_files_get_no_row(self, tmp_path):
+        blank = tmp_path / "blank" / "STEERING.md"
+        blank.parent.mkdir()
+        blank.write_text("   \n")
+        gone = tmp_path / "gone" / "STEERING.md"
+        real = tmp_path / "STEERING.md"
+        real.write_text("kept")
+        assert [p for p, _ in SteeringStore(files=[blank, gone, real]).sizes()] == [real]
+
+    def test_reports_the_capped_size_not_the_file_size(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(SteeringStore, "_max_chars", staticmethod(lambda: 100))
+        big = tmp_path / "STEERING.md"
+        big.write_text("x" * 5000)
+        _, text = SteeringStore(files=[big]).sizes()[0]
+        assert len(text) < 5000
+
+    def test_no_files_no_rows(self):
+        assert SteeringStore(files=[]).sizes() == []
+
+
+class TestSteeringReferences:
+    """``@path`` lets a long ruleset be split into focused files. The reference is
+    resolved against the file that MENTIONS it and only inlined when it names a
+    real file, which is what keeps a false positive (a decorator, a handle) from
+    turning into noise."""
+
+    def _steering(self, tmp_path, text):
+        f = tmp_path / "STEERING.md"
+        f.write_text(text)
+        return f
+
+    def test_a_referenced_file_is_injected_with_its_own_header(self, tmp_path):
+        (tmp_path / "rules").mkdir()
+        (tmp_path / "rules" / "style.md").write_text("two-space indents")
+        f = self._steering(tmp_path, "Follow @rules/style.md at all times.")
+        out = SteeringStore(files=[f]).read()
+        assert "two-space indents" in out
+        assert "referenced by @rules/style.md" in out
+        assert str(tmp_path / "rules" / "style.md") in out
+
+    def test_the_reference_stays_in_the_prose(self, tmp_path):
+        (tmp_path / "x.md").write_text("body")
+        f = self._steering(tmp_path, "See @x.md for details.")
+        out = SteeringStore(files=[f]).read()
+        assert "See @x.md for details." in out  # the sentence still reads
+
+    def test_relative_to_the_referencing_file_not_the_process_cwd(self, tmp_path):
+        # The project's steering file means ITS neighbours, wherever the app ran.
+        deep = tmp_path / "proj" / "sub"
+        deep.mkdir(parents=True)
+        (deep / "extra.md").write_text("nested rule")
+        f = deep / "STEERING.md"
+        f.write_text("also @extra.md")
+        assert "nested rule" in SteeringStore(files=[f]).read()
+
+    def test_absolute_and_home_paths_resolve(self, tmp_path, monkeypatch):
+        target = tmp_path / "abs.md"
+        target.write_text("absolute rule")
+        f = self._steering(tmp_path, f"see @{target}")
+        assert "absolute rule" in SteeringStore(files=[f]).read()
+
+        home_file = tmp_path / "home.md"
+        home_file.write_text("home rule")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        g = tmp_path / "other" / "STEERING.md"
+        g.parent.mkdir()
+        g.write_text("see @~/home.md")
+        assert "home rule" in SteeringStore(files=[g]).read()
+
+    def test_a_nonexistent_reference_is_left_alone(self, tmp_path):
+        f = self._steering(tmp_path, "see @nope/missing.md for details")
+        out = SteeringStore(files=[f]).read()
+        assert "see @nope/missing.md for details" in out
+        assert "referenced by" not in out
+
+    def test_a_decorator_or_handle_is_not_a_reference(self, tmp_path):
+        # Nothing resolves, so nothing is injected — the false positive is inert.
+        f = self._steering(
+            tmp_path, "Use @staticmethod here. Ask @someone. Mail a@b.com."
+        )
+        out = SteeringStore(files=[f]).read()
+        assert "referenced by" not in out
+        assert "@staticmethod" in out and "a@b.com" in out
+
+    def test_an_email_address_never_matches(self, tmp_path):
+        # Even when a file with the domain's name exists: the @ is mid-word.
+        (tmp_path / "b.com").write_text("SHOULD NOT APPEAR")
+        f = self._steering(tmp_path, "contact a@b.com")
+        assert "SHOULD NOT APPEAR" not in SteeringStore(files=[f]).read()
+
+    def test_a_directory_reference_is_not_inlined(self, tmp_path):
+        (tmp_path / "rules").mkdir()
+        f = self._steering(tmp_path, "see @rules")
+        assert "referenced by" not in SteeringStore(files=[f]).read()
+
+    def test_references_are_followed_transitively(self, tmp_path):
+        (tmp_path / "a.md").write_text("level one, then @b.md")
+        (tmp_path / "b.md").write_text("level two")
+        f = self._steering(tmp_path, "start at @a.md")
+        out = SteeringStore(files=[f]).read()
+        assert "level one" in out and "level two" in out
+
+    def test_a_reference_cycle_terminates(self, tmp_path):
+        (tmp_path / "a.md").write_text("A refers to @b.md")
+        (tmp_path / "b.md").write_text("B refers back to @a.md")
+        f = self._steering(tmp_path, "see @a.md")
+        out = SteeringStore(files=[f]).read()
+        assert out.count("A refers to") == 1
+        assert out.count("B refers back") == 1
+
+    def test_a_file_is_injected_once_however_many_times_it_is_named(self, tmp_path):
+        (tmp_path / "one.md").write_text("single copy")
+        f = self._steering(tmp_path, "@one.md and again @one.md and ./@one.md")
+        assert SteeringStore(files=[f]).read().count("single copy") == 1
+
+    def test_a_reference_to_another_discovered_file_is_not_duplicated(self, tmp_path):
+        glob = tmp_path / "global" / "STEERING.md"
+        glob.parent.mkdir()
+        glob.write_text("global rule")
+        proj = tmp_path / "proj" / "STEERING.md"
+        proj.parent.mkdir()
+        proj.write_text(f"inherit @{glob}")
+        out = SteeringStore(files=[glob, proj]).read()
+        assert out.count("global rule") == 1
+
+    def test_deep_chains_stop_at_the_depth_limit(self, tmp_path):
+        # Each level points at the next; beyond the limit nothing more is pulled in.
+        depth = steering_store._MAX_INCLUDE_DEPTH
+        for i in range(depth + 3):
+            (tmp_path / f"l{i}.md").write_text(f"level {i} then @l{i + 1}.md")
+        f = self._steering(tmp_path, "start @l0.md")
+        out = SteeringStore(files=[f]).read()
+        assert "level 0" in out
+        assert f"level {depth + 2}" not in out
+
+    def test_includes_share_the_files_own_size_budget(self, tmp_path, monkeypatch):
+        # Splitting a ruleset across references must not sidestep STEERING.MAX_CHARS.
+        # Patch the effective cap, not the code default — a runtime config.yaml
+        # that sets MAX_CHARS would otherwise win and the test would pass blindly.
+        monkeypatch.setattr(SteeringStore, "_max_chars", staticmethod(lambda: 200))
+        (tmp_path / "big.md").write_text("z" * 500)
+        f = self._steering(tmp_path, "see @big.md")
+        out = SteeringStore(files=[f]).read()
+        assert "z" * 500 not in out
+        assert "not included" in out  # and it says so
+
+    def test_an_unreadable_reference_costs_only_itself(self, tmp_path):
+        bad = tmp_path / "bad.md"
+        bad.write_text("secret")
+        bad.chmod(0o000)
+        (tmp_path / "good.md").write_text("good rule")
+        f = self._steering(tmp_path, "see @bad.md and @good.md")
+        try:
+            out = SteeringStore(files=[f]).read()
+        finally:
+            bad.chmod(0o644)
+        assert "good rule" in out
+
+
+class TestSteeringReferenceScan:
+    """The pure text scan, independent of the filesystem."""
+
+    def test_finds_references_in_order_without_duplicates(self):
+        found = steering_store.references("@a.md then @b/c.md then @a.md")
+        assert found == ["a.md", "b/c.md"]
+
+    def test_a_trailing_period_is_not_part_of_the_path(self):
+        assert steering_store.references("read @docs/style.md.") == ["docs/style.md"]
+
+    def test_start_of_line_and_bracketed_forms_match(self):
+        assert steering_store.references("@top.md") == ["top.md"]
+        assert steering_store.references("(@paren.md)") == ["paren.md"]
+        assert steering_store.references("`@code.md`") == ["code.md"]
+
+    def test_mid_word_at_signs_never_match(self):
+        assert steering_store.references("user@host.com") == []
+        assert steering_store.references("x/y@v1.md") == []
+
+    def test_empty_input_is_safe(self):
+        assert steering_store.references("") == []
+        assert steering_store.references(None) == []
+
+
 class TestSteeringEphemeralStrip:
     def test_steering_block_stripped_from_stored_prompt(self):
         prompt = "<steering>always use tabs</steering>\n\nrefactor this"
