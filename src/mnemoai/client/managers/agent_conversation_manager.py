@@ -7,6 +7,7 @@ import textwrap
 from datetime import date
 from typing import Any, Dict, List
 
+from mnemoai.client.agent import stream_policy
 from mnemoai.client.agent.subagents import available_subagents_block
 from mnemoai.client.memory.skill_store import (
     SkillStore,
@@ -249,8 +250,11 @@ class AgentConversationManager:
         async def _map_one(idx: int, batch: List[Dict]):
             async with sem:
                 try:
-                    return idx, await self._summarize_batch(
-                        batch, model, focus_instructions, prior_summary=None
+                    return idx, await self._with_transient_retry(
+                        lambda: self._summarize_batch(
+                            batch, model, focus_instructions, prior_summary=None
+                        ),
+                        f"Summary batch {idx + 1}/{len(batches)}",
                     )
                 except Exception as e:
                     logger.warning(
@@ -280,8 +284,9 @@ class AgentConversationManager:
         # a single coherent summary. If the reduce itself fails, fall back to the
         # concatenated partials so no content is lost.
         try:
-            reduced = await self._reduce_summaries(
-                partials, model, focus_instructions
+            reduced = await self._with_transient_retry(
+                lambda: self._reduce_summaries(partials, model, focus_instructions),
+                "Summary reduce",
             )
             if reduced:
                 return self._strip_analysis(reduced).strip()
@@ -290,6 +295,25 @@ class AgentConversationManager:
 
         joined = "\n\n".join(self._strip_analysis(p).strip() for p in partials)
         return joined or self._excerpt_fallback(messages, budget)
+
+    async def _with_transient_retry(self, call, label: str):
+        """Await ``call()``, retrying a transient provider failure (529/overloaded).
+
+        The map fans every batch out at once, so an overloaded provider rejects
+        them together — and each batch's fallback drops that slice of history from
+        the summary for good. Retrying is what keeps a compaction lossless under
+        load; the caller's fallback still runs once the attempts are spent.
+        """
+        llm = config.get("LLM", {})
+        return await stream_policy.acall_with_transient_retry(
+            call,
+            attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),
+            base=float(llm.get("RETRY_DELAY", 1.0)),
+            factor=float(llm.get("RETRY_BACKOFF", 2.0)),
+            on_retry=lambda e, delay, n, total: logger.debug(
+                stream_policy.retry_notice(label, e, delay, n, total)
+            ),
+        )
 
     async def _reduce_summaries(
         self, partials: List[str], model: Any, focus_instructions: str

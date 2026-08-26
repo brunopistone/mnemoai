@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from mnemoai.client.agent import stream_policy
 from mnemoai.client.agent.reasoning_utils import (
     disable_reasoning,
     restore_reasoning,
@@ -129,6 +130,9 @@ class QueryRouter:
         # sees, so it must still count toward the session totals (/usage).
         self.usage = usage
         self.usage_model_name = ""
+        # Set by the agent that owns this router, so a retry backoff here wakes on
+        # Esc/Ctrl+C instead of holding the worker thread for the full delay.
+        self.cancel_event = None
 
     def fast_route(self, query: str) -> Optional[str]:
         """Route deterministically from unambiguous signals, or None.
@@ -231,7 +235,11 @@ class QueryRouter:
             return route
 
         except Exception as e:
-            logger.error(f"Router classification failed: {e}")
+            # Recoverable (we bind the full toolset), so a warning, not an error —
+            # but still worth surfacing: routing was skipped for this query.
+            logger.warning(
+                f"Router classification failed ({e}); binding the full toolset"
+            )
             return "full"
 
     def _classify_with(self, model, messages: List[BaseMessage]) -> str:
@@ -241,13 +249,32 @@ class QueryRouter:
         # caller falls back to "full".
         route = ""
         for _ in range(2):
-            response = model.invoke(messages, config={"callbacks": []})
+            response = self._invoke_with_retry(model, messages)
             if self.usage is not None:
                 self.usage.record(response, self.usage_model_name)
             route = self._parse_route(response.content)
             if route:
                 break
         return route
+
+    def _invoke_with_retry(self, model, messages: List[BaseMessage]):
+        """Classify with a retry on a transient provider failure (529/overloaded).
+
+        The loop above only re-runs an EMPTY response, so before this an exception
+        escaped on the first try and the route silently degraded to "full" — while
+        the streamed turn beside it recovered on its second attempt.
+        """
+        llm = config.get("LLM", {})
+        return stream_policy.call_with_transient_retry(
+            lambda: model.invoke(messages, config={"callbacks": []}),
+            attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),
+            base=float(llm.get("RETRY_DELAY", 1.0)),
+            factor=float(llm.get("RETRY_BACKOFF", 2.0)),
+            cancel_event=getattr(self, "cancel_event", None),
+            on_retry=lambda e, delay, n, total: logger.debug(
+                stream_policy.retry_notice("Route classification", e, delay, n, total)
+            ),
+        )
 
     def _parse_route(self, content: str) -> str:
         """Parse the model response into a valid route (thinking tags/quotes

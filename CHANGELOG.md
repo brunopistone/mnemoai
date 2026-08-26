@@ -7,6 +7,35 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.2] — 2026-08-26
+
+### Fixed
+
+- **A provider overload (`529 overloaded_error`) no longer silently costs you
+  routing and task decomposition.** When the provider is busy it rejects
+  everything in flight at once, and the streamed turn handled that correctly —
+  `retrying turn on a fresh connection (attempt 1/6)` — while the two smaller
+  calls beside it, query classification and task decomposition, gave up on their
+  **first** rejection. Both have a graceful fallback (bind every tool; treat the
+  whole request as one subtask), which is exactly why the failure was easy to
+  miss: nothing broke, the work just quietly got dumber for that turn, and the
+  only trace was `Router classification failed` in the log. They now retry the
+  overload the same way the turn does — fewer attempts, because a working
+  fallback makes a quick second chance better than a long stall — and fall back
+  only once the attempts are spent.
+- **Compaction no longer loses a slice of your history to an overload.** The
+  summary summarizes history in batches fanned out concurrently, so an overloaded
+  provider rejects several at once — and a rejected batch was simply dropped from
+  the summary, permanently, since the messages it covered are removed either way.
+  Batches (and the final merge) now retry a transient failure first.
+- Retry backoff is **jittered**, and honors the provider's own `retry-after`
+  header when it sends one. Orchestrator waves, spawned sub-agents and the
+  compaction map all fan out together, so a purely deterministic backoff had them
+  all come back at the same instant and collide again.
+- The router's give-up message is now a warning that names the consequence
+  (`binding the full toolset`) instead of an `ERROR` for something the app
+  recovers from.
+
 ## [1.12.1] — 2026-08-26
 
 ### Fixed
