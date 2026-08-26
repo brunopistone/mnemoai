@@ -225,6 +225,13 @@ class LangGraphAgent:
         # Exact prompt-token count from the provider's own usage_metadata on the
         # last model turn — ground truth for "how big is my context"
         self._last_input_tokens: Optional[int] = None
+        # How many messages this turn's graph state was SEEDED with, and the
+        # compacted history to substitute for them if a compaction replaced live
+        # history mid-turn. The graph's `messages` channel is append-only
+        # (operator.add), so the seed index is the only way back to "what this
+        # turn actually produced". Set per turn by invoke().
+        self._turn_seed_len: int = 0
+        self._mid_turn_compaction: Optional[tuple] = None
         # Cumulative reported token usage for the session (drives /usage). Lives on
         # the agent because every model-call path reaches it, including the ones
         # with no visible turn (sub-agents, orchestrator workers, the router).
@@ -1325,6 +1332,11 @@ class LangGraphAgent:
         """Call the model with the current state, streaming the response."""
         messages = list(state["messages"])
 
+        # Swap in the compacted history if a compaction replaced it mid-turn.
+        # Applied to the RAW state list — which is only ever appended to, so the
+        # seed boundary still lines up — before sanitizing reorders anything.
+        messages = self._apply_mid_turn_compaction(messages)
+
         # Repair orphaned tool call/result pairs — an orphan from earlier history
         # would make the provider reject every subsequent turn.
         messages = self._sanitize_tool_pairs(messages)
@@ -1367,7 +1379,18 @@ class LangGraphAgent:
                     "thinking": None,
                 }
             logger.warning(f"Context overflow: {overflow}; compacted and retrying")
-            messages = rebuilt
+            # Keep the compacted history for the REST of the turn, not just this
+            # retry. The graph state is append-only, so without this the next
+            # model call re-reads the pre-compaction prompt and overflows again —
+            # by then there is nothing left to compact, so the turn dead-ends on
+            # "couldn't compact it further" over a history that is already small.
+            self._mid_turn_compaction = (rebuilt, getattr(self, "_turn_seed_len", 0))
+            # Rebuild through the same substitution so the tool calls and results
+            # this turn already produced survive the retry instead of being
+            # dropped (the model would otherwise redo that work).
+            messages = self._sanitize_tool_pairs(
+                self._apply_mid_turn_compaction(list(state["messages"]))
+            )
             self._start_spinner()
             try:
                 response, had_reasoning = self._stream_response(
@@ -1633,6 +1656,27 @@ class LangGraphAgent:
                 final.additional_kwargs["reasoning_content"] = last_thinking
             return {"messages": [final], "thinking": last_thinking}
         return None
+
+    def _apply_mid_turn_compaction(self, messages: list) -> list:
+        """Substitute the compacted history into a raw graph-state message list.
+
+        A compaction mid-turn replaces ``self._messages``, but the graph's
+        ``messages`` channel is ``operator.add`` — append-only — so the running
+        turn keeps re-reading the history it was seeded with. Fixing only the
+        retry prompt is not enough: the model call AFTER the next tool result
+        overflows on the same prompt, and that second attempt finds nothing left
+        to compact, so the turn dies telling the user to ``/clear`` a
+        conversation whose live history is already tiny.
+
+        No-op until a compaction actually happens; then it keeps everything the
+        turn has appended since it started and puts the compacted history in
+        front of it.
+        """
+        stash = getattr(self, "_mid_turn_compaction", None)
+        if not stash:
+            return messages
+        compacted, seed = stash
+        return list(compacted) + list(messages[seed:])
 
     def _compact_and_rebuild(self, current_messages: list) -> Optional[list]:
         """Force-compact history, then rebuild the model's message list from the
@@ -2705,6 +2749,14 @@ class LangGraphAgent:
                 initial_state["messages"]
             )
 
+        # Where this turn's own messages begin. The graph state only ever grows
+        # (operator.add), so this index is what lets a mid-turn compaction reach
+        # the running turn (_apply_mid_turn_compaction) and keeps _commit_turn
+        # from re-committing the seeded history. Reset the stash: a compaction
+        # from a PREVIOUS turn must not substitute itself into this one.
+        self._turn_seed_len = len(initial_state["messages"])
+        self._mid_turn_compaction = None
+
         # recursion_limit is a runaway guard; hitting it means a likely stuck loop.
         #
         # STREAM the graph instead of `invoke()`ing it, purely so hitting that
@@ -2840,10 +2892,20 @@ class LangGraphAgent:
         Skips System/Human: the user turn was already stored as the clean prompt,
         so the reminder-bearing ``HumanMessage`` the model ran on must not be
         re-added.
+
+        Sliced at the turn's seed boundary because the append-only graph state
+        still carries the history the turn started from, and the ``not in
+        self._messages`` dedup below stops recognizing it the moment compaction
+        or tool-result eviction REPLACES that list mid-turn: every message
+        compaction just summarized away would be appended back — undoing the
+        compaction and re-logging it to the transcript as this turn's work.
         """
+        produced = list((result or {}).get("messages", []))[
+            getattr(self, "_turn_seed_len", 0) :
+        ]
         new_messages = [
             m
-            for m in (result or {}).get("messages", [])
+            for m in produced
             if not isinstance(m, (SystemMessage, HumanMessage))
             and m not in self._messages
         ]

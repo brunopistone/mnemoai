@@ -182,6 +182,42 @@ retrying, only by sending less:
   window is a hard maximum, not a target.
 - `/branch` to continue from an earlier point without the accumulated history.
 
+## A turn ends with "I couldn't compact it further"
+
+```
+Compacted: summarized 1209 older messages, kept 2 recent.
+WARNING — Context overflow: prompt is too long: 3155357 tokens > 1000000 maximum;
+          compacted and retrying
+WARNING — Context overflow: prompt is too long: 3157792 tokens > 1000000 maximum;
+          could not compact
+● The conversation grew past the model's context window and I couldn't compact it
+  further. Use /clear to start fresh, or /compact <focus>.
+```
+
+Fixed in 1.12.4. The tell is the arithmetic: the second overflow is a few thousand
+tokens above the first, and it lands _after_ a compaction that reduced history to
+two messages — so the message is wrong, there was plenty left to compact. Three
+separate defects lined up, and on older versions all three are worth knowing about:
+
+1. **The compaction didn't reach the rest of the turn.** A running turn re-reads the
+   history it started with, so only the immediate retry saw the smaller prompt; the
+   next model call re-sent the original one, and by then compaction genuinely had
+   nothing left to give.
+2. **The turn then undid its own compaction.** Everything summarized away was
+   appended back when the turn ended — and written to the session transcript as
+   this turn's work — so the following turn compacted the same history again
+   (`1209 older messages`, then `1165`).
+3. **The pre-flight check was skipped entirely.** It uses the context size the
+   provider reported for the previous turn, and `/branch`, `/load` and `--resume`
+   replace history wholesale. Since the transcript keeps every message compaction
+   had summarized away, restoring it makes history much _larger_ while the
+   leftover count still describes the small version — so the check passed and the
+   first turn went straight to a provider-side overflow.
+
+Defect 3 is why this shows up right after a `/branch`, `/load` or `--resume` of a
+long conversation. On an older version, `/compact` immediately after restoring one
+avoids it; on 1.12.4 the next turn measures the history that is actually there.
+
 ## A file write is refused
 
 Three different guards produce three different messages:

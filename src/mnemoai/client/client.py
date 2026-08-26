@@ -505,6 +505,21 @@ class LangGraphClient:
             self._summary_model_cached = cached
         return cached
 
+    def _forget_context_size(self) -> None:
+        """Drop the cached provider token count after live history is REPLACED.
+
+        ``_compact_now`` prefers the provider's exact ``input_tokens`` from the
+        last turn over its own estimate, so that number must never outlive the
+        conversation it measured. A resume, a ``/load`` and a ``/branch`` all swap
+        the whole message list — and they rehydrate the **transcript**, which is
+        append-only and therefore still holds every message compaction had
+        already summarized away. The stale count then reads far too LOW for the
+        history now in memory, the high-water check passes, and the next turn goes
+        straight to a provider-side context overflow.
+        """
+        if self.agent is not None and hasattr(self.agent, "_last_input_tokens"):
+            self.agent._last_input_tokens = None
+
     def _compact_now(self, force: bool = False) -> bool:
         """Mid-loop compaction hook the agent calls before each model call.
 
@@ -985,6 +1000,7 @@ class LangGraphClient:
             if self.agent:
                 self.agent.messages.clear()
                 self.agent.messages.extend(langchain_messages)
+                self._forget_context_size()
                 # Mark as open so a bare /save writes back to the same file.
                 self.current_conversation_path = normalized_path
                 self._seed_session_log(langchain_messages, normalized_path)
@@ -1211,6 +1227,7 @@ class LangGraphClient:
             messages = convert_strands_messages_to_langchain(raw)
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
+            self._forget_context_size()
             self.agent.session_log = SessionLog.reopen(new_path)
             # A branch is not the open /save file — a bare /save must not
             # overwrite the conversation this was forked from.
@@ -1285,6 +1302,7 @@ class LangGraphClient:
 
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
+            self._forget_context_size()
             self._seed_session_log(messages, str(path), label=data.get("label", ""))
             logger.info(f"Resumed {len(messages)} messages from {path}")
 
