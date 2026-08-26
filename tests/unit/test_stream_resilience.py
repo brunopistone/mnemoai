@@ -7,15 +7,32 @@ timeout and re-runs the turn on a dead/transient connection with backoff, instea
 of hanging. These tests exercise that logic with fake models (no network/LLM).
 """
 
+import asyncio
 import threading
 import time
 
 import pytest
 
+from mnemoai.client.agent import stream_policy
 from mnemoai.client.agent.agent import (
     LangGraphAgent,
     _StreamIdleTimeout,
 )
+
+# A provider "overloaded" (529) failure — the transient error this app sees most
+# under load, and the one the auxiliary calls used to give up on immediately.
+_OVERLOADED = (
+    "Error code: 529 - {'type': 'error', 'error': "
+    "{'type': 'overloaded_error', 'message': 'Overloaded'}}"
+)
+
+
+def _overloaded(retry_after=None, message=_OVERLOADED):
+    """An overload exception, optionally carrying an httpx-shaped retry-after."""
+    exc = Exception(message)
+    if retry_after is not None:
+        exc.response = type("R", (), {"headers": {"retry-after": retry_after}})()
+    return exc
 
 
 def _agent(idle=0.2):
@@ -172,14 +189,39 @@ class TestNetworkRetryDelay:
         return _agent()
 
     def test_exponential_backoff(self, monkeypatch):
+        # Jittered: each delay is the exponential base plus up to RETRY_JITTER of it.
         a = self._agent_with_cfg(monkeypatch, delay=1.0, backoff=2.0)
-        assert a._network_retry_delay(0) == 1.0
-        assert a._network_retry_delay(1) == 2.0
-        assert a._network_retry_delay(2) == 4.0
+        for attempt, base in ((0, 1.0), (1, 2.0), (2, 4.0)):
+            d = a._network_retry_delay(attempt)
+            assert base <= d <= base * (1 + stream_policy.RETRY_JITTER)
 
     def test_capped_at_30s(self, monkeypatch):
         a = self._agent_with_cfg(monkeypatch, delay=10.0, backoff=10.0)
-        assert a._network_retry_delay(5) == 30.0  # min(10*10^5, 30)
+        d = a._network_retry_delay(5)  # min(10*10^5, 30) + jitter
+        assert 30.0 <= d <= 30.0 * (1 + stream_policy.RETRY_JITTER)
+
+    def test_pure_helper_is_deterministic_without_jitter(self):
+        # The pure function stays exact by default — jitter is opt-in, so callers
+        # that need reproducible math (and these tests) aren't forced into ranges.
+        assert stream_policy.network_retry_delay(0, 1.0, 2.0) == 1.0
+        assert stream_policy.network_retry_delay(1, 1.0, 2.0) == 2.0
+        assert stream_policy.network_retry_delay(2, 1.0, 2.0) == 4.0
+        assert stream_policy.network_retry_delay(5, 10.0, 10.0) == 30.0
+
+    def test_jitter_is_bounded_and_applied(self):
+        # rand injected: 1.0 → the full jitter fraction, 0.0 → none.
+        assert stream_policy.network_retry_delay(
+            0, 4.0, 2.0, jitter=0.25, rand=lambda: 1.0
+        ) == 5.0
+        assert stream_policy.network_retry_delay(
+            0, 4.0, 2.0, jitter=0.25, rand=lambda: 0.0
+        ) == 4.0
+
+    def test_prefers_provider_retry_after(self, monkeypatch):
+        a = self._agent_with_cfg(monkeypatch, delay=1.0, backoff=2.0)
+        assert a._transient_retry_delay(_overloaded(retry_after="7"), 0) == 7.0
+        # No header → back to the jittered exponential.
+        assert a._transient_retry_delay(Exception("overloaded_error"), 0) >= 1.0
 
 
 class TestStreamResponseRetries:
@@ -323,3 +365,292 @@ class TestNoBlockingNonStreamingFallback:
         resp, _ = a._stream_response([], {})
         assert resp.content == "recovered"
         assert calls["n"] == 2  # 500 retried, then succeeded
+
+
+class TestAuxAttempts:
+    """An auxiliary call has a working fallback, so its attempt budget is capped
+    below the streamed turn's — a quick second chance, never a long stall."""
+
+    def test_clamps_to_the_cap(self):
+        assert stream_policy.aux_attempts(10) == stream_policy.AUX_RETRY_ATTEMPTS
+        assert stream_policy.aux_attempts(5) == stream_policy.AUX_RETRY_ATTEMPTS
+
+    def test_respects_a_lower_config(self):
+        assert stream_policy.aux_attempts(2) == 2
+
+    def test_never_below_one_attempt(self):
+        # 0/negative retries must still make the call itself.
+        assert stream_policy.aux_attempts(0) == 1
+        assert stream_policy.aux_attempts(-3) == 1
+
+    def test_junk_config_falls_back_to_the_cap(self):
+        assert stream_policy.aux_attempts(None) == stream_policy.AUX_RETRY_ATTEMPTS
+        assert stream_policy.aux_attempts("many") == stream_policy.AUX_RETRY_ATTEMPTS
+
+
+class TestRetryAfterHeader:
+    """When the provider says how long to wait, that beats our guess."""
+
+    def test_reads_httpx_style_response_headers(self):
+        assert stream_policy.retry_after_seconds(_overloaded(retry_after="12")) == 12.0
+
+    def test_reads_botocore_style_response_dict(self):
+        exc = Exception(_OVERLOADED)
+        exc.response = {
+            "ResponseMetadata": {"HTTPHeaders": {"retry-after": "3.5"}}
+        }
+        assert stream_policy.retry_after_seconds(exc) == 3.5
+
+    def test_case_insensitive_for_plain_dicts(self):
+        exc = Exception(_OVERLOADED)
+        exc.response = type("R", (), {"headers": {"Retry-After": "4"}})()
+        assert stream_policy.retry_after_seconds(exc) == 4.0
+
+    def test_absent_or_unusable_values_yield_none(self):
+        assert stream_policy.retry_after_seconds(Exception("boom")) is None
+        assert stream_policy.retry_after_seconds(_overloaded(retry_after="0")) is None
+        # HTTP-date form is legal but unusable here — never guess across a skew.
+        assert stream_policy.retry_after_seconds(
+            _overloaded(retry_after="Wed, 21 Oct 2026 07:28:00 GMT")
+        ) is None
+
+    def test_capped(self):
+        assert stream_policy.retry_after_seconds(_overloaded(retry_after="9999")) == 60.0
+
+    def test_transient_retry_delay_prefers_it(self):
+        assert stream_policy.transient_retry_delay(
+            _overloaded(retry_after="9"), 0, 1.0, 2.0
+        ) == 9.0
+        d = stream_policy.transient_retry_delay(_overloaded(), 1, 1.0, 2.0)
+        assert 2.0 <= d <= 2.0 * (1 + stream_policy.RETRY_JITTER)
+
+
+class TestCallWithTransientRetry:
+    """The driver the non-streamed auxiliary calls use."""
+
+    def test_retries_a_transient_failure_then_succeeds(self):
+        calls = {"n": 0}
+
+        def _call():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _overloaded()
+            return "ok"
+
+        out = stream_policy.call_with_transient_retry(
+            _call, attempts=3, base=0.0, factor=2.0
+        )
+        assert out == "ok"
+        assert calls["n"] == 2
+
+    def test_reraises_a_deterministic_error_immediately(self):
+        calls = {"n": 0}
+
+        def _call():
+            calls["n"] += 1
+            raise ValueError("invalid_request_error: bad parameter")
+
+        with pytest.raises(ValueError):
+            stream_policy.call_with_transient_retry(
+                _call, attempts=3, base=0.0, factor=2.0
+            )
+        assert calls["n"] == 1  # not retried
+
+    def test_reraises_the_last_transient_so_the_caller_can_fall_back(self):
+        calls = {"n": 0}
+
+        def _call():
+            calls["n"] += 1
+            raise _overloaded()
+
+        with pytest.raises(Exception, match="529"):
+            stream_policy.call_with_transient_retry(
+                _call, attempts=3, base=0.0, factor=2.0
+            )
+        assert calls["n"] == 3  # whole budget spent, then the fallback path runs
+
+    def test_reports_every_wait(self):
+        seen = []
+
+        def _call():
+            raise _overloaded()
+
+        with pytest.raises(Exception):
+            stream_policy.call_with_transient_retry(
+                _call, attempts=3, base=0.0, factor=2.0,
+                on_retry=lambda e, d, n, t: seen.append((n, t)),
+            )
+        assert seen == [(1, 3), (2, 3)]  # a wait per retry, none after the last
+
+    def test_cancel_during_backoff_aborts(self):
+        event = threading.Event()
+        event.set()  # already cancelled
+
+        def _call():
+            raise _overloaded()
+
+        with pytest.raises(KeyboardInterrupt):
+            stream_policy.call_with_transient_retry(
+                _call, attempts=3, base=5.0, factor=2.0, cancel_event=event
+            )
+
+    def test_async_twin_retries_then_succeeds(self):
+        calls = {"n": 0}
+
+        async def _call():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise _overloaded()
+            return "ok"
+
+        out = asyncio.run(
+            stream_policy.acall_with_transient_retry(
+                _call, attempts=3, base=0.0, factor=2.0
+            )
+        )
+        assert out == "ok"
+        assert calls["n"] == 3
+
+    def test_async_twin_reraises_a_deterministic_error(self):
+        async def _call():
+            raise ValueError("model not found")
+
+        with pytest.raises(ValueError):
+            asyncio.run(
+                stream_policy.acall_with_transient_retry(
+                    _call, attempts=3, base=0.0, factor=2.0
+                )
+            )
+
+
+class TestAuxiliaryCallsRetryOverload:
+    """The auxiliary LLM calls each have a graceful fallback, which is why they
+    used to take it on the FIRST 529 — dropping routing / the decomposition /
+    a slice of the compaction summary while the streamed turn recovered beside
+    them. Each must retry the overload first.
+    """
+
+    @staticmethod
+    def _no_backoff(monkeypatch, mod):
+        monkeypatch.setattr(
+            mod.config, "get",
+            lambda k, d=None: {
+                "RETRY_DELAY": 0.0, "RETRY_BACKOFF": 1.0, "MAX_RETRIES": 5,
+            } if k == "LLM" else (d or {}),
+        )
+
+    class _FlakyModel:
+        """Fails with an overload ``fail_times`` times, then answers ``content``."""
+
+        def __init__(self, content, fail_times=1):
+            self.content = content
+            self.fail_times = fail_times
+            self.calls = 0
+
+        def invoke(self, messages, config=None):
+            self.calls += 1
+            if self.calls <= self.fail_times:
+                raise _overloaded()
+            return type("R", (), {"content": self.content})()
+
+    def test_router_classification_retries(self, monkeypatch):
+        import mnemoai.client.agent.router as mod
+
+        self._no_backoff(monkeypatch, mod)
+        router = mod.QueryRouter.__new__(mod.QueryRouter)
+        router._valid_routes = set(mod.ROUTE_TOOLS.keys())
+        router.usage = None
+        router.usage_model_name = ""
+        model = self._FlakyModel("code")
+
+        assert router._classify_with(model, []) == "code"
+        assert model.calls == 2  # 529, retried, classified
+
+    def test_router_falls_back_to_full_once_the_budget_is_spent(self, monkeypatch):
+        import mnemoai.client.agent.router as mod
+
+        self._no_backoff(monkeypatch, mod)
+        router = mod.QueryRouter.__new__(mod.QueryRouter)
+        router._valid_routes = set(mod.ROUTE_TOOLS.keys())
+        router.usage = None
+        router.usage_model_name = ""
+        router.model = self._FlakyModel("code", fail_times=99)
+        monkeypatch.setattr(mod, "without_reasoning", lambda m: None)
+        monkeypatch.setattr(mod, "disable_reasoning", lambda m: None)
+        monkeypatch.setattr(mod, "restore_reasoning", lambda m, s: None)
+
+        assert router.classify("do a thing", conversation_context="ctx") == "full"
+        assert router.model.calls == stream_policy.AUX_RETRY_ATTEMPTS
+
+    def test_agent_wires_its_cancel_event_into_the_router(self):
+        import mnemoai.client.agent.router as mod
+
+        class _StubModel:
+            def bind_tools(self, tools):
+                return self
+
+        router = mod.QueryRouter(_StubModel())
+        agent = LangGraphAgent(model=_StubModel(), tools=[], router=router)
+        assert router.cancel_event is agent._cancel_event
+
+    def test_router_backoff_is_cancellable(self, monkeypatch):
+        # Classification runs inline in the turn, so Esc during its backoff must
+        # abort instead of holding the worker thread for the full delay.
+        import mnemoai.client.agent.router as mod
+
+        monkeypatch.setattr(
+            mod.config, "get",
+            lambda k, d=None: {"RETRY_DELAY": 30.0, "RETRY_BACKOFF": 2.0}
+            if k == "LLM" else (d or {}),
+        )
+        router = mod.QueryRouter.__new__(mod.QueryRouter)
+        router.usage = None
+        router.usage_model_name = ""
+        router.cancel_event = threading.Event()
+        router.cancel_event.set()
+
+        with pytest.raises(KeyboardInterrupt):
+            router._invoke_with_retry(self._FlakyModel("code", fail_times=99), [])
+
+    def test_decomposition_retries(self, monkeypatch):
+        import mnemoai.client.agent.agent as mod
+
+        self._no_backoff(monkeypatch, mod)
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        model = self._FlakyModel('[{"description": "step one", "category": "code"}]')
+        a._non_reasoning = lambda: model
+
+        subtasks = a._decompose_task("q", "orchestrator prompt", {"code", "full"})
+        assert model.calls == 2  # 529, retried, decomposed
+        assert [s["description"] for s in subtasks] == ["step one"]
+
+    def test_decomposition_falls_back_to_one_subtask_after_the_budget(
+        self, monkeypatch
+    ):
+        import mnemoai.client.agent.agent as mod
+
+        self._no_backoff(monkeypatch, mod)
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        model = self._FlakyModel("[]", fail_times=99)
+        a._non_reasoning = lambda: model
+
+        subtasks = a._decompose_task("q", "orchestrator prompt", {"code", "full"})
+        assert model.calls == stream_policy.AUX_RETRY_ATTEMPTS
+        assert subtasks == [{"description": "q", "category": "full"}]
+
+    def test_summary_batch_retries(self, monkeypatch):
+        import mnemoai.client.managers.agent_conversation_manager as mod
+
+        self._no_backoff(monkeypatch, mod)
+        mgr = mod.AgentConversationManager.__new__(mod.AgentConversationManager)
+        calls = {"n": 0}
+
+        async def _call():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _overloaded()
+            return "summary"
+
+        out = asyncio.run(mgr._with_transient_retry(_call, "Summary batch 1/2"))
+        assert out == "summary"
+        assert calls["n"] == 2

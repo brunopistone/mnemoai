@@ -243,6 +243,15 @@ class LangGraphAgent:
         # skipping re-prompts until restart.
         self._trusted_confirm_categories: set = set()
         self.router = router
+        if router is not None:
+            # Classification runs inline in the turn, so its retry backoff must
+            # wake on Esc/Ctrl+C like every other wait on this thread. Tolerant:
+            # the router is duck-typed here (tests pass a bare sentinel object,
+            # which accepts no attributes).
+            try:
+                router.cancel_event = self._cancel_event
+            except (AttributeError, TypeError):
+                pass
         self.orchestrator_enabled = orchestrator_enabled and router is not None
         # Runaway guard on the model<->tool loop, set high (default 200) so real
         # long tasks never hit it; compaction is the actual context limiter.
@@ -903,7 +912,7 @@ class LangGraphAgent:
         if aux is not None:
             aux.callbacks = None
             try:
-                response = aux.invoke(messages, config={"callbacks": []})
+                response = self._aux_invoke(aux, messages, "Task decomposition")
                 return parse_subtasks(response.content, query, valid_categories)
             except Exception as e:
                 # A failed decomposition shouldn't crash the turn: fall back to
@@ -916,7 +925,7 @@ class LangGraphAgent:
         try:
             self.model.callbacks = None
             saved_reasoning = self._disable_reasoning()
-            response = self.model.invoke(messages, config={"callbacks": []})
+            response = self._aux_invoke(self.model, messages, "Task decomposition")
             return parse_subtasks(response.content, query, valid_categories)
         except Exception as e:
             logger.warning(f"Task decomposition failed: {e}; using single subtask")
@@ -1690,7 +1699,7 @@ class LangGraphAgent:
                 )
                 if not retriable or attempt == attempts - 1:
                     raise
-                delay = self._network_retry_delay(attempt)
+                delay = self._transient_retry_delay(e, attempt)
                 logger.warning(
                     "Stream connection failed (%s); retrying turn on a fresh "
                     "connection in %.1fs (attempt %d/%d)",
@@ -1719,16 +1728,47 @@ class LangGraphAgent:
         return response, had_reasoning
 
     def _network_retry_delay(self, attempt: int) -> float:
-        """Exponential backoff (seconds) for a network-error stream retry, using
-        the same LLM.RETRY_DELAY / RETRY_BACKOFF knobs as the rest of the app.
+        """Jittered exponential backoff (seconds) for a network-error stream retry,
+        using the same LLM.RETRY_DELAY / RETRY_BACKOFF knobs as the rest of the app.
 
         The config read stays here (tests patch this module's ``config``); the
         capped-exponential math delegates to :func:`stream_policy.network_retry_delay`.
         """
         llm = config.get("LLM", {})
-        base = float(llm.get("RETRY_DELAY", 1.0))
-        factor = float(llm.get("RETRY_BACKOFF", 2.0))
-        return stream_policy.network_retry_delay(attempt, base, factor)
+        return stream_policy.network_retry_delay(
+            attempt,
+            float(llm.get("RETRY_DELAY", 1.0)),
+            float(llm.get("RETRY_BACKOFF", 2.0)),
+            jitter=stream_policy.RETRY_JITTER,
+        )
+
+    def _transient_retry_delay(self, exc: Exception, attempt: int) -> float:
+        """Backoff for retrying ``exc``, preferring the provider's own retry-after
+        header (it knows its own load) over our exponential guess."""
+        hinted = stream_policy.retry_after_seconds(exc)
+        return hinted if hinted is not None else self._network_retry_delay(attempt)
+
+    def _aux_invoke(self, model, messages: list, label: str):
+        """Invoke ``model`` for a non-streamed auxiliary call, retrying a transient
+        provider failure (529/overloaded) before the caller's fallback kicks in.
+
+        These calls degrade gracefully, which is exactly why they used to take the
+        fallback on the FIRST 529 — silently dropping the decomposition while the
+        streamed turn beside them recovered on its second attempt. Fewer attempts
+        than a streamed turn (:data:`stream_policy.AUX_RETRY_ATTEMPTS`): a working
+        fallback makes a quick second chance better than a long stall.
+        """
+        llm = config.get("LLM", {})
+        return stream_policy.call_with_transient_retry(
+            lambda: model.invoke(messages, config={"callbacks": []}),
+            attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),
+            base=float(llm.get("RETRY_DELAY", 1.0)),
+            factor=float(llm.get("RETRY_BACKOFF", 2.0)),
+            cancel_event=getattr(self, "_cancel_event", None),
+            on_retry=lambda e, delay, n, total: logger.debug(
+                stream_policy.retry_notice(label, e, delay, n, total)
+            ),
+        )
 
     def _sleep_or_cancel(self, delay: float) -> bool:
         """Delegates to :func:`stream_policy.sleep_or_cancel` with this agent's

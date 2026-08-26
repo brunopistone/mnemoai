@@ -113,6 +113,34 @@ parallel.
    tree: narrow it, point `path` at a subdirectory, or use `find` via
    `execute_bash`.
 
+## `529 overloaded_error` / `Router classification failed`
+
+```
+WARNING — Stream connection failed (Error code: 529 … 'overloaded_error');
+          retrying turn on a fresh connection in 1.0s (attempt 1/6)
+WARNING — Router classification failed (Error code: 529 …); binding the full toolset
+WARNING — Task decomposition failed: Error code: 529 …; using single subtask
+```
+
+A `529` (or a `503`/`overloaded`) is the provider saying it is busy, not a
+misconfiguration. It is transient and retried automatically — the turn on a fresh
+connection, and the smaller internal calls (routing, decomposition, each
+compaction summary batch) up to three attempts each, with jittered backoff and
+the provider's own `retry-after` honored when it sends one.
+
+1. Nothing to do if the retry succeeds; the lines are informational.
+2. The two `WARNING` lines above mean the retries were exhausted and the app
+   proceeded on its fallback: every tool was bound instead of a routed subset, or
+   the request ran as one task instead of a decomposed one. The answer is still
+   produced — resend the message if the result looks coarser than usual.
+3. A burst of them means genuine provider load. `LLM.MAX_RETRIES`,
+   `LLM.RETRY_DELAY` and `LLM.RETRY_BACKOFF` govern how long the app waits;
+   raising `RETRY_DELAY` helps more than raising `MAX_RETRIES` when the overload
+   lasts more than a few seconds.
+4. Concurrency multiplies it: orchestrator waves, `spawn_agent` sub-agents and the
+   compaction summary all call the provider at once. Lower
+   `LLM.SUBAGENT_MAX_CONCURRENCY` if overloads cluster around parallel work.
+
 ## A file write is refused
 
 Three different guards produce three different messages:
