@@ -35,9 +35,11 @@ def _overloaded(retry_after=None, message=_OVERLOADED):
     return exc
 
 
-def _agent(idle=0.2):
+def _agent(idle=0.2, first_token=None):
     a = LangGraphAgent.__new__(LangGraphAgent)
     a._stream_idle_timeout = idle
+    if first_token is not None:
+        a._stream_first_token_timeout = first_token
     return a
 
 
@@ -64,6 +66,24 @@ class TestTransientNetworkClassifier:
             "'message': 'Internal server error'}}",
             "Internal server error",
             "api_error",
+        ]:
+            assert LangGraphAgent._is_transient_network_error(Exception(msg)), msg
+
+    def test_matches_every_botocore_transport_error(self):
+        # Verbatim from botocore.exceptions' own `fmt` strings. Only the two
+        # containing the word "timeout" used to match, so a dropped Bedrock
+        # converse-stream socket ("Connection WAS closed …", which the
+        # "connection closed" marker does NOT substring-match) counted as
+        # deterministic and the turn died on the spot with no retry.
+        for msg in [
+            'Connection was closed before we received a valid response from '
+            'endpoint URL: "https://bedrock-runtime.us-east-1.amazonaws.com/'
+            'model/global.anthropic.claude-opus-5/converse-stream".',
+            'Could not connect to the endpoint URL: "https://x"',
+            "An error occurred while reading from response stream: boom",
+            'Read timeout on endpoint URL: "https://x"',
+            'Connect timeout on endpoint URL: "https://x"',
+            "An HTTP Client failed to establish a connection: boom",
         ]:
             assert LangGraphAgent._is_transient_network_error(Exception(msg)), msg
 
@@ -124,6 +144,57 @@ class TestIdleTimeoutIterator:
         assert next(it) == "ok"
         with pytest.raises(ValueError, match="boom"):
             next(it)
+
+
+class TestFirstTokenWindow:
+    """The wait for the FIRST chunk is prefill, not a stalled socket.
+
+    On a large context the provider reasons over the whole prompt before emitting
+    a byte (measured ~123s at ~440k tokens), so policing that window with the
+    per-chunk idle timeout aborts a healthy turn — and each retry re-sends the same
+    prompt and re-pays the same doomed wait, so the turn can never complete.
+    """
+
+    def test_budget_derives_from_request_timeout(self):
+        assert stream_policy.first_token_timeout(120, 600) == 630  # + grace
+        # Never shorter than the per-chunk window: raising one raises both.
+        assert stream_policy.first_token_timeout(900, 600) == 900
+        # No request timeout configured → nothing to widen with.
+        assert stream_policy.first_token_timeout(120, 0) == 120
+        assert stream_policy.first_token_timeout(120, None) == 120
+
+    def test_slow_first_token_is_not_a_timeout(self):
+        # Stalls 0.5s BEFORE the first chunk with a 0.1s per-chunk window: the old
+        # single-budget loop raised here, killing the turn mid-prefill.
+        a = _agent(idle=0.1, first_token=5.0)
+        model = _FakeModel(["a", "b"], stall_before=0, stall_seconds=0.5)
+        assert list(a._iter_stream_with_idle_timeout(model, [], {})) == ["a", "b"]
+
+    def test_first_token_window_still_bounded(self):
+        a = _agent(idle=0.1, first_token=0.2)
+        model = _FakeModel(["a"], stall_before=0, stall_seconds=3.0)
+        with pytest.raises(_StreamIdleTimeout, match="first token"):
+            list(a._iter_stream_with_idle_timeout(model, [], {}))
+
+    def test_widened_window_does_not_leak_into_a_running_stream(self):
+        # Once data flows, a silent socket must still be caught by the SHORT
+        # per-chunk window — the long budget covers prefill only.
+        a = _agent(idle=0.2, first_token=30.0)
+        model = _FakeModel(["a", "b"], stall_before=1, stall_seconds=3.0)
+        it = a._iter_stream_with_idle_timeout(model, [], {})
+        assert next(it) == "a"
+        t0 = time.time()
+        with pytest.raises(_StreamIdleTimeout, match="stream data"):
+            next(it)
+        assert time.time() - t0 < 2.0  # tripped on `idle`, not the 30s budget
+
+    def test_unset_budget_falls_back_to_idle(self):
+        # A hand-built agent (no _stream_first_token_timeout) keeps the old
+        # behavior rather than inheriting a 10-minute first-token wait.
+        a = _agent(idle=0.2)
+        model = _FakeModel(["a"], stall_before=0, stall_seconds=3.0)
+        with pytest.raises(_StreamIdleTimeout):
+            list(a._iter_stream_with_idle_timeout(model, [], {}))
 
 
 class TestCooperativeCancel:
