@@ -57,6 +57,7 @@ nav:
           - Memory & learning: guides/memory.md
           - Knowledge & web tools: guides/knowledge-and-web.md
           - External MCP servers: guides/mcp.md
+          - Tool hooks: guides/hooks.md
   - Reference:
       - Configuration: configuration.md
       - Tools reference: reference/tools.md

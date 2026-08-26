@@ -23,13 +23,23 @@ from .readers import (
 def register_fs_read_tools(mcp: FastMCP) -> None:
     """Register file system reading tools.
 
+    ``fs_read`` and every reader it dispatches to are SYNCHRONOUS on purpose, so
+    the registration chokepoint runs them on a worker thread (see
+    server/tools/thread_offload.py). They used to be ``async def`` with no real
+    await anywhere — reading a file, counting tokens, even a blocking
+    ``model.invoke`` when summarizing a large PDF, all inline on the server's
+    single event loop. That froze every OTHER agent's tool call for the duration:
+    a parallel ``glob_search`` whose own work is milliseconds died at the client's
+    ``LLM.MCP_CALL_TIMEOUT``. ``fs_read`` is the tool the model calls most, so it
+    was the biggest remaining source of that stall.
+
     Args:
         mcp: FastMCP server instance to register tools with
     """
 
     @mcp.tool()
     @tool_error_handler
-    async def fs_read(
+    def fs_read(
         path: str,
         mode: str = "Line",
         start_line: int = 1,
@@ -94,19 +104,19 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
 
             if mode == "Directory":
                 # A directory listing isn't a file read; nothing to gate later.
-                return await read_directory(normalized_path, depth)
+                return read_directory(normalized_path, depth)
             elif mode == "Line":
-                result = await read_lines(normalized_path, start_line, end_line)
+                result = read_lines(normalized_path, start_line, end_line)
             elif mode == "Search":
-                result = await search_file(normalized_path, pattern, context_lines)
+                result = search_file(normalized_path, pattern, context_lines)
             elif mode == "CSV":
-                result = await read_csv(normalized_path)
+                result = read_csv(normalized_path)
             elif mode in ["JSON", "JSONL"]:
-                result = await read_json(normalized_path, start_line, end_line)
+                result = read_json(normalized_path, start_line, end_line)
             elif mode == "PDF":
-                result = await read_pdf(normalized_path)
+                result = read_pdf(normalized_path)
             elif mode == "DOCX":
-                result = await read_docx(normalized_path)
+                result = read_docx(normalized_path)
             else:
                 return json.dumps(
                     {

@@ -1610,7 +1610,9 @@ def run_params_override() -> Optional[Path]:
 
     dest.write_text(new_text)
     print(f"\n  Updated {label} parameters in:\n    {dest}")
-    print("  Reload to apply: the change takes effect on the next config reload.")
+    # No "reload to apply" note: the only caller (/params) reloads the params in
+    # place and says so, so telling the user to reload contradicts what happens
+    # next. It was left behind when /params stopped restarting the app.
     print("=" * 64 + "\n")
     return dest
 

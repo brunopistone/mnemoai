@@ -115,10 +115,17 @@ unlimited.
 
 **`glob_search`** skips eleven noise directories unless `include_ignored=True`:
 `.git`, `.idea`, `.mypy_cache`, `.pytest_cache`, `.ruff_cache`, `.tox`, `.venv`,
-`__pycache__`, `build`, `dist`, `node_modules`. With `sort_by_mtime=True` it
-collects then sorts, so a capped result really is the newest N — at the cost of
-scanning everything, up to a ceiling of 100,000 matches. `sort_by_mtime=False`
-stops early and is faster.
+`__pycache__`, `build`, `dist`, `node_modules`. They are skipped **before** being
+walked, so a pattern that names one explicitly (`node_modules/**/*.js`) still
+works. Hidden files and directories need a pattern segment that starts with a dot
+(`.*rc`), as with any glob. With `sort_by_mtime=True` it collects then sorts, so a
+capped result really is the newest N — at the cost of scanning everything, up to a
+ceiling of 100,000 matches. `sort_by_mtime=False` stops early and is faster.
+
+The scan is **bounded at 30 seconds**: past that it returns the matches it has
+with `truncated` and `timed_out` set, rather than running until the caller's own
+timeout fires. Symlinked **directories** are not traversed — a link back to a
+parent would make the walk endless — while symlinks to files still match.
 
 **`grep_search`** takes three `output_mode` values: `"files_with_matches"`
 (default), `"content"`, and `"count"`. Context flags apply **only** in `content`

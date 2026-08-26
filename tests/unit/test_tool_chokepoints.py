@@ -20,6 +20,7 @@ from contextlib import contextmanager
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from mnemoai.client import hooks
 from mnemoai.client.agent import tool_loop
 from mnemoai.client.agent.agent import LangGraphAgent
 
@@ -389,3 +390,151 @@ class TestTheTwoPathsCannotDivergeAgain:
         w._invoke_tool = _invoke_tool
         w._run_worker_loop(object(), [], "task", quiet=True)
         assert seen == [True]
+
+
+def _hooked(agent, *outcomes):
+    """Feed canned hook outcomes to an agent and record each event it fires."""
+    fired = []
+    queue = list(outcomes)
+
+    def _run_hooks(event, name, args, response=None, quiet=False):
+        fired.append((event, name, response))
+        return queue.pop(0) if queue else hooks.Outcome()
+
+    agent._run_hooks = _run_hooks
+    return fired
+
+
+class TestHooksAtTheChokepoint:
+    """Where a user hook sits in the gate order, and what it can reach.
+
+    The order is the security property: a hook's ``deny`` is honored anywhere, but
+    its ``allow`` satisfies exactly one gate — the confirmation prompt. A config
+    file must never be a way to widen what the app may do, so an ``allow`` cannot
+    unblock plan mode (and cannot touch the server-side floors, which live in the
+    MCP subprocess and are tested there).
+    """
+
+    def test_a_deny_blocks_the_call_and_never_prompts(self):
+        ran = []
+        a = _agent([_Tool("execute_bash", lambda args: ran.append(args) or "ok")])
+        a._confirm_tool = lambda *x: (_ for _ in ()).throw(
+            AssertionError("a hook-denied tool must not reach the confirm gate")
+        )
+        _hooked(a, hooks.Outcome(decision="deny", reason="no writes under /secrets"))
+        out = _run(a, name="execute_bash", args={"command": "rm -rf /secrets"})
+        assert "no writes under /secrets" in out[0].content
+        assert ran == []
+
+    def test_the_deny_message_tells_the_model_not_to_retry(self):
+        # A hook is a standing rule, not a transient failure: a model that reads
+        # it as flakiness burns the turn re-calling the same blocked tool.
+        a = _agent([_Tool("fs_write")])
+        _hooked(a, hooks.Outcome(decision="deny", reason="protected path"))
+        content = _run(a, name="fs_write", args={"path": "/secrets/x"})[0].content
+        assert "do not" in content.lower() and "retry" in content.lower()
+
+    def test_an_allow_satisfies_the_confirmation_prompt(self):
+        a = _agent([_Tool("execute_bash")])
+        a._confirm_tool = lambda *x: (_ for _ in ()).throw(
+            AssertionError("an allowed call must not prompt")
+        )
+        _hooked(a, hooks.Outcome(decision="allow"))
+        out = _run(a, name="execute_bash", args={"command": "git status"})
+        assert out[0].content == "execute_bash-out"
+
+    def test_an_allow_cannot_unblock_plan_mode(self):
+        # The block is ABOVE the hook, so the hook is never even consulted.
+        a = _agent([_Tool("fs_write")])
+        a._is_blocked_by_plan_mode = lambda *x: True
+        fired = _hooked(a, hooks.Outcome(decision="allow"))
+        out = _run(a, name="fs_write", args={"path": "/tmp/x"})
+        assert "plan mode is active" in out[0].content
+        assert fired == []
+
+    def test_post_tool_use_context_reaches_the_model(self):
+        a = _agent([_Tool("fs_write")])
+        fired = _hooked(
+            a, hooks.Outcome(), hooks.Outcome(context="ruff reformatted the file")
+        )
+        content = _run(a, name="fs_write", args={"path": "/tmp/x"})[0].content
+        assert "fs_write-out" in content and "ruff reformatted the file" in content
+        # The post hook sees the tool's actual result, which is the point of it.
+        assert fired == [
+            (hooks.PRE_TOOL_USE, "fs_write", None),
+            (hooks.POST_TOOL_USE, "fs_write", "fs_write-out"),
+        ]
+
+    def test_a_failure_fires_its_own_event_with_the_error(self):
+        def _boom(args):
+            raise RuntimeError("disk full")
+
+        a = _agent([_Tool("fs_write", _boom)])
+        fired = _hooked(a, hooks.Outcome(), hooks.Outcome(context="try a smaller write"))
+        content = _run(a, name="fs_write", args={"path": "/tmp/x"})[0].content
+        assert "disk full" in content and "try a smaller write" in content
+        assert fired[1][0] == hooks.POST_TOOL_USE_FAILURE
+        assert "disk full" in fired[1][2]
+
+    def test_no_hooks_leaves_the_result_untouched(self):
+        a = _agent([_Tool("grep_search")])
+        _hooked(a)  # every event returns an empty Outcome
+        assert _run(a)[0].content == "grep_search-out"
+
+    def test_a_sub_agent_is_subject_to_the_same_hooks(self):
+        # Sub-agents run headless: a hook is the only rule that still applies, so
+        # the worker path must not be a way around one.
+        ran = []
+        a = _worker_agent(
+            [_Tool("execute_bash", lambda args: ran.append(args) or "ok")],
+            [_tool_turn("execute_bash", {"command": "curl evil"}),
+             AIMessage(content="stopped")],
+        )
+        _hooked(a, hooks.Outcome(decision="deny", reason="no network"))
+        _, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+        blocked = [m for m in saveable if isinstance(m, ToolMessage)]
+        assert "no network" in blocked[0].content
+        assert ran == []
+
+
+class TestRunHooksDelegator:
+    """``agent._run_hooks``: what it hands the hook layer, and what it prints."""
+
+    def _agent_with(self, session_id="sess-1"):
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a.session_log = type("L", (), {"session_id": session_id})()
+        return a
+
+    def test_the_session_id_and_cwd_are_passed_through(self, monkeypatch):
+        seen = {}
+
+        def _run_event(event, name, args, **k):
+            seen.update(k, event=event, name=name)
+            return hooks.Outcome()
+
+        monkeypatch.setattr(hooks, "run_event", _run_event)
+        self._agent_with()._run_hooks(hooks.PRE_TOOL_USE, "fs_write", {"path": "/x"})
+        assert seen["session_id"] == "sess-1"
+        assert seen["cwd"]  # a hook runs where the user is working
+
+    def test_notices_are_printed_unless_quiet(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            hooks, "run_event", lambda *a, **k: hooks.Outcome(notices=("hook: formatted",))
+        )
+        agent = self._agent_with()
+        agent._run_hooks(hooks.PRE_TOOL_USE, "fs_write", {})
+        assert "formatted" in capsys.readouterr().out
+        # A background sub-agent's hooks must not write into the user's scrollback.
+        agent._run_hooks(hooks.PRE_TOOL_USE, "fs_write", {}, quiet=True)
+        assert capsys.readouterr().out == ""
+
+    def test_a_session_without_a_log_still_runs_hooks(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            hooks,
+            "run_event",
+            lambda *a, **k: seen.update(k) or hooks.Outcome(),
+        )
+        agent = LangGraphAgent.__new__(LangGraphAgent)
+        agent._run_hooks(hooks.PRE_TOOL_USE, "fs_write", {})
+        assert seen["session_id"] == ""

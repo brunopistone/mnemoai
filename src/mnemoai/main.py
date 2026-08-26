@@ -88,11 +88,12 @@ def _discard_empty_session(client: Any) -> None:
 
 
 def _format_session_label(entry: dict) -> str:
-    """One picker row: how long ago, turn count, and the opening prompt.
+    """One picker row: how long ago, turn count, and the name or opening prompt.
 
-    A ``/branch`` fork is tagged, because it INHERITS its parent's opening prompt
-    — so the preview alone renders a branch and the conversation it came from as
-    two identical rows.
+    A ``/rename`` title wins over the prompt preview when there is one — that is
+    the entire point of naming a session. A ``/branch`` fork is tagged, because it
+    INHERITS its parent's opening prompt — so the preview alone renders a branch
+    and the conversation it came from as two identical rows.
     """
     import time
 
@@ -114,9 +115,9 @@ def _format_session_label(entry: dict) -> str:
         tag = " (continued)"
     else:
         tag = ""
+    title = (entry.get("label") or "").strip() or entry.get("preview", "")
     return (
-        f"{when:>8}  {count:>3} turn{'s' if count != 1 else ''}  "
-        f"{entry.get('preview', '')}{tag}"
+        f"{when:>8}  {count:>3} turn{'s' if count != 1 else ''}  {title}{tag}"
     )
 
 

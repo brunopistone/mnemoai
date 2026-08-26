@@ -20,6 +20,7 @@ Start here if you know what you want to change but not where.
 | Add a repeatable procedure                  | `skills/<name>/SKILL.md`    | Everything          | [Agent skills](../guides/agent-skills.md)                           |
 | Define a custom sub-agent                   | `agents/<name>.md`          | Everything          | [Sub-agents](../guides/orchestration.md)                            |
 | Connect an external tool server             | `mcp/mcp.json`              | Everything          | [External MCP servers](../guides/mcp.md)                            |
+| Run a command around every tool call        | `hooks/hooks.json`          | Everything          | [Tool hooks](../guides/hooks.md)                                    |
 
 For the two steering rows, `CLAUDE.md` is read as an equivalent filename, so a repo
 that already keeps its instructions under that name needs no second file. Within a
@@ -37,6 +38,8 @@ tool's instructions file is picked up as your always-on rules.
 │   └── prompts.yaml          # ← you edit; model-facing prompts
 ├── mcp/
 │   └── mcp.json              # ← you edit; external MCP servers
+├── hooks/
+│   └── hooks.json            # ← you edit; commands run around tool calls
 ├── STEERING.md               # ← you edit; global project rules (or CLAUDE.md)
 ├── skills/
 │   └── <name>/SKILL.md       # ← you edit; on-demand procedures
@@ -69,6 +72,7 @@ because the next turn overwrites it.
 | Path                                                        | Written by                           | Safe to hand-edit?                          |
 | ----------------------------------------------------------- | ------------------------------------ | ------------------------------------------- |
 | `config/config.yaml`, `config/prompts.yaml`, `mcp/mcp.json` | You                                  | **Yes** — this is the intended interface    |
+| `hooks/hooks.json`                                          | You                                  | **Yes** — read at startup, so restart after |
 | `STEERING.md` (or `CLAUDE.md`), `skills/`, `agents/`        | You                                  | **Yes**                                     |
 | `<profile>/MEMORY.md`                                       | The assistant, via the `memory` tool | Yes — it's Markdown, and `/memory` shows it |
 | `<profile>/<profile>.json`                                  | The assistant, every turn            | No — EMAs and counters are recomputed       |

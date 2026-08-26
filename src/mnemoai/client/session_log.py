@@ -8,6 +8,7 @@ per line:
     {"t": "meta",  "session_id": …, "cwd": …, "started": …, "model": …}
     {"t": "turn",  "n": 1, "ts": …, "messages": [ …strands dicts… ]}
     {"t": "compact", "n": 3, "ts": …}
+    {"t": "label", "ts": …, "title": "…"}          # /rename, last one wins
 
 **Why append-only instead of mirroring the live message list:** compaction
 *replaces* ``agent.messages`` wholesale (it summarizes older turns away), so a
@@ -43,6 +44,9 @@ from mnemoai.utils.paths import sessions_dir
 
 # Chars of the first user message kept as a session's preview label.
 _PREVIEW_CHARS = 100
+# Chars kept of a user-set session name (/rename). Long enough to be descriptive,
+# short enough that a picker row still fits one line next to its metadata.
+_LABEL_CHARS = 80
 
 def _message_text(message: Dict[str, Any]) -> str:
     """First text block of a strands message ("" for a tool-result-only message)."""
@@ -216,6 +220,19 @@ class SessionLog:
         """Note that the live context was compacted (the transcript is unaffected)."""
         self._append({"t": "compact", "n": self._turn, "ts": time.time()})
 
+    def set_label(self, title: str) -> bool:
+        """Name this session for the ``--resume`` picker; True if recorded.
+
+        Appended as a record like everything else — the file is never rewritten,
+        so renaming twice leaves two records and the LAST one wins
+        (:func:`read_session`). An empty title is a valid record: it clears the
+        name back to the first-prompt preview.
+        """
+        if self.path is None:
+            return False
+        self._append({"t": "label", "ts": time.time(), "title": str(title)[:_LABEL_CHARS]})
+        return True
+
     def discard_if_empty(self) -> bool:
         """Delete this session's file if no turn was ever recorded; True if removed.
 
@@ -374,11 +391,15 @@ def read_session(path) -> Dict[str, Any]:
     messages: List[Dict[str, Any]] = []
     branched_from: Dict[str, Any] = {}
     resumed_from = ""
+    label = ""
     turns = 0
     for rec in _iter_records(p):
         kind = rec.get("t")
         if kind == "meta":
             meta = rec
+        elif kind == "label":
+            # Last one wins: /rename appends, it never rewrites the file.
+            label = str(rec.get("title") or "").strip()
         elif kind in ("turn", "restore"):
             if kind == "restore":
                 if isinstance(rec.get("branched_from"), dict):
@@ -402,6 +423,7 @@ def read_session(path) -> Dict[str, Any]:
         "path": str(p),
         "branched_from": branched_from,
         "resumed_from": resumed_from,
+        "label": label,
     }
 
 
@@ -482,6 +504,9 @@ def list_sessions(
                 "exchanges": data.get("exchanges", data["turns"]),
                 "messages": data["messages"],
                 "preview": _preview(data["messages"]),
+                # A name the user gave this session (/rename). Shown instead of the
+                # first-prompt preview, which is why it survives a resume.
+                "label": data.get("label", ""),
                 # A fork shares its parent's opening prompt, so the preview alone
                 # can't tell them apart — the picker appends a "(branch)" marker.
                 "branched_from": data.get("branched_from") or {},

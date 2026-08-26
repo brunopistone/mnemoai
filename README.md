@@ -51,6 +51,7 @@ On first run, if no config is found, an interactive configurator launches and wa
 - **🔎 Fast Search**: Glob + ripgrep content search (10-100x faster)
 - **📋 Todo Tracking, 📝 Plan Mode & 🔄 Background Tasks**: Multi-step task management
 - **⚡ Bash Execution & 🛡️ Git Safety**: Shell commands with smart error handling and guardrails
+- **🪝 Tool Hooks**: Your own commands run before/after any tool call — format writes, deny paths, auto-approve safe commands ([docs](https://brunopistone.github.io/mnemoai/guides/hooks/))
 
 ## 📄 License
 

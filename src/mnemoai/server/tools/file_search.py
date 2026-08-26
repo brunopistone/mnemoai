@@ -1,10 +1,12 @@
 """Fast search tools using glob and ripgrep."""
 
 import base64
-import glob
+import fnmatch
 import json
 import os
+import re
 import subprocess
+import time
 
 from mcp.server.fastmcp import FastMCP
 
@@ -37,6 +39,120 @@ _DEFAULT_IGNORED_DIRS = {
 # sorting" on an enormous tree can't exhaust memory.
 _GLOB_SCAN_CEILING = 100000
 
+# Wall-clock bound on ONE glob_search, matching grep_search's subprocess timeout.
+# The tool must fail with a usable partial result long before the CLIENT's
+# LLM.MCP_CALL_TIMEOUT (300s) fires: that timeout kills the call without a retry
+# and, until it does, occupies a slot the agent is waiting on. A caller pointing
+# a `**` pattern at $HOME is the ordinary way to get here.
+_GLOB_TIME_BUDGET_S = 30.0
+
+_MAGIC = re.compile(r"[*?\[]")
+
+
+class _ScanBudget:
+    """Wall-clock bound for a directory walk; ``expired()`` is what stops it."""
+
+    def __init__(self, seconds: float) -> None:
+        self.deadline = time.monotonic() + seconds
+        self.timed_out = False
+
+    def expired(self) -> bool:
+        """True once the budget is spent (latched, so it's cheap to re-ask)."""
+        if not self.timed_out and time.monotonic() >= self.deadline:
+            self.timed_out = True
+        return self.timed_out
+
+
+def _split_glob_pattern(root: str, pattern: str) -> tuple[str, list[str]]:
+    """Split ``pattern`` into a concrete search root and its magic segments.
+
+    Leading segments with no wildcard are folded into the root, so
+    ``src/**/*.ts`` starts walking at ``src`` instead of filtering everything
+    under ``root``. An absolute pattern anchors itself and ignores ``root``, the
+    way ``os.path.join`` used to.
+    """
+    parts = [p for p in pattern.replace(os.sep, "/").split("/") if p not in ("", ".")]
+    if os.path.isabs(pattern):
+        root = os.path.splitdrive(pattern)[0] + os.sep
+    while parts and not _MAGIC.search(parts[0]):
+        root = os.path.join(root, parts.pop(0))
+    return os.path.normpath(root) if root else root, parts
+
+
+def _iter_glob_files(
+    root: str, segments: list[str], include_ignored: bool, budget: _ScanBudget
+):
+    """Yield files under ``root`` matching ``segments``, one segment per path part.
+
+    Replaces ``glob.iglob(recursive=True)``, which bounds its OUTPUT but not its
+    WORK: the ignore list was applied to the matches it yielded, so a `**` walk
+    still descended every ``node_modules``/``build``/``dist`` tree only to throw
+    the results away, nothing checked the clock, and on Python < 3.13 ``**``
+    follows directory symlinks — a link back to an ancestor made the walk
+    effectively unbounded. Here the noise dirs are PRUNED before descending,
+    directory symlinks are never followed, and the budget is checked as we go.
+
+    Hidden names are skipped unless the matching segment itself starts with a dot,
+    which is stdlib glob's rule (and why ``.git`` was never the slow part).
+    """
+    if not segments:
+        # A pattern with no wildcard at all: the root IS the candidate.
+        if os.path.isfile(root):
+            yield root
+        return
+
+    stack = [(root, 0)]
+    seen = set()
+    while stack:
+        if budget.expired():
+            return
+        state = stack.pop()
+        if state in seen:  # two `**` segments can reach the same state
+            continue
+        seen.add(state)
+        dirpath, index = state
+        segment = segments[index]
+        recursive = segment == "**"
+        last = index == len(segments) - 1
+        if recursive and not last:
+            # `**` matches zero directories too, so the next segment also gets a
+            # shot at THIS directory.
+            stack.append((dirpath, index + 1))
+        hidden_ok = segment.startswith(".")
+        try:
+            entries = list(os.scandir(dirpath))
+        except OSError:  # unreadable/vanished dir — skip it, keep the walk alive
+            continue
+        for entry in entries:
+            if budget.expired():
+                return
+            name = entry.name
+            if name.startswith(".") and not hidden_ok:
+                continue
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_dir:
+                if not include_ignored and name in _DEFAULT_IGNORED_DIRS:
+                    continue
+                if recursive:
+                    stack.append((entry.path, index))
+                elif not last and fnmatch.fnmatch(name, segment):
+                    stack.append((entry.path, index + 1))
+                continue
+            # A file only ever answers the LAST segment ("**" as the last segment
+            # means "everything below here").
+            if not last:
+                continue
+            if not recursive and not fnmatch.fnmatch(name, segment):
+                continue
+            try:
+                if entry.is_file():  # follows a symlink to a real file
+                    yield entry.path
+            except OSError:
+                continue
+
 
 def register_search_tools(mcp: FastMCP) -> None:
     """Register fast search tools.
@@ -66,7 +182,11 @@ def register_search_tools(mcp: FastMCP) -> None:
             include_ignored: Include files inside common noise dirs (.git, node_modules, .venv, __pycache__, build, dist, ...); default False
 
         Returns:
-            JSON string with matching file paths
+            JSON string with matching file paths. The scan is bounded: it stops
+            after 30 seconds and returns what it found with timed_out=True, so a
+            pattern aimed at a huge tree gives a partial answer instead of hanging.
+            Symlinked directories are not traversed (a link to an ancestor would
+            make the walk endless); symlinks to files still match.
 
         Examples:
             glob_search(pattern="**/*.py", max_results=100)  # First 100 Python files
@@ -89,13 +209,8 @@ def register_search_tools(mcp: FastMCP) -> None:
             )
 
         try:
-            full_pattern = os.path.join(path, pattern)
-
-            def _is_ignored(match: str) -> bool:
-                # Match on path parts relative to the search root so an excluded
-                # dir name in the base path itself doesn't filter everything.
-                rel = os.path.relpath(match, path)
-                return any(part in _DEFAULT_IGNORED_DIRS for part in rel.split(os.sep))
+            search_root, segments = _split_glob_pattern(path, pattern)
+            budget = _ScanBudget(_GLOB_TIME_BUDGET_S)
 
             def _mtime(p: str) -> float:
                 # A file yielded by glob can vanish before we stat it; treat a
@@ -109,15 +224,13 @@ def register_search_tools(mcp: FastMCP) -> None:
             truncated = False
             scan_ceiling_hit = False
 
+            found = _iter_glob_files(search_root, segments, include_ignored, budget)
+
             if sort_by_mtime:
                 # Collect ALL matches (up to a hard ceiling), THEN sort, THEN
                 # slice — so a capped result is the truly-newest N, not the first
-                # N glob happened to yield.
-                for match in glob.iglob(full_pattern, recursive=True):
-                    if not os.path.isfile(match):
-                        continue
-                    if not include_ignored and _is_ignored(match):
-                        continue
+                # N the walk happened to yield.
+                for match in found:
                     matches.append(match)
                     if len(matches) >= _GLOB_SCAN_CEILING:
                         scan_ceiling_hit = True
@@ -132,11 +245,7 @@ def register_search_tools(mcp: FastMCP) -> None:
                     truncated = True
             else:
                 # Unsorted: stop lazily as soon as max_results is reached (fast).
-                for match in glob.iglob(full_pattern, recursive=True):
-                    if not os.path.isfile(match):
-                        continue
-                    if not include_ignored and _is_ignored(match):
-                        continue
+                for match in found:
                     matches.append(match)
                     if max_results > 0 and len(matches) >= max_results:
                         truncated = True
@@ -174,6 +283,22 @@ def register_search_tools(mcp: FastMCP) -> None:
                     )
             if scan_ceiling_hit:
                 result["scan_ceiling_hit"] = True
+            if budget.timed_out:
+                # Partial, and say so plainly: an unflagged short list reads as
+                # "that's all there is". Overwrites any truncation message —
+                # running out of time is the more important fact.
+                result["truncated"] = True
+                result["timed_out"] = True
+                result["message"] = (
+                    f"Scan stopped after {int(_GLOB_TIME_BUDGET_S)}s with "
+                    f"{len(matches)} match(es) — the tree is too large to walk "
+                    "fully. Narrow the pattern or point path at a subdirectory, "
+                    "or use execute_bash with 'find' for a system-wide search."
+                )
+                logger.debug(
+                    f"glob_search timed out after {_GLOB_TIME_BUDGET_S}s: "
+                    f"{pattern} under {search_root}"
+                )
 
             return json.dumps(result)
 

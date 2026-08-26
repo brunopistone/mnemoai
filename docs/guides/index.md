@@ -10,6 +10,7 @@ Task-oriented guides for using and extending Mnemo AI day to day.
 | Give the assistant memory: profiles, MEMORY.md, steering, episodic memory, and the playbook | [Memory & learning](memory.md)                 |
 | Add knowledge: RAG, web search, and web crawling                                            | [Knowledge & web tools](knowledge-and-web.md)  |
 | Connect external MCP servers                                                                | [External MCP servers](mcp.md)                 |
+| Run my own command before or after every tool call                                          | [Tool hooks](hooks.md)                         |
 | Use todos, fast search, precise edits, and background tasks                                 | [Everyday tools](productivity-tools.md)        |
 | Decide what runs without asking, and what is refused outright                               | [Safety & permissions](safety.md)              |
 

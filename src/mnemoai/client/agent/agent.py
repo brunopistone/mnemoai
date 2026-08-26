@@ -1,6 +1,7 @@
 """LangGraph-based agent implementation."""
 
 import operator
+import os
 import queue
 import re
 import sys  # noqa: F401  — tests patch agent_mod.sys.stdin.isatty (the confirm gate reads the same sys.stdin)
@@ -20,6 +21,7 @@ from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
+from mnemoai.client import hooks
 from mnemoai.client.agent import (
     ask_user,
     cancellation,
@@ -2378,6 +2380,45 @@ class LangGraphAgent:
             activity=activity,
             spawn_results=spawn_results,
             log_label=log_label,
+        )
+
+    def _run_hooks(
+        self,
+        event: str,
+        tool_name: str,
+        tool_input: dict,
+        tool_response: Optional[str] = None,
+        quiet: bool = False,
+    ) -> hooks.Outcome:
+        """Run the user's hooks for one tool call and surface what they said.
+
+        Display lives here rather than in ``tool_loop`` for the same reason
+        ``_invoke_tool``'s does: a sub-agent (``quiet``) must stay silent, and a
+        hook that fires invisibly is the bug class this feature would otherwise
+        introduce — so anything a hook decides, blocks, or prints is echoed.
+        """
+        log = getattr(self, "session_log", None)
+        outcome = hooks.run_event(
+            event,
+            tool_name,
+            tool_input,
+            tool_response=tool_response,
+            session_id=getattr(log, "session_id", "") or "",
+            cwd=os.getcwd(),
+        )
+        if not quiet:
+            for notice in outcome.notices:
+                print(turn_view.render_hook_notice(notice))
+        return outcome
+
+    @staticmethod
+    def _hook_deny_message(tool_name: str, reason: str) -> str:
+        """What the model is told when a hook blocked its call."""
+        detail = reason.strip() or "no reason given"
+        return (
+            f"'{tool_name}' was blocked by a local hook: {detail}\n"
+            "This is a rule configured by the user, not a transient failure — do not "
+            "retry the same call. Adapt, or ask the user how to proceed."
         )
 
     def _is_preapproved_bash(self, command: str) -> bool:

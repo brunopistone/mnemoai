@@ -29,7 +29,7 @@ def _rag_session():
     return get_rag_session
 
 
-async def read_pdf(file_path: str) -> str:
+def read_pdf(file_path: str) -> str:
     """Read PDF content with automatic chunking and summarization for large files.
 
     Args:
@@ -101,7 +101,7 @@ async def read_pdf(file_path: str) -> str:
                         # fallback to summarization
 
             # Process with chunking if needed (fallback or RAG not enabled)
-            processed_content, metadata = await process_large_content(full_text)
+            processed_content, metadata = process_large_content(full_text)
 
             return json.dumps(
                 {

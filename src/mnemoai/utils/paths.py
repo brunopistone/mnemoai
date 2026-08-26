@@ -11,6 +11,9 @@ find, back up, or relocate:
     ├── mcp/                                # external MCP servers
     │   ├── mcp.json                        # optional, user-created
     │   └── mcp.json.example                # bundled example (copied here to read)
+    ├── hooks/                              # user-scriptable tool-call hooks
+    │   ├── hooks.json                      # optional, user-created (app home ONLY)
+    │   └── hooks.json.example              # bundled example (copied here to read)
     ├── plans/plan_<ts>.md                  # approved plan-mode plans
     ├── skills                              # skills folder
     ├── STEERING.md                         # user-authored always-on instructions
@@ -65,6 +68,13 @@ def mcp_dir() -> Path:
     return d
 
 
+def hooks_dir() -> Path:
+    """Directory holding hooks.json and the bundled hooks example (created)."""
+    d = app_home() / "hooks"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def config_path() -> Path:
     """Default config.yaml location: ``<app_home>/config/config.yaml`` (not auto-created)."""
     return config_dir() / "config.yaml"
@@ -102,6 +112,18 @@ def mcp_config_path() -> Path:
 def legacy_mcp_config_path() -> Path:
     """Pre-subfolder mcp.json location (``<app_home>/mcp.json``), read-only fallback."""
     return app_home() / "mcp.json"
+
+
+def hooks_config_path() -> Path:
+    """Location of the tool-hooks config: ``<app_home>/hooks/hooks.json``.
+
+    **App home only, deliberately** — a hooks file is arbitrary code that runs on
+    tool calls, so unlike a per-project ``STEERING.md`` (read-only text) it must
+    never arrive with a ``git clone`` and start firing. The same rule already
+    applied to global steering: nothing outside the app home silently becomes
+    always-on. Not auto-created; presence is the switch.
+    """
+    return hooks_dir() / "hooks.json"
 
 
 def _refresh_example(src: Path, dest: Path) -> None:
@@ -218,8 +240,9 @@ def seed_example_files() -> None:
     """Copy the package's bundled ``*.example`` templates into the app home.
 
     Gives users browsable examples right next to their live files:
-    ``config/`` gets the ``config.yaml*.example`` templates and ``mcp/`` gets
-    ``mcp.json.example``. The ``*.example`` reference files are **refreshed from
+    ``config/`` gets the ``config.yaml*.example`` templates, ``mcp/`` gets
+    ``mcp.json.example`` and ``hooks/`` gets ``hooks.json.example``. The
+    ``*.example`` reference files are **refreshed from
     the bundle when they differ** so a new bundled key reaches an EXISTING install
     on upgrade (they're read-only reference, not loaded as config). Bundled example
     skills are copied when absent, and an already-installed one whose ``SKILL.md``
@@ -248,6 +271,9 @@ def seed_example_files() -> None:
         mcp_example = pkg_templates / "mcp.json.example"
         if mcp_example.is_file():
             _refresh_example(mcp_example, mcp_dir() / mcp_example.name)
+        hooks_example = pkg_templates / "hooks.json.example"
+        if hooks_example.is_file():
+            _refresh_example(hooks_example, hooks_dir() / hooks_example.name)
         # Seed the bundled example skill(s) into the skills dir so the feature is
         # discoverable out of the box. Per-skill (like the config *.example files
         # above): copy any bundled skill whose directory doesn't exist yet, so a

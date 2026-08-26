@@ -2,6 +2,13 @@
 
 Diagnose the failures you're most likely to hit, by symptom.
 
+**Run `/doctor` first.** It checks this install for the usual causes — which
+`config.yaml` is actually loaded, whether the provider's credentials resolve and
+its endpoint answers, whether `rg`/`git`/`bash` are on `PATH`, how many MCP tools
+came up and whether every declared server connected, and whether an enabled
+feature is missing its dependency. Most of the sections below start with a check
+it already performed for you ([details](../guides/usage.md#checking-your-install)).
+
 | Symptom                                            | Go to                                                                             |
 | -------------------------------------------------- | --------------------------------------------------------------------------------- |
 | Startup hangs, or tools are missing entirely       | [The assistant starts but has no tools](#the-assistant-starts-but-has-no-tools)   |
@@ -77,6 +84,34 @@ The configured embedding model was unreachable, so deterministic SHA256 vectors
 were used instead. They keep the app running but carry no semantic meaning —
 retrieval will look random. Fix the embedding model rather than tuning
 thresholds: for Ollama, `ollama pull qwen3-embedding:0.6b`.
+
+## A tool times out after 300 seconds
+
+```
+Tool execution error: 'glob_search' did not respond within 300s. The call was not retried …
+```
+
+The number is `LLM.MCP_CALL_TIMEOUT`, and the tool named in the message is
+usually the **victim**, not the cause — especially when its real work takes
+milliseconds. The MCP server is one subprocess with one event loop, so a tool
+whose body blocks that loop holds up every other agent's call behind it until
+their timeouts fire. Expect it in bursts, while several agents are working in
+parallel.
+
+1. If the failing call is a genuinely long one — a slow build under
+   `execute_bash`, `wait_for_task` on a long background job — raise
+   `LLM.MCP_CALL_TIMEOUT`. That is the case the message's own hint is about.
+2. If it is a fast tool that timed out anyway, something else was blocking the
+   server. Check the log for a long-running tool that started before it (see
+   [Read the logs](#read-the-logs)); a tool added locally is the first suspect —
+   write it as a plain `def` unless its body really awaits, so it is offloaded to
+   a worker thread (`python -m pytest tests/unit/test_thread_offload.py` fails on
+   an `async def` that never awaits, helpers included).
+3. `glob_search` bounds itself at 30 seconds and returns what it found with
+   `timed_out` set, so a slow filename search reports a partial result rather
+   than hanging. Seeing that instead means the pattern is aimed at too large a
+   tree: narrow it, point `path` at a subdirectory, or use `find` via
+   `execute_bash`.
 
 ## A file write is refused
 

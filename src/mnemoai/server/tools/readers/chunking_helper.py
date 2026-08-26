@@ -1,16 +1,18 @@
 """Universal chunking and summarization for large files.
 
-Improvements added:
 - simple on-disk SQLite cache to store per-chunk summaries keyed by a sha256 hash
-- concurrent summarization of chunks using an asyncio Semaphore limited by
-  `CHUNKING_CONCURRENCY` in config (defaults to 3)
+- chunks summarized on a bounded thread pool sized by `CHUNKING_CONCURRENCY`
+  (defaults to 3). Everything here is SYNCHRONOUS on purpose: summarizing calls
+  a blocking ``model.invoke``, so the whole path is offloaded to a worker thread
+  by its caller (``fs_read`` → server/tools/thread_offload.py) rather than
+  pretending to be async on the MCP server's event loop.
 """
 
-import asyncio
 import hashlib
 import os
 import sqlite3
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import tiktoken
@@ -231,7 +233,7 @@ def __split_into_chunks(content: str, chunk_size: int = 512) -> list[str]:
     return overlapped
 
 
-async def __summarize_with_model(text: str, context: str = "") -> str:
+def __summarize_with_model(text: str, context: str = "") -> str:
     """Summarize text using the configured model.
 
     Args:
@@ -298,7 +300,7 @@ async def __summarize_with_model(text: str, context: str = "") -> str:
         return text[:2000] + "...[summarization failed]"
 
 
-async def process_large_content(
+def process_large_content(
     content: str, chunk_size: int = 1024 * 8
 ) -> tuple[str, dict]:
     """Process large content with chunking and summarization.
@@ -320,17 +322,22 @@ async def process_large_content(
             "chunks_processed": 0,
         }
 
-    print(f"\033[38;5;98m[CHUNKING]\033[0m Total tokens: {total_tokens}")
+    # Progress goes to the LOGGER, never stdout: this runs inside the MCP server
+    # subprocess, whose stdout IS the JSON-RPC pipe — a print() there injects
+    # ANSI text into the protocol stream.
+    logger.info(f"[CHUNKING] Total tokens: {total_tokens}")
 
     chunks = __split_into_chunks(content, chunk_size)
 
-    print(f"\033[38;5;98m[CHUNKING]\033[0m Total chunks: {len(chunks)}")
-    # Summarize each chunk concurrently with a bounded semaphore and local cache
-    concurrency = int(config.get("CHUNKING_CONCURRENCY", 3))
-    semaphore = asyncio.Semaphore(concurrency)
+    logger.info(f"[CHUNKING] Total chunks: {len(chunks)}")
+    # Summarize chunks on a bounded thread pool with a local cache. Threads, not
+    # an asyncio semaphore: the summarization body is a blocking model.invoke, so
+    # the coroutine version never yielded — the chunks ran one after another AND
+    # the whole thing sat on the server's event loop.
+    concurrency = max(1, int(config.get("CHUNKING_CONCURRENCY", 3)))
 
-    async def _summarize_chunk(index: int, chunk_text: str) -> str:
-        """Summarize a single chunk with caching and concurrency control.
+    def _summarize_chunk(index: int, chunk_text: str) -> str:
+        """Summarize a single chunk with caching.
 
         Args:
             index: Chunk index
@@ -348,10 +355,9 @@ async def process_large_content(
             logger.debug(f"[CHUNK_CACHE] hit for chunk {index+1}")
             return f"=== Part {index+1}/{len(chunks)} ===\n{cached}"
 
-        async with semaphore:
-            print(f"\033[38;5;98m[CHUNKING]\033[0m Processing chunk {index+1}")
-            context = f"Part {index+1} of {len(chunks)}"
-            summary = await __summarize_with_model(chunk_text, context)
+        logger.info(f"[CHUNKING] Processing chunk {index+1}")
+        context = f"Part {index+1} of {len(chunks)}"
+        summary = __summarize_with_model(chunk_text, context)
 
         # Cache summary (best-effort)
         try:
@@ -361,15 +367,17 @@ async def process_large_content(
 
         return f"=== Part {index+1}/{len(chunks)} ===\n{summary}"
 
-    # Launch concurrent summarization tasks
-    tasks = [asyncio.create_task(_summarize_chunk(i, c)) for i, c in enumerate(chunks)]
-    summaries = await asyncio.gather(*tasks)
+    # map() keeps the results in chunk order — the parts are joined positionally.
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        summaries = list(
+            pool.map(lambda pair: _summarize_chunk(*pair), enumerate(chunks))
+        )
     combined = "\n\n".join(summaries)
     combined_tokens = __count_tokens(combined)
 
     # If combined summaries still too large, summarize again
     if combined_tokens > chunk_size:
-        final_summary = await __summarize_with_model(
+        final_summary = __summarize_with_model(
             combined, f"Final summary of {len(chunks)} parts"
         )
         final_tokens = __count_tokens(final_summary)
