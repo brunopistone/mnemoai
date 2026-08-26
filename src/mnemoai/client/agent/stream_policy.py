@@ -53,6 +53,17 @@ TRANSIENT_NETWORK_MARKERS = (
     "read timed out",
     "server disconnected",
     "connection closed",
+    # botocore's own wording for the same failures, which its exceptions spell out
+    # in prose rather than reusing the phrasings above. Only ReadTimeoutError and
+    # ConnectTimeoutError contain a marker already ("timeout"), so without these
+    # FIVE of its seven transport errors read as deterministic and got NO retry —
+    # including ConnectionClosedError ("Connection WAS closed …", which the
+    # "connection closed" marker above does not substring-match), the way a
+    # dropped Bedrock converse-stream socket actually surfaces.
+    "connection was closed",              # ConnectionClosedError
+    "could not connect",                  # EndpointConnectionError
+    "failed to establish a connection",   # ConnectionError
+    "reading from response stream",       # ResponseStreamingError
     "peer closed connection",
     "remotedisconnected",
     "incomplete read",
@@ -81,6 +92,10 @@ RETRY_JITTER = 0.25
 AUX_RETRY_ATTEMPTS = 3
 # A provider's own retry-after is authoritative but must not park a turn forever.
 _RETRY_AFTER_CAP = 60.0
+# Grace added on top of the request timeout when deriving the first-token window,
+# so a request that really did exceed its budget fails with the provider's own
+# specific error rather than our generic "no data" one.
+_FIRST_TOKEN_GRACE = 30.0
 
 
 def is_context_overflow_error(exc: Exception) -> bool:
@@ -124,6 +139,31 @@ def network_retry_delay(
     if jitter:
         delay += delay * jitter * rand()
     return delay
+
+
+def first_token_timeout(
+    idle: float, request_timeout: float, grace: float = _FIRST_TOKEN_GRACE
+) -> float:
+    """Seconds to allow before a stream's FIRST chunk, from the per-chunk ``idle``
+    watchdog and the configured ``LLM.REQUEST_TIMEOUT``.
+
+    The idle watchdog is for a stream that goes silent once RUNNING; the wait for
+    the first token is a different thing entirely — the provider spends prefill +
+    reasoning on the whole prompt before emitting a byte, which on a large context
+    is minutes, not seconds (a ~440k-token turn at max effort measured ~123s).
+    Policing that window with the per-chunk timeout aborts a perfectly healthy
+    turn, and each retry then re-sends the same oversized prompt and re-pays the
+    same doomed wait, so the turn can never complete — the same trap as botocore's
+    60s default ``read_timeout``, one layer up.
+
+    Derived from ``REQUEST_TIMEOUT`` (already documented as the knob that must
+    exceed the largest expected time-to-first-byte) rather than a new config key,
+    so the fix reaches installs whose ``config.yaml`` will never mention it. Never
+    shorter than ``idle``, so raising the watchdog raises this too.
+    """
+    if request_timeout and request_timeout > 0:
+        return max(idle, request_timeout + grace)
+    return idle
 
 
 def aux_attempts(max_retries, cap: int = AUX_RETRY_ATTEMPTS) -> int:

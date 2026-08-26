@@ -277,6 +277,15 @@ class LangGraphAgent:
         self._stream_idle_timeout = float(
             config.get("LLM", {}).get("STREAM_IDLE_TIMEOUT", 120)
         )
+        # …but the wait for the FIRST chunk is not idleness: the provider prefills
+        # and reasons over the whole prompt before emitting a byte, which on a big
+        # context runs into minutes. Policing that with the per-chunk window kills
+        # healthy turns on a large conversation, so it gets its own (longer) budget
+        # derived from REQUEST_TIMEOUT. See stream_policy.first_token_timeout.
+        self._stream_first_token_timeout = stream_policy.first_token_timeout(
+            self._stream_idle_timeout,
+            float(config.get("LLM", {}).get("REQUEST_TIMEOUT", 600)),
+        )
         # Cap one tool result so a runaway (e.g. grep_search max_results=4000)
         # can't alone overflow the context window. Defaults to 10% of the context
         # window (converted tokens->chars at ~4 chars/token), so it scales with
@@ -1807,11 +1816,19 @@ class LangGraphAgent:
         reader thread feeding a queue and time each ``get``. On timeout we raise and
         ABANDON the reader thread (it's a daemon; it unwinds when its socket finally
         errors) rather than blocking on it — the whole point is not to wait. When
-        the timeout is 0/disabled, we iterate directly with no extra thread."""
+        the timeout is 0/disabled, we iterate directly with no extra thread.
+
+        The window before the FIRST chunk is deliberately a different, longer one
+        (``_stream_first_token_timeout``): that wait is the provider prefilling and
+        reasoning over the whole prompt, not a stalled socket, and on a large
+        context it legitimately outlasts the per-chunk budget."""
         idle = getattr(self, "_stream_idle_timeout", 0) or 0
         if idle <= 0:
             yield from active_model.stream(messages, config=config)
             return
+        # Falls back to `idle` when unset, so a hand-built agent (tests) behaves as
+        # before rather than inheriting a 10-minute first-token wait.
+        first_token = getattr(self, "_stream_first_token_timeout", 0) or idle
 
         q: "queue.Queue" = queue.Queue()
 
@@ -1833,6 +1850,8 @@ class LangGraphAgent:
         # idle-timeout once `idle` seconds have truly elapsed with no chunk.
         poll = min(idle, self._CANCEL_POLL_SECONDS)
         waited = 0.0
+        budget = first_token  # widened window until the stream actually starts
+        started = False
         while True:
             if self._cancelled():
                 raise KeyboardInterrupt("cancelled while waiting for stream")
@@ -1840,14 +1859,16 @@ class LangGraphAgent:
                 item, chunk = q.get(timeout=poll)
             except queue.Empty:
                 waited += poll
-                if waited >= idle:
-                    # No chunk for `idle` seconds — the stream is wedged (likely a
+                if waited >= budget:
+                    # Nothing for `budget` seconds — the stream is wedged (likely a
                     # dead socket after sleep). Abandon the reader; let retry re-run.
                     raise _StreamIdleTimeout(
-                        f"No stream data for {idle:.0f}s (connection likely dropped)"
+                        f"No {'stream data' if started else 'first token'} for "
+                        f"{budget:.0f}s (connection likely dropped)"
                     )
                 continue
             waited = 0.0  # a chunk (or terminal item) arrived — reset the idle clock
+            started, budget = True, idle
             if item is self._STREAM_DONE:
                 return
             if item is not None:  # the reader captured an exception — re-raise it

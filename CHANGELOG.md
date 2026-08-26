@@ -7,6 +7,34 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.3] — 2026-08-26
+
+### Fixed
+
+- **A dropped connection no longer ends the turn.** `Connection was closed before
+  we received a valid response from endpoint URL …` was reported as an error the
+  app "can't recover from automatically" — yet a closed socket is the single most
+  retryable failure there is. The classifier matches provider wordings, and
+  botocore phrases this one as "Connection **was** closed", which the existing
+  `connection closed` entry didn't match. Only its two errors containing the word
+  "timeout" were ever retried; the other five — a closed connection, an
+  unreachable endpoint, a failed response stream — ended the turn on the first
+  occurrence. All of them now retry on a fresh connection.
+- **A long conversation is no longer mistaken for a dead stream.**
+  `LLM.STREAM_IDLE_TIMEOUT` (default 120s) exists to abandon a stream that goes
+  silent mid-response, but it was also policing the wait for the **first** token —
+  which is the model reading your whole prompt before it starts answering, and on
+  a large context takes minutes, not seconds. So a perfectly healthy turn was
+  aborted at 120s with `No stream data for 120s (connection likely dropped)`, and
+  because every retry re-sent the same prompt and re-paid the same wait, the turn
+  could never complete: the bigger the conversation, the more reliably it failed.
+  The wait for the first token now gets its own budget, derived from
+  `LLM.REQUEST_TIMEOUT` (default 600s), while `STREAM_IDLE_TIMEOUT` continues to
+  guard the running stream — it narrows back the moment data arrives, so a socket
+  that dies mid-response is still caught as quickly as before. No new config key,
+  and the log now says which of the two tripped (`No first token for Ns` vs
+  `No stream data for Ns`).
+
 ## [1.12.2] — 2026-08-26
 
 ### Fixed
@@ -62,18 +90,18 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   The same file now reads in **0.007s**, and a `glob_search` issued while three
   agents read files in parallel returns in **0.008s**.
 - **`glob_search` now bounds its work, not just its output.** It filtered
-  `node_modules`, `build`, `dist` and friends out of the *results* — after walking
+  `node_modules`, `build`, `dist` and friends out of the _results_ — after walking
   every one of them — never looked at the clock, and followed directory symlinks,
   so a link back to a parent directory made the walk effectively endless. It now
   walks the tree itself: noise directories are skipped **before** descending, and
   the scan stops after 30 seconds with the matches it has and `timed_out` set,
   instead of running until the client gives up on it. Two deliberate changes that
-  follow: symlinked *directories* are no longer traversed (symlinks to files still
+  follow: symlinked _directories_ are no longer traversed (symlinks to files still
   match), and a pattern that explicitly names an ignored directory —
   `node_modules/**/*.js` — is now honored rather than silently returning nothing.
 - Summarizing a large PDF or DOCX in chunks is **actually** concurrent now (a
   bounded thread pool; the previous asyncio semaphore never yielded, so chunks ran
-  one after another *and* on the event loop), and its progress lines go to the log
+  one after another _and_ on the event loop), and its progress lines go to the log
   file instead of `print` — standard output in the server subprocess is the
   protocol pipe, so printing there wrote text into the message stream.
 - The guard that was supposed to prevent all of this only inspected the

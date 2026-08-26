@@ -9,15 +9,17 @@ came up and whether every declared server connected, and whether an enabled
 feature is missing its dependency. Most of the sections below start with a check
 it already performed for you ([details](../guides/usage.md#checking-your-install)).
 
-| Symptom                                            | Go to                                                                             |
-| -------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Startup hangs, or tools are missing entirely       | [The assistant starts but has no tools](#the-assistant-starts-but-has-no-tools)   |
-| `grep_search` returns `ripgrep (rg) not installed` | [Content search doesn't work](#content-search-doesnt-work)                        |
-| A model error on the first prompt                  | [The model fails to load](#the-model-fails-to-load)                               |
-| Searches find nothing in indexed documents         | [RAG or episodic memory returns nothing](#rag-or-episodic-memory-returns-nothing) |
-| `fallback embeddings` in the logs                  | [Semantic search quality is degraded](#semantic-search-quality-is-degraded)       |
-| A write or edit is refused                         | [A file write is refused](#a-file-write-is-refused)                               |
-| `ImportError` before the prompt appears            | [Import errors on startup](#import-errors-on-startup)                             |
+| Symptom                                                     | Go to                                                                             |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Startup hangs, or tools are missing entirely                | [The assistant starts but has no tools](#the-assistant-starts-but-has-no-tools)   |
+| `grep_search` returns `ripgrep (rg) not installed`          | [Content search doesn't work](#content-search-doesnt-work)                        |
+| A model error on the first prompt                           | [The model fails to load](#the-model-fails-to-load)                               |
+| Searches find nothing in indexed documents                  | [RAG or episodic memory returns nothing](#rag-or-episodic-memory-returns-nothing) |
+| `fallback embeddings` in the logs                           | [Semantic search quality is degraded](#semantic-search-quality-is-degraded)       |
+| `Connection was closed before we received a valid response` | [A turn dies on a dropped connection](#a-turn-dies-on-a-dropped-connection)       |
+| `No first token for Ns` on a long conversation              | [A turn dies on a dropped connection](#a-turn-dies-on-a-dropped-connection)       |
+| A write or edit is refused                                  | [A file write is refused](#a-file-write-is-refused)                               |
+| `ImportError` before the prompt appears                     | [Import errors on startup](#import-errors-on-startup)                             |
 
 ## The assistant starts but has no tools
 
@@ -140,6 +142,45 @@ the provider's own `retry-after` honored when it sends one.
 4. Concurrency multiplies it: orchestrator waves, `spawn_agent` sub-agents and the
    compaction summary all call the provider at once. Lower
    `LLM.SUBAGENT_MAX_CONCURRENCY` if overloads cluster around parallel work.
+
+## A turn dies on a dropped connection
+
+```
+WARNING — Stream connection failed (No stream data for 120s (connection likely dropped));
+          retrying turn on a fresh connection in 1.2s (attempt 1/6)
+ERROR   — Model request failed: Connection was closed before we received a valid
+          response from endpoint URL: ".../converse-stream".
+● The model request failed with an error I can't recover from automatically.
+```
+
+Both lines are retried automatically as of 1.12.3. If you see this on an older
+version, two separate causes were at work — and the giveaway for each is the
+`[Context: N tokens]` line printed with the turn:
+
+1. **A genuinely dropped socket.** botocore words this "Connection **was** closed",
+   which the transient-error classifier didn't recognize, so the most retryable
+   failure there is got no retry at all and ended the turn. Fixed by matching
+   botocore's own phrasings.
+2. **A long prompt mistaken for a dead stream.** `LLM.STREAM_IDLE_TIMEOUT`
+   (default 120s) used to police the wait for the _first_ token as well as the gaps
+   between chunks. That first wait is the model reading your whole prompt before it
+   answers — minutes on a large conversation, not seconds — so the watchdog killed
+   healthy turns, and each retry re-sent the same prompt and re-paid the same wait.
+   The first-token window is now derived from `LLM.REQUEST_TIMEOUT` (default 600s)
+   instead, while `STREAM_IDLE_TIMEOUT` still guards the running stream.
+
+If it persists after upgrading, the context itself is the problem — a turn large
+enough to exceed `REQUEST_TIMEOUT` before the first token can't be rescued by
+retrying, only by sending less:
+
+- Run `/context` to see what the next turn pays for, and `/compact` to summarize
+  the conversation now.
+- Lower `MAX_CONVERSATION_TOKENS`. It sets the compaction trigger too (80% of it by
+  default), so a value matching the model's full window — e.g. `1000000` — means
+  compaction effectively never runs and every turn re-sends the whole history.
+  A ceiling well below the model's limit keeps turns fast; the model's context
+  window is a hard maximum, not a target.
+- `/branch` to continue from an earlier point without the accumulated history.
 
 ## A file write is refused
 
