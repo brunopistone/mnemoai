@@ -4,8 +4,9 @@ The server is one stdio subprocess with one event loop, and the SDK dispatches
 tool calls concurrently — so a tool body that blocks freezes every OTHER agent's
 in-flight call until the client's MCP_CALL_TIMEOUT kills it. These tests pin both
 halves of the contract: the offload actually moves work to a thread without
-changing the tool's MCP surface, and no tool is declared ``async def`` while
-having a blocking (await-free) body.
+changing the tool's MCP surface, and NOTHING under server/tools is declared
+``async def`` while having a blocking (await-free) body — helpers included, since
+a tool that awaits an await-free coroutine is just as much on the loop.
 """
 
 import ast
@@ -234,32 +235,47 @@ class TestConcurrencyIsRestored:
         assert order == ["slow-start", "fast", "slow-end"]
 
 
+def _yields_to_the_loop(node: ast.AST) -> bool:
+    """Whether an ``async def`` body contains anything that suspends it."""
+    dumped = ast.dump(node)
+    return any(kind in dumped for kind in ("Await(", "AsyncFor(", "AsyncWith("))
+
+
+def _server_tools_root() -> pathlib.Path:
+    import mnemoai.server.tools as tools_pkg
+
+    return pathlib.Path(tools_pkg.__file__).parent
+
+
+def _walk_server_tools():
+    """Every function node under server/tools, by AST, with its filename.
+
+    Parsed rather than imported so the check also covers the config-gated groups
+    (web_search, web_crawler, rag) that a unit run never registers, and needs no
+    config.yaml or heavy optional dependency.
+    """
+    root = _server_tools_root()
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield path.relative_to(root), node
+
+
 class TestNoToolReintroducesTheBug:
     """A guard, not a behavior test: it fails on the NEXT blocking `async def`."""
 
     @staticmethod
     def _tool_functions():
-        """Every ``@mcp.tool()``-decorated function in server/tools, by AST.
-
-        Parsed rather than imported so the check also covers the config-gated
-        groups (web_search, web_crawler, rag) that a unit run never registers,
-        and needs no config.yaml or heavy optional dependency.
-        """
-        import mnemoai.server.tools as tools_pkg
-
-        root = pathlib.Path(tools_pkg.__file__).parent
-        for path in sorted(root.rglob("*.py")):
-            tree = ast.parse(path.read_text())
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                decorated = any(
-                    (isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "tool")
-                    or getattr(d, "attr", "") == "tool"
-                    for d in node.decorator_list
-                )
-                if decorated:
-                    yield path.name, node
+        """Every ``@mcp.tool()``-decorated function in server/tools, by AST."""
+        for path, node in _walk_server_tools():
+            decorated = any(
+                (isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "tool")
+                or getattr(d, "attr", "") == "tool"
+                for d in node.decorator_list
+            )
+            if decorated:
+                yield path.name, node
 
     def test_the_scan_finds_the_tools(self):
         found = {name for _, node in self._tool_functions() for name in [node.name]}
@@ -272,12 +288,58 @@ class TestNoToolReintroducesTheBug:
         offenders = [
             f"{filename}::{node.name}"
             for filename, node in self._tool_functions()
-            if isinstance(node, ast.AsyncFunctionDef)
-            and "Await(" not in ast.dump(node)
+            if isinstance(node, ast.AsyncFunctionDef) and not _yields_to_the_loop(node)
         ]
         assert not offenders, (
             "These tools are `async def` but never await, so their whole body "
             "runs inline on the MCP server's event loop and blocks every other "
             "agent's tool call. Make them plain `def` — thread_offload runs a "
             f"sync tool on a worker thread: {offenders}"
+        )
+
+
+class TestNoHelperReintroducesTheBug:
+    """The wider guard: NOTHING under server/tools is ``async def`` without a
+    real await — not just the decorated tools.
+
+    Checking only the tools left a hole big enough to hide the worst offender.
+    ``fs_read`` awaited its readers, so it looked genuinely async; every reader
+    was itself an await-free ``async def`` (one of them doing a blocking
+    ``model.invoke``), so the whole chain — file I/O, tokenizing, summarizing —
+    ran inline on the loop and stalled every parallel agent's tool call until the
+    client's MCP_CALL_TIMEOUT killed it. An `await` on a coroutine that never
+    suspends buys nothing; only the leaf matters.
+    """
+
+    def test_the_detector_flags_an_await_free_coroutine(self):
+        # Self-check, so the repo scan below can't pass because the detector is
+        # broken rather than because the code is clean.
+        flagged, allowed = [], []
+        source = (
+            "async def blocking():\n"
+            "    return open('f').read()\n"
+            "async def real():\n"
+            "    return await client.get()\n"
+            "async def streaming():\n"
+            "    async with session() as s:\n"
+            "        return s\n"
+        )
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.AsyncFunctionDef):
+                (allowed if _yields_to_the_loop(node) else flagged).append(node.name)
+        assert flagged == ["blocking"]
+        assert sorted(allowed) == ["real", "streaming"]
+
+    def test_no_async_helper_is_await_free(self):
+        offenders = [
+            f"{path}::{node.name}"
+            for path, node in _walk_server_tools()
+            if isinstance(node, ast.AsyncFunctionDef) and not _yields_to_the_loop(node)
+        ]
+        assert not offenders, (
+            "These are `async def` with no await, async-with or async-for, so "
+            "they run start-to-finish on the MCP server's event loop — including "
+            "when a tool awaits them, which is how a blocking read chain hid "
+            "behind an async-looking tool. Make them plain `def` and let the "
+            f"registration chokepoint offload the caller to a thread: {offenders}"
         )

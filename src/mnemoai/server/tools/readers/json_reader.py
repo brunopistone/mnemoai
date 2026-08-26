@@ -8,7 +8,7 @@ from mnemoai.utils.logger import logger
 from .. import count_tokens, validate_file_path
 
 
-async def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
+def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
     """Read JSON/JSONL file as text with token limit enforcement.
 
     Args:
@@ -125,20 +125,25 @@ async def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
         lines_included = len(selected_lines)
 
         if content_tokens > max_tokens:
-            # Truncate content to fit token limit
+            # Truncate content to fit token limit. Counted INCREMENTALLY (a
+            # running total + the new line) — re-counting the whole accumulated
+            # text per line is quadratic in tokenizer work, which on a file this
+            # size means minutes of CPU (see line_reader for the measurement).
             lines = content.split("\n")
-            truncated_content = ""
+            kept = []
+            used_tokens = 0
             lines_included = 0
 
             for line in lines:
-                test_content = truncated_content + line + "\n"
-                if count_tokens(test_content) > max_tokens:
+                line_tokens = count_tokens(line + "\n")
+                if used_tokens + line_tokens > max_tokens:
                     break
-                truncated_content = test_content
+                kept.append(line + "\n")
+                used_tokens += line_tokens
                 lines_included += 1
 
             content = (
-                truncated_content.strip()
+                "".join(kept).strip()
                 + "\n... [TRUNCATED - Content exceeds token limit]"
             )
             was_truncated = True

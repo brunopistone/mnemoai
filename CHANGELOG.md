@@ -7,6 +7,52 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.1] — 2026-08-26
+
+### Fixed
+
+- **`'glob_search' did not respond within 300s` — the same class of failure as
+  1.10.3, this time hiding behind an `await`.** Reading files was still stalling
+  every other agent's tool call: with a reviewer sub-agent reading the same files
+  in parallel, a `glob_search` whose real work is milliseconds died at
+  `LLM.MCP_CALL_TIMEOUT`. `fs_read` looked innocent — it was `async def` and it
+  awaited its readers — but every reader was itself an `async def` with no await
+  anywhere (one of them making a blocking model call to summarize a large PDF), so
+  the entire chain ran start-to-finish on the server's single event loop. **An
+  `await` on a coroutine that never suspends buys nothing; only the leaf matters.**
+  `fs_read` and all seven readers are now plain functions and run on a worker
+  thread like every other blocking tool.
+- **The stall was measured in minutes, not milliseconds, because line reading was
+  quadratic.** Each line's token count re-counted the whole accumulated text, so
+  the tokenizer re-did all its previous work on every line: **9.0 seconds for one
+  2839-line source file, against 0.007 seconds to count the same text once** — and
+  since the read cap is derived from the context window, a large-context model
+  reads to the end of the file rather than stopping early, so the cost kept
+  growing. Counting is now incremental (a running total plus the new line), with
+  one exact count of what is actually returned. Same for JSON/JSONL truncation.
+  The same file now reads in **0.007s**, and a `glob_search` issued while three
+  agents read files in parallel returns in **0.008s**.
+- **`glob_search` now bounds its work, not just its output.** It filtered
+  `node_modules`, `build`, `dist` and friends out of the *results* — after walking
+  every one of them — never looked at the clock, and followed directory symlinks,
+  so a link back to a parent directory made the walk effectively endless. It now
+  walks the tree itself: noise directories are skipped **before** descending, and
+  the scan stops after 30 seconds with the matches it has and `timed_out` set,
+  instead of running until the client gives up on it. Two deliberate changes that
+  follow: symlinked *directories* are no longer traversed (symlinks to files still
+  match), and a pattern that explicitly names an ignored directory —
+  `node_modules/**/*.js` — is now honored rather than silently returning nothing.
+- Summarizing a large PDF or DOCX in chunks is **actually** concurrent now (a
+  bounded thread pool; the previous asyncio semaphore never yielded, so chunks ran
+  one after another *and* on the event loop), and its progress lines go to the log
+  file instead of `print` — standard output in the server subprocess is the
+  protocol pipe, so printing there wrote text into the message stream.
+- The guard that was supposed to prevent all of this only inspected the
+  **tools**, which is exactly how `fs_read` slipped through it. It now also fails
+  on any **helper** under `server/tools/` declared `async def` without a real
+  await, and a new troubleshooting entry explains that the tool named in a 300s
+  timeout is usually the victim rather than the cause.
+
 ## [1.12.0] — 2026-08-25
 
 ### Added

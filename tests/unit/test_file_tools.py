@@ -13,7 +13,7 @@ import pytest
 
 from mnemoai.server.tools import read_state
 from mnemoai.server.tools.file_edit import register_edit_tools
-from mnemoai.server.tools.file_search import register_search_tools
+from mnemoai.server.tools.file_search import _split_glob_pattern, register_search_tools
 from mnemoai.server.tools.fs_write import _resolve_path
 
 # grep_search shells out to ripgrep; skip its tests where rg isn't installed so
@@ -603,6 +603,115 @@ class TestGlobExclusionAndSorting:
         assert "truncated" not in r
 
 
+def _symlink_or_skip(target, link):
+    """Create a symlink, skipping the test where the platform won't allow one."""
+    try:
+        os.symlink(str(target), str(link))
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform")
+
+
+class TestGlobBoundedWalk:
+    """glob_search walks the tree itself (file_search._iter_glob_files) so its
+    WORK is bounded, not just its output.
+
+    stdlib glob filtered the noise dirs out of the matches it returned — after
+    descending every one of them — never looked at the clock, and follows
+    directory symlinks below 3.13, so a link back to an ancestor made the walk
+    effectively endless. Unbounded work there is what showed up as the tool
+    dying at the client's LLM.MCP_CALL_TIMEOUT.
+    """
+
+    def test_ignored_dir_is_never_descended(self, glob_search, tmp_path, monkeypatch):
+        deep = tmp_path / "node_modules" / "pkg" / "lib"
+        deep.mkdir(parents=True)
+        (deep / "x.py").write_text("")
+        (tmp_path / "keep.py").write_text("")
+
+        visited = []
+        real_scandir = os.scandir
+
+        def _spy(target):
+            visited.append(str(target))
+            return real_scandir(target)
+
+        monkeypatch.setattr(os, "scandir", _spy)
+        r = json.loads(run(glob_search("**/*.py", path=str(tmp_path))))
+        assert [os.path.basename(m) for m in r["matches"]] == ["keep.py"]
+        # The point of the rewrite: the subtree isn't walked at all.
+        assert not any("node_modules" in v for v in visited)
+
+    def test_pattern_naming_an_ignored_dir_still_matches(self, glob_search, tmp_path):
+        # Pruning happens during traversal, so a pattern that explicitly asks for
+        # an ignored dir is honored — the list is about where we don't go looking.
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "x.py").write_text("")
+        r = json.loads(run(glob_search("node_modules/**/*.py", path=str(tmp_path))))
+        assert [os.path.basename(m) for m in r["matches"]] == ["x.py"]
+
+    def test_directory_symlink_loop_terminates(self, glob_search, tmp_path):
+        (tmp_path / "a.py").write_text("")
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "b.py").write_text("")
+        _symlink_or_skip(tmp_path, sub / "loop")  # link back to an ancestor
+        r = json.loads(run(glob_search("**/*.py", path=str(tmp_path))))
+        assert sorted(os.path.basename(m) for m in r["matches"]) == ["a.py", "b.py"]
+        assert "timed_out" not in r  # terminated on its own, not on the deadline
+
+    def test_symlink_to_a_file_still_matches(self, glob_search, tmp_path):
+        (tmp_path / "real.py").write_text("")
+        _symlink_or_skip(tmp_path / "real.py", tmp_path / "link.py")
+        r = json.loads(run(glob_search("*.py", path=str(tmp_path))))
+        assert sorted(os.path.basename(m) for m in r["matches"]) == [
+            "link.py",
+            "real.py",
+        ]
+
+    def test_deadline_returns_a_flagged_partial_not_an_error(
+        self, glob_search, tmp_path, monkeypatch
+    ):
+        import mnemoai.server.tools.file_search as fs
+
+        (tmp_path / "a.py").write_text("")
+        monkeypatch.setattr(fs, "_GLOB_TIME_BUDGET_S", 0.0)  # deadline already past
+        r = json.loads(run(glob_search("**/*.py", path=str(tmp_path))))
+        # A partial answer, not a failure: the model can narrow and retry.
+        assert r["success"] is True
+        assert r["timed_out"] is True and r["truncated"] is True
+        assert "Scan stopped after" in r["message"]
+
+    def test_hidden_names_need_an_explicit_dot_segment(self, glob_search, tmp_path):
+        (tmp_path / ".hidden.py").write_text("")
+        (tmp_path / "shown.py").write_text("")
+        plain = json.loads(run(glob_search("*.py", path=str(tmp_path))))
+        dotted = json.loads(run(glob_search(".*.py", path=str(tmp_path))))
+        assert [os.path.basename(m) for m in plain["matches"]] == ["shown.py"]
+        assert [os.path.basename(m) for m in dotted["matches"]] == [".hidden.py"]
+
+    def test_magic_free_pattern_resolves_to_the_file(self, glob_search, tmp_path):
+        (tmp_path / "STEERING.md").write_text("")
+        r = json.loads(run(glob_search("STEERING.md", path=str(tmp_path))))
+        assert [os.path.basename(m) for m in r["matches"]] == ["STEERING.md"]
+
+    def test_split_folds_magic_free_prefix_into_the_root(self):
+        # src/**/*.ts starts walking at src, instead of walking everything and
+        # filtering paths afterwards.
+        root, segments = _split_glob_pattern("/base", "src/**/*.ts")
+        assert root == os.path.join("/base", "src")
+        assert segments == ["**", "*.ts"]
+
+    def test_split_absolute_pattern_anchors_itself(self):
+        root, segments = _split_glob_pattern("/base", "/etc/**/*.conf")
+        assert root == "/etc"
+        assert segments == ["**", "*.conf"]
+
+    def test_split_magic_free_pattern_has_no_segments(self):
+        root, segments = _split_glob_pattern("/base", "./docs/index.md")
+        assert segments == []
+        assert root == os.path.join("/base", "docs", "index.md")
+
+
 class TestResolvePath:
     """fs_write._resolve_path: relative paths resolve against the CWD, not ~
     (the old extension-based relocation was a surprise-overwrite footgun)."""
@@ -719,6 +828,71 @@ class TestStreamedRead:
         # mashed into the text ("1 word ...").
         assert first.startswith("     1\t")
         assert not first.startswith("1 ")
+
+
+class TestReadLinesTokenAccounting:
+    """read_lines counts tokens INCREMENTALLY (running total + the new line).
+
+    It used to re-count `full_content + line` on every line, which is quadratic
+    in tokenizer work: 9.8s for one 2839-line source file against 0.007s for a
+    single count of the same text, and with DOC_MAX_TOKENS sized for a
+    large-context model the loop runs to EOF. That burned minutes of CPU inside
+    the MCP server for the tool the model calls most often.
+    """
+
+    def test_tokenizer_work_is_linear_in_content_size(self, tmp_path, monkeypatch):
+        import mnemoai.server.tools.readers.line_reader as lr
+        from mnemoai.server.tools.readers.line_reader import read_lines
+
+        _patch_doc_tokens(monkeypatch)  # 16k budget: the whole file fits
+        f = tmp_path / "big.txt"
+        f.write_text("\n".join("x" * 60 for _ in range(200)) + "\n")
+        size = len(f.read_text())
+
+        tokenized = []
+        real_count = lr.count_tokens
+
+        def _spy(text):
+            tokenized.append(len(text))
+            return real_count(text)
+
+        monkeypatch.setattr(lr, "count_tokens", _spy)
+        out = json.loads(run(read_lines(str(f), 1, -1)))
+
+        assert out["lines_processed"] == 200
+        # Quadratic re-counting tokenizes ~n/2 * size characters (~1.2M here);
+        # one pass plus the final exact count is ~2x the file.
+        assert sum(tokenized) < size * 3
+
+    def test_reported_tokens_are_one_exact_count(self, tmp_path, monkeypatch):
+        from mnemoai.server.tools import count_tokens
+        from mnemoai.server.tools.readers.line_reader import read_lines
+
+        _patch_doc_tokens(monkeypatch)
+        f = tmp_path / "f.txt"
+        f.write_text("\n".join(f"line {i}" for i in range(1, 31)) + "\n")
+        out = json.loads(run(read_lines(str(f), 1, -1)))
+        # Summed per line the running total reads slightly high (cross-line token
+        # merges are lost), so the payload must carry a real count of what's in it.
+        assert out["tokens"] == count_tokens(out["content"] + "\n")
+
+    def test_truncated_content_stays_within_the_budget(self, tmp_path, monkeypatch):
+        import mnemoai.server.tools.readers.line_reader as lr
+        from mnemoai.server.tools import count_tokens
+        from mnemoai.server.tools.readers.line_reader import read_lines
+
+        monkeypatch.setattr(
+            lr.config,
+            "get",
+            lambda key, default=None: 200 if key == "DOC_MAX_TOKENS" else default,
+        )
+        f = tmp_path / "f.txt"
+        f.write_text("\n".join("word " * 20 for _ in range(100)) + "\n")
+        out = json.loads(run(read_lines(str(f), 1, -1)))
+        assert out["truncated"] is True
+        # The per-line total is an upper bound on the real count, so the exact
+        # count of the kept content can never exceed the cap.
+        assert count_tokens(out["content"]) <= 200
 
 
 class TestEncodingPreservation:

@@ -9,7 +9,7 @@ from mnemoai.utils.logger import logger
 from .. import count_tokens, validate_file_path
 
 
-async def read_csv(path: str) -> str:
+def read_csv(path: str) -> str:
     """Read and parse CSV file with token-based truncation.
 
     Args:

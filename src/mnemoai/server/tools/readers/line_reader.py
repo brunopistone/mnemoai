@@ -9,7 +9,7 @@ from .. import binary_file_error, count_tokens, looks_like_binary, validate_file
 from ..file_encoding import bom_encoding
 
 
-async def read_lines(path: str, start_line: int, end_line: int) -> str:
+def read_lines(path: str, start_line: int, end_line: int) -> str:
     """Read specific lines from a file.
 
     Args:
@@ -74,7 +74,17 @@ async def read_lines(path: str, start_line: int, end_line: int) -> str:
                     break
                 selected_lines.append(line)
 
-        full_content = ""
+        # Token accounting is INCREMENTAL: a running total plus the cost of the
+        # line being added. Re-counting `full_content + line` on every line made
+        # the read quadratic in tokenizer work — measured 9.8s for a 2839-line
+        # file against 0.007s for a single count of the same text — and with
+        # DOC_MAX_TOKENS sized for a large-context model the loop runs to EOF, so
+        # a big file cost minutes of CPU. Per-line counts sum slightly HIGH (the
+        # merges a tokenizer would make across a line boundary are lost), which
+        # is the safe direction for a limit.
+        max_tokens = config.get("DOC_MAX_TOKENS")
+        pieces = []
+        used_tokens = 0
         lines_processed = 0
 
         for i, line in enumerate(selected_lines):
@@ -86,37 +96,43 @@ async def read_lines(path: str, start_line: int, end_line: int) -> str:
             line_content = f"{line_no:>6}\t" + line.rstrip("\n\r") + "\n"
 
             # Check token limit before adding this line
-            test_content = full_content + line_content
-            if count_tokens(test_content) > config.get("DOC_MAX_TOKENS"):
+            line_tokens = count_tokens(line_content)
+            if used_tokens + line_tokens > max_tokens:
                 # Try to fit partial line if we have room
-                remaining_tokens = config.get("DOC_MAX_TOKENS") - count_tokens(
-                    full_content
-                )
+                remaining_tokens = max_tokens - used_tokens
                 if remaining_tokens > 50:  # Only if we have reasonable space left
                     # Split the RAW line (not the guttered line_content) so the
                     # line number isn't pulled in as a leading word and the TAB
                     # gutter is preserved on the truncated fragment.
                     words = line.rstrip("\n\r").split()
                     gutter = f"{line_no:>6}\t"
-                    partial_line = gutter
+                    partial_words = []
+                    partial_tokens = count_tokens(gutter)
                     for word in words:
-                        test_partial = full_content + partial_line + word + " "
-                        if count_tokens(test_partial) > config.get("DOC_MAX_TOKENS"):
+                        word_tokens = count_tokens(word + " ")
+                        if used_tokens + partial_tokens + word_tokens > max_tokens:
                             break
-                        partial_line += word + " "
+                        partial_words.append(word)
+                        partial_tokens += word_tokens
 
-                    if partial_line.strip() != gutter.strip():
-                        full_content += (
-                            partial_line + "\n[TRUNCATED - Content exceeds token limit]"
+                    if partial_words:
+                        pieces.append(
+                            gutter
+                            + "".join(f"{word} " for word in partial_words)
+                            + "\n[TRUNCATED - Content exceeds token limit]"
                         )
                 break
 
-            full_content += line_content
+            pieces.append(line_content)
+            used_tokens += line_tokens
             lines_processed = i + 1
 
+        full_content = "".join(pieces)
         was_truncated = (
             lines_processed < len(selected_lines) or "[TRUNCATED" in full_content
         )
+        # One exact count of the final content — the running total above is only
+        # the budget guard, and summed per line it reads a little high.
         final_tokens = count_tokens(full_content)
 
         return json.dumps(
@@ -129,7 +145,7 @@ async def read_lines(path: str, start_line: int, end_line: int) -> str:
                 "lines_processed": lines_processed,
                 "lines_requested": len(selected_lines),
                 "tokens": final_tokens,
-                "max_tokens": config.get("DOC_MAX_TOKENS"),
+                "max_tokens": max_tokens,
                 "truncated": was_truncated,
                 "message": f"Read {lines_processed}/{len(selected_lines)} lines ({final_tokens} tokens)"
                 + (" - truncated due to token limit" if was_truncated else ""),

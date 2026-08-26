@@ -5,7 +5,7 @@ import os
 from typing import Dict, List
 
 
-async def read_directory(path: str, depth: int) -> str:
+def read_directory(path: str, depth: int) -> str:
     """Read directory contents.
 
     Args:

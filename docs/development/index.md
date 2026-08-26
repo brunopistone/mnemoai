@@ -107,11 +107,20 @@ from mcp.server.fastmcp import FastMCP
 
 def register_your_tool(mcp: FastMCP):
     @mcp.tool()
-    async def your_tool(param: str) -> str:
+    def your_tool(param: str) -> str:
         """Tool description for the LLM."""
         # Implementation
         return result
 ```
+
+Write it as a plain `def` unless the body genuinely `await`s something. The MCP
+server is one subprocess with one event loop, so a blocking body declared
+`async def` runs start-to-finish on that loop and freezes every other agent's
+in-flight tool call; a sync tool is moved to a worker thread automatically where
+the tools are registered. The same rule applies to any **helper** the tool calls —
+awaiting a coroutine that never suspends is still blocking the loop. Two AST
+guards in `tests/unit/test_thread_offload.py` fail on an await-free `async def`
+anywhere under `server/tools/`.
 
 2. Register in `tools_manager.py`:
 
@@ -125,7 +134,7 @@ register_your_tool(mcp)
 1. Create reader in `server/tools/readers/`:
 
 ```python
-async def read_your_format(path: str) -> str:
+def read_your_format(path: str) -> str:
     """Read your custom format."""
     # Implementation
     return content

@@ -8,7 +8,7 @@ from mnemoai.utils.logger import logger
 from .. import validate_file_path
 
 
-async def search_file(path: str, pattern: str, context_lines: int) -> str:
+def search_file(path: str, pattern: str, context_lines: int) -> str:
     """Search for pattern in file with context.
 
     Args:
