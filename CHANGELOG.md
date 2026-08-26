@@ -7,6 +7,37 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.4] — 2026-08-26
+
+### Fixed
+
+- **A conversation that outgrows the context window mid-turn now recovers instead
+  of dead-ending.** The turn compacted, retried once, and then hit
+  `Context overflow … could not compact` on the very next model call — a few
+  thousand tokens later, over a history that had just been reduced to two
+  messages. The compaction was real but the running turn never saw it: it keeps
+  re-reading the history it started with, so every later call in that turn re-sent
+  the same oversized prompt, and by the second overflow there was nothing left to
+  compact. The compacted history is now substituted into the rest of the turn, and
+  the tool calls and results the turn already produced are carried across the retry
+  so that work isn't redone.
+- **A compaction mid-turn is no longer undone when the turn ends.** Everything the
+  compaction had summarized away was appended back to the conversation — and
+  written to the session transcript as if this turn had produced it — so the next
+  turn immediately compacted the same history again. Visible as two compactions in
+  a row over almost the same message count (`summarized 1209 older messages`, then
+  `summarizing 1165 older messages`). Only what the turn actually produced is
+  committed now.
+- **`--resume`, `/load` and `/branch` no longer skip the pre-flight compaction
+  check.** The check uses the exact context size the provider reported for the
+  last turn, but restoring a conversation replaces history wholesale — and the
+  transcript keeps every message compaction had summarized away, so the restored
+  history can be far larger than the number left over from before. The stale count
+  read too low, the check passed, and the first turn after a `/branch` went
+  straight to a provider-side context overflow. The cached size is now dropped
+  whenever live history is replaced, so the next turn measures what is really
+  there.
+
 ## [1.12.3] — 2026-08-26
 
 ### Fixed
