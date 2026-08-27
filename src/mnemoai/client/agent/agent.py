@@ -716,7 +716,7 @@ class LangGraphAgent:
         dependency cycle survived sanitization, or all remaining deps failed), the
         remaining subtasks are forced to run so orchestration always completes.
         Returns ``{index: result_dict}``."""
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
         total = len(subtasks)
         results: Dict[int, dict] = {}
@@ -736,15 +736,13 @@ class LangGraphAgent:
             # One checklist per WAVE, printed from this (single) scheduling thread:
             # a parallel wave's workers run on pool threads, where interleaved
             # prints would shred the block.
-            if self.verbose:
-                self._stop_spinner()
-                print(
-                    "\n"
-                    + turn_view.render_step_list(
-                        descriptions, running=set(ready), done=set(results)
-                    ),
-                    flush=True,
-                )
+            self._print_step_list(descriptions, running=set(ready), done=set(results))
+
+            # A wave of several steps can't show progress through the block (it
+            # was printed before any of them started), so each completion ticks
+            # its own line. A lone step needs none — the next block, or the
+            # closing one, marks it done a moment later.
+            tick = len(ready) > 1
 
             if len(ready) == 1 or max_workers <= 1:
                 # A lone/sequential worker runs on THIS thread and CAN prompt for
@@ -761,8 +759,10 @@ class LangGraphAgent:
                         )
                     finally:
                         self._stop_spinner()
+                    if tick:
+                        self._print_step_done(descriptions, i, len(results), total)
             else:
-                self._start_spinner(f"{len(ready)} steps running…")
+                self._start_spinner(self._wave_label(len(ready)))
 
                 # Parallel-wave workers run HEADLESS: several run at once on pool
                 # threads, and stacking interactive confirmation prompts on one
@@ -782,12 +782,64 @@ class LangGraphAgent:
                     with ThreadPoolExecutor(
                         max_workers=min(max_workers, len(ready))
                     ) as pool:
-                        for i, res in pool.map(_run_headless, ready):
+                        # as_completed, not map: a tick must belong to the step
+                        # that ACTUALLY finished, and map yields in submission
+                        # order — so a late first step would hold every later
+                        # one's line back until it lands.
+                        futures = [pool.submit(_run_headless, i) for i in ready]
+                        left = len(futures)
+                        for future in as_completed(futures):
+                            i, res = future.result()
                             results[i] = res
+                            left -= 1
+                            if tick:
+                                # Printing stops the spinner; bring it back for
+                                # whatever is still running.
+                                self._print_step_done(
+                                    descriptions, i, len(results), total
+                                )
+                                if left:
+                                    self._start_spinner(self._wave_label(left))
                 finally:
                     self._stop_spinner()
             remaining -= set(ready)
+
+        # Closing state. Every block so far was printed with its wave still
+        # executing, so without this the checklist ends on the last wave's green
+        # rows — a finished plan that reads as stuck at N-1/N (or at 0/N, when one
+        # wave held the whole plan).
+        self._print_step_list(descriptions, running=(), done=set(results))
         return results
+
+    @staticmethod
+    def _wave_label(count: int) -> str:
+        """Spinner label for a wave with ``count`` steps still running."""
+        return f"{count} step{'s' if count != 1 else ''} running…"
+
+    def _print_step_list(self, descriptions, running=(), done=()) -> None:
+        """Print the multi-step checklist. SCHEDULING THREAD ONLY.
+
+        Workers run on pool threads, where interleaved prints would shred the
+        block; keep every call to this on the one thread that schedules waves.
+        """
+        if not self.verbose or not descriptions:
+            return
+        self._stop_spinner()
+        print(
+            "\n"
+            + turn_view.render_step_list(descriptions, running=running, done=done),
+            flush=True,
+        )
+
+    def _print_step_done(self, descriptions, index: int, done: int, total: int) -> None:
+        """Tick one finished step of a multi-step wave. SCHEDULING THREAD ONLY."""
+        if not self.verbose or not (0 <= index < len(descriptions)):
+            return
+        self._stop_spinner()
+        print(
+            turn_view.render_step_done(descriptions[index], done, total),
+            flush=True,
+        )
 
     def _run_subtask(
         self,

@@ -11,6 +11,7 @@ traceback into the middle of the chat.
 import logging
 import sys
 import threading
+import warnings
 
 import pytest
 
@@ -22,8 +23,9 @@ def isolated_logging(tmp_path, monkeypatch):
     """Give the test its own app home AND restore all global logging state.
 
     ``enable_file_logging`` mutates process-wide state (handlers on two loggers,
-    both excepthooks, a module global), so a test that didn't undo it would leak
-    a handler writing into a deleted tmp dir for the rest of the suite.
+    both excepthooks, ``warnings.showwarning``, two module globals), so a test
+    that didn't undo it would leak a handler writing into a deleted tmp dir for
+    the rest of the suite.
     """
     monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
     app = logging.getLogger("ai_app")
@@ -35,12 +37,17 @@ def isolated_logging(tmp_path, monkeypatch):
         root.level,
         sys.excepthook,
         threading.excepthook,
+        warnings.showwarning,
         logger_mod._file_handler,
         getattr(sys, "_mnemoai_excepthooks", False),
+        getattr(sys, "_mnemoai_warning_capture", False),
+        set(logger_mod._seen_warnings),
         [getattr(h.formatter, "hint", None) for h in app.handlers],
     )
     logger_mod._file_handler = None
     sys._mnemoai_excepthooks = False
+    sys._mnemoai_warning_capture = False
+    logger_mod._seen_warnings.clear()
     yield tmp_path
     handler = logger_mod._file_handler
     if handler is not None:
@@ -52,10 +59,15 @@ def isolated_logging(tmp_path, monkeypatch):
         root.level,
         sys.excepthook,
         threading.excepthook,
+        warnings.showwarning,
         logger_mod._file_handler,
         sys._mnemoai_excepthooks,
+        sys._mnemoai_warning_capture,
+        seen,
         hints,
     ) = saved
+    logger_mod._seen_warnings.clear()
+    logger_mod._seen_warnings.update(seen)
     for h, hint in zip(app.handlers, hints):
         if hint is not None:
             h.formatter.hint = hint
@@ -237,6 +249,52 @@ class TestFileLogging:
         assert logger_mod.log_file_hint() == ""
         logger_mod.enable_file_logging()
         assert logger_mod.log_file_hint().endswith("logs/mnemoai.log")
+
+
+class TestWarningCapture:
+    """A dependency's ``warnings.warn`` is a fifth path to the screen.
+
+    langchain/botocore warn through the stdlib, which prints the path, line,
+    category, message AND the offending source line straight to stderr — four
+    raw lines in the middle of the conversation that the app can't fix at the
+    call site.
+    """
+
+    def test_a_dependency_warning_becomes_one_line(self, isolated_logging, capsys):
+        logger_mod.enable_file_logging()
+        warnings.simplefilter("always")
+        warnings.warn("Tool messages were passed without toolConfig", RuntimeWarning)
+
+        err = capsys.readouterr().err
+        assert err.strip() == "! Tool messages were passed without toolConfig"
+        assert "warnings.warn(" not in err and "RuntimeWarning" not in err
+
+        # The origin is metadata, like the timestamp and thread name: on disk.
+        text = (isolated_logging / "logs" / "mnemoai.log").read_text()
+        assert "Tool messages were passed without toolConfig" in text
+        assert "RuntimeWarning from" in text and "test_log_destinations.py" in text
+
+    def test_the_same_warning_twice_is_reported_once(self, isolated_logging, capsys):
+        # Printed twice in one turn it reads as two separate problems; the stdlib
+        # registry doesn't help when a library resets the filters.
+        logger_mod.enable_file_logging()
+        warnings.simplefilter("always")
+        for _ in range(3):
+            warnings.warn("converting to text format", RuntimeWarning)
+
+        assert capsys.readouterr().err.count("converting to text format") == 1
+        text = (isolated_logging / "logs" / "mnemoai.log").read_text()
+        assert text.count("converting to text format") == 3
+
+    def test_a_broken_warning_is_swallowed(self, isolated_logging):
+        logger_mod.enable_file_logging()
+
+        class Boom:
+            def __str__(self):
+                raise ValueError("unprintable")
+
+        # A warning must never become the failure being reported.
+        warnings.showwarning(Boom(), RuntimeWarning, "f.py", 1)
 
 
 class TestExceptHooks:

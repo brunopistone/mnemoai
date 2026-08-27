@@ -7,6 +7,34 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.14.1] — 2026-08-27
+
+### Fixed
+
+- **A multi-step task's checklist now marks steps as they finish.** The block was
+  printed once, before the wave of steps started — so the usual case, a task whose
+  steps are all independent and therefore run as a single wave, showed `Steps 0/3`
+  with every row live for the whole turn and then ended with nothing checked, right
+  as the answer arrived. Each step in a wave of several now ticks its own
+  `[✓] 2/3 <step>` line the moment it lands (in completion order, with the spinner
+  counting down what's still running), and the plan closes on a full block:
+
+  ```
+  Steps 3/3
+    [✓] Research how to push an image to the container registry
+    [✓] Research the CLI command reference
+    [✓] Write a concise practical guide
+  ```
+
+- **A warning from a dependency no longer prints four raw lines into the chat.**
+  `warnings.warn` bypasses logging entirely and writes the path, line number,
+  category, message and the offending line of source straight to the terminal —
+  which is how `RuntimeWarning: Tool messages were passed without toolConfig` landed
+  in the middle of a conversation, twice per turn, beside the one-line failures
+  1.14.0 introduced. A warning is now one `! …` line like any other, with where it
+  came from recorded in `~/.mnemoai/logs/mnemoai.log`, and a repeat of the same
+  warning goes to the file without taking another line on screen.
+
 ## [1.14.0] — 2026-08-27
 
 ### Added

@@ -15,6 +15,7 @@ import logging.handlers
 import os
 import sys
 import threading
+import warnings
 from typing import Optional
 
 # ANSI colors per level. ERROR/CRITICAL red, WARNING yellow; DEBUG/INFO dim.
@@ -171,6 +172,21 @@ class _ConsoleFormatter(_ColorFormatter):
         return line
 
 
+class _FileFormatter(logging.Formatter):
+    """The whole record for the log file, plus a captured warning's origin.
+
+    ``origin`` (``RuntimeWarning from …/bedrock_converse.py:1270``) is metadata
+    about where a warning came from, in the same class as the timestamp and the
+    thread name: it belongs on disk, and the console omits it for the same reason
+    it omits those — not because it was buried, but because it isn't the message.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        origin = getattr(record, "origin", "")
+        return f"{text}\n  {origin}" if origin else text
+
+
 def _console_filter(record: logging.LogRecord) -> bool:
     """``extra={"console": False}`` keeps a record out of the interface.
 
@@ -244,6 +260,10 @@ def setup_logger(name: str = "ai_app", level: int = None) -> logging.Logger:
 # Create a default logger instance
 logger = setup_logger()
 
+# A child of ours, so a captured warning inherits the console + file handlers
+# (``ai_app`` doesn't propagate) while the file line still names its source.
+_warnings_logger = logging.getLogger("ai_app.warnings")
+
 # The file handler, once installed. Module-level so a second call is a no-op:
 # every entry point may ask for file logging without coordinating.
 _file_handler: Optional[logging.Handler] = None
@@ -284,7 +304,9 @@ def enable_file_logging(level: int = None) -> Optional[logging.Handler]:
       in the middle of the conversation. Third-party records are kept at
       ``level`` so the file gets their warnings without their INFO chatter;
     * **the two excepthooks** — a thread that dies or an unhandled crash bypasses
-      logging entirely and prints a raw traceback of its own.
+      logging entirely and prints a raw traceback of its own;
+    * **``warnings.showwarning``** — same bypass, from a dependency (see
+      :func:`_install_warning_capture`).
 
     Best-effort: an unwritable app home must not stop the app from running, so a
     failure here leaves the console-only setup in place.
@@ -322,7 +344,7 @@ def enable_file_logging(level: int = None) -> Optional[logging.Handler]:
     file_level = min(level, logging.INFO)
     handler.setLevel(file_level)
     handler.setFormatter(
-        logging.Formatter(
+        _FileFormatter(
             "%(asctime)s - %(name)s - %(levelname)s - [%(threadName)s] %(message)s"
         )
     )
@@ -342,7 +364,54 @@ def enable_file_logging(level: int = None) -> Optional[logging.Handler]:
         if isinstance(h.formatter, _ConsoleFormatter):
             h.formatter.hint = hint
     _install_excepthooks()
+    _install_warning_capture()
     return handler
+
+
+# Console lines already spent on a captured warning. The stdlib registry dedupes
+# per calling module, which a library that resets the filters (or warns from a
+# fresh module each turn) defeats — and the same RuntimeWarning printed twice in
+# one turn reads as two separate problems.
+_seen_warnings: set = set()
+_MAX_SEEN_WARNINGS = 256
+
+
+def _install_warning_capture() -> None:
+    """Route ``warnings.warn`` through the logger instead of raw stderr.
+
+    ``warnings.showwarning`` prints four lines of its own — path, line number,
+    category, message, then the offending source line — straight to stderr. It is
+    the same raw diagnostic in the middle of the conversation the excepthooks
+    close, except it comes from a dependency (langchain, botocore), so it can't be
+    fixed at the call site. Here it becomes one ``!`` line like any other warning,
+    with its origin kept in the log file, and a repeat is file-only.
+
+    Not :func:`logging.captureWarnings`: that routes to the ``py.warnings``
+    logger, which propagates to the root — where only the FILE handler lives — so
+    the warning would vanish from the screen entirely, and it logs the whole
+    pre-formatted multi-line block as the message.
+
+    Best-effort and idempotent: a warning must never be the thing that raises.
+    """
+    if getattr(sys, "_mnemoai_warning_capture", False):
+        return
+    sys._mnemoai_warning_capture = True
+
+    def show(message, category, filename, lineno, file=None, line=None) -> None:
+        try:
+            name = getattr(category, "__name__", None) or str(category)
+            text = str(message)
+            origin = f"{name} from {filename}:{lineno}"
+            first = (origin, text) not in _seen_warnings
+            if first and len(_seen_warnings) < _MAX_SEEN_WARNINGS:
+                _seen_warnings.add((origin, text))
+            _warnings_logger.warning(
+                text, extra={"origin": origin, "console": first}
+            )
+        except Exception:  # noqa: BLE001 — never raise from a warning
+            pass
+
+    warnings.showwarning = show
 
 
 def _install_excepthooks() -> None:
