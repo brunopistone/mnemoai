@@ -139,6 +139,7 @@ def _resume_session(client: Any, resume: str, chat_interface: Any = None) -> str
       let the caller print the banner.
     """
     from mnemoai.client.session_log import list_sessions
+    from mnemoai.client.ui import turn_view
     from mnemoai.client.ui.tui import select_from_list
 
     sessions = list_sessions()
@@ -181,7 +182,9 @@ def _resume_session(client: Any, resume: str, chat_interface: Any = None) -> str
         chat_interface.show_welcome()
 
     if target and client.resume_session(target["path"]):
-        print(f"\033[90m[Resumed session {target['session_id']}]\033[0m")
+        # Full id, not a prefix: `--resume <id>` matches by suffix, so this line is
+        # also how you copy the id of the session you're now in.
+        print(turn_view.render_session_notice(f"resumed  {target['session_id']}"))
     return "resumed"
 
 

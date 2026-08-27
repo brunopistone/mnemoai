@@ -154,8 +154,9 @@ ERROR   — Model request failed: Connection was closed before we received a val
 ```
 
 Both lines are retried automatically as of 1.12.3. If you see this on an older
-version, two separate causes were at work — and the giveaway for each is the
-`[Context: N tokens]` line printed with the turn:
+version, two separate causes were at work — and the giveaway for each is how large
+the context was (the footer's meter, or the `[Context: N tokens]` line printed with
+the turn on those versions):
 
 1. **A genuinely dropped socket.** botocore words this "Connection **was** closed",
    which the transient-error classifier didn't recognize, so the most retryable
@@ -262,8 +263,9 @@ larger, past the model's window), the first message after resuming had to summar
 the whole conversation again, and the summary you had already paid for was
 discarded. A compaction now records what replaced that history, and a restore
 rebuilds the state the session ended in, for `--resume`, `/load` and `/branch`
-alike. The conversation still replays on screen in full, followed by a note saying
-how many earlier messages are carried as a summary.
+alike. The conversation still replays on screen in full — what came back is visible
+in the footer's context meter, which reads about what it did when you closed the
+session.
 
 Nothing needs migrating, but note what a checkpoint is and isn't:
 

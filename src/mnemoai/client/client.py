@@ -118,6 +118,11 @@ class LangGraphClient:
         # tools and tells the model to research + present a plan.
         self.plan_mode_active: bool = False
 
+        # Set by the pinned UI, which shows the context size in its footer: the
+        # per-turn `[Context: N tokens]` line then has nothing left to add and is
+        # suppressed (see :meth:`_print_context_size`).
+        self.status_footer_active: bool = False
+
         self.llm_controller = LangChainLLMController(verbose=self.verbose_mode)
         # Cache of same-provider models built for a custom sub-agent's 'model'
         # override (keyed by model name), so repeated spawns don't rebuild.
@@ -388,8 +393,7 @@ class LangGraphClient:
 
                 self._profile_turn()
 
-                token_count = self._count_context_tokens()
-                print(f"\n\033[90m[Context: {token_count} tokens]\033[0m")
+                self._print_context_size()
 
                 if self.episodic_memory:
                     self.previous_query = prompt
@@ -819,6 +823,18 @@ class LangGraphClient:
         """Delegates to :func:`context_injection.count_context_tokens`."""
         return context_injection.count_context_tokens(self)
 
+    def _print_context_size(self) -> None:
+        """Print ``[Context: N tokens]`` — only where nothing else shows it.
+
+        The pinned UI keeps the same number in its footer, live, so printing it
+        per turn would just repeat it into scrollback. Off a TTY (``--no-verbose``
+        pipelines, the plain ``input()`` loop) there is no footer, and the count is
+        the only signal of how large the conversation has grown.
+        """
+        if getattr(self, "status_footer_active", False):
+            return
+        print(f"\n\033[90m[Context: {self._count_context_tokens()} tokens]\033[0m")
+
     def clear_context(self) -> None:
         """Clear conversation history but keep system prompt."""
         if self.agent:
@@ -1049,9 +1065,7 @@ class LangGraphClient:
                 transcript = turn_view.render_conversation(langchain_messages)
                 if transcript:
                     print("\n" + transcript)
-                print(
-                    f"\n\033[90m[Context: {self._count_context_tokens()} tokens]\033[0m"
-                )
+                self._print_context_size()
                 return True
 
             logger.error("Agent not initialized")
@@ -1391,15 +1405,13 @@ class LangGraphClient:
             )
             logger.info(f"Resumed {len(messages)} messages from {path}")
 
+            # The conversation replays in full; what it came back as (the kept
+            # window plus a summary, or everything) is deliberately NOT announced —
+            # a resume reads the same whether or not the session was compacted.
             transcript = turn_view.render_conversation(replayed)
             if transcript:
                 print("\n" + transcript)
-            if data["compacted_away"]:
-                print(
-                    f"\n\033[90m[{data['compacted_away']} earlier messages carried "
-                    "as a summary, as they were when this session ended]\033[0m"
-                )
-            print(f"\n\033[90m[Context: {self._count_context_tokens()} tokens]\033[0m")
+            self._print_context_size()
             return True
         except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to resume session: {e}")

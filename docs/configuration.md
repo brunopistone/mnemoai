@@ -559,7 +559,8 @@ LLM:
 **Token counting.** `TOKEN_COUNTING` only tunes the _pre-flight estimate_ for a
 prompt that hasn't been sent yet. Once a turn completes, the size comes from the
 provider's own `usage_metadata`, which is ground truth and needs no estimate —
-that is what `/usage` and the `[Context: N tokens]` line report.
+that is what `/usage` and the footer's context meter report (an estimate there is
+marked with a `~`).
 
 The estimate is deliberately conservative, because undercounting overflows the
 window while overcounting only compacts a little early. Text is tokenized with

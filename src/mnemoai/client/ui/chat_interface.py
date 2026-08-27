@@ -18,6 +18,7 @@ from mnemoai.client.memory.episodic_memory import (
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
+from mnemoai.client.ui import status_bar
 from mnemoai.client.ui.tui import (
     _DELETE,
     PinnedPromptReader,
@@ -49,6 +50,10 @@ class ChatInterface:
     def __init__(self, client: Any) -> None:
         self.client = client
         self.command_history = InMemoryHistory()
+        # Decided HERE, not in _run_pinned_loop: on a TTY the footer will carry the
+        # context size, so nothing else should print it — and `--resume` replays
+        # (and would print it) BEFORE the loop starts, from main._resume_session.
+        client.status_footer_active = _dialog_is_tty()
 
     def _prompt_html(self) -> str:
         """Build the input-prompt line, with a 🔒 plan tag while plan mode is on.
@@ -808,6 +813,50 @@ class ChatInterface:
             store = getattr(agent, "_activity", None) if agent else None
             return store.request_stop_all() if store is not None else 0
 
+        # Persistent footer: model · provider, launch dir, context meter. Model and
+        # directory are read once — /model and /config re-exec the process, so they
+        # can't change under a live footer.
+        model_cfg = config.get("MODEL_ID", {}) or {}
+        footer_model = str(model_cfg.get("NAME", "") or "")
+        footer_provider = str(model_cfg.get("TYPE", "") or "")
+        footer_cwd = os.getcwd()
+        token_cache = {"key": None, "tokens": 0}
+
+        def _context_tokens():
+            """``(tokens, estimated)`` for the footer meter.
+
+            Exact once a turn has reported its ``input_tokens``; until then a
+            CACHED estimate — the footer repaints ~10x/second while the estimate
+            walks the whole history, so it is recomputed only when the history
+            (or the system prompt) actually changes.
+            """
+            agent = getattr(self.client, "agent", None)
+            exact = int(getattr(agent, "_last_input_tokens", 0) or 0) if agent else 0
+            if exact:
+                return exact, False
+            msgs = (getattr(agent, "messages", None) or []) if agent else []
+            key = (len(msgs), len(getattr(self.client, "system_prompt", "") or ""))
+            if token_cache["key"] != key:
+                try:
+                    token_cache["tokens"] = self.client._count_context_tokens()
+                except Exception:
+                    token_cache["tokens"] = 0
+                token_cache["key"] = key
+            return token_cache["tokens"], True
+
+        def _footer(width: int):
+            manager = getattr(self.client, "conversation_manager", None)
+            tokens, estimated = _context_tokens()
+            return status_bar.segments(
+                model=footer_model,
+                provider=footer_provider,
+                cwd=footer_cwd,
+                tokens=tokens,
+                window=int(getattr(manager, "max_tokens", 0) or 0),
+                estimated=estimated,
+                width=width,
+            )
+
         reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
             commands=self._COMMANDS,
@@ -815,6 +864,7 @@ class ChatInterface:
             dispatch=_dispatch,
             toolbar_text=lambda: spinner_toolbar_text(status),
             reasoning_text=lambda: reasoning.render(time.monotonic()),
+            footer_text=_footer,
             on_cancel=_on_cancel,
             agents_provider=_agents_snapshot,
             agents_get=_agents_get,
