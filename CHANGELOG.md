@@ -7,6 +7,32 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.6] — 2026-08-27
+
+### Fixed
+
+- **Resuming a compacted conversation no longer undoes the compaction.** A session
+  the provider had just reported at **235,793 tokens** came back after `--resume`
+  at **1,166,221** — five times bigger, past the model's window, before a single
+  new message. The transcript keeps every turn's full text (deliberately: nothing
+  said is ever lost from disk), but restoring it replayed the raw history a
+  `/compact` had already summarized away. So every resume re-inflated the context
+  and the first turn back had to summarize the whole conversation again, paying for
+  a summary that had already been paid for and thrown away. A compaction now
+  records what replaced that history — the summary plus the messages that stayed
+  live — and a restore rebuilds **the state the session ended in**, for `--resume`,
+  `/load` and `/branch` alike. The conversation still replays on screen in full,
+  with a note saying how many earlier messages are carried as a summary.
+- **`/save` now records the active summary too.** Saving after a `/compact` wrote
+  only the messages left in the window: the summary lived inside the system prompt,
+  which `/load` rebuilds from scratch, so a loaded conversation resumed mid-thread
+  with the earlier history silently gone. Files saved before this release load
+  exactly as before.
+- **`/clear` now drops the compaction summary.** It rebuilt the system prompt
+  without the summary block but left the manager's copy in place, so a cleared
+  conversation's history could still reach the next compaction's summary — and, with
+  the change above, a later `/save`.
+
 ## [1.12.5] — 2026-08-27
 
 ### Fixed
@@ -64,7 +90,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 ### Fixed
 
 - **A dropped connection no longer ends the turn.** `Connection was closed before
-  we received a valid response from endpoint URL …` was reported as an error the
+we received a valid response from endpoint URL …` was reported as an error the
   app "can't recover from automatically" — yet a closed socket is the single most
   retryable failure there is. The classifier matches provider wordings, and
   botocore phrases this one as "Connection **was** closed", which the existing

@@ -121,6 +121,10 @@ class AgentConversationManager:
         """
         self.max_tokens = max_tokens
         self.previous_summary = None
+        # The latest summary as PLAIN text (``previous_summary`` is the wrapped
+        # block). Persisted by /save and the session transcript, so a restore can
+        # rebuild the compacted context instead of re-summarizing the raw history.
+        self.summary_text = ""
         logger.info(f"Initialized conversation manager with max_tokens={max_tokens}")
 
     def count_tokens(self, messages: List[Dict]) -> int:
@@ -490,6 +494,7 @@ class AgentConversationManager:
             """
         ).strip()
         self.previous_summary = summary_block
+        self.summary_text = clean_summary
 
         original_system_prompt = config.system_prompt
         if not original_system_prompt:
@@ -508,6 +513,29 @@ class AgentConversationManager:
         parts.extend(self._session_blocks(client))
         parts.append(summary_block)
         return "\n\n".join(parts)
+
+    def apply_restored_summary(self, client: Any, agent: Any, summary: str) -> bool:
+        """Re-apply a restored conversation's compaction summary; True if applied.
+
+        The counterpart of the checkpoint written by ``_compact``: a resume, a
+        ``/load`` or a ``/branch`` restores the compacted message window, and that
+        window only makes sense alongside the summary of what it followed. Rebuilds
+        the system prompt through the same path a live compaction uses, so the
+        session-start blocks are restored with it and ``previous_summary`` is set —
+        without which the NEXT compaction would silently drop this one's history
+        from its reduce step.
+        """
+        if not summary or client is None:
+            return False
+        try:
+            rebuilt = self._build_system_with_summary(str(summary), client=client)
+            client.system_prompt = rebuilt
+            if agent is not None:
+                agent.system_prompt = rebuilt
+            return True
+        except Exception as e:  # noqa: BLE001 — a restore already succeeded
+            logger.warning(f"Could not re-apply the restored summary: {e}")
+            return False
 
     def _session_blocks(self, client: Any = None) -> List[str]:
         """The session-start context blocks to restore after compaction.
@@ -815,15 +843,16 @@ class AgentConversationManager:
             client.system_prompt = new_system_content
             agent.system_prompt = new_system_content
 
-            # Note the boundary in the session transcript. Purely informational:
-            # the log is append-only, so the turns summarized away are still on
-            # disk and `--resume` restores the full conversation regardless. This
-            # only records WHERE the live context was shrunk, which is otherwise
-            # invisible in a transcript that never loses anything.
+            # Checkpoint the new state in the session transcript. The turns
+            # summarized away stay on disk in their own records (the log is
+            # append-only), so this loses no text — it records what REPLACED them,
+            # which is what a later `--resume` must restore. Without it a resume
+            # rebuilt the raw pre-compaction history and had to summarize the whole
+            # conversation again, discarding the summary just paid for.
             log = getattr(agent, "session_log", None)
             if log is not None:
                 try:
-                    log.log_compaction()
+                    log.log_compaction(summary=clean_summary, kept=kept)
                 except Exception as e:  # noqa: BLE001 — never break a compaction
                     logger.debug(f"Session log compaction marker failed: {e}")
 

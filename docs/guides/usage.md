@@ -184,6 +184,16 @@ complete record on its own and resuming _it_ later replays everything — not ju
 what you added after the restore. The session you resumed from is never modified,
 so you can always go back and resume the same point again.
 
+**A compacted session comes back compacted.** If the conversation was
+[compacted](#commands) — by you, or automatically once it outgrew the window — the
+transcript records the summary alongside the turns that stayed verbatim, so
+resuming restores the state the session **ended** in: the same summary, the same
+recent turns, and roughly the same `[Context: N tokens]` you last saw. A line like
+`[412 earlier messages carried as a summary, as they were when this session ended]`
+says how much is standing behind it. The full text is still in the file and still
+replays into the terminal, so you can scroll back and read anything the summary
+condensed — it just isn't re-sent to the model, which is what a compaction was for.
+
 A launch you never typed into records nothing resumable, so its file is removed
 when you exit — only sessions with at least one exchange are offered, which also
 means a resume you didn't ask anything in won't appear as a duplicate of the
@@ -241,6 +251,11 @@ from there — turn 3 stays behind in the original. **The original session is co
 never changed**, so it remains resumable exactly as it was; if the branch turns out
 to be a dead end, `--resume` the original and nothing is lost. That also means
 branching is cheap: there's no "are you sure", because nothing is destroyed.
+
+If the conversation was [compacted](#commands), branching after that point carries
+the summary with it, exactly as [resuming](#resuming-a-session) does — while
+branching to a turn *before* it forks the raw history instead, which is a way to get
+the uncompacted detail of those turns back into a conversation.
 
 Forks are marked in the `--resume` picker, since a branch inherits its parent's
 opening prompt and the two rows would otherwise look identical:

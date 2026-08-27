@@ -148,3 +148,112 @@ class TestCompactionRebuild:
         assert "<available_skills>" in rebuilt
         assert "<available_subagents>" in rebuilt
         assert "Earlier we did X." in rebuilt
+
+    def test_the_raw_summary_is_kept_alongside_the_wrapped_block(self, wired):
+        # `previous_summary` is the <conversation_summary> block (what the prompt
+        # holds); `summary_text` is the text needed to REBUILD it after a restore.
+        # Persisting the wrapped form would nest a block inside a block on load.
+        mgr = AgentConversationManager(max_tokens=1000)
+        mgr._build_system_with_summary("Earlier we did X.", client=wired)
+        assert mgr.summary_text == "Earlier we did X."
+        assert "<conversation_summary>" in (mgr.previous_summary or "")
+        assert "<conversation_summary>" not in mgr.summary_text
+
+
+class TestARestoredSummaryIsReApplied:
+    """A restore rehydrates the COMPACTED window, which only makes sense with the
+    summary of what it followed — otherwise the model resumes a conversation that
+    appears to start mid-thread, with the earlier history silently gone."""
+
+    def _client_and_agent(self, wired):
+        wired.system_prompt = "stale"
+        return wired, SimpleNamespace(system_prompt="stale")
+
+    def test_the_prompt_is_rebuilt_on_both_holders(self, wired):
+        # The agent holds its own copy; updating only the client leaves the model
+        # being called with the stale one.
+        client, agent = self._client_and_agent(wired)
+        mgr = AgentConversationManager(max_tokens=1000)
+        assert mgr.apply_restored_summary(client, agent, "Earlier: X.") is True
+        assert "Earlier: X." in client.system_prompt
+        assert agent.system_prompt == client.system_prompt
+
+    def test_the_session_blocks_come_back_with_it(self, wired):
+        client, agent = self._client_and_agent(wired)
+        mgr = AgentConversationManager(max_tokens=1000)
+        mgr.apply_restored_summary(client, agent, "Earlier: X.")
+        assert MEMORY_TEXT in client.system_prompt
+        assert PROFILE_TEXT in client.system_prompt
+
+    def test_the_next_compaction_folds_it_in(self, wired):
+        # Without `previous_summary` set, the next compaction's reduce step has no
+        # prior summary to fold — so this restore's history is dropped for good.
+        client, agent = self._client_and_agent(wired)
+        mgr = AgentConversationManager(max_tokens=1000)
+        mgr.apply_restored_summary(client, agent, "Earlier: X.")
+        assert "Earlier: X." in (mgr.previous_summary or "")
+        assert mgr.summary_text == "Earlier: X."
+
+    def test_no_summary_is_a_no_op(self, wired):
+        # An uncompacted session: the prompt built at startup must stay as it is.
+        client, agent = self._client_and_agent(wired)
+        mgr = AgentConversationManager(max_tokens=1000)
+        assert mgr.apply_restored_summary(client, agent, "") is False
+        assert client.system_prompt == "stale"
+        assert mgr.previous_summary is None
+
+    def test_a_missing_agent_still_updates_the_client(self, wired):
+        client, _ = self._client_and_agent(wired)
+        mgr = AgentConversationManager(max_tokens=1000)
+        assert mgr.apply_restored_summary(client, None, "Earlier: X.") is True
+        assert "Earlier: X." in client.system_prompt
+
+    def test_a_rebuild_failure_does_not_break_the_restore(self, wired, monkeypatch):
+        # The history is already back in the agent by this point; raising here
+        # would turn a degraded prompt into a failed resume.
+        client, agent = self._client_and_agent(wired)
+        mgr = AgentConversationManager(max_tokens=1000)
+        monkeypatch.setattr(
+            mgr,
+            "_build_system_with_summary",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        assert mgr.apply_restored_summary(client, agent, "Earlier: X.") is False
+        assert client.system_prompt == "stale"
+
+    def test_every_restore_path_re_applies_it(self, wired):
+        # Guard the wiring: --resume, /load and /branch each rehydrate a compacted
+        # window, so each must carry the summary that window stands on.
+        import inspect
+
+        from mnemoai.client.client import LangGraphClient
+
+        for name in ("resume_session", "load_conversation", "branch_conversation"):
+            src = inspect.getsource(getattr(LangGraphClient, name))
+            assert "apply_restored_summary(" in src, name
+
+
+class TestClearingTheContextDropsTheSummary:
+    """``/clear`` rebuilds the prompt without the summary block, so the manager's
+    own copy has to go too: it feeds the next compaction's reduce step and is
+    persisted by ``/save``, either of which would carry a cleared conversation's
+    history into the new one."""
+
+    def test_both_copies_are_reset(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+        from mnemoai.client.client import LangGraphClient
+
+        monkeypatch.setattr(
+            LangGraphClient, "_build_system_prompt", lambda self: "fresh prompt"
+        )
+        c = LangGraphClient.__new__(LangGraphClient)
+        c.agent = None
+        c.session_id = "s1"
+        c.current_conversation_path = "/tmp/open.json"
+        c.conversation_manager = AgentConversationManager(max_tokens=1000)
+        c.conversation_manager.previous_summary = "<conversation_summary>X</…>"
+        c.conversation_manager.summary_text = "X"
+
+        c.clear_context()
+        assert c.conversation_manager.previous_summary is None
+        assert c.conversation_manager.summary_text == ""
