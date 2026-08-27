@@ -572,7 +572,11 @@ class TestACheckpointSurvivesEveryRestorePath:
             convert_strands_messages_to_langchain(data["all_messages"]),
             source=str(source),
             summary=data["summary"],
-            kept=convert_strands_messages_to_langchain(data["messages"]),
+            kept=(
+                convert_strands_messages_to_langchain(data["messages"])
+                if data["checkpoint"]
+                else None
+            ),
         )
         return nxt
 
@@ -626,6 +630,110 @@ class TestACheckpointSurvivesEveryRestorePath:
         blob = str(data["messages"])
         assert "after compaction" in blob and "the second question" in blob
         assert "the opening question" not in blob
+
+
+class TestEvictionIsCheckpointedToo:
+    """Tool-result eviction shrinks the context WITHOUT summarizing anything.
+
+    It drops no message — it rewrites old tool results smaller — so there is no
+    summary to record, and the transcript still holds every result at its
+    original size. A restore that replayed those handed back exactly the tokens
+    eviction had reclaimed: the same defect as an un-checkpointed compaction, on
+    the one path where no summary exists. Hence a checkpoint is marked by the
+    ``messages`` key, not by ``summary``.
+    """
+
+    def _evicted(self):
+        """2 turns, then the whole history re-recorded with the bulky one shrunk.
+
+        Eviction keeps every message — that's the shape the checkpoint has to
+        have, and why ``compacted_away`` stays 0.
+        """
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn([HumanMessage(content="q1"), AIMessage(content="A" * 400)])
+        log.log_turn(_turn("the recent question", "a2"))
+        log.log_compaction(
+            kept=[
+                HumanMessage(content="q1"),
+                AIMessage(content="A…[evicted]"),
+                HumanMessage(content="the recent question"),
+                AIMessage(content="a2"),
+            ]
+        )
+        return log
+
+    def test_the_restorable_state_is_the_evicted_one(self, home):
+        data = slog.read_session(self._evicted().path)
+        assert "[evicted]" in str(data["messages"])
+        assert "A" * 400 not in str(data["messages"])
+
+    def test_the_full_size_text_is_still_on_disk(self, home):
+        data = slog.read_session(self._evicted().path)
+        assert "A" * 400 in str(data["all_messages"])
+
+    def test_it_reports_no_summary_and_nothing_summarized_away(self, home):
+        # Nothing was dropped, so the resume notice must not claim it was.
+        data = slog.read_session(self._evicted().path)
+        assert data["summary"] == ""
+        assert data["compacted_away"] == 0
+        assert data["checkpoint"] is True
+
+    def test_it_does_not_clear_an_earlier_summary(self, home):
+        # An eviction after a compaction must leave that summary standing — it is
+        # what the kept window's earlier history stands on.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q1", "a1"))
+        log.log_compaction(summary="Earlier: X.", kept=_turn("q1", "a1"))
+        log.log_compaction(kept=[HumanMessage(content="q1"), AIMessage(content="…")])
+        data = slog.read_session(log.path)
+        assert data["summary"] == "Earlier: X."
+        assert data["checkpoint"] is True
+
+    def test_an_uncompacted_session_reports_no_checkpoint(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q", "a"))
+        assert slog.read_session(log.path)["checkpoint"] is False
+
+    def test_a_pre_1_12_6_marker_is_not_a_checkpoint(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q", "a"))
+        log._append({"t": "compact", "n": 1, "ts": time.time()})
+        data = slog.read_session(log.path)
+        assert data["checkpoint"] is False
+        assert "q" in str(data["messages"])  # restores everything, as it always did
+
+    def test_a_resume_keeps_the_evicted_state(self, home):
+        source = self._evicted().path
+        data = slog.read_session(source)
+        nxt = slog.SessionLog(cwd="/proj/a")
+        nxt.seed_history(
+            convert_strands_messages_to_langchain(data["all_messages"]),
+            source=str(source),
+            summary=data["summary"],
+            kept=convert_strands_messages_to_langchain(data["messages"]),
+        )
+        second = slog.read_session(nxt.path)
+        assert "A" * 400 not in str(second["messages"])  # not re-inflated
+        assert "A" * 400 in str(second["all_messages"])  # still readable
+
+    def test_a_branch_carries_the_evicted_state_without_inventing_a_summary(self, home):
+        fork = slog.branch_session(self._evicted().path)
+        data = slog.read_session(fork)
+        assert data["summary"] == ""
+        assert "[evicted]" in str(data["messages"])
+        assert "A" * 400 not in str(data["messages"])
+
+    def test_an_unencodable_eviction_falls_back_to_a_marker(self, home, monkeypatch):
+        log = slog.SessionLog(cwd="/proj/a")
+        log._turn = 1
+        monkeypatch.setattr(
+            slog,
+            "convert_langchain_messages_to_strands",
+            lambda msgs: (_ for _ in ()).throw(TypeError("nope")),
+        )
+        log.log_compaction(kept=_turn("q", "a"))
+        rec = next(r for r in slog._iter_records(log.path) if r.get("t") == "compact")
+        assert "messages" not in rec and "summary" not in rec
 
 
 class TestTurnSummariesLabelEachTurn:

@@ -599,7 +599,9 @@ layers prevent a single oversized turn from breaking the loop:
    most of the context but are rarely needed verbatim once acted on) to a short
    head plus a marker, with **no model call** — recent turns stay verbatim and no
    message is dropped. If that alone gets back under budget, the expensive
-   summary is skipped; otherwise it falls through to the full LLM summary. Tune
+   summary is skipped; otherwise it falls through to the full LLM summary. Either
+   way the reduced state is checkpointed in the session transcript, so a resume
+   comes back to it rather than to the full-size history. Tune
    with `TOOL_EVICTION_KEEP_RECENT` (messages kept verbatim, default 8) and
    `EVICTED_TOOL_RESULT_CHARS` (shrink target, default 500; 0 disables the layer).
 3. **Overflow backstop** — if a request still exceeds the window, the turn ends

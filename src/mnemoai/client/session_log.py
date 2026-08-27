@@ -8,6 +8,7 @@ per line:
     {"t": "meta",  "session_id": …, "cwd": …, "started": …, "model": …}
     {"t": "turn",  "n": 1, "ts": …, "messages": [ …strands dicts… ]}
     {"t": "compact", "n": 3, "ts": …, "summary": "…", "messages": [ …kept… ]}
+    {"t": "compact", "n": 4, "ts": …, "messages": [ …evicted history… ]}
     {"t": "label", "ts": …, "title": "…"}          # /rename, last one wins
 
 **Why append-only instead of mirroring the live message list:** compaction
@@ -25,8 +26,17 @@ that state as ``messages`` while still exposing everything ever logged as
 the compaction — the live context jumped back to the full pre-compaction history
 (measured: a chat the provider reported at 235,793 tokens came back as ~1.05M,
 past the model's window), so the first turn after every resume had to summarize
-the whole thing again, and the summary already paid for was thrown away. Records
-written before 1.12.6 carry no ``summary`` and stay purely informational.
+the whole thing again, and the summary already paid for was thrown away.
+
+**Two ways the context shrinks, so two checkpoint shapes** — what marks a record
+as restorable is the ``messages`` key, not ``summary``. A summary checkpoint
+replaces older turns; an **eviction** checkpoint (tool-result eviction, the cheap
+layer that runs with no model call) drops no message at all, it rewrites old tool
+results smaller — and since the transcript holds each result at its original
+size, a restore replayed those and handed back every token eviction had just
+reclaimed. Same defect, a path where no summary exists to record. Records written
+before 1.12.6 carry neither key and stay purely informational (they restore
+everything, which is what they always did).
 
 Sub-agent runs are deliberately NOT logged: they execute on their own isolated
 message list and never enter ``agent.messages``, so writing them here would
@@ -199,7 +209,9 @@ class SessionLog:
         ``messages`` is the FULL history (so the new file keeps the whole text on
         disk); ``summary``/``kept`` re-state the compaction checkpoint that was
         active, so the next restore rebuilds the compacted context rather than the
-        raw history it stands for.
+        raw history it stands for. Pass ``kept`` only when there IS a checkpoint to
+        carry — an eviction one has no summary, so a caller that always passed the
+        live history would duplicate the whole conversation in every restore.
         """
         if self.path is None or not messages:
             return
@@ -220,7 +232,7 @@ class SessionLog:
         self._append(
             {"t": "restore", "ts": time.time(), "source": source, "messages": payload}
         )
-        if summary:
+        if summary or kept is not None:
             self.log_compaction(summary=summary, kept=kept or [])
 
     def log_turn(self, messages: List[Any]) -> None:
@@ -242,27 +254,35 @@ class SessionLog:
     def log_compaction(
         self, summary: str = "", kept: Optional[List[Any]] = None
     ) -> None:
-        """Record that the live context was compacted — as a restorable checkpoint.
+        """Record that the live context shrank — as a restorable checkpoint.
 
-        The turns summarized away stay on disk in their own ``turn`` records; this
-        adds what replaced them, so a later restore can rebuild the context the
-        user actually had instead of re-inflating the raw history
-        (:func:`read_session`). ``kept`` is the window left verbatim after the
-        summary, and may legitimately be empty — the ``summary`` key, not the
-        message list, is what marks a record as a checkpoint. Falls back to a bare
-        marker if the kept window can't be encoded: an unusable checkpoint would
-        drop real history, while a marker only loses the optimization.
+        One record, two shapes. **With a summary:** the turns it replaced stay on
+        disk in their own ``turn`` records and ``kept`` is the window left
+        verbatim, which may legitimately be empty. **Without one:** no message was
+        dropped, they got SMALLER — tool-result eviction rewrote old results in
+        place — and ``kept`` is that whole rewritten history.
+
+        So the ``messages`` key, not ``summary``, is what marks a record as a
+        checkpoint (:func:`read_session`). Eviction has no summary to record, yet
+        its state is exactly as unreachable from the raw turns as a summary's is:
+        the transcript holds each result at its ORIGINAL size, so a restore that
+        replayed the turns re-inflated everything eviction had just reclaimed.
+
+        Falls back to a bare marker if the window can't be encoded: an unusable
+        checkpoint would drop real history, a marker only loses the optimization.
         """
         record: Dict[str, Any] = {"t": "compact", "n": self._turn, "ts": time.time()}
-        if summary:
+        if summary or kept is not None:
             try:
                 record["messages"] = convert_langchain_messages_to_strands(
                     list(kept or [])
                 )
-                record["summary"] = str(summary)
+                if summary:
+                    record["summary"] = str(summary)
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"Compaction checkpoint encode failed: {e}")
                 record.pop("messages", None)
+                record.pop("summary", None)
         self._append(record)
 
     def set_label(self, title: str) -> bool:
@@ -354,6 +374,7 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
     messages: List[Dict[str, Any]] = []
     live: List[Dict[str, Any]] = []
     summary = ""
+    checkpoint = False
     kept = 0
     limit = through_turn if (through_turn and through_turn > 0) else None
     for rec in _iter_records(src):
@@ -361,10 +382,12 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
         if kind == "meta":
             meta = rec
             continue
-        if kind == "compact" and "summary" in rec:
+        if kind == "compact" and "messages" in rec:
             window = rec.get("messages")
             live = list(window) if isinstance(window, list) else []
-            summary = str(rec.get("summary") or "")
+            checkpoint = True
+            if "summary" in rec:
+                summary = str(rec.get("summary") or "")
             continue
         if kind not in ("turn", "restore"):
             continue
@@ -406,18 +429,20 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
             "messages": messages,
         }
     )
-    if summary:
+    if checkpoint:
         # Written raw (not via log_compaction) because these are already-encoded
-        # strands dicts, not LangChain messages.
-        log._append(
-            {
-                "t": "compact",
-                "n": 0,
-                "ts": time.time(),
-                "summary": summary,
-                "messages": live,
-            }
-        )
+        # strands dicts, not LangChain messages. No `summary` key when the source
+        # checkpoint had none (eviction) — the shape has to survive the copy, or
+        # the fork restores a summary the conversation never had.
+        record: Dict[str, Any] = {
+            "t": "compact",
+            "n": 0,
+            "ts": time.time(),
+            "messages": live,
+        }
+        if summary:
+            record["summary"] = summary
+        log._append(record)
     return log.path
 
 
@@ -452,7 +477,10 @@ def read_session(path) -> Dict[str, Any]:
     the context the user actually had. ``all_messages`` still holds every turn's
     full text — it is what the replay, the picker preview and ``exchanges`` read,
     so a compaction can't shorten how the conversation is displayed or sized.
-    ``compacted_away`` is how many messages the checkpoint stands in for.
+    ``compacted_away`` is how many messages the checkpoint stands in for, and
+    ``checkpoint`` whether one was found at all — an eviction checkpoint shrinks
+    the state without a summary or a dropped message, so neither of the other two
+    can tell a caller that ``messages`` is narrower than ``all_messages``.
 
     ``turns`` counts only turns taken in THIS file (inherited history doesn't
     inflate it). ``exchanges`` is what a reader actually cares about: how long the
@@ -473,6 +501,7 @@ def read_session(path) -> Dict[str, Any]:
     resumed_from = ""
     label = ""
     summary = ""
+    checkpoint = False
     compacted_away = 0
     turns = 0
     for rec in _iter_records(p):
@@ -482,15 +511,19 @@ def read_session(path) -> Dict[str, Any]:
         elif kind == "label":
             # Last one wins: /rename appends, it never rewrites the file.
             label = str(rec.get("title") or "").strip()
-        elif kind == "compact" and "summary" in rec:
-            # A checkpoint: everything before it is represented by the summary, so
-            # the restorable state restarts from the window that stayed live. Only
-            # `messages` is rewound — `all_messages` keeps the full text.
+        elif kind == "compact" and "messages" in rec:
+            # A checkpoint: the restorable state restarts from the window this
+            # record kept. Only `messages` is rewound — `all_messages` keeps the
+            # full text. An EVICTION checkpoint carries no summary (it dropped no
+            # message, it rewrote old tool results smaller), so it must not clear
+            # the summary an earlier compaction left standing.
             kept = rec.get("messages")
             kept = kept if isinstance(kept, list) else []
             compacted_away += max(0, len(messages) - len(kept))
             messages = list(kept)
-            summary = str(rec.get("summary") or "")
+            checkpoint = True
+            if "summary" in rec:
+                summary = str(rec.get("summary") or "")
         elif kind in ("turn", "restore"):
             if kind == "restore":
                 if isinstance(rec.get("branched_from"), dict):
@@ -512,6 +545,7 @@ def read_session(path) -> Dict[str, Any]:
         "messages": messages,
         "all_messages": all_messages,
         "summary": summary,
+        "checkpoint": checkpoint,
         "compacted_away": compacted_away,
         "turns": turns,
         "exchanges": sum(1 for m in all_messages if _is_user_prompt(m)),

@@ -275,6 +275,10 @@ Nothing needs migrating, but note what a checkpoint is and isn't:
   1.12.6 load exactly as they did.
 - A `/branch` **before** the compaction point deliberately forks the raw history —
   that is the point of rewinding to there.
+- A compaction that only trimmed old tool-result bodies (the cheap pass that runs
+  before any summarizing) is checkpointed as well, but only since **1.12.7** — on
+  1.12.6 that case still came back at full size, and with no summary involved
+  nothing on screen hinted that anything had been reclaimed.
 
 On an older version, `/compact` immediately after resuming is the workaround; it
 costs a summarization but brings the context back down before the first real turn.

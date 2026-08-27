@@ -195,6 +195,6 @@ The kept-verbatim window is bounded by **both** a message count and a token budg
 
 The summary preserves topics, decisions, and **tool calls/results** (which tools ran, their inputs, and outcomes), so the agent retains actionable context after compacting.
 
-A compaction is also **recorded in the session transcript** — the summary plus the messages that stayed verbatim — so `--resume`, `/load` and `/branch` come back to the context size the session ended at instead of restoring the raw history the summary replaced. See [Resuming a session](../guides/usage.md#resuming-a-session).
+A compaction is also **recorded in the session transcript** — the messages that stayed live, plus the summary when older turns were summarized away — so `--resume`, `/load` and `/branch` come back to the context size the session ended at instead of restoring the raw history it replaced. The cheaper tool-result eviction pass is recorded the same way, even though it produces no summary. See [Resuming a session](../guides/usage.md#resuming-a-session).
 
 For the full per-file reference, see [`ARCHITECTURE.md`](https://github.com/brunopistone/mnemoai/blob/main/ARCHITECTURE.md) in the repository (a repo-only, agent/contributor-facing reference, not part of this docs site).
