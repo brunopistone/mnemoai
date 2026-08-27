@@ -11,7 +11,11 @@ never saw.
 This is a server-side gate, independent of the client's confirmation prompt and
 the ``path_policy`` catastrophic-write floor. It never prompts; it returns a
 normal tool-error payload, so a non-TTY / directly-driven server can't deadlock.
-Creating a brand-new file (absent on disk) needs no prior read.
+Creating a brand-new file (absent on disk) needs no prior read — and neither does
+filling an EMPTY one: the gate exists to protect content, and a zero-byte file
+has none. Requiring a read there deadlocked the file outright, since a reader has
+no lines to hand back and reports the empty range as an error, so the read was
+never recorded and every write was refused forever.
 
 Config-independent (only ``os`` + logger) so it stays unit-testable.
 """
@@ -34,12 +38,18 @@ def _key(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
 
-def _current_mtime_ns(path: str) -> Optional[int]:
-    """Current mtime in ns, or None if the file can't be stat'd (absent/unreadable)."""
+def _stat(path: str) -> Optional[os.stat_result]:
+    """``os.stat`` of ``path``, or None if it can't be stat'd (absent/unreadable)."""
     try:
-        return os.stat(path).st_mtime_ns
+        return os.stat(path)
     except OSError:
         return None
+
+
+def _current_mtime_ns(path: str) -> Optional[int]:
+    """Current mtime in ns, or None if the file can't be stat'd (absent/unreadable)."""
+    info = _stat(path)
+    return info.st_mtime_ns if info is not None else None
 
 
 def record_read(path: str) -> None:
@@ -58,14 +68,20 @@ def check_write_allowed(path: str) -> Optional[dict]:
     """Gate a mutation of ``path``. Returns None if allowed, else an error payload.
 
     - Brand-new file (absent on disk): allowed — no prior read required.
+    - Existing but EMPTY file: allowed — there is no content to clobber, and
+      demanding a read of nothing is a demand that can't be met.
     - Existing file never read this session: blocked ("read it first").
     - Existing file changed on disk since last read: blocked ("read it again").
     """
-    current = _current_mtime_ns(path)
-    if current is None:
+    info = _stat(path)
+    if info is None:
         # Doesn't exist yet (or unreadable) -> treated as a fresh create.
         return None
+    if info.st_size == 0:
+        # Same case as a create, in every way that matters here: nothing to lose.
+        return None
 
+    current = info.st_mtime_ns
     seen = _read_mtimes.get(_key(path))
     if seen is None:
         logger.info("read-gate: %s modified without a prior read", path)

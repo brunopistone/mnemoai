@@ -784,15 +784,31 @@ class TestStreamedRead:
         assert "l8" in out["content"] and "l10" in out["content"]
         assert "l7" not in out["content"]
 
-    def test_empty_file(self, tmp_path, monkeypatch):
+    def test_empty_file_reads_as_empty_not_as_an_error(self, tmp_path, monkeypatch):
+        # An empty file is a successful read of nothing. As an "Invalid line
+        # range" error it was also unwritable: the write gate only clears a file
+        # whose read succeeded, so the file could be neither read nor filled.
         from mnemoai.server.tools.readers.line_reader import read_lines
 
         _patch_doc_tokens(monkeypatch)
         f = tmp_path / "f.txt"
         f.write_text("")
         out = json.loads(run(read_lines(str(f), 1, -1)))
+        assert "error" not in out
+        assert out["content"] == "" and out["total_lines"] == 0
+        assert "empty" in out["message"].lower()
+
+    def test_out_of_range_on_a_non_empty_file_still_errors(
+        self, tmp_path, monkeypatch
+    ):
+        from mnemoai.server.tools.readers.line_reader import read_lines
+
+        _patch_doc_tokens(monkeypatch)
+        f = tmp_path / "f.txt"
+        f.write_text("one\ntwo\n")
+        out = json.loads(run(read_lines(str(f), 50, 60)))
         assert out["error"] is True
-        assert "0 lines" in out["message"]
+        assert "2 lines" in out["message"]
 
     def test_token_budget_truncates_streamed_slice(self, tmp_path, monkeypatch):
         import mnemoai.server.tools.readers.line_reader as lr

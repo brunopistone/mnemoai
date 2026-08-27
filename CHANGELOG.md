@@ -7,6 +7,24 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.14.2] — 2026-08-27
+
+### Fixed
+
+- **An existing empty file can be written again.** The read-before-write gate asks
+  that a file be read before it's modified, and an empty file had no read to give:
+  the reader resolved the whole-file range to `1-0`, called it `Invalid line range`
+  and returned an error, so no read was ever recorded and every `fs_write` /
+  `file_edit` on the file came back with "read it first" — advice that could be
+  followed forever without effect. A placeholder created by `touch` or `install`
+  (an empty `Dockerfile`, an `__init__.py`) was therefore impossible to fill: the
+  model bounced between the two tools and gave up, offering to delete the file or
+  to run a shell workaround instead. Reading an empty file is now a successful read
+  of empty content, and the gate exempts a zero-byte file outright — it holds no
+  content to clobber, so it is a create in every way that matters, and the
+  exemption also covers the modes whose reader legitimately errors on an empty file
+  (`JSON` on an empty `.json`).
+
 ## [1.14.1] — 2026-08-27
 
 ### Fixed

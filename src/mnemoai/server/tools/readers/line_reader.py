@@ -44,6 +44,28 @@ def read_lines(path: str, start_line: int, end_line: int) -> str:
         with open(normalized_path, "r", encoding=encoding) as file:
             total_lines = sum(1 for _ in file)
 
+        if total_lines == 0:
+            # An empty file is a successful read of NOTHING, not an invalid range:
+            # no request can be out of bounds when the file has no bounds. As an
+            # error it also made the file unwritable — the write gate only clears a
+            # file whose read succeeded, so an empty one could be neither read nor
+            # filled (read_state exempts it now; this is the other half).
+            return json.dumps(
+                {
+                    "path": normalized_path,
+                    "content": "",
+                    "start_line": 0,
+                    "end_line": 0,
+                    "total_lines": 0,
+                    "lines_processed": 0,
+                    "lines_requested": 0,
+                    "tokens": 0,
+                    "max_tokens": config.get("DOC_MAX_TOKENS"),
+                    "truncated": False,
+                    "message": "File is empty (0 lines)",
+                }
+            )
+
         # Handle negative indices (from end of file)
         if start_line < 0:
             start_line = total_lines + start_line + 1
