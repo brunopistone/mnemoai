@@ -218,6 +218,34 @@ Defect 3 is why this shows up right after a `/branch`, `/load` or `--resume` of 
 long conversation. On an older version, `/compact` immediately after restoring one
 avoids it; on 1.12.4 the next turn measures the history that is actually there.
 
+## A resumed session reports an impossible context size
+
+```
+[Context: 12650351 tokens]
+[Resumed session 20260827_095050_7757_521593]
+```
+
+Twelve million tokens into a one-million-token window is not a display glitch —
+the history really was that large, and the next message would have overflowed.
+Fixed in 1.12.5: each resume used to re-save every tool result wrapped inside a
+copy of itself with all the quotes escaped again, so the same results roughly
+**doubled on every resume** while adding no content. File reads in the reported
+session had reached 1.07M characters each, and ~90% of the 21M-character
+transcript was backslashes.
+
+Upgrading is the whole fix — there is nothing to delete or migrate. Opening an
+affected conversation (`--resume`, `--continue` or `/load`) unwraps the nested
+copies as it reads and re-saves it clean; the reported session dropped from 21M to
+2.1M characters with no content lost. To see the effect, run `/context` after
+resuming.
+
+Two related notes if the number is large but plausible: `MAX_TOOL_RESULT_CHARS`
+caps a tool result when it is first produced, not when it is restored, and it
+derives from `MAX_CONVERSATION_TOKENS` — at `1000000` a single result may be
+400,000 characters. And a transcript is never compacted, so restoring one brings
+back everything a previous `/compact` had summarized away; the first message after
+a resume is what triggers compaction of that.
+
 ## A file write is refused
 
 Three different guards produce three different messages:
