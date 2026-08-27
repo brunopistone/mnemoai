@@ -216,7 +216,9 @@ separate defects lined up, and on older versions all three are worth knowing abo
 
 Defect 3 is why this shows up right after a `/branch`, `/load` or `--resume` of a
 long conversation. On an older version, `/compact` immediately after restoring one
-avoids it; on 1.12.4 the next turn measures the history that is actually there.
+avoids it; on 1.12.4 the next turn measures the history that is actually there, and
+since 1.12.6 restoring rebuilds the compacted state rather than re-inflating it
+(see [below](#a-resumed-session-reports-a-much-larger-context-than-when-i-closed-it)).
 
 ## A resumed session reports an impossible context size
 
@@ -239,12 +241,43 @@ copies as it reads and re-saves it clean; the reported session dropped from 21M 
 2.1M characters with no content lost. To see the effect, run `/context` after
 resuming.
 
-Two related notes if the number is large but plausible: `MAX_TOOL_RESULT_CHARS`
+One related note if the number is large but plausible: `MAX_TOOL_RESULT_CHARS`
 caps a tool result when it is first produced, not when it is restored, and it
 derives from `MAX_CONVERSATION_TOKENS` — at `1000000` a single result may be
-400,000 characters. And a transcript is never compacted, so restoring one brings
-back everything a previous `/compact` had summarized away; the first message after
-a resume is what triggers compaction of that.
+400,000 characters. If the number is instead much larger than it was when you
+closed the session, see the next section.
+
+## A resumed session reports a much larger context than when I closed it
+
+```
+[Context: 235793 tokens]     ← before closing
+[Context: 1166221 tokens]    ← after --resume
+```
+
+Fixed in 1.12.6. The transcript holds every turn's full text — deliberately,
+because nothing you said should ever be lost from disk — but restoring it used to
+replay all of that text, which brought back everything a previous `/compact` had
+summarized away. So the context came back at its pre-compaction size (here 5×
+larger, past the model's window), the first message after resuming had to summarize
+the whole conversation again, and the summary you had already paid for was
+discarded. A compaction now records what replaced that history, and a restore
+rebuilds the state the session ended in, for `--resume`, `/load` and `/branch`
+alike. The conversation still replays on screen in full, followed by a note saying
+how many earlier messages are carried as a summary.
+
+Nothing needs migrating, but note what a checkpoint is and isn't:
+
+- It is written **when a compaction happens**, so a session that never compacted is
+  unaffected, and a session compacted on an older version has no checkpoint to
+  restore — the first `/compact` after upgrading creates one.
+- `/save` records the active summary too, so a `/load` of a compacted conversation
+  no longer resumes mid-thread with the earlier history missing. Files saved before
+  1.12.6 load exactly as they did.
+- A `/branch` **before** the compaction point deliberately forks the raw history —
+  that is the point of rewinding to there.
+
+On an older version, `/compact` immediately after resuming is the workaround; it
+costs a summarization but brings the context back down before the first real turn.
 
 ## A file write is refused
 

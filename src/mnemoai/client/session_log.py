@@ -7,16 +7,26 @@ per line:
 
     {"t": "meta",  "session_id": …, "cwd": …, "started": …, "model": …}
     {"t": "turn",  "n": 1, "ts": …, "messages": [ …strands dicts… ]}
-    {"t": "compact", "n": 3, "ts": …}
+    {"t": "compact", "n": 3, "ts": …, "summary": "…", "messages": [ …kept… ]}
     {"t": "label", "ts": …, "title": "…"}          # /rename, last one wins
 
 **Why append-only instead of mirroring the live message list:** compaction
 *replaces* ``agent.messages`` wholesale (it summarizes older turns away), so a
 log that mirrored the list would lose that history the moment it compacted — and
-resuming would restore a summarized stub rather than the conversation. The log is
+the full text of those turns would be gone from disk for good. The log is
 therefore the record of what was *said*, written once per turn and never
-rewritten; a ``compact`` marker records that the live context was shrunk, without
-discarding the transcript.
+rewritten.
+
+**But a restore must reproduce the COMPACTED state, not the raw history.** A
+``compact`` record is therefore a checkpoint, carrying the summary that replaced
+the older turns plus the window that stayed live: :func:`read_session` returns
+that state as ``messages`` while still exposing everything ever logged as
+``all_messages``. Without it, resuming a compacted conversation silently undid
+the compaction — the live context jumped back to the full pre-compaction history
+(measured: a chat the provider reported at 235,793 tokens came back as ~1.05M,
+past the model's window), so the first turn after every resume had to summarize
+the whole thing again, and the summary already paid for was thrown away. Records
+written before 1.12.6 carry no ``summary`` and stay purely informational.
 
 Sub-agent runs are deliberately NOT logged: they execute on their own isolated
 message list and never enter ``agent.messages``, so writing them here would
@@ -163,7 +173,13 @@ class SessionLog:
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Session log append failed: {e}")
 
-    def seed_history(self, messages: List[Any], source: str = "") -> None:
+    def seed_history(
+        self,
+        messages: List[Any],
+        source: str = "",
+        summary: str = "",
+        kept: Optional[List[Any]] = None,
+    ) -> None:
         """Copy an ALREADY-RESTORED conversation into this session's transcript.
 
         Called after ``--resume`` or ``/load`` rehydrates history into the agent.
@@ -179,6 +195,11 @@ class SessionLog:
         Recorded as one ``restore`` record (not a ``turn``) so the turn counter
         keeps meaning "turns the user took in THIS session", while
         :func:`read_session` still replays the messages in order.
+
+        ``messages`` is the FULL history (so the new file keeps the whole text on
+        disk); ``summary``/``kept`` re-state the compaction checkpoint that was
+        active, so the next restore rebuilds the compacted context rather than the
+        raw history it stands for.
         """
         if self.path is None or not messages:
             return
@@ -199,6 +220,8 @@ class SessionLog:
         self._append(
             {"t": "restore", "ts": time.time(), "source": source, "messages": payload}
         )
+        if summary:
+            self.log_compaction(summary=summary, kept=kept or [])
 
     def log_turn(self, messages: List[Any]) -> None:
         """Record the messages this turn added (already-final LangChain messages)."""
@@ -216,9 +239,31 @@ class SessionLog:
             {"t": "turn", "n": self._turn, "ts": time.time(), "messages": payload}
         )
 
-    def log_compaction(self) -> None:
-        """Note that the live context was compacted (the transcript is unaffected)."""
-        self._append({"t": "compact", "n": self._turn, "ts": time.time()})
+    def log_compaction(
+        self, summary: str = "", kept: Optional[List[Any]] = None
+    ) -> None:
+        """Record that the live context was compacted — as a restorable checkpoint.
+
+        The turns summarized away stay on disk in their own ``turn`` records; this
+        adds what replaced them, so a later restore can rebuild the context the
+        user actually had instead of re-inflating the raw history
+        (:func:`read_session`). ``kept`` is the window left verbatim after the
+        summary, and may legitimately be empty — the ``summary`` key, not the
+        message list, is what marks a record as a checkpoint. Falls back to a bare
+        marker if the kept window can't be encoded: an unusable checkpoint would
+        drop real history, while a marker only loses the optimization.
+        """
+        record: Dict[str, Any] = {"t": "compact", "n": self._turn, "ts": time.time()}
+        if summary:
+            try:
+                record["messages"] = convert_langchain_messages_to_strands(
+                    list(kept or [])
+                )
+                record["summary"] = str(summary)
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Compaction checkpoint encode failed: {e}")
+                record.pop("messages", None)
+        self._append(record)
 
     def set_label(self, title: str) -> bool:
         """Name this session for the ``--resume`` picker; True if recorded.
@@ -297,16 +342,29 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
     inherited history for the new session — the same shape ``seed_history`` writes
     after ``--resume``, so the new file is self-contained and its own turn counter
     starts at the turns the user takes *in the branch*.
+
+    A compaction checkpoint inside the copied range is copied too, so a fork of a
+    compacted conversation starts from the context the source had rather than
+    re-inflating the history the summary already stands for. A branch point BEFORE
+    the compaction never reaches that record, and so forks from the raw history —
+    which is the point of branching there.
     """
     src = Path(path)
     meta: Dict[str, Any] = {}
     messages: List[Dict[str, Any]] = []
+    live: List[Dict[str, Any]] = []
+    summary = ""
     kept = 0
     limit = through_turn if (through_turn and through_turn > 0) else None
     for rec in _iter_records(src):
         kind = rec.get("t")
         if kind == "meta":
             meta = rec
+            continue
+        if kind == "compact" and "summary" in rec:
+            window = rec.get("messages")
+            live = list(window) if isinstance(window, list) else []
+            summary = str(rec.get("summary") or "")
             continue
         if kind not in ("turn", "restore"):
             continue
@@ -318,6 +376,7 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
                 break  # records are in order, so the rest is past the branch point
             kept += 1
         messages.extend(msgs)
+        live.extend(msgs)
     if not messages:
         return None
 
@@ -347,6 +406,18 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
             "messages": messages,
         }
     )
+    if summary:
+        # Written raw (not via log_compaction) because these are already-encoded
+        # strands dicts, not LangChain messages.
+        log._append(
+            {
+                "t": "compact",
+                "n": 0,
+                "ts": time.time(),
+                "summary": summary,
+                "messages": live,
+            }
+        )
     return log.path
 
 
@@ -371,9 +442,17 @@ def _iter_records(path: Path):
 
 
 def read_session(path) -> Dict[str, Any]:
-    """Read one session file into ``{meta, messages, turns, …}``.
+    """Read one session file into ``{meta, messages, all_messages, summary, …}``.
 
     Returns ``messages: []`` for a session that never completed a turn.
+
+    **``messages`` is the state to RESTORE, ``all_messages`` everything logged.**
+    They differ once the session compacted: a ``compact`` checkpoint replaces the
+    history before it with ``summary`` plus the window that stayed live, which is
+    the context the user actually had. ``all_messages`` still holds every turn's
+    full text — it is what the replay, the picker preview and ``exchanges`` read,
+    so a compaction can't shorten how the conversation is displayed or sized.
+    ``compacted_away`` is how many messages the checkpoint stands in for.
 
     ``turns`` counts only turns taken in THIS file (inherited history doesn't
     inflate it). ``exchanges`` is what a reader actually cares about: how long the
@@ -389,9 +468,12 @@ def read_session(path) -> Dict[str, Any]:
     p = Path(path)
     meta: Dict[str, Any] = {}
     messages: List[Dict[str, Any]] = []
+    all_messages: List[Dict[str, Any]] = []
     branched_from: Dict[str, Any] = {}
     resumed_from = ""
     label = ""
+    summary = ""
+    compacted_away = 0
     turns = 0
     for rec in _iter_records(p):
         kind = rec.get("t")
@@ -400,6 +482,15 @@ def read_session(path) -> Dict[str, Any]:
         elif kind == "label":
             # Last one wins: /rename appends, it never rewrites the file.
             label = str(rec.get("title") or "").strip()
+        elif kind == "compact" and "summary" in rec:
+            # A checkpoint: everything before it is represented by the summary, so
+            # the restorable state restarts from the window that stayed live. Only
+            # `messages` is rewound — `all_messages` keeps the full text.
+            kept = rec.get("messages")
+            kept = kept if isinstance(kept, list) else []
+            compacted_away += max(0, len(messages) - len(kept))
+            messages = list(kept)
+            summary = str(rec.get("summary") or "")
         elif kind in ("turn", "restore"):
             if kind == "restore":
                 if isinstance(rec.get("branched_from"), dict):
@@ -410,6 +501,7 @@ def read_session(path) -> Dict[str, Any]:
             msgs = rec.get("messages")
             if isinstance(msgs, list):
                 messages.extend(msgs)
+                all_messages.extend(msgs)
                 # A `restore` record is inherited history, not a turn the user
                 # took here — it must not inflate the turn count the picker
                 # shows, but it IS part of the conversation to replay.
@@ -418,8 +510,11 @@ def read_session(path) -> Dict[str, Any]:
     return {
         "meta": meta,
         "messages": messages,
+        "all_messages": all_messages,
+        "summary": summary,
+        "compacted_away": compacted_away,
         "turns": turns,
-        "exchanges": sum(1 for m in messages if _is_user_prompt(m)),
+        "exchanges": sum(1 for m in all_messages if _is_user_prompt(m)),
         "path": str(p),
         "branched_from": branched_from,
         "resumed_from": resumed_from,
@@ -472,7 +567,9 @@ def list_sessions(
     superseded: set = set()
     for f in files:
         data = read_session(f)
-        if not data["messages"] or data["turns"] == 0:
+        # Judge emptiness on everything logged: a compaction checkpoint can leave
+        # `messages` empty (summary only) in a conversation that is very much real.
+        if not data["all_messages"] or data["turns"] == 0:
             continue
         scanned.append((f, data))
         parent = data.get("resumed_from") or ""
@@ -503,7 +600,10 @@ def list_sessions(
                 # conversation, inherited history included.
                 "exchanges": data.get("exchanges", data["turns"]),
                 "messages": data["messages"],
-                "preview": _preview(data["messages"]),
+                # Sized and labelled from the full text: a compaction shrinks the
+                # live context, not the conversation — and the preview is the
+                # OPENING prompt, which a checkpoint's kept window no longer holds.
+                "preview": _preview(data["all_messages"]),
                 # A name the user gave this session (/rename). Shown instead of the
                 # first-prompt preview, which is why it survives a resume.
                 "label": data.get("label", ""),

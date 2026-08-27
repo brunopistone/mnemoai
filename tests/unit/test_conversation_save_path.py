@@ -16,10 +16,23 @@ class _StubAgent:
         self.messages = messages or []
 
 
-def _client(tmp_path):
+class _StubManager:
+    """Only what save/load touch: the active summary, and re-applying a restored one."""
+
+    def __init__(self, summary_text=""):
+        self.summary_text = summary_text
+        self.applied = None
+
+    def apply_restored_summary(self, client, agent, summary):
+        self.applied = summary
+        return bool(summary)
+
+
+def _client(tmp_path, summary_text=""):
     """A bare client with just the attributes save/load touch."""
     c = LangGraphClient.__new__(LangGraphClient)
     c.agent = _StubAgent()
+    c.conversation_manager = _StubManager(summary_text)
     c.system_prompt = "sys"
     c.tools = []
     c.current_conversation_path = None
@@ -86,6 +99,67 @@ def test_explicit_path_updates_current(tmp_path, monkeypatch):
     assert target.is_file()
     # The explicit path becomes the open conversation for subsequent bare saves.
     assert c.current_conversation_path == str(target)
+
+
+class TestTheActiveSummaryIsSavedAndRestored:
+    """A ``/save`` after a compaction holds only the kept window.
+
+    The summary lives inside the system prompt, which is rebuilt from scratch on
+    load — so without recording it separately, ``/load`` restored those few
+    messages with no trace of the history they follow, and the model answered as
+    if the conversation had started there.
+    """
+
+    def test_save_records_the_active_summary(self, tmp_path, monkeypatch):
+        import mnemoai.client.client as mod
+
+        monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+        c = _client(tmp_path, summary_text="Earlier: the user asked about X.")
+        c.save_conversation(timestamp="20260827_120000")
+        saved = json.loads((tmp_path / "conversation_20260827_120000.json").read_text())
+        assert saved["summary"] == "Earlier: the user asked about X."
+
+    def test_an_uncompacted_save_records_an_empty_summary(self, tmp_path, monkeypatch):
+        import mnemoai.client.client as mod
+
+        monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+        c = _client(tmp_path)
+        c.save_conversation(timestamp="20260827_120000")
+        saved = json.loads((tmp_path / "conversation_20260827_120000.json").read_text())
+        assert saved["summary"] == ""
+
+    def test_load_re_applies_the_saved_summary(self, tmp_path, monkeypatch):
+        import mnemoai.client.client as mod
+
+        monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+        f = tmp_path / "conversation_20260827_120000.json"
+        f.write_text(json.dumps({"messages": [], "summary": "Earlier: X."}))
+        c = _client(tmp_path)
+        assert c.load_conversation(str(f)) is True
+        assert c.conversation_manager.applied == "Earlier: X."
+
+    def test_loading_a_file_without_a_summary_applies_nothing(self, tmp_path, monkeypatch):
+        # Every conversation saved before 1.12.6, and every uncompacted one.
+        import mnemoai.client.client as mod
+
+        monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+        f = tmp_path / "conversation_20260827_120000.json"
+        f.write_text(json.dumps({"messages": []}))
+        c = _client(tmp_path)
+        assert c.load_conversation(str(f)) is True
+        assert c.conversation_manager.applied == ""
+
+    def test_a_bare_list_conversation_still_loads(self, tmp_path, monkeypatch):
+        # The oldest on-disk shape is a plain message list, with nowhere to put a
+        # summary — reading one must not raise.
+        import mnemoai.client.client as mod
+
+        monkeypatch.setattr(mod, "conversations_dir", lambda: tmp_path)
+        f = tmp_path / "conversation_20260827_120000.json"
+        f.write_text(json.dumps([{"role": "user", "content": [{"text": "hi"}]}]))
+        c = _client(tmp_path)
+        assert c.load_conversation(str(f)) is True
+        assert c.conversation_manager.applied == ""
 
 
 def _write_conv(path, messages):

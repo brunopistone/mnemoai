@@ -814,6 +814,12 @@ class LangGraphClient:
 
         self.session_id = self._new_session_id()
         self.system_prompt = self._build_system_prompt()
+        # The rebuilt prompt drops the compaction summary block, so the manager's
+        # copy of it must go too: it is fed to the next compaction's reduce step and
+        # persisted by /save, either of which would carry a cleared conversation's
+        # history into the new one.
+        self.conversation_manager.previous_summary = None
+        self.conversation_manager.summary_text = ""
         if self.agent:
             # Mirror start(): the AGENT's prompt carries the playbook, while
             # self.system_prompt stays playbook-free (session-log replay uses it).
@@ -896,6 +902,11 @@ class LangGraphClient:
                     {"role": "system", "content": [{"text": self.system_prompt}]}
                 ]
                 + strands_messages,
+                # The active compaction summary, recorded separately from the system
+                # prompt it is embedded in: a save made after a /compact holds only
+                # the kept window, so without this /load restores those few messages
+                # with no trace of the history they follow.
+                "summary": getattr(self.conversation_manager, "summary_text", "") or "",
                 "tools": (
                     [{"name": t.name, "description": t.description} for t in self.tools]
                     if self.tools
@@ -986,24 +997,28 @@ class LangGraphClient:
                 else conversation_data.get("messages", [])
             )
             conversation_messages = [m for m in messages if m.get("role") != "system"]
-            langchain_messages = convert_strands_messages_to_langchain(
-                conversation_messages
+            langchain_messages = self._decode_restored(conversation_messages)
+            summary = (
+                conversation_data.get("summary", "")
+                if isinstance(conversation_data, dict)
+                else ""
             )
-
-            # Strip any stored <plan-mode-active> block (older saves) so a
-            # reloaded chat doesn't believe it's still in plan mode.
-            for m in langchain_messages:
-                content = getattr(m, "content", None)
-                if isinstance(content, str) and "<plan-mode-active>" in content:
-                    m.content = LangGraphAgent._strip_ephemeral(content)
 
             if self.agent:
                 self.agent.messages.clear()
                 self.agent.messages.extend(langchain_messages)
                 self._forget_context_size()
+                self.conversation_manager.apply_restored_summary(
+                    self, self.agent, summary
+                )
                 # Mark as open so a bare /save writes back to the same file.
                 self.current_conversation_path = normalized_path
-                self._seed_session_log(langchain_messages, normalized_path)
+                self._seed_session_log(
+                    langchain_messages,
+                    normalized_path,
+                    summary=summary,
+                    kept=langchain_messages,
+                )
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"
                 )
@@ -1055,7 +1070,29 @@ class LangGraphClient:
         except Exception:  # noqa: BLE001
             return ""
 
-    def _seed_session_log(self, messages: list, source: str = "", label: str = "") -> None:
+    @staticmethod
+    def _decode_restored(raw: list) -> list:
+        """Decode stored messages into live history, minus a stale plan-mode block.
+
+        The ``<plan-mode-active>`` reminder is ephemeral — injected per turn and
+        stripped before storage — so a copy left in an older transcript must not
+        make a restored chat believe it is still in plan mode.
+        """
+        messages = convert_strands_messages_to_langchain(raw)
+        for m in messages:
+            content = getattr(m, "content", None)
+            if isinstance(content, str) and "<plan-mode-active>" in content:
+                m.content = LangGraphAgent._strip_ephemeral(content)
+        return messages
+
+    def _seed_session_log(
+        self,
+        messages: list,
+        source: str = "",
+        label: str = "",
+        summary: str = "",
+        kept: list = None,
+    ) -> None:
         """Copy a just-restored conversation into THIS run's transcript.
 
         Both ``--resume`` and ``/load`` replace the live history wholesale, so
@@ -1069,12 +1106,16 @@ class LangGraphClient:
         the first time they resume (a ``/branch`` deliberately doesn't inherit it —
         that's a different conversation, and it would then be indistinguishable
         from its parent in the picker).
+
+        ``messages`` is the full conversation (the new file keeps the whole text);
+        ``summary``/``kept`` re-state the compaction checkpoint, so resuming THIS
+        file restores the compacted context rather than the history behind it.
         """
         log = getattr(self.agent, "session_log", None)
         if log is None:
             return
         try:
-            log.seed_history(messages, source=source)
+            log.seed_history(messages, source=source, summary=summary, kept=kept)
             if label:
                 log.set_label(label)
         except Exception as e:  # noqa: BLE001
@@ -1224,10 +1265,13 @@ class LangGraphClient:
         try:
             data = read_session(new_path)
             raw = [m for m in data["messages"] if m.get("role") != "system"]
-            messages = convert_strands_messages_to_langchain(raw)
+            messages = self._decode_restored(raw)
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
             self._forget_context_size()
+            self.conversation_manager.apply_restored_summary(
+                self, self.agent, data["summary"]
+            )
             self.agent.session_log = SessionLog.reopen(new_path)
             # A branch is not the open /save file — a bare /save must not
             # overwrite the conversation this was forked from.
@@ -1283,32 +1327,52 @@ class LangGraphClient:
         identical to a loaded one. Deliberately does NOT set
         ``current_conversation_path`` — a resumed session is not an open ``/save``
         file, so a bare ``/save`` must not overwrite one.
+
+        **What is restored is the state the session ENDED in, compaction
+        included.** A transcript keeps every turn's full text, so replaying it
+        verbatim rebuilt the raw pre-compaction history — a context the user had
+        already shrunk, often past the model's window — and the first turn back had
+        to summarize the whole thing again. The live history therefore comes from
+        the checkpoint (``messages`` + ``summary``) while the on-screen replay still
+        shows the whole conversation (``all_messages``).
         """
         try:
             data = read_session(path)
+            full = [m for m in data["all_messages"] if m.get("role") != "system"]
             raw = [m for m in data["messages"] if m.get("role") != "system"]
-            if not raw:
+            if not full:
                 logger.error(f"Session has no messages: {path}")
                 return False
             if not self.agent:
                 logger.error("Agent not initialized")
                 return False
 
-            messages = convert_strands_messages_to_langchain(raw)
-            for m in messages:
-                content = getattr(m, "content", None)
-                if isinstance(content, str) and "<plan-mode-active>" in content:
-                    m.content = LangGraphAgent._strip_ephemeral(content)
+            messages = self._decode_restored(raw)
+            replayed = self._decode_restored(full) if data["summary"] else messages
 
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
             self._forget_context_size()
-            self._seed_session_log(messages, str(path), label=data.get("label", ""))
+            self.conversation_manager.apply_restored_summary(
+                self, self.agent, data["summary"]
+            )
+            self._seed_session_log(
+                replayed,
+                str(path),
+                label=data.get("label", ""),
+                summary=data["summary"],
+                kept=messages,
+            )
             logger.info(f"Resumed {len(messages)} messages from {path}")
 
-            transcript = turn_view.render_conversation(messages)
+            transcript = turn_view.render_conversation(replayed)
             if transcript:
                 print("\n" + transcript)
+            if data["compacted_away"]:
+                print(
+                    f"\n\033[90m[{data['compacted_away']} earlier messages carried "
+                    "as a summary, as they were when this session ended]\033[0m"
+                )
             print(f"\n\033[90m[Context: {self._count_context_tokens()} tokens]\033[0m")
             return True
         except Exception as e:  # noqa: BLE001

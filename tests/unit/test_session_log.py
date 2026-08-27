@@ -37,6 +37,11 @@ def _turn(q, a):
     return [HumanMessage(content=q), AIMessage(content=a)]
 
 
+def _text(message):
+    """Text of a recorded (strands-format) message."""
+    return slog._message_text(message)
+
+
 class TestSanitizeCwd:
     def test_readable_name(self):
         assert paths.sanitize_cwd("/Users/x/dev/proj") == "Users-x-dev-proj"
@@ -387,12 +392,14 @@ class TestResumedHistoryIsRecorded:
 
 
 class TestCompactionBoundaryIsRecorded:
-    """A compaction writes a marker, and the marker changes nothing else.
+    """A bare compaction marker changes nothing else.
 
-    The transcript is append-only, so the turns compaction summarizes away are
-    still on disk and `--resume` restores them regardless — the marker is purely
-    informational, recording WHERE the live context was shrunk. It had been dead
-    code (defined, never called from the compaction path).
+    The transcript is append-only, so the turns a compaction summarizes away are
+    still on disk either way. A marker with no ``summary`` — every record written
+    before 1.12.6, and the fallback when the kept window can't be encoded — is
+    purely informational: it says WHERE the live context was shrunk and restores
+    the raw history, which is safe (nothing is lost, only re-inflated). Carrying
+    the compacted state is :class:`TestCompactionCheckpointIsRestorable`.
     """
 
     def test_marker_does_not_inflate_the_turn_count(self, home):
@@ -419,14 +426,206 @@ class TestCompactionBoundaryIsRecorded:
         assert slog.list_sessions(cwd="/proj/a") == []
         assert log.discard_if_empty() is True
 
-    def test_the_compaction_path_calls_it(self, home, monkeypatch):
-        # Guard against it going dead again: assert the wiring, not just the API.
+    def test_the_compaction_path_records_a_checkpoint(self, home, monkeypatch):
+        # Guard against it going dead again — and against it degrading back to a
+        # bare marker, which is what made every resume undo the compaction.
         import inspect
 
         from mnemoai.client.managers import agent_conversation_manager as acm
 
         src = inspect.getsource(acm)
-        assert "log_compaction()" in src, "compaction no longer records a boundary"
+        assert "log_compaction(summary=" in src, "compaction records no summary"
+        assert "kept=kept" in src, "compaction records no kept window"
+
+
+class TestCompactionCheckpointIsRestorable:
+    """A restore must reproduce the state the session ENDED in.
+
+    The transcript keeps every turn's full text, so returning all of it made
+    ``--resume`` silently undo the compaction: the live context jumped back to the
+    raw pre-compaction history (measured: 235,793 tokens on screen, ~1.05M after
+    resuming, past the model's window), the first turn had to summarize the whole
+    thing again, and the summary already paid for was thrown away. A ``compact``
+    record is therefore a checkpoint — summary + the window that stayed live — and
+    ``read_session`` splits what to RESTORE (``messages``) from what was SAID
+    (``all_messages``).
+    """
+
+    def _compacted(self, kept=None, summary="Earlier: the user asked about X."):
+        """A session with two turns, then a checkpoint, then one more turn."""
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("the opening question", "answer one"))
+        log.log_turn(_turn("the second question", "answer two"))
+        log.log_compaction(
+            summary=summary,
+            kept=_turn("the second question", "answer two") if kept is None else kept,
+        )
+        log.log_turn(_turn("after compaction", "answer three"))
+        return log
+
+    def test_restored_state_starts_from_the_kept_window(self, home):
+        data = slog.read_session(self._compacted().path)
+        blob = str(data["messages"])
+        assert "the opening question" not in blob  # the summary stands for it
+        assert "the second question" in blob and "after compaction" in blob
+
+    def test_the_full_text_is_still_on_disk(self, home):
+        # The whole point of append-only: compaction shrinks the live context, it
+        # must never shorten the record of what was said.
+        data = slog.read_session(self._compacted().path)
+        blob = str(data["all_messages"])
+        assert "the opening question" in blob and "after compaction" in blob
+
+    def test_the_summary_comes_back_with_it(self, home):
+        # Without it the restore drops the compacted history entirely instead of
+        # re-inflating it — the one outcome worse than the bug.
+        data = slog.read_session(self._compacted().path)
+        assert data["summary"] == "Earlier: the user asked about X."
+
+    def test_compacted_away_counts_what_the_summary_stands_for(self, home):
+        # Two turns (4 messages) in, a 2-message window kept.
+        assert slog.read_session(self._compacted().path)["compacted_away"] == 2
+
+    def test_a_summary_only_checkpoint_keeps_nothing_live(self, home):
+        data = slog.read_session(self._compacted(kept=[]).path)
+        assert [_text(m) for m in data["messages"]] == [
+            "after compaction",
+            "answer three",
+        ]
+        assert data["compacted_away"] == 4
+
+    def test_a_second_checkpoint_supersedes_the_first(self, home):
+        log = self._compacted()
+        log.log_compaction(summary="Later: and then Y.", kept=_turn("newest", "a"))
+        data = slog.read_session(log.path)
+        assert data["summary"] == "Later: and then Y."
+        assert [_text(m) for m in data["messages"]] == ["newest", "a"]
+
+    def test_a_checkpoint_is_not_a_turn(self, home):
+        # The picker shows "N turns"; a compaction is not a turn the user took.
+        assert slog.read_session(self._compacted().path)["turns"] == 3
+
+    def test_the_picker_label_is_still_the_opening_prompt(self, home):
+        # The kept window no longer holds it, so a preview read off the restorable
+        # state would relabel the row with whatever survived the compaction.
+        self._compacted()
+        row = slog.list_sessions(cwd="/proj/a")[0]
+        assert row["preview"] == "the opening question"
+
+    def test_the_row_is_sized_by_the_whole_conversation(self, home):
+        self._compacted()
+        assert slog.list_sessions(cwd="/proj/a")[0]["exchanges"] == 3
+
+    def test_a_session_whose_window_is_empty_is_still_offered(self, home):
+        # `messages` can legitimately be empty right after a compaction; judging
+        # emptiness on it would hide a long, very real conversation.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("a real conversation", "a"))
+        log.log_compaction(summary="It happened.", kept=[])
+        rows = slog.list_sessions(cwd="/proj/a")
+        assert [r["path"] for r in rows] == [str(log.path)]
+        assert rows[0]["preview"] == "a real conversation"
+
+    def test_a_pre_1_12_6_marker_still_restores_everything(self, home):
+        # Sessions recorded before checkpoints exist on disk; a bare marker must
+        # keep its old meaning rather than truncate history to nothing.
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("early", "a1"))
+        log.log_compaction()
+        log.log_turn(_turn("late", "a2"))
+        data = slog.read_session(log.path)
+        assert "early" in str(data["messages"]) and "late" in str(data["messages"])
+        assert data["summary"] == "" and data["compacted_away"] == 0
+
+    def test_an_unencodable_window_falls_back_to_a_marker(self, home, monkeypatch):
+        # A checkpoint that can't be written must lose the optimization, never the
+        # history: no summary key means the old restore-everything behavior.
+        monkeypatch.setattr(
+            slog,
+            "convert_langchain_messages_to_strands",
+            lambda msgs: (_ for _ in ()).throw(TypeError("nope")),
+        )
+        log = slog.SessionLog(cwd="/proj/a")
+        log._turn = 1  # log_turn would fail the same way; write the record directly
+        log.log_compaction(summary="lost", kept=_turn("q", "a"))
+        rec = next(r for r in slog._iter_records(log.path) if r.get("t") == "compact")
+        assert "summary" not in rec and "messages" not in rec
+
+
+class TestACheckpointSurvivesEveryRestorePath:
+    """`--resume`, `/load` and `/branch` all rehydrate from a transcript, so each
+    has to carry the checkpoint forward — otherwise the compaction is undone one
+    restore later instead of immediately."""
+
+    def _compacted(self):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("the opening question", "a1"))
+        log.log_turn(_turn("the second question", "a2"))
+        log.log_compaction(summary="Earlier: X.", kept=_turn("the second question", "a2"))
+        return log
+
+    def _resume(self, source):
+        """What client.resume_session does: seed the full text + the checkpoint."""
+        data = slog.read_session(source)
+        nxt = slog.SessionLog(cwd="/proj/a")
+        nxt.seed_history(
+            convert_strands_messages_to_langchain(data["all_messages"]),
+            source=str(source),
+            summary=data["summary"],
+            kept=convert_strands_messages_to_langchain(data["messages"]),
+        )
+        return nxt
+
+    def test_a_resume_keeps_the_compacted_state(self, home):
+        second = slog.read_session(self._resume(self._compacted().path).path)
+        assert second["summary"] == "Earlier: X."
+        assert "the opening question" not in str(second["messages"])
+        assert "the second question" in str(second["messages"])
+
+    def test_a_resume_still_carries_the_full_text(self, home):
+        second = slog.read_session(self._resume(self._compacted().path).path)
+        assert "the opening question" in str(second["all_messages"])
+
+    def test_a_resume_of_a_resume_does_not_re_inflate(self, home):
+        # The failure mode compounds per resume, so two links is the real test.
+        third = self._resume(self._resume(self._compacted().path).path)
+        data = slog.read_session(third.path)
+        assert data["summary"] == "Earlier: X."
+        assert "the opening question" not in str(data["messages"])
+        assert "the opening question" in str(data["all_messages"])
+
+    def test_seeding_without_a_summary_writes_no_checkpoint(self, home):
+        log = slog.SessionLog(cwd="/proj/a")
+        log.log_turn(_turn("q", "a"))
+        nxt = self._resume(log.path)
+        assert not [r for r in slog._iter_records(nxt.path) if r.get("t") == "compact"]
+
+    def test_a_seeded_checkpoint_is_not_a_turn(self, home):
+        nxt = self._resume(self._compacted().path)
+        assert slog.read_session(nxt.path)["turns"] == 0
+        assert nxt.discard_if_empty() is True  # an unused resume is still empty
+
+    def test_a_branch_after_the_compaction_carries_the_checkpoint(self, home):
+        fork = slog.branch_session(self._compacted().path, through_turn=2)
+        data = slog.read_session(fork)
+        assert data["summary"] == "Earlier: X."
+        assert "the opening question" not in str(data["messages"])
+        assert "the opening question" in str(data["all_messages"])
+
+    def test_a_branch_before_the_compaction_forks_the_raw_history(self, home):
+        # Branching at turn 1 is a deliberate rewind to before the summary existed.
+        fork = slog.branch_session(self._compacted().path, through_turn=1)
+        data = slog.read_session(fork)
+        assert data["summary"] == ""
+        assert "the opening question" in str(data["messages"])
+
+    def test_a_branch_keeps_turns_taken_after_the_checkpoint_live(self, home):
+        log = self._compacted()
+        log.log_turn(_turn("after compaction", "a3"))
+        data = slog.read_session(slog.branch_session(log.path))
+        blob = str(data["messages"])
+        assert "after compaction" in blob and "the second question" in blob
+        assert "the opening question" not in blob
 
 
 class TestTurnSummariesLabelEachTurn:
