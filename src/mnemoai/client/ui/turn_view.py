@@ -20,7 +20,10 @@ _ADD = "\033[32m"   # green
 _DEL = "\033[31m"   # red
 # Unchanged lines kept on each side of a change in a file-edit diff.
 _DIFF_CONTEXT = 3
-_HEADER = "\033[38;5;63m"  # indigo, matches the launch banner
+# A LIGHTER blue than the launch banner's indigo (63): these headers sit inline
+# among gray args and white prose all turn long, so they need to read as a label
+# at a glance without going as dark as a one-off banner can afford to be.
+_HEADER = "\033[38;5;111m"
 
 _BAR = f"{_GREEN}▌{_RESET}"
 _CONNECTOR = "↳"
@@ -323,20 +326,97 @@ def render_fs_write(args: dict) -> str:
 
 
 def render_tool_call(name: str, args: dict) -> str:
-    """Build one tool block: bold ``ToolName`` then dimmed ``↳ key=value`` lines.
+    """Build one tool block: the ``ToolName`` header then dimmed ``↳ key=value``
+    lines.
 
-    Values are shown in full (unlike the elided ``[⚙ …]`` marker); newlines are
-    flattened to one arg per line. File-op tools use their own richer renderers.
+    The name carries the accent color the file-op blocks already use for theirs —
+    bold white read as ordinary answer text, so a tool call didn't separate from
+    the prose around it. Values are shown in full (unlike the elided ``[⚙ …]``
+    marker); newlines are flattened to one arg per line. File-op tools use their
+    own richer renderers.
     """
     if name == "file_edit":
         return render_file_edit(args or {})
     if name == "fs_write":
         return render_fs_write(args or {})
-    lines = [f"{_BOLD}{name or 'tool'}{_RESET}"]
+    lines = [f"{_HEADER}{_BOLD}{name or 'tool'}{_RESET}"]
     for key, value in (args or {}).items():
         flat = str(value).replace("\n", " ")
         lines.append(f"  {_GRAY}{_CONNECTOR} {key}={flat}{_RESET}")
     return "\n".join(lines)
+
+
+# Steps shown at once in a multi-step checklist; a longer plan elides the parts
+# that are neither running nor about to (see :func:`render_step_list`).
+_STEP_MAX_ROWS = 8
+_STEP_LEAD = 2  # rows of already-done context kept above the running step
+
+
+def _step_window(total: int, running: set, max_rows: int) -> tuple:
+    """``(start, end)`` slice of a step list to display, centered on the work.
+
+    A 20-step plan re-printed in full for every wave would bury the answer, so
+    only a window around the running step is shown; the elided ends are counted
+    in the rendered output rather than dropped silently.
+    """
+    if total <= max_rows:
+        return 0, total
+    first = min(running) if running else 0
+    start = max(0, min(first - _STEP_LEAD, total - max_rows))
+    return start, start + max_rows
+
+
+def render_step_list(
+    descriptions: list,
+    running=(),
+    done=(),
+    width: int = 76,
+    max_rows: int = _STEP_MAX_ROWS,
+) -> str:
+    """Checklist of a multi-step task, the step(s) executing now in green.
+
+    ``[✓]`` for a finished step (dim), green for whatever is running, dim for
+    what hasn't started. A parallel wave runs several steps at once, so
+    ``running`` is a collection, not a single index. "" for an empty plan.
+    """
+    steps = [str(d or "") for d in descriptions or []]
+    if not steps:
+        return ""
+    running = {i for i in running if 0 <= i < len(steps)}
+    done = {i for i in done if 0 <= i < len(steps)}
+    total = len(steps)
+    body = max(20, width - 6)
+
+    header = (
+        f"{_HEADER}{_BOLD}Steps{_RESET} {_GRAY}{len(done)}/{total}{_RESET}"
+    )
+    out = [header]
+    start, end = _step_window(total, running, max_rows)
+    if start:
+        out.append(f"  {_GRAY}… {start} earlier step{'s' if start != 1 else ''}{_RESET}")
+    for i in range(start, end):
+        text = steps[i]
+        if len(text) > body:
+            text = text[: body - 1] + "…"
+        if i in done:
+            out.append(f"  {_GREEN}[✓]{_RESET} {_GRAY}{text}{_RESET}")
+        elif i in running:
+            out.append(f"  {_GREEN}[ ] {text}{_RESET}")
+        else:
+            out.append(f"  {_GRAY}[ ] {text}{_RESET}")
+    left = total - end
+    if left:
+        out.append(f"  {_GRAY}… {left} more step{'s' if left != 1 else ''}{_RESET}")
+    return "\n".join(out)
+
+
+def render_session_notice(text: str) -> str:
+    """One accent line for a session-level event (a resume) — not a turn.
+
+    Distinct from a turn's own output: the glyph carries the accent color and the
+    text stays dim, so it reads as a marker rather than something the model said.
+    """
+    return f"{_HEADER}⟲{_RESET} {_GRAY}{' '.join(str(text or '').split())}{_RESET}"
 
 
 def render_hook_notice(text: str) -> str:

@@ -6,6 +6,8 @@ loose so restyling colors doesn't churn tests) — but do check that the reasoni
 text and tool args survive verbatim and that empty inputs collapse to nothing.
 """
 
+import re
+
 from mnemoai.client.ui.turn_view import (
     ReasoningStatus,
     format_duration,
@@ -14,6 +16,8 @@ from mnemoai.client.ui.turn_view import (
     render_live_reasoning,
     render_plan,
     render_reasoning_block,
+    render_session_notice,
+    render_step_list,
     render_tool_call,
     user_prompt_text,
 )
@@ -80,6 +84,84 @@ class TestToolCall:
     def test_missing_name_falls_back(self):
         out = render_tool_call("", {"a": 1})
         assert "tool" in out
+
+    def test_name_is_colored_like_the_file_op_headers(self):
+        """The header must not be plain bold — bold white read as answer text.
+
+        Asserted against the color the ``Update(...)``/``Create file`` blocks
+        already use, so the two kinds of tool block can't drift apart again."""
+        generic = render_tool_call("web_search", {"query": "x"})
+        file_op = render_tool_call(
+            "file_edit", {"file_path": "/tmp/a.py", "old_string": "a", "new_string": "b"}
+        )
+        accent = file_op.split("Update")[0]
+        assert accent and accent in generic.split("web_search")[0]
+
+
+class TestStepList:
+    """Multi-step checklist: done / running (green) / not started."""
+
+    _STEPS = ["Read the config", "Update the loader", "Run the tests"]
+
+    def test_empty_plan_renders_nothing(self):
+        assert render_step_list([]) == ""
+
+    def test_lists_every_step_with_a_progress_count(self):
+        out = render_step_list(self._STEPS, running={1}, done={0})
+        for step in self._STEPS:
+            assert step in out
+        assert "1/3" in out  # one done of three
+
+    def test_done_steps_are_checked_and_others_are_not(self):
+        out = render_step_list(self._STEPS, running={1}, done={0})
+        rows = {ln.split("]")[0]: ln for ln in out.split("\n")[1:]}
+        assert sum("[✓]" in ln for ln in rows.values()) == 1
+        assert sum("[ ]" in ln for ln in rows.values()) == 2
+
+    def test_running_step_is_the_only_green_description(self):
+        green = "\033[32m"
+        out = render_step_list(self._STEPS, running={1}, done=set())
+        running_row = next(ln for ln in out.split("\n") if self._STEPS[1] in ln)
+        pending_row = next(ln for ln in out.split("\n") if self._STEPS[2] in ln)
+        assert running_row.index(green) < running_row.index(self._STEPS[1])
+        assert green not in pending_row
+
+    def test_a_parallel_wave_marks_several_steps_running(self):
+        out = render_step_list(self._STEPS, running={0, 1}, done=set())
+        green_rows = [
+            ln for ln in out.split("\n")[1:] if "\033[32m[ ]" in ln
+        ]
+        assert len(green_rows) == 2
+
+    def test_long_descriptions_are_truncated(self):
+        out = render_step_list(["x" * 300], running={0}, width=40)
+        assert "…" in out
+        assert max(len(ln) for ln in out.split("\n")) < 200
+
+    def test_long_plan_is_windowed_and_says_what_it_elided(self):
+        steps = [f"step {i}" for i in range(20)]
+        out = render_step_list(steps, running={12}, done=set(range(12)))
+        assert "step 12" in out              # the running step is always shown
+        assert "earlier step" in out         # elided head is counted
+        assert "more step" in out            # elided tail too
+        assert len(out.split("\n")) <= 11    # header + 8 rows + 2 elision markers
+
+    def test_out_of_range_indices_are_ignored(self):
+        out = render_step_list(self._STEPS, running={99}, done={-1})
+        assert "0/3" in out
+
+
+class TestSessionNotice:
+    def test_marks_a_resume_without_brackets(self):
+        out = render_session_notice("resumed  20260827_170510_84272_173b8c")
+        assert "20260827_170510_84272_173b8c" in out
+        assert "⟲" in out
+        plain = re.sub(r"\033\[[0-9;]*m", "", out)  # the notice itself, unstyled
+        assert "[" not in plain and "]" not in plain
+
+    def test_collapses_whitespace_and_tolerates_empty(self):
+        assert "a b" in render_session_notice(" a \n b ")
+        assert render_session_notice("").endswith("\033[0m")
 
 
 class TestFileOpRendering:

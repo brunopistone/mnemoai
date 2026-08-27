@@ -476,6 +476,47 @@ class TestConfirmPromptRendering:
         assert segments[0][0] == "class:pinned-confirm"
 
 
+class TestFooterLine:
+    """The persistent footer under the input: provided by the caller, sized by the
+    app, and never able to take the UI down with it."""
+
+    def test_no_provider_means_no_footer(self):
+        assert _reader(lambda line: None)._footer_text() == []
+
+    def test_provider_receives_a_width_and_its_segments_are_returned(self):
+        seen = {}
+
+        def _footer(width):
+            seen["width"] = width
+            return [("class:pinned-footer", "claude-opus-5")]
+
+        r = PinnedPromptReader(
+            prompt_text=lambda: "> ", commands=[], dispatch=lambda line: None,
+            footer_text=_footer,
+        )
+        segments = r._footer_text()
+        assert segments == [("class:pinned-footer", "claude-opus-5")]
+        assert seen["width"] >= 1  # falls back to the terminal size off-TTY
+
+    def test_a_raising_provider_hides_the_footer_instead_of_crashing(self):
+        def _boom(width):
+            raise RuntimeError("no")
+
+        r = PinnedPromptReader(
+            prompt_text=lambda: "> ", commands=[], dispatch=lambda line: None,
+            footer_text=_boom,
+        )
+        assert r._footer_text() == []
+
+    def test_footer_styles_are_registered(self):
+        from mnemoai.client.ui.tui import _TUI_STYLE
+
+        names = {rule[0] for rule in _TUI_STYLE.style_rules}
+        for cls in ("pinned-footer", "pinned-footer-model",
+                    "pinned-footer-warn", "pinned-footer-crit"):
+            assert cls in names
+
+
 def _escape_binding(reader):
     """The reader's own bare-Escape binding (its filter gates word-motion)."""
     for b in reader._make_bindings().bindings:

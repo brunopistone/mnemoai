@@ -54,6 +54,10 @@ _TUI_STYLE = Style(
         ("pinned-panel", "noreverse bg:default fg:#888888"),
         ("pinned-panel-hint", "noreverse bg:default fg:#5f5fff"),
         ("pinned-panel-sel", "noreverse bg:default fg:#ffffff bold"),
+        ("pinned-footer", "noreverse bg:default fg:#6c6c6c"),
+        ("pinned-footer-model", "noreverse bg:default fg:#87afff"),  # = turn_view._HEADER
+        ("pinned-footer-warn", "noreverse bg:default fg:#d78700"),
+        ("pinned-footer-crit", "noreverse bg:default fg:#d75f5f"),
     ]
 )
 
@@ -108,10 +112,10 @@ def _normalize_paste(text: str) -> str:
 def _paste_num_lines(text: str) -> int:
     """Number of line breaks in normalized ``text`` (``\\n`` only).
 
-    This is line breaks, not visual lines — "a\\nb\\nc" → 2 — matching Claude
-    Code's ``+M lines`` count (visual lines minus one). Callers normalize first
-    (``_normalize_paste``), so only ``\\n`` remains; the regex still tolerates a
-    stray ``\\r`` defensively."""
+    This is line breaks, not visual lines — "a\\nb\\nc" → 2 — so the ``+M lines``
+    suffix reads as "how many lines were added below the first". Callers normalize
+    first (``_normalize_paste``), so only ``\\n`` remains; the regex still tolerates
+    a stray ``\\r`` defensively."""
     return len(re.findall(r"\r\n|\r|\n", text))
 
 
@@ -178,6 +182,7 @@ class PinnedPromptReader:
         history: Optional[History] = None,
         toolbar_text: Optional[Callable[[], Any]] = None,
         reasoning_text: Optional[Callable[[], str]] = None,
+        footer_text: Optional[Callable[[int], Any]] = None,
         on_cancel: Optional[Callable[[], None]] = None,
         agents_provider: Optional[Callable[[], list]] = None,
         agents_get: Optional[Callable[[str], Any]] = None,
@@ -195,6 +200,9 @@ class PinnedPromptReader:
             history: Optional shared prompt history.
             toolbar_text: Returns the status-line content; empty hides the line.
             reasoning_text: Returns the live-reasoning ANSI block; empty hides it.
+            footer_text: ``f(width)`` -> styled segments for the persistent footer
+                line under the input (model · provider, dir, context meter); empty
+                hides it. Called on every repaint, so it must stay cheap.
             on_cancel: Called (UI thread) on Esc/Ctrl+C during a turn — fires the
                 cooperative cancel so blocking stream/backoff waits wake at once
                 (the async KeyboardInterrupt alone can't preempt them).
@@ -208,6 +216,7 @@ class PinnedPromptReader:
         self._dispatch = dispatch
         self._toolbar_text = toolbar_text or (lambda: "")
         self._reasoning_text = reasoning_text or (lambda: "")
+        self._footer_provider = footer_text
         self._on_cancel = on_cancel
         # Live sub-agent activity: provider() -> list of ActivityRun snapshots for
         # the bottom "agents" panel; get(run_id) -> one run for the detail view;
@@ -278,6 +287,24 @@ class PinnedPromptReader:
             prefix = "\n" if i else ""
             lines.append(("class:pinned-queued", f"{prefix}> {q}  (queued)"))
         return lines
+
+    def _footer_text(self):
+        """Styled segments for the persistent footer, sized to the terminal.
+
+        Width comes from the app's own output (not ``shutil``) so a resize is
+        picked up on the next repaint. Tolerant: a provider that raises hides the
+        footer instead of taking the whole UI down with it.
+        """
+        if self._footer_provider is None:
+            return []
+        try:
+            width = get_app().output.get_size().columns
+        except Exception:
+            width = shutil.get_terminal_size((80, 24)).columns
+        try:
+            return self._footer_provider(max(1, width)) or []
+        except Exception:
+            return []
 
     # --- live agents panel ----------------------------------------------------
 
@@ -505,6 +532,17 @@ class PinnedPromptReader:
             ),
             filter=Condition(self._panel_showable),
         )
+        # Persistent footer, always the bottom-most line: what the NEXT turn
+        # costs (model, directory, context meter). Replaces the per-turn
+        # `[Context: N tokens]` notice, which scrolled away with its own turn.
+        footer_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(self._footer_text),
+                height=1,
+                style="class:pinned-footer",
+            ),
+            filter=Condition(lambda: bool(self._footer_text())),
+        )
 
         root = FloatContainer(
             content=HSplit(
@@ -514,6 +552,7 @@ class PinnedPromptReader:
                     status_window,
                     input_window,
                     agents_window,
+                    footer_window,
                 ]
             ),
             floats=[

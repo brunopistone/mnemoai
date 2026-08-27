@@ -164,6 +164,17 @@ class TestBannerOrdering:
         )
         assert order == ["banner", "transcript"]
 
+    def test_resume_line_is_styled_and_carries_the_full_id(self, home, capsys):
+        target = _make_session("q")
+        client = _Client()
+        assert main_mod._resume_session(client, target.session_id) == "resumed"
+        out = capsys.readouterr().out
+        # The full id (─ `--resume <id>` matches by suffix, so it must be copyable)
+        # in a styled marker line, not the old bracketed `[Resumed session …]`.
+        assert target.session_id in out
+        assert "⟲" in out
+        assert "[Resumed session" not in out
+
     def test_no_banner_when_nothing_to_resume(self, home, monkeypatch):
         # "fresh" must let the CALLER print the banner, or it'd never appear.
         monkeypatch.setattr(main_mod, "print_error", lambda *_: None)

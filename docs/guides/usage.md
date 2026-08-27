@@ -79,6 +79,30 @@ screen while the assistant works; the answer, its reasoning, and tool activity
 stream **above** it (native scrollback and copy/paste are preserved). You can
 keep typing during a turn — see the shortcuts below.
 
+### The status footer
+
+Under the input sits a dim one-line footer with the three facts that apply to
+whatever you type next:
+
+```
+claude-opus-5 · bedrock          ~/dev/project          ▓░░░░░░░ 90.1k · 9%
+```
+
+the **model** (and provider) the turn will go to, the **directory** the session is
+running in — which is what the file and shell tools act on — and the **context
+meter**: how large the next prompt is and how much of the model's window that
+fills. The meter turns **amber past 70%** and **red past 90%**, which is the point
+at which [compaction](#commands) is close (it starts at 80% by default), so a long
+session tells you it's getting long before a summary interrupts it.
+
+The count is the provider's own number for the last turn. Before the first turn —
+and right after a `--resume`, where no turn has run yet — it's a local estimate and
+shown with a `~`; estimates run high, so the first real turn usually moves it down.
+A narrow terminal drops the path, then the provider, keeping the meter.
+
+Off an interactive terminal (a pipe, CI) there's no footer, so the context size is
+printed after each turn as `[Context: N tokens]` instead.
+
 ### Keyboard Shortcuts
 
 - `Ctrl+J`: Insert a new line in the input (`Enter` submits)
@@ -188,11 +212,10 @@ so you can always go back and resume the same point again.
 [compacted](#commands) — by you, or automatically once it outgrew the window — the
 transcript records the summary alongside the turns that stayed verbatim, so
 resuming restores the state the session **ended** in: the same summary, the same
-recent turns, and roughly the same `[Context: N tokens]` you last saw. A line like
-`[412 earlier messages carried as a summary, as they were when this session ended]`
-says how much is standing behind it. The full text is still in the file and still
-replays into the terminal, so you can scroll back and read anything the summary
-condensed — it just isn't re-sent to the model, which is what a compaction was for.
+recent turns, and roughly the same context size the footer last showed you. The
+full text is still in the file and still replays into the terminal, so you can
+scroll back and read anything the summary condensed — it just isn't re-sent to the
+model, which is what a compaction was for.
 
 The same holds when the context was reclaimed **without** a summary. Before
 summarizing anything, mnemoai first trims the bodies of older tool results — a
@@ -260,7 +283,7 @@ branching is cheap: there's no "are you sure", because nothing is destroyed.
 
 If the conversation was [compacted](#commands), branching after that point carries
 the summary with it, exactly as [resuming](#resuming-a-session) does — while
-branching to a turn *before* it forks the raw history instead, which is a way to get
+branching to a turn _before_ it forks the raw history instead, which is a way to get
 the uncompacted detail of those turns back into a conversation.
 
 Forks are marked in the `--resume` picker, since a branch inherits its parent's
@@ -313,7 +336,7 @@ permanent tax on every turn — trimming the file is the only thing that helps. 
 conversation row is the part `/compact` shrinks.
 
 The **total** is exact (the provider's own count for the last turn, the same number
-as the `[Context: N tokens]` line); the **split** is estimated and scaled onto it,
+the [status footer](#the-status-footer) shows); the **split** is estimated and scaled onto it,
 so the percentages are meaningful even though the per-part counts are approximate.
 Before the first turn of a session there is nothing to scale to and the report says
 so.
@@ -344,8 +367,8 @@ tool calls. See
 [`PROMPT_CACHE`](../configuration.md#prompt_cache-reuse-the-prompt-prefix-instead-of-re-paying-for-it)
 for what it applies to and how to turn it off.
 
-**`/usage` and `[Context: N]` measure different things.** The context line after each
-turn is how big the prompt is _right now_ — what the next turn re-sends, and what
+**`/usage` and the footer's context meter measure different things.** The footer is
+how big the prompt is _right now_ — what the next turn re-sends, and what
 [compaction](#commands) shrinks. `/usage` is cumulative spend since the session
 started (or since your last `/clear`, which resets it). A long conversation has a
 large context; a conversation with lots of delegated work has large usage. They move

@@ -7,6 +7,53 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.13.0] — 2026-08-27
+
+### Added
+
+- **A status footer under the prompt.** One dim line pinned below the input,
+  carrying the three facts that apply to whatever you type next: the **model**
+  (and provider) the turn will go to, the **directory** the session runs in — what
+  the file and shell tools act on — and a **context meter**,
+  `▓░░░░░░░ 90.1k · 9%`, showing how large the next prompt is and how much of the
+  model's window it fills. The meter turns **amber past 70%** and **red past 90%**,
+  so a long session says it's getting long before a compaction interrupts it
+  (compaction starts at 80% by default). The count is the provider's own number for
+  the last turn; before the first turn — and right after a `--resume`, where none
+  has run yet — it is a local estimate, marked with a `~` and usually revised
+  downward by the first real turn. A narrow terminal drops the path, then the
+  provider, keeping the meter. Off an interactive terminal (a pipe, CI) nothing
+  paints a footer, so the `[Context: N tokens]` line prints after each turn as
+  before.
+- **A multi-step task shows a checklist.** While the orchestrator works through a
+  decomposed task, the steps render as `[✓]` for finished and a **green `[ ]`** for
+  the ones executing right now, with pending steps in gray — so a parallel wave
+  shows both of its steps as live, and it's clear at a glance what is done and what
+  is left. A long plan is windowed around the current step with a count of what's
+  elided, so it can't bury the answer it's working toward. This replaces the
+  `[Step i/N: …]` line printed per subtask, which said nothing about progress.
+
+### Changed
+
+- **The per-turn `[Context: N tokens]` line is gone on an interactive terminal** —
+  the footer shows the same number permanently, instead of one that scrolled away
+  with the turn that printed it. That includes a `--resume`, `/load` or `/branch`,
+  which printed it too. It still prints off-TTY, where there is no footer.
+- **A tool call's name is now colored** rather than the same white as the model's
+  prose, so tool activity and the answer no longer blur together. The accent used
+  for it and for the file-operation headers is a **lighter blue** than before — it
+  sits inline among gray arguments all turn long, where the darker indigo of the
+  launch banner read as low-contrast.
+- **A resume prints a compact `⟲ resumed <id>` marker** instead of
+  `[Resumed session <id>]`. The full session id is kept, since `--resume <id>`
+  matches on any suffix of it.
+- **Nothing is printed about a restored compaction any more.** A resumed session no
+  longer opens with a note saying how many earlier messages are carried as a
+  summary: it described an internal detail nothing could be done about, sitting
+  above a transcript that had just replayed in full. A resume reads the same whether
+  or not the session had been compacted — what came back is visible in the footer's
+  context meter.
+
 ## [1.12.7] — 2026-08-27
 
 ### Fixed

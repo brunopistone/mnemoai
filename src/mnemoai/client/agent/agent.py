@@ -723,6 +723,8 @@ class LangGraphAgent:
         max_workers = getattr(self, "_max_subagent_concurrency", 1)
         remaining = set(range(total))
 
+        descriptions = [str(s.get("description", "")) for s in subtasks]
+
         while remaining:
             ready = [
                 i for i in sorted(remaining)
@@ -730,6 +732,19 @@ class LangGraphAgent:
             ]
             if not ready:  # broken/cyclic deps — force the rest so we never hang
                 ready = sorted(remaining)
+
+            # One checklist per WAVE, printed from this (single) scheduling thread:
+            # a parallel wave's workers run on pool threads, where interleaved
+            # prints would shred the block.
+            if self.verbose:
+                self._stop_spinner()
+                print(
+                    "\n"
+                    + turn_view.render_step_list(
+                        descriptions, running=set(ready), done=set(results)
+                    ),
+                    flush=True,
+                )
 
             if len(ready) == 1 or max_workers <= 1:
                 # A lone/sequential worker runs on THIS thread and CAN prompt for
@@ -747,11 +762,6 @@ class LangGraphAgent:
                     finally:
                         self._stop_spinner()
             else:
-                if self.verbose:
-                    print(
-                        f"\n\033[90m[Running {len(ready)} steps in parallel]\033[0m",
-                        flush=True,
-                    )
                 self._start_spinner(f"{len(ready)} steps running…")
 
                 # Parallel-wave workers run HEADLESS: several run at once on pool
@@ -799,13 +809,10 @@ class LangGraphAgent:
         category = subtasks[i]["category"]
         deps = subtasks[i].get("depends_on", [])
 
-        total = len(subtasks)
+        # Label for the agents panel. No per-step PRINT here: the scheduler prints
+        # the whole checklist once per wave (this runs on a pool thread during a
+        # parallel wave, where interleaved prints would shred the block).
         short_desc = desc[:70] + ("..." if len(desc) > 70 else "")
-        if self.verbose:
-            print(
-                f"\n\033[90m[Step {i + 1}/{total}: {short_desc}]\033[0m",
-                flush=True,
-            )
 
         # Route-specific tools, bound onto a CALLBACK-FREE model copy: workers run
         # quiet, so (like sub-agents) they must not fire the shared spinner's

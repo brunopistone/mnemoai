@@ -69,7 +69,8 @@ The client manages the conversation flow and user interaction.
 - **`ui/`**: User interface components
   - `chat_interface.py`: Interactive chat loop with command handling
   - `tui.py`: pinned-input prompt_toolkit UI — `>` stays at the bottom while output streams above it (via `patch_stdout`); slash completion, history, input queue, Esc/Ctrl+C cancel, in-app confirmations, full-screen dialogs; degrades to a plain `input()` loop off-TTY
-  - `turn_view.py`: styled "Thought for Ns…" reasoning block + `ToolName`/`↳ arg` tool blocks shown above the pinned input
+  - `turn_view.py`: styled "Thought for Ns…" reasoning block + colored `ToolName`/`↳ arg` tool blocks and the multi-step `[✓]`/`[ ]` checklist shown above the pinned input
+  - `status_bar.py`: the pinned footer under the input — model · provider, directory, and the context meter (`▓░░░░░░░ 90.1k · 9%`)
   - `spinner.py`: status/spinner animation (stdout mode + a state sink for the pinned UI)
 - **`managers/`**: Business logic
   - `agent_conversation_manager.py`: Conversation state and token tracking
