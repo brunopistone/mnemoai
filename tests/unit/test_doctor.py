@@ -321,6 +321,34 @@ class TestSizeChecks:
         assert doctor._size_checks() == []
 
 
+class TestLogCheck:
+    def test_reports_the_path_size_and_retention(self, cfg, tmp_path, monkeypatch):
+        cfg.values["LOG_MAX_AGE_DAYS"] = 14
+        log = tmp_path / "logs" / "mnemoai.log"
+        log.parent.mkdir()
+        log.write_bytes(b"x" * 4096)
+        monkeypatch.setattr(doctor, "app_log_path", lambda: log)
+        check = doctor._log_check()
+        assert check.status == INFO
+        assert "4 KB" in check.detail and "kept 14 days" in check.detail
+
+    def test_zero_says_the_sweep_is_off(self, cfg, tmp_path, monkeypatch):
+        cfg.values["LOG_MAX_AGE_DAYS"] = 0
+        monkeypatch.setattr(doctor, "app_log_path", lambda: tmp_path / "nope.log")
+        assert "never expired" in doctor._log_check().detail
+
+    def test_a_missing_log_is_not_a_problem(self, cfg, tmp_path, monkeypatch):
+        # delay=True — a run that never logged has no file, which is the good case.
+        monkeypatch.setattr(doctor, "app_log_path", lambda: tmp_path / "nope.log")
+        check = doctor._log_check()
+        assert check.status == INFO and "empty" in check.detail
+
+    def test_a_junk_retention_value_falls_back(self, cfg, tmp_path, monkeypatch):
+        cfg.values["LOG_MAX_AGE_DAYS"] = "soon"
+        monkeypatch.setattr(doctor, "app_log_path", lambda: tmp_path / "nope.log")
+        assert "kept 7 days" in doctor._log_check().detail
+
+
 class TestSteeringEntry:
     def test_path_and_text(self):
         assert doctor._steering_entry(("/a/STEERING.md", "abc")) == ("/a/STEERING.md", 3)

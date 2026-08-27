@@ -11,6 +11,7 @@ from typing import Any, Optional
 # startup_loader are all dependency-free.
 from mnemoai.utils.configurator import config_exists, run_first_run_setup
 from mnemoai.utils.console import print_error
+from mnemoai.utils.logger import enable_file_logging
 from mnemoai.utils.paths import seed_example_files
 from mnemoai.utils.startup_loader import StartupLoader
 
@@ -219,6 +220,10 @@ def cli() -> None:
         help="Resume the most recent session from this directory (no prompt)",
     )
     args = parser.parse_args()
+
+    # Before anything can fail: from here on a traceback goes to
+    # ~/.mnemoai/logs/mnemoai.log and the terminal gets one line.
+    enable_file_logging()
 
     seed_example_files()
 

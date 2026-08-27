@@ -348,7 +348,7 @@ exactly what each provider's init path forwards. (`mantle` reads
 | `REASONING`          | Enable extended thinking (boolean)                                                          | bedrock, anthropic                                             |
 | `THINKING_TOKENS`    | Thinking token budget (default `2048`)                                                      | bedrock, anthropic                                             |
 | `REASONING_EFFORT`   | reasoning effort (provider-dependent: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`) | openai, anthropic, bedrock, mantle, litellm                    |
-| `PROMPT_CACHE`       | Cache the stable prompt prefix (boolean, default **on** where supported)                     | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)         |
+| `PROMPT_CACHE`       | Cache the stable prompt prefix (boolean, default **on** where supported)                    | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)         |
 | `PROMPT_CACHE_TTL`   | How long a cached prefix lives: `5m` (default) or `1h`                                      | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)         |
 
 `VISION_MODEL_ID` supports the same seven providers as `MODEL_ID`. It accepts a
@@ -466,6 +466,9 @@ DOC_MAX_TOKENS: 16384
 # Saved conversations (/save) are separate and never expire.
 SESSION_MAX_AGE_DAYS: 30
 
+# Days a log file under ~/.mnemoai/logs/ is kept (0 disables the sweep).
+LOG_MAX_AGE_DAYS: 7
+
 # Profile configuration
 PROFILE:
   NAME: default # Used for session data isolation (~/.mnemoai/{NAME}/)
@@ -478,22 +481,29 @@ Sessions are grouped by the directory you launched from, so resuming in a projec
 only offers that project's sessions. Set it to `0` to stop recording sessions
 altogether; this never affects `/save` / `/load`.
 
+`LOG_MAX_AGE_DAYS` expires everything under `~/.mnemoai/logs/` — the app log
+(`mnemoai.log`, where the tracebacks the terminal deliberately doesn't print end
+up) and the MCP subprocess log. The app log also rotates at 2 MB, keeping two
+generations, so one very noisy `LOG_LEVEL=DEBUG` run can't fill the disk before
+the next sweep. Set it to `0` to keep logs indefinitely. See
+[Read the logs](development/troubleshooting.md#read-the-logs).
+
 ### Environment variables
 
 Mnemo AI reads a handful of environment variables. Provider API keys can be set either in your shell or, more conveniently, under the config `ENV:` block — every key there is exported as an environment variable at startup.
 
-| Variable                     | Purpose                                                    | Notes                                                                         |
-| ---------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `MNEMOAI_CONFIG`             | Explicit path to `config.yaml`                             | Highest-priority config location; overrides the normal resolution order       |
-| `MNEMOAI_HOME`               | Override the app home (default `~/.mnemoai`)               | Moves config, prompts, plans, tasks, and per-profile/per-model state together |
-| `MNEMOAI_PROMPTS`            | Explicit path to `prompts.yaml`                            | Overrides the normal prompts resolution order                                 |
-| `LOG_LEVEL`                  | Log verbosity: `DEBUG` / `INFO` / `WARNING`                | Default `WARNING`; logs go to stderr                                          |
-| `OPENAI_API_KEY`             | OpenAI auth (`TYPE: openai`)                               | Or set `MODEL_ID.API_KEY`                                                     |
-| `ANTHROPIC_API_KEY`          | Anthropic auth (`TYPE: anthropic`)                         | Or set `MODEL_ID.API_KEY`                                                     |
-| `AWS_PROFILE` / `AWS_REGION` | AWS profile / region (Bedrock, Mantle, SageMaker)          | Standard boto3 chain; often set via the `ENV:` block                          |
-| `AWS_BEARER_TOKEN_BEDROCK`   | Bedrock API key for **standard** Bedrock (`TYPE: bedrock`) | Read automatically by `langchain-aws`                                         |
-| `BEDROCK_API_KEY`            | Bedrock API key for **Mantle** (`TYPE: mantle`)            | Or `MODEL_ID.API_KEY`; else a token is minted from AWS creds                  |
-| `BRAVE_API_KEY`              | Brave Search API key for web search                        | Can also be the top-level `BRAVE_API_KEY` config key                          |
+| Variable                     | Purpose                                                    | Notes                                                                                                                                                           |
+| ---------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MNEMOAI_CONFIG`             | Explicit path to `config.yaml`                             | Highest-priority config location; overrides the normal resolution order                                                                                         |
+| `MNEMOAI_HOME`               | Override the app home (default `~/.mnemoai`)               | Moves config, prompts, plans, tasks, and per-profile/per-model state together                                                                                   |
+| `MNEMOAI_PROMPTS`            | Explicit path to `prompts.yaml`                            | Overrides the normal prompts resolution order                                                                                                                   |
+| `LOG_LEVEL`                  | Log verbosity: `DEBUG` / `INFO` / `WARNING`                | Default `WARNING`; one line per record on stderr, full records (tracebacks included) in `~/.mnemoai/logs/mnemoai.log`. `DEBUG` also prints tracebacks on screen |
+| `OPENAI_API_KEY`             | OpenAI auth (`TYPE: openai`)                               | Or set `MODEL_ID.API_KEY`                                                                                                                                       |
+| `ANTHROPIC_API_KEY`          | Anthropic auth (`TYPE: anthropic`)                         | Or set `MODEL_ID.API_KEY`                                                                                                                                       |
+| `AWS_PROFILE` / `AWS_REGION` | AWS profile / region (Bedrock, Mantle, SageMaker)          | Standard boto3 chain; often set via the `ENV:` block                                                                                                            |
+| `AWS_BEARER_TOKEN_BEDROCK`   | Bedrock API key for **standard** Bedrock (`TYPE: bedrock`) | Read automatically by `langchain-aws`                                                                                                                           |
+| `BEDROCK_API_KEY`            | Bedrock API key for **Mantle** (`TYPE: mantle`)            | Or `MODEL_ID.API_KEY`; else a token is minted from AWS creds                                                                                                    |
+| `BRAVE_API_KEY`              | Brave Search API key for web search                        | Can also be the top-level `BRAVE_API_KEY` config key                                                                                                            |
 
 ```yaml
 # Set provider keys/vars without touching your shell:

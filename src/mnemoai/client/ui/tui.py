@@ -1212,15 +1212,28 @@ class PinnedPromptReader:
 
     def _dispatch_tracked(self, line: str):
         """Run ``dispatch`` on the pool thread, recording its id so Esc can inject
-        KeyboardInterrupt into it (client.query turns that into a clean cancel)."""
+        KeyboardInterrupt into it (client.query turns that into a clean cancel).
+
+        The id is cleared HERE, on the pool thread, the instant the work returns —
+        not only in :meth:`_worker`'s ``finally``, which runs on the app loop and
+        so only after the future has resolved. In that gap a second Esc still had
+        a live target, and the injected exception landed in
+        ``concurrent.futures``' own bookkeeping as it published the result: not
+        our frame to catch, so the pool logged it as ``Exception in worker``.
+        """
         import threading
 
         self._worker_tid = threading.get_ident()
         try:
-            return self._dispatch(line)
+            try:
+                return self._dispatch(line)
+            finally:
+                self._worker_tid = None
         except KeyboardInterrupt:
-            # Cancellation landed between steps rather than inside query(); swallow
-            # so the REPL continues (turn abandoned).
+            # Cancellation landed between steps — or in the clear above, an already
+            # fired injection arriving late. Swallow either way so the REPL
+            # continues (turn abandoned) instead of the exception escaping into the
+            # thread pool, which is what printed the traceback.
             return None
 
     def _request_cancel(self) -> None:

@@ -23,6 +23,9 @@ DOC_MAX_TOKENS: 524288
 # Days a recorded session is kept for `mnemoai --resume` (0 disables recording
 # entirely). Saved conversations (/save) live elsewhere and never expire.
 SESSION_MAX_AGE_DAYS: 30
+# Days a log file under ~/.mnemoai/logs/ is kept (0 disables the sweep). The app
+# log holds the tracebacks the terminal deliberately doesn't show.
+LOG_MAX_AGE_DAYS: 7
 
 # Ask for confirmation before every execute_bash shell command.
 # Set to false to run shell commands without prompting (trusted/automation setups).

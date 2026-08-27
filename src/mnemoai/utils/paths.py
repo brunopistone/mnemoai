@@ -14,6 +14,9 @@ find, back up, or relocate:
     ├── hooks/                              # user-scriptable tool-call hooks
     │   ├── hooks.json                      # optional, user-created (app home ONLY)
     │   └── hooks.json.example              # bundled example (copied here to read)
+    ├── logs/                               # diagnostics (age-swept at startup)
+    │   ├── mnemoai.log                     # app log: every traceback lands here
+    │   └── mcp.log                         # MCP server subprocess stderr
     ├── plans/plan_<ts>.md                  # approved plan-mode plans
     ├── skills                              # skills folder
     ├── STEERING.md                         # user-authored always-on instructions
@@ -383,9 +386,61 @@ def mcp_log_path() -> Path:
     return logs_dir() / "mcp.log"
 
 
+def app_log_path() -> Path:
+    """Log file capturing the app's own diagnostics, exceptions included.
+
+    The terminal here is a conversation, not a console: a stack trace printed
+    into it buries the answer above it and asks the user to debug the app. The
+    same trace on disk is exactly what debugging needs — so the console gets one
+    line and this file gets everything (see
+    :func:`mnemoai.utils.logger.enable_file_logging`).
+
+    Does NOT create the directory (unlike :func:`logs_dir`): ``/doctor`` reports
+    this path and must not write anything while doing so.
+    """
+    return app_home() / "logs" / "mnemoai.log"
+
+
 # Size cap for the MCP stderr log before it's rotated (bytes). One backup
 # generation is kept (``mcp.log.1``), so on-disk use is bounded to ~2x this.
 MCP_LOG_MAX_BYTES = 1_000_000
+
+# Size cap + generations for the app log. Rotation bounds ONE noisy run (a
+# DEBUG session can write megabytes); expiry below bounds a year of quiet ones.
+APP_LOG_MAX_BYTES = 2_000_000
+APP_LOG_BACKUPS = 2
+
+# Days a log file is kept. Root-level config key ``LOG_MAX_AGE_DAYS`` overrides
+# it; 0 disables the sweep.
+LOG_MAX_AGE_DAYS = 7
+
+
+def sweep_old_logs(max_age_days: int = LOG_MAX_AGE_DAYS) -> int:
+    """Delete log files older than ``max_age_days``; return the count.
+
+    Best-effort startup housekeeping (0 disables) over everything under
+    ``logs/`` — the app log's rotated generations and the MCP stderr log alike,
+    since neither has an owner that expires it. A file being appended to right
+    now has a fresh mtime, so a live instance's log is never the one swept.
+    """
+    if max_age_days <= 0:
+        return 0
+    root = app_home() / "logs"  # not logs_dir(): a sweep must not create it
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    try:
+        for f in root.iterdir():
+            try:
+                if f.is_file() and f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    removed += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return removed
 
 
 def open_mcp_log():

@@ -421,6 +421,45 @@ class TestSubdirs:
         paths.sweep_old_plans(max_age_days=7)
         assert not legacy.exists()
 
+    def test_app_log_path_does_not_create_the_dir(self, tmp_home):
+        # /doctor reports this path; a read-only report must not write anything.
+        assert paths.app_log_path() == tmp_home / "logs" / "mnemoai.log"
+        assert not (tmp_home / "logs").exists()
+
+    def test_sweep_old_logs_removes_stale_only(self, tmp_home):
+        import os
+        import time
+
+        d = paths.logs_dir()
+        old, rotated, recent = d / "mnemoai.log.2", d / "mcp.log.1", d / "mnemoai.log"
+        for f in (old, rotated, recent):
+            f.write_text("x")
+        stale = time.time() - 30 * 86400
+        os.utime(old, (stale, stale))
+        os.utime(rotated, (stale, stale))
+
+        removed = paths.sweep_old_logs(max_age_days=7)
+
+        assert removed == 2
+        assert not old.exists() and not rotated.exists()
+        assert recent.exists()  # the live instance's log is never the one swept
+
+    def test_sweep_old_logs_disabled_by_zero(self, tmp_home):
+        import os
+        import time
+
+        f = paths.logs_dir() / "mnemoai.log"
+        f.write_text("x")
+        stale = time.time() - 365 * 86400
+        os.utime(f, (stale, stale))
+        assert paths.sweep_old_logs(max_age_days=0) == 0
+        assert f.exists()
+
+    def test_sweep_old_logs_no_dir_is_a_noop(self, tmp_home):
+        # Must not CREATE logs/ just to sweep it (a launch that never logs).
+        assert paths.sweep_old_logs(max_age_days=7) == 0
+        assert not (tmp_home / "logs").exists()
+
     def test_instance_id_stable_within_process(self, tmp_home, monkeypatch):
         # Cached in the env so both halves of one instance (client + its MCP
         # subprocess, which copies os.environ) resolve the same id.

@@ -50,6 +50,7 @@ tool's instructions file is picked up as your always-on rules.
 ├── tasks/
 │   └── <id>.log              # background-task output
 ├── logs/
+│   ├── mnemoai.log           # app log: the tracebacks the chat doesn't show
 │   ├── mcp.log               # MCP subprocess stderr (survives restarts)
 │   └── mcp.log.1             # one rotated generation
 └── <profile>/                # "default" unless PROFILE.NAME is set
@@ -98,6 +99,8 @@ forever:
 | `plans/`                      | 7 days                               | —                      |
 | `tasks/`                      | 7 days                               | —                      |
 | RAG stores under `<profile>/` | 7 days                               | —                      |
+| `logs/`                       | 7 days                               | `LOG_MAX_AGE_DAYS`     |
+| `logs/mnemoai.log`            | 2 MB, two rotated generations        | —                      |
 | `logs/mcp.log`                | one rotated generation (`mcp.log.1`) | —                      |
 
 `conversations/` (from `/save`) is **never** swept — an explicitly saved

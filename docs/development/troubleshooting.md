@@ -316,17 +316,38 @@ with `MNEMOAI_HOME` if the default isn't writable.
 
 ## Read the logs
 
-Logs go to **stderr**, at `WARNING` by default:
+Two destinations, with different jobs.
 
-```bash
-LOG_LEVEL=DEBUG mnemoai  # everything, including MCP traffic
-LOG_LEVEL=INFO mnemoai   # lifecycle events
-mnemoai                  # warnings and errors only
+**On screen**, a problem is one line in the app's own shape — no timestamp,
+logger name or level word, and never a stack trace (the terminal is a
+conversation, and a trace there buries the answer above it). The mark carries
+the severity: `✗` an error, `!` a warning, `·` anything lower.
+
+```
+✗ Query failed: division by zero (traceback → ~/.mnemoai/logs/mnemoai.log)
 ```
 
-The MCP subprocess also writes to `~/.mnemoai/logs/mcp.log`, which persists
-across runs and is the right place to look when startup fails before the prompt
-appears.
+The pointer at the end appears only when something *was* left out — a
+traceback, or a message too long for one line.
+
+**On disk**, `~/.mnemoai/logs/mnemoai.log` has the whole record — traceback,
+thread name, and the surrounding `INFO` lifecycle lines — for both the app's own
+errors and anything a library or the standard library logged. Start here for any
+"it went wrong and I couldn't see why". The file rotates at 2 MB (two
+generations kept) and every file under `logs/` is deleted after
+`LOG_MAX_AGE_DAYS` days (default 7; `0` keeps them forever). `/doctor` prints
+the path and the retention it's using.
+
+The screen threshold is `WARNING` by default:
+
+```bash
+LOG_LEVEL=DEBUG mnemoai  # everything, tracebacks included, on screen too
+LOG_LEVEL=INFO mnemoai   # lifecycle events
+mnemoai                  # warnings and errors only, one line each
+```
+
+The MCP subprocess writes separately to `~/.mnemoai/logs/mcp.log`, which is the
+right place to look when startup fails before the prompt appears.
 
 ## See also
 

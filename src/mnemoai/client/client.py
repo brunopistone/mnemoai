@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import threading
-import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -49,14 +48,16 @@ from mnemoai.client.ui.spinner import Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
-from mnemoai.utils.logger import logger
+from mnemoai.utils.logger import log_file_hint, logger, one_line
 from mnemoai.utils.paths import (
+    LOG_MAX_AGE_DAYS,
     SESSION_MAX_AGE_DAYS,
     conversations_dir,
     instance_id,
     model_dir,
     plans_dir,
     sanitize_model_name,
+    sweep_old_logs,
     sweep_old_plans,
     sweep_old_rag_artifacts,
     sweep_old_sessions,
@@ -273,6 +274,13 @@ class LangGraphClient:
             except Exception as e:
                 logger.debug(f"Session sweep skipped: {e}")
 
+            # Expire old log files. Rotation bounds one noisy run; only age
+            # bounds a year of quiet ones.
+            try:
+                sweep_old_logs(self._log_max_age_days())
+            except Exception as e:
+                logger.debug(f"Log sweep skipped: {e}")
+
             # Fail fast if prompts.yaml is missing a required prompt (a feature's
             # prompt is required when that feature is enabled).
             config.validate_prompts(
@@ -344,7 +352,9 @@ class LangGraphClient:
                     probe(lambda: self.agent is not None and self.agent._cancelled())
 
         except Exception as e:
-            logger.error(traceback.format_exc())
+            # exc_info, not format_exc(): the traceback belongs in the log file,
+            # and the console formatter keeps the screen to one line.
+            logger.error(f"Client start failed: {e}", exc_info=True)
             raise e
 
     def query(self, prompt: str) -> str:
@@ -411,7 +421,10 @@ class LangGraphClient:
             # Clean user-facing message for any model/MCP/runtime failure.
             with self.spinner_lock:
                 self.spinner.stop()
-            logger.error(f"Query failed: {e}", exc_info=True)
+            # ONE report per failure: the print below IS the user-facing error,
+            # so the record is file-only — a second red line about the same
+            # exception is noise. The traceback never leaves the log file.
+            logger.error(f"Query failed: {e}", exc_info=True, extra={"console": False})
             msg = (
                 "Something went wrong while processing that request "
                 f"({type(e).__name__}). Your conversation is intact — "
@@ -419,8 +432,15 @@ class LangGraphClient:
             )
             # The turn errored before/without streaming an answer, so PRINT this
             # (nothing else will) — otherwise the turn ends silently with only
-            # the traceback in the log and no user-facing message.
-            print(f"\n\033[91m{msg}\033[0m", flush=True)
+            # the traceback in the log and no user-facing message. Two lines in
+            # the app's own shape: what failed, then what to do about it.
+            details = log_file_hint()
+            print(
+                f"\n\033[91m✗ {type(e).__name__}: {one_line(e)}\033[0m\n"
+                f"\033[90m  Your conversation is intact — try again or rephrase."
+                f"{f'  Details: {details}' if details else ''}\033[0m",
+                flush=True,
+            )
             return msg
 
         finally:
@@ -1085,6 +1105,13 @@ class LangGraphClient:
             return int(config.get("SESSION_MAX_AGE_DAYS", SESSION_MAX_AGE_DAYS))
         except (TypeError, ValueError):
             return SESSION_MAX_AGE_DAYS
+
+    def _log_max_age_days(self) -> int:
+        """Days a log file is kept (0 disables the sweep). Same fallback rule."""
+        try:
+            return int(config.get("LOG_MAX_AGE_DAYS", LOG_MAX_AGE_DAYS))
+        except (TypeError, ValueError):
+            return LOG_MAX_AGE_DAYS
 
     def _attach_session_log(self) -> None:
         """Start this session's transcript and attach it to the agent.
