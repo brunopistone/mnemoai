@@ -7,6 +7,27 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.5] — 2026-08-27
+
+### Fixed
+
+- **Resuming a session no longer inflates it.** Every resume re-saved each tool
+  result wrapped inside a copy of itself, with all the quotes escaped again — so
+  the same results roughly **doubled in size on every resume**, silently, without
+  a single character of new content. A 31-character result reached 4,735
+  characters after ten resumes; in a real conversation, file reads reached **1.07
+  million characters each**, and a 1,929-message session weighed 21M characters of
+  which about 90% was backslashes. That is what produced impossible readings like
+  `[Context: 12650351 tokens]` right after `--resume`, followed by a context
+  overflow on the first message. The conversion is now stable — a result is
+  byte-identical after fifty round trips — and `MAX_TOOL_RESULT_CHARS` can no
+  longer be exceeded after the fact.
+- **Sessions already bloated by this are repaired when you open them.** Resuming
+  or `/load`ing an affected conversation unwraps the nested copies as it reads,
+  so the history is restored at its real size and re-saved clean; the reported
+  session went from 21M to 2.1M characters (10× smaller) with no content lost.
+  Nothing needs to be deleted or migrated by hand.
+
 ## [1.12.4] — 2026-08-26
 
 ### Fixed

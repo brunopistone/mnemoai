@@ -3,8 +3,15 @@
 Pure functions with no agent/instance state — extracted from ``agent.py`` so the
 codec can be read, tested, and reused independently of the agent loop. The agent
 re-exports both names for backward compatibility.
+
+**The round trip must be idempotent.** Every resume of a session decodes the whole
+transcript and re-encodes it into the new session file, so any asymmetry compounds
+once per resume — see ``_collapse_wrapped_tool_result``.
 """
 
+import ast
+import json
+import re
 from typing import Any, Dict, List
 
 from langchain_core.messages import (
@@ -14,6 +21,91 @@ from langchain_core.messages import (
     SystemMessage,
     ToolMessage,
 )
+
+# Head of a tool result whose text is itself a serialized ``[{'text': …}]`` block
+# list — matched on the head so a megabyte payload isn't scanned in full.
+_WRAPPED_BLOCKS_RE = re.compile(r"^\[\s*\{\s*['\"]text['\"]\s*:")
+
+# Enough to unwrap any real transcript (one layer per resume); a bound, not a
+# tuning knob — it only stops a pathological payload from looping.
+_MAX_COLLAPSE_DEPTH = 64
+
+
+def _collapse_wrapped_tool_result(text: str) -> str:
+    """Unwrap a tool result an earlier round trip re-serialized into its own text.
+
+    Decoding used to take ``str()`` of the ``toolResult.content`` BLOCK LIST, so a
+    result came back as the literal ``"[{'text': …}]"``; re-encoding then wrapped
+    that in a new block and re-escaped every quote in it. Each cycle therefore
+    roughly DOUBLED the payload — and a cycle is one resume, so the same tool
+    results grew without bound across a resumed conversation (measured: a 31-char
+    result reached 4,735 chars after ten resumes; real ``fs_read`` results reached
+    1.07M chars, blowing past ``MAX_TOOL_RESULT_CHARS``, which is only applied
+    once at the source). Transcripts recorded before the fix still hold the nested
+    form, so decoding repairs them in place. Only an EXACT single-``text``-block
+    literal is collapsed — a genuine payload is vanishingly unlikely to be one.
+    """
+    for _ in range(_MAX_COLLAPSE_DEPTH):
+        stripped = text.strip()
+        if not stripped.endswith("]") or not _WRAPPED_BLOCKS_RE.match(stripped):
+            break
+        try:
+            parsed = ast.literal_eval(stripped)
+        except (ValueError, SyntaxError, MemoryError, RecursionError):
+            break
+        if (
+            not isinstance(parsed, list)
+            or len(parsed) != 1
+            or not isinstance(parsed[0], dict)
+            or set(parsed[0]) != {"text"}
+            or not isinstance(parsed[0]["text"], str)
+        ):
+            break
+        text = parsed[0]["text"]
+    return text
+
+
+def _tool_result_text(content: Any) -> str:
+    """Text of a Strands ``toolResult.content`` — READ, never re-serialized."""
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if "text" in block:
+                    parts.append(str(block["text"]))
+                elif "json" in block:
+                    parts.append(json.dumps(block["json"], default=str))
+                else:
+                    parts.append(json.dumps(block, default=str))
+            else:
+                parts.append(str(block))
+        text = "".join(parts)
+    elif isinstance(content, str):
+        text = content
+    elif isinstance(content, dict):
+        text = json.dumps(content, default=str)
+    else:
+        text = str(content)
+    return _collapse_wrapped_tool_result(text)
+
+
+def _tool_result_blocks(content: Any) -> List[Dict[str, Any]]:
+    """Strands ``toolResult.content`` blocks for a LangChain ToolMessage.
+
+    A list of blocks is mapped block-by-block; ``str()`` of the list would be the
+    non-reversible form ``_collapse_wrapped_tool_result`` exists to undo.
+    """
+    if isinstance(content, list):
+        blocks: List[Dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, dict) and "text" in block:
+                blocks.append({"text": str(block["text"])})
+            elif isinstance(block, dict):
+                blocks.append({"text": json.dumps(block, default=str)})
+            else:
+                blocks.append({"text": str(block)})
+        return blocks or [{"text": ""}]
+    return [{"text": content if isinstance(content, str) else str(content)}]
 
 
 def convert_strands_messages_to_langchain(
@@ -53,7 +145,7 @@ def convert_strands_messages_to_langchain(
                 for result in tool_results:
                     langchain_messages.append(
                         ToolMessage(
-                            content=str(result.get("content", "")),
+                            content=_tool_result_text(result.get("content", "")),
                             tool_call_id=result.get("toolUseId", ""),
                         )
                     )
@@ -164,7 +256,7 @@ def convert_langchain_messages_to_strands(
                 {
                     "toolResult": {
                         "toolUseId": msg.tool_call_id,
-                        "content": [{"text": str(msg.content)}],
+                        "content": _tool_result_blocks(msg.content),
                     }
                 }
             )
