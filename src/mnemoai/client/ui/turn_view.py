@@ -395,7 +395,7 @@ def render_step_list(
     if start:
         out.append(f"  {_GRAY}… {start} earlier step{'s' if start != 1 else ''}{_RESET}")
     for i in range(start, end):
-        text = steps[i]
+        text = " ".join(steps[i].split())  # a newline would shred the block
         if len(text) > body:
             text = text[: body - 1] + "…"
         if i in done:
@@ -408,6 +408,20 @@ def render_step_list(
     if left:
         out.append(f"  {_GRAY}… {left} more step{'s' if left != 1 else ''}{_RESET}")
     return "\n".join(out)
+
+
+def render_step_done(text: str, done: int, total: int, width: int = 76) -> str:
+    """One line marking a step that just finished, with the running count.
+
+    A wave's checklist is printed before any of its steps start, so a wave of
+    several steps would otherwise sit at ``0/N`` for as long as it runs. Emitted
+    per completion from the scheduling thread only (see the checklist note).
+    """
+    label = " ".join(str(text or "").split())
+    body = max(20, width - 6)
+    if len(label) > body:
+        label = label[: body - 1] + "…"
+    return f"  {_GREEN}[✓]{_RESET} {_GRAY}{done}/{total} {label}{_RESET}"
 
 
 def render_session_notice(text: str) -> str:

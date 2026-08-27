@@ -330,6 +330,17 @@ the severity: `✗` an error, `!` a warning, `·` anything lower.
 The pointer at the end appears only when something *was* left out — a
 traceback, or a message too long for one line.
 
+A warning raised by a dependency reads the same way, even though the standard
+library would print four lines for it (path, line number, category, message,
+then the offending source line):
+
+```
+! Tool messages were passed without toolConfig, converting to text format
+```
+
+Where it came from is recorded in the log file with it, and a warning repeated
+during the session is written there without taking another line on screen.
+
 **On disk**, `~/.mnemoai/logs/mnemoai.log` has the whole record — traceback,
 thread name, and the surrounding `INFO` lifecycle lines — for both the app's own
 errors and anything a library or the standard library logged. Start here for any

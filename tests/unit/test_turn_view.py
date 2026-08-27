@@ -17,6 +17,7 @@ from mnemoai.client.ui.turn_view import (
     render_plan,
     render_reasoning_block,
     render_session_notice,
+    render_step_done,
     render_step_list,
     render_tool_call,
     user_prompt_text,
@@ -149,6 +150,27 @@ class TestStepList:
     def test_out_of_range_indices_are_ignored(self):
         out = render_step_list(self._STEPS, running={99}, done={-1})
         assert "0/3" in out
+
+    def test_a_multi_line_description_stays_on_one_row(self):
+        out = render_step_list(["do a\nthen b"], running={0})
+        assert len(out.split("\n")) == 2  # header + one row
+        assert "do a then b" in out
+
+
+class TestStepDone:
+    """Per-completion tick line: a wave's block is printed before it starts."""
+
+    def test_marks_the_step_and_carries_the_count(self):
+        out = render_step_done("Update the loader", 2, 3)
+        assert "[✓]" in out and "2/3" in out and "Update the loader" in out
+        assert "\n" not in out
+
+    def test_long_description_is_truncated(self):
+        out = render_step_done("x" * 300, 1, 2, width=40)
+        assert out.endswith("…\033[0m") and len(out) < 100
+
+    def test_a_multi_line_description_stays_on_one_line(self):
+        assert "\n" not in render_step_done("do a\nthen b", 1, 1)
 
 
 class TestSessionNotice:

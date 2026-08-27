@@ -5,6 +5,8 @@ Covers the pure registry (client/agent/subagents.py) and the client-side
 A sub-agent runs an isolated model↔tool loop and returns only its final report.
 """
 
+import threading
+
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -806,6 +808,81 @@ class TestOrchestratorScheduling:
         subtasks = [{"description": "solo", "category": "full", "depends_on": []}]
         a._run_subtasks_scheduled(subtasks)  # no history arg
         assert seen == [None]
+
+
+class TestStepChecklistProgress:
+    """What the checklist SHOWS while the wave graph runs.
+
+    A wave's block is printed before any of its steps start, so a plan whose
+    subtasks are all independent (one wave, the common case) used to sit at
+    ``0/N`` for the whole turn and end with nothing marked done.
+    """
+
+    def _agent(self, concurrency=4):
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a._max_subagent_concurrency = concurrency
+        a.verbose = True
+        a.callbacks = []
+        a.tools = []
+        a.tools_by_route = None
+        a.model = object()
+        a.model_with_tools = object()
+        a._activity = AgentActivityStore()
+        a._headless_tl = threading.local()
+        a._run_worker_loop = lambda model, tools, prompt, **kw: ("R", [])
+        return a
+
+    @staticmethod
+    def _plan(n, depends_on=None):
+        return [
+            {
+                "description": f"step {i}",
+                "category": "full",
+                "depends_on": list(depends_on(i)) if depends_on else [],
+            }
+            for i in range(n)
+        ]
+
+    def test_one_wave_ticks_each_completion_and_closes_complete(self, capsys):
+        a = self._agent()
+        a._run_subtasks_scheduled(self._plan(3))
+        out = capsys.readouterr().out
+
+        header = out.strip().split("\n", 1)[0]
+        assert "Steps" in header and "0/3" in header       # opened before any ran
+        for n in (1, 2, 3):                               # one tick per completion
+            assert f"{n}/3" in out
+        # …and the closing block says the plan is done, every row checked.
+        closing = out.rsplit("Steps", 1)[1]
+        assert "3/3" in closing and closing.count("[✓]") == 3
+        assert "[ ]" not in closing
+
+    def test_a_chain_closes_complete_too(self, capsys):
+        # Sequential waves: each block already showed the previous step done, so
+        # the steps aren't double-reported — but the last one still needs marking.
+        a = self._agent()
+        a._run_subtasks_scheduled(self._plan(3, depends_on=lambda i: range(i)))
+        out = capsys.readouterr().out
+
+        closing = out.rsplit("Steps", 1)[1]
+        assert "3/3" in closing and closing.count("[✓]") == 3
+        # A lone step per wave isn't ticked separately (the next block marks it).
+        assert "1/3 step 0" not in out
+
+    def test_sequential_fallback_ticks_a_multi_step_wave(self, capsys):
+        # concurrency 1: the same wave runs inline, and must still show progress.
+        a = self._agent(concurrency=1)
+        a._run_subtasks_scheduled(self._plan(2))
+        out = capsys.readouterr().out
+        assert "1/2 step 0" in out and "2/2 step 1" in out
+
+    def test_quiet_agent_prints_nothing(self, capsys):
+        a = self._agent()
+        a.verbose = False
+        a._run_subtasks_scheduled(self._plan(3))
+        assert capsys.readouterr().out == ""
 
 
 class TestPriorHistory:
