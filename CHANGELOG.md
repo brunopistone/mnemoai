@@ -7,6 +7,22 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.12.7] — 2026-08-27
+
+### Fixed
+
+- **A resume no longer gives back the tokens tool-result trimming had reclaimed.**
+  Before summarizing anything, mnemoai trims the bodies of older tool results — a
+  cheap pass with no model call that often frees enough on its own. That pass wrote
+  nothing to the session transcript, which keeps every result at its original size,
+  so `--resume` (and `/load`, `/branch`) replayed the full-size results and handed
+  back exactly the context the trimming had freed. It is the same defect 1.12.6
+  fixed for summaries, in the layer that runs more often — and it was invisible,
+  because nothing about a trim shows up as "compacted". Both kinds of reduction are
+  now checkpointed, and a trim recorded now can never overwrite a summary an earlier
+  compaction left standing. Sessions recorded by earlier versions still restore in
+  full, as they always did.
+
 ## [1.12.6] — 2026-08-27
 
 ### Fixed

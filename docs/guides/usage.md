@@ -194,6 +194,12 @@ says how much is standing behind it. The full text is still in the file and stil
 replays into the terminal, so you can scroll back and read anything the summary
 condensed — it just isn't re-sent to the model, which is what a compaction was for.
 
+The same holds when the context was reclaimed **without** a summary. Before
+summarizing anything, mnemoai first trims the bodies of older tool results — a
+cheap pass that costs no model call and often frees enough on its own. A resume
+brings back those trimmed results too, so the context you come back to matches the
+one you left in that case as well.
+
 A launch you never typed into records nothing resumable, so its file is removed
 when you exit — only sessions with at least one exchange are offered, which also
 means a resume you didn't ask anything in won't appear as a duplicate of the

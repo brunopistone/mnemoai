@@ -138,6 +138,87 @@ class TestToolEvictionShortCircuit:
         assert c.conversation_manager.compacted == [2]
 
 
+class _RecordingLog:
+    def __init__(self, boom=False):
+        self.calls = []
+        self._boom = boom
+
+    def log_compaction(self, summary="", kept=None):
+        self.calls.append((summary, list(kept or [])))
+        if self._boom:
+            raise OSError("disk full")
+
+
+class TestEvictionIsRecordedInTheTranscript:
+    """An eviction-only compaction has to leave a checkpoint behind.
+
+    It shrinks the live context without summarizing anything, so ``_compact``
+    (which writes its own checkpoint) never runs — and the transcript holds every
+    tool result at its ORIGINAL size, so a later resume replayed those and gave
+    back exactly the tokens eviction had reclaimed.
+    """
+
+    def _client_with_log(self, monkeypatch, log, **kw):
+        _patch_config(monkeypatch)
+        c = _client(**kw)
+        c.agent.session_log = log
+        return c
+
+    def test_eviction_alone_records_a_checkpoint(self, monkeypatch):
+        log = _RecordingLog()
+        c = self._client_with_log(
+            monkeypatch, log, token_count=900, evict_returns=True, token_after_evict=100
+        )
+        assert c._compact_now() is True
+        assert len(log.calls) == 1
+        summary, kept = log.calls[0]
+        assert summary == ""  # nothing was summarized away
+        assert kept == c.agent.messages  # the whole, now-smaller history
+
+    def test_falling_through_to_the_summary_does_not_double_record(self, monkeypatch):
+        # _compact writes its own checkpoint; a second one here would duplicate
+        # the entire history in the file for nothing.
+        log = _RecordingLog()
+        c = self._client_with_log(
+            monkeypatch, log, token_count=900, evict_returns=True, token_after_evict=850
+        )
+        assert c._compact_now() is True
+        assert log.calls == []
+
+    def test_nothing_evicted_records_nothing(self, monkeypatch):
+        log = _RecordingLog()
+        c = self._client_with_log(
+            monkeypatch, log, token_count=900, evict_returns=False
+        )
+        c._compact_now()
+        assert log.calls == []
+
+    def test_a_failing_transcript_write_does_not_break_compaction(self, monkeypatch):
+        # The context IS smaller by this point; raising here would turn a
+        # successful compaction into a failed turn.
+        log = _RecordingLog(boom=True)
+        c = self._client_with_log(
+            monkeypatch, log, token_count=900, evict_returns=True, token_after_evict=100
+        )
+        assert c._compact_now() is True
+
+    def test_no_session_log_is_a_no_op(self, monkeypatch):
+        # SESSION_MAX_AGE_DAYS: 0 — recording is off, compaction still works.
+        _patch_config(monkeypatch)
+        c = _client(token_count=900, evict_returns=True, token_after_evict=100)
+        assert c._compact_now() is True
+
+    def test_an_empty_history_records_nothing(self, monkeypatch):
+        # A checkpoint of nothing would restore nothing — worse than no record.
+        log = _RecordingLog()
+        c = self._client_with_log(
+            monkeypatch, log, token_count=900, evict_returns=True, token_after_evict=100
+        )
+        c.agent.messages = []
+        c._compact_now()
+        assert log.calls == []
+
+
 class TestTriggerPrefersGroundTruth:
     """The trigger prefers the provider's exact input_tokens (_last_input_tokens,
     ground truth) over the manager's estimate, which over-counts non-OpenAI

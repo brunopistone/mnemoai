@@ -558,6 +558,7 @@ class LangGraphClient:
             # back under the high-water mark, skip the expensive full summary.
             if mgr.evict_old_tool_results(self.agent):
                 if mgr.count_tokens(messages_to_dict_list(self.agent.messages)) <= high_water:
+                    self._log_eviction_checkpoint()
                     return True
         keep = 2 if force else config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)
         try:
@@ -567,6 +568,25 @@ class LangGraphClient:
         except Exception as e:
             logger.error(f"Mid-loop compaction failed: {e}")
             return False
+
+    def _log_eviction_checkpoint(self) -> None:
+        """Checkpoint an eviction-only compaction in the session transcript.
+
+        Eviction is the one path that shrinks the context without summarizing
+        anything, so ``_compact`` (which writes its own checkpoint) never runs and
+        the transcript kept every tool result at its ORIGINAL size — a resume then
+        replayed those and gave back exactly the tokens eviction had reclaimed,
+        the same defect a summary checkpoint fixed one release earlier. Recorded
+        with no summary: nothing was summarized away, the history is simply
+        smaller. Best-effort, like every other transcript write.
+        """
+        log = getattr(self.agent, "session_log", None)
+        if log is None or not self.agent.messages:
+            return
+        try:
+            log.log_compaction(kept=list(self.agent.messages))
+        except Exception as e:  # noqa: BLE001 — never break a compaction
+            logger.debug(f"Session log eviction checkpoint failed: {e}")
 
     def reflect_and_learn(self, task: str) -> None:
         """Reflect on the last interaction and update the playbook."""
@@ -1017,7 +1037,10 @@ class LangGraphClient:
                     langchain_messages,
                     normalized_path,
                     summary=summary,
-                    kept=langchain_messages,
+                    # A saved conversation holds the LIVE state, so the seeded
+                    # history already IS what a restore wants; the checkpoint
+                    # exists only to carry the summary it stands on.
+                    kept=langchain_messages if summary else None,
                 )
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"
@@ -1348,7 +1371,7 @@ class LangGraphClient:
                 return False
 
             messages = self._decode_restored(raw)
-            replayed = self._decode_restored(full) if data["summary"] else messages
+            replayed = self._decode_restored(full) if data["checkpoint"] else messages
 
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
@@ -1361,7 +1384,10 @@ class LangGraphClient:
                 str(path),
                 label=data.get("label", ""),
                 summary=data["summary"],
-                kept=messages,
+                # Only when there IS a checkpoint: otherwise the restorable state
+                # already equals the seeded history, and re-stating it would write
+                # the whole conversation into the file a second time.
+                kept=messages if data["checkpoint"] else None,
             )
             logger.info(f"Resumed {len(messages)} messages from {path}")
 
