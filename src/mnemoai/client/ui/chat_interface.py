@@ -36,7 +36,7 @@ from mnemoai.utils.configurator import (
     run_reconfigure,
 )
 from mnemoai.utils.console import print_error
-from mnemoai.utils.logger import logger
+from mnemoai.utils.logger import logger, one_line
 from mnemoai.utils.paths import (
     mcp_config_path,
     memory_file_path,
@@ -1149,7 +1149,12 @@ class ChatInterface:
         except KeyboardInterrupt:
             return None
         except Exception as e:
-            # Full traceback to the logger; user gets a concise red line.
-            logger.error(f"Error processing query: {str(e)}", exc_info=True)
-            print_error(f"Error: {e}")
+            # Full traceback to the log FILE only (console=False): the red line
+            # below is the one report the user should see for this failure.
+            logger.error(
+                f"Error processing query: {str(e)}",
+                exc_info=True,
+                extra={"console": False},
+            )
+            print_error(f"{type(e).__name__}: {one_line(e)}")
         return None

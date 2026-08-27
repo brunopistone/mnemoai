@@ -8,25 +8,26 @@ All advanced features can be independently enabled or disabled in your config fi
 
     **The Default column shows what the setup wizard writes — the state almost every install starts from.** If you instead hand-edit `config.yaml` and omit a key entirely, the code falls back differently: RAG, Episodic Memory, ACE Playbook, Query Routing, Orchestrator-Workers, Web Search, and Web Crawler fall back to **off**; Persistent Memory and Skills fall back to **on**.
 
-| Feature                                                                       | Config Key                             | Default             | Dependencies                                                                       |
-| ----------------------------------------------------------------------------- | -------------------------------------- | ------------------- | ---------------------------------------------------------------------------------- |
-| **RAG** (document indexing & search)                                          | `ENABLE_RAG: true`                     | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)                                             |
-| **Episodic Memory** (learn from past tasks)                                   | `ENABLE_EPISODIC_MEMORY: true`         | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)                                             |
-| **ACE Playbook** (learn strategies from success/failure)                      | `ENABLE_PLAYBOOK: true`                | `true`              | None (embeddings optional for refinement)                                          |
-| **Query Routing** (classify each query, bind a tool subset)                   | `ENABLE_ROUTING: true`                 | `true`              | None ([details](orchestration.md#query-routing))                                   |
-| **Orchestrator-Workers** (decompose complex tasks into subtasks)              | `ENABLE_ORCHESTRATION: true`           | `true`              | Requires `ENABLE_ROUTING: true` ([details](orchestration.md#orchestrator-workers)) |
-| **User Profiling** (personalized responses)                                   | `PROFILE.USE_PROFILING: true`          | `true`              | Activates after 5+ interactions                                                    |
-| **Web Search**                                                                | `ENABLE_WEB_SEARCH: true`              | `true`              | `BRAVE_API_KEY` configured                                                         |
-| **Web Crawler**                                                               | `ENABLE_WEB_CRAWL: true`               | `true`              | None                                                                               |
-| **Vision** (image analysis)                                                   | Configure `VISION_MODEL_ID`            | Disabled if not set | Vision-capable model                                                               |
-| **Bash Confirmation** (prompt before each shell command)                      | `REQUIRE_BASH_CONFIRMATION: true`      | `true`              | None (auto-skips when non-interactive)                                             |
-| **Write Confirmation** (prompt before each file write)                        | `REQUIRE_WRITE_CONFIRMATION: true`     | `true`              | None (auto-skips when non-interactive)                                             |
-| **Persistent Memory** (curated memory the agent maintains, `MEMORY.md`)       | `ENABLE_MEMORY: true`                  | `true`              | None                                                                               |
-| **Memory Confirmation** (prompt before each memory write)                     | `REQUIRE_MEMORY_CONFIRMATION: false`   | `false`             | None (auto-skips when non-interactive)                                             |
-| **Git Override Confirmation** (prompt before overriding a git safety refusal) | `REQUIRE_GIT_CONFIRMATION: true`       | `true`              | None (auto-skips when non-interactive)                                             |
-| **Memory Auto-Extraction** (background turn-end auto-save to `MEMORY.md`)     | `ENABLE_MEMORY_AUTO_EXTRACTION: false` | `false`             | Writes without a prompt; one extra background model call per turn                  |
-| **Verbose Mode** (show thinking process)                                      | CLI flag `--no-verbose`                | Enabled             | Supported by model                                                                 |
-| **Session Recording** (resume a past session with `--resume`)                 | `SESSION_MAX_AGE_DAYS: 30`             | `30` days           | `0` disables recording ([details](#resuming-a-session))                            |
+| Feature                                                                       | Config Key                             | Default             | Dependencies                                                                        |
+| ----------------------------------------------------------------------------- | -------------------------------------- | ------------------- | ----------------------------------------------------------------------------------- |
+| **RAG** (document indexing & search)                                          | `ENABLE_RAG: true`                     | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)                                              |
+| **Episodic Memory** (learn from past tasks)                                   | `ENABLE_EPISODIC_MEMORY: true`         | `true`              | Embedding model (`RAG.EMBED_MODEL_ID`)                                              |
+| **ACE Playbook** (learn strategies from success/failure)                      | `ENABLE_PLAYBOOK: true`                | `true`              | None (embeddings optional for refinement)                                           |
+| **Query Routing** (classify each query, bind a tool subset)                   | `ENABLE_ROUTING: true`                 | `true`              | None ([details](orchestration.md#query-routing))                                    |
+| **Orchestrator-Workers** (decompose complex tasks into subtasks)              | `ENABLE_ORCHESTRATION: true`           | `true`              | Requires `ENABLE_ROUTING: true` ([details](orchestration.md#orchestrator-workers))  |
+| **User Profiling** (personalized responses)                                   | `PROFILE.USE_PROFILING: true`          | `true`              | Activates after 5+ interactions                                                     |
+| **Web Search**                                                                | `ENABLE_WEB_SEARCH: true`              | `true`              | `BRAVE_API_KEY` configured                                                          |
+| **Web Crawler**                                                               | `ENABLE_WEB_CRAWL: true`               | `true`              | None                                                                                |
+| **Vision** (image analysis)                                                   | Configure `VISION_MODEL_ID`            | Disabled if not set | Vision-capable model                                                                |
+| **Bash Confirmation** (prompt before each shell command)                      | `REQUIRE_BASH_CONFIRMATION: true`      | `true`              | None (auto-skips when non-interactive)                                              |
+| **Write Confirmation** (prompt before each file write)                        | `REQUIRE_WRITE_CONFIRMATION: true`     | `true`              | None (auto-skips when non-interactive)                                              |
+| **Persistent Memory** (curated memory the agent maintains, `MEMORY.md`)       | `ENABLE_MEMORY: true`                  | `true`              | None                                                                                |
+| **Memory Confirmation** (prompt before each memory write)                     | `REQUIRE_MEMORY_CONFIRMATION: false`   | `false`             | None (auto-skips when non-interactive)                                              |
+| **Git Override Confirmation** (prompt before overriding a git safety refusal) | `REQUIRE_GIT_CONFIRMATION: true`       | `true`              | None (auto-skips when non-interactive)                                              |
+| **Memory Auto-Extraction** (background turn-end auto-save to `MEMORY.md`)     | `ENABLE_MEMORY_AUTO_EXTRACTION: false` | `false`             | Writes without a prompt; one extra background model call per turn                   |
+| **Verbose Mode** (show thinking process)                                      | CLI flag `--no-verbose`                | Enabled             | Supported by model                                                                  |
+| **Session Recording** (resume a past session with `--resume`)                 | `SESSION_MAX_AGE_DAYS: 30`             | `30` days           | `0` disables recording ([details](#resuming-a-session))                             |
+| **Log retention** (days a file under `~/.mnemoai/logs/` is kept)              | `LOG_MAX_AGE_DAYS: 7`                  | `7` days            | `0` keeps them forever ([details](../development/troubleshooting.md#read-the-logs)) |
 
 **Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `RAG.EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](../configuration.md#embeddings-model)).
 
@@ -452,6 +453,7 @@ Doctor — 1 problem, 1 warning
 
   State
     ✓ sessions here  10 recorded, kept 30 days
+    · logs  ~/.mnemoai/logs/mnemoai.log — 34 KB, kept 7 days
     ! MEMORY.md  2192 / 2200 chars (~/.mnemoai/bpistone/MEMORY.md)
       → Nearly full; the next entry may push an older one out.
     · steering  ~/dev/project/CLAUDE.md — 14240 chars, injected every turn
@@ -476,7 +478,8 @@ problem comes with the command that fixes it. What it covers:
   the vector store package for RAG, a `BRAVE_API_KEY` for web search.
 - **State** — the files that grow and then bite: `MEMORY.md` near its cap (it starts
   dropping older entries), steering files and the size each one injects **every**
-  turn, and how many sessions this directory has recorded.
+  turn, how many sessions this directory has recorded, and where the app log is
+  (the terminal shows one line per error; the traceback behind it is only there).
 
 It's local, cheap and read-only: no model call, nothing written, no network beyond
 that one local port probe.

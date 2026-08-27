@@ -7,6 +7,61 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.14.0] — 2026-08-27
+
+### Added
+
+- **A log file, so the terminal can stay a conversation.**
+  `~/.mnemoai/logs/mnemoai.log` now records every diagnostic in full — traceback,
+  thread name, and the `INFO` lifecycle lines leading up to it — for the app's own
+  errors **and** for anything a library or the standard library logs. On screen a
+  problem is one line ending in a pointer to that file
+  (`✗ Query failed: division by zero (traceback → ~/.mnemoai/logs/mnemoai.log)`),
+  which is where a stack trace belongs: printed into the chat it buries the answer
+  above it and asks you to debug the app. `LOG_LEVEL=DEBUG` still shows the whole
+  trace on screen — at that point the terminal _is_ the debugger.
+- **A failure now reads as part of the interface, not as a log line.** A problem
+  on screen is `✗ <what failed>` in red (`!` amber for a warning, `·` for anything
+  lower) — the same mark the rest of the app already uses — with no timestamp,
+  logger name or level word, and capped to one line of at most 500 characters, so a
+  provider error carrying a JSON body can't flood the window the way the traceback
+  used to. A turn that dies mid-flight prints the failure and what to do about it,
+  and the details are one path away:
+
+  ```
+  ✗ ConnectionClosedError: Connection was closed before we received a valid response
+    Your conversation is intact — try again or rephrase.  Details: ~/.mnemoai/logs/mnemoai.log
+  ```
+
+- **One report per failure.** A single exception used to be announced twice — once
+  as the app's own message and again as a red diagnostic line about the same thing.
+  A diagnostic can now be marked file-only (`extra={"console": False}`), so the
+  record and its traceback still reach the log while the screen keeps the one
+  report that was written for you to read.
+- **The log is bounded two ways, so it can't grow without end.** `mnemoai.log`
+  rotates at 2 MB keeping two generations, and every file under `logs/` — including
+  the MCP subprocess's `mcp.log` — is deleted after **`LOG_MAX_AGE_DAYS`** days at
+  startup (new root-level config key, default `7`; `0` keeps them forever).
+  Rotation bounds one noisy run; only age bounds a year of quiet ones.
+- **`/doctor` reports the log.** A `logs` row under **State** prints the path, its
+  current size and the retention in force — the traceback behind a one-line error
+  exists nowhere else, so the report that describes this install now says where to
+  find it.
+
+### Fixed
+
+- **Cancelling during setup no longer prints a Python traceback into the chat.**
+  Pressing Esc twice while `/model` (or any dialog) was open could surface
+  `Exception in worker` followed by a full `KeyboardInterrupt` traceback through
+  `concurrent.futures` and `asyncio` — alarming, and about nothing: the interrupt
+  _was_ the cancellation, working as intended. Two independent causes, both closed:
+  the second press could land inside the thread pool's own bookkeeping (the worker
+  now clears its cancellation target on its own thread and swallows a late
+  interrupt), and the report reached the screen through the **root** logger, which
+  had no handler and so fell back to printing on stderr. With the log file attached
+  to the root logger as well, no library — ours or the standard library's — can put
+  a traceback on screen again.
+
 ## [1.13.0] — 2026-08-27
 
 ### Added

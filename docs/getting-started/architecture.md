@@ -132,7 +132,7 @@ Shared utilities and configuration.
 - `paths.py`: Central path helper — single source of truth for the app home (`~/.mnemoai`, override with `$MNEMOAI_HOME`) and all runtime subdirectories (config, plans, tasks, per-profile, per-model)
 - `config.yaml.example`: Configuration template (copy to `config.yaml` and add your settings; `.bedrock` and `.bedrock.mantle` variants also provided)
 - `bm25.py`: Lightweight BM25 implementation for hybrid (semantic + keyword) search
-- `logger.py`: Logging utilities (stderr output)
+- `logger.py`: Logging utilities — one line per record on stderr, the full record (tracebacks included) in `~/.mnemoai/logs/mnemoai.log`
 - **`formatting/`**: Text formatting
   - `code_formatter.py`: Code syntax highlighting
   - `url_formatter.py`: URL highlighting

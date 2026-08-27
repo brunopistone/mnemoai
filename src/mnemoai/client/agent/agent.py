@@ -1434,7 +1434,12 @@ class LangGraphAgent:
             # then re-runs on a fresh connection). Tailor the wording per family.
             self._stop_spinner()
             if isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e):
-                logger.error(f"Stream failed after retries (connection issue): {e}")
+                # The line names the CAUSE (the prose below can't — it's the turn's
+                # answer); exc_info sends the trace to the log file, not the screen.
+                logger.error(
+                    f"Stream failed after retries (connection issue): {e}",
+                    exc_info=True,
+                )
                 msg = (
                     "I lost the connection to the model and couldn't reconnect after "
                     "several retries (this can happen after the machine sleeps or the "
@@ -1454,7 +1459,7 @@ class LangGraphAgent:
                         "/compact to shrink the prompt)."
                     )
             else:
-                logger.error(f"Model request failed: {e}")
+                logger.error(f"Model request failed: {e}", exc_info=True)
                 msg = (
                     "The model request failed with an error I can't recover from "
                     "automatically. Your conversation is intact — please try again."

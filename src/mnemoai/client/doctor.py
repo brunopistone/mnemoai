@@ -41,7 +41,9 @@ from mnemoai.models import prompt_cache
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import (
+    LOG_MAX_AGE_DAYS,
     app_home,
+    app_log_path,
     config_path,
     hooks_config_path,
     mcp_config_path,
@@ -499,8 +501,32 @@ def _state_checks(client: Any) -> List[Check]:
     elif registry.hooks:
         out.append(Check("State", "tool hooks", OK, f"{len(registry.hooks)} loaded"))
 
+    out.append(_log_check())
     out.extend(_size_checks())
     return out
+
+
+def _log_check() -> Check:
+    """Where the diagnostics went, and for how long they're kept.
+
+    The terminal shows one line per failure; the traceback behind it exists only
+    in this file — so a report about the machine has to say where that is.
+    """
+    days = config.get("LOG_MAX_AGE_DAYS", LOG_MAX_AGE_DAYS)
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = LOG_MAX_AGE_DAYS
+    kept = f"kept {days} days" if days > 0 else "never expired (LOG_MAX_AGE_DAYS: 0)"
+    path = app_log_path()
+    try:
+        size = path.stat().st_size if path.is_file() else 0
+    except OSError:
+        size = 0
+    where = f"{_short(path)} — {size // 1024} KB, {kept}" if size else (
+        f"{_short(path)} — empty, {kept}"
+    )
+    return Check("State", "logs", INFO, where)
 
 
 def _size_checks() -> List[Check]:

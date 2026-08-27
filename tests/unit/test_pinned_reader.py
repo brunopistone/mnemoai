@@ -282,6 +282,56 @@ def test_request_cancel_interrupts_blocking_dispatch(monkeypatch):
     assert reader.busy is False
 
 
+def test_dispatch_tracked_clears_the_thread_id_on_the_worker_thread():
+    # A second Esc must have nothing left to inject into. The id used to be
+    # cleared in _worker's finally, which runs on the app loop only AFTER the
+    # future resolves — in that gap the injected KeyboardInterrupt landed in the
+    # thread pool's own bookkeeping and printed "Exception in worker".
+    seen = {}
+
+    def dispatch(line):
+        seen["during"] = reader._worker_tid
+        return None
+
+    reader = _reader(dispatch)
+    reader._dispatch_tracked("hello")
+
+    import threading
+
+    assert seen["during"] == threading.get_ident()  # cancellable while running
+    assert reader._worker_tid is None  # and not for one instruction longer
+
+
+def test_dispatch_tracked_swallows_a_late_interrupt():
+    # The injection can arrive after the work is done (Esc pressed as the turn
+    # ends). It must not escape into the thread pool, whatever it interrupts.
+    def dispatch(line):
+        return None
+
+    reader = _reader(dispatch)
+
+    class _Late:
+        """Fires KeyboardInterrupt on the CLEAR (``= None``), which is where an
+        already-injected exception would land once the work has returned."""
+
+        def __init__(self):
+            self.value = None
+
+        def __get__(self, obj, owner=None):
+            return self.value
+
+        def __set__(self, obj, value):
+            if value is None:
+                raise KeyboardInterrupt()
+            self.value = value
+
+    type(reader)._worker_tid = _Late()
+    try:
+        assert reader._dispatch_tracked("hello") is None
+    finally:
+        del type(reader)._worker_tid
+
+
 class TestSinkSpinner:
     """In pinned mode the spinner is state-only — no thread, no stdout writes;
     the prompt's bottom_toolbar renders the frame from the shared status.
