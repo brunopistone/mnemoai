@@ -59,6 +59,25 @@ class TestRegistry:
         # Brand-new file: create needs no prior read.
         assert read_state.check_write_allowed(str(tmp_path / "new.txt")) is None
 
+    def test_existing_empty_file_allowed(self, tmp_path):
+        # A zero-byte file holds no content to clobber, so the gate has nothing
+        # to protect — and a read of nothing can't satisfy it, so demanding one
+        # left the file permanently unwritable.
+        f = tmp_path / "empty.txt"
+        f.write_text("")
+        assert read_state.check_write_allowed(str(f)) is None
+
+    def test_file_emptied_after_a_read_is_allowed_not_stale(self, tmp_path):
+        # The size exemption outranks staleness: whatever was read is gone, and
+        # writing over nothing loses nothing.
+        f = tmp_path / "f.txt"
+        f.write_text("data")
+        read_state.record_read(str(f))
+        future = time.time() + 10
+        f.write_text("")
+        os.utime(str(f), (future, future))
+        assert read_state.check_write_allowed(str(f)) is None
+
     def test_existing_unread_blocked(self, tmp_path):
         f = tmp_path / "f.txt"
         f.write_text("data")
@@ -204,6 +223,35 @@ class TestGateEndToEnd:
         ok = json.loads(run(tools["file_edit"](str(f), "world", "there")))
         assert ok.get("success") is True
         assert f.read_text() == "hello there"
+
+    def test_empty_file_is_readable_then_writable(self, tools, tmp_path, monkeypatch):
+        # The deadlock: an existing empty file (an `install -m` / `touch` stub)
+        # could be neither read (no lines -> "invalid range" error, so no
+        # read-state recorded) nor written (gate: "read it first") — the model
+        # bounced between the two tools until it gave up.
+        import mnemoai.server.tools.readers.line_reader as lr
+
+        monkeypatch.setattr(
+            lr.config,
+            "get",
+            lambda key, default=None: 16384 if key == "DOC_MAX_TOKENS" else default,
+        )
+        f = tmp_path / "Dockerfile"
+        f.write_text("")
+        read_out = json.loads(run(tools["fs_read"](str(f), mode="Line")))
+        assert "error" not in read_out and read_out["content"] == ""
+        ok = json.loads(run(tools["fs_write"](str(f), "create", file_text="FROM x")))
+        assert ok.get("success") is True
+        assert f.read_text() == "FROM x"
+
+    def test_empty_file_writable_without_any_read(self, tools, tmp_path):
+        # Belt and braces: a mode whose reader legitimately errors on an empty
+        # file (JSON) must not be able to recreate the deadlock.
+        f = tmp_path / "data.json"
+        f.write_text("")
+        ok = json.loads(run(tools["fs_write"](str(f), "create", file_text="{}")))
+        assert ok.get("success") is True
+        assert f.read_text() == "{}"
 
     def test_chained_edit_after_successful_edit(self, tools, tmp_path):
         f = tmp_path / "f.txt"
