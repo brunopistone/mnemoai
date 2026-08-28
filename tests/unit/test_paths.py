@@ -339,6 +339,114 @@ class TestSubdirs:
             f"those installs: {missing}"
         )
 
+    def test_commands_dir_is_app_home_only(self, tmp_home):
+        # A command is invoked by the USER, so a git clone must never be able to
+        # redefine what a typed name expands to — app home, like agents/ and skills/.
+        assert paths.commands_dir() == tmp_home / "commands"
+
+    def test_seed_commands_are_bundled_examples(self, tmp_home):
+        paths.seed_example_files()
+        commands = tmp_home / "commands"
+        seeded = {p.name for p in commands.glob("*.md")}
+        assert "explain.md" in seeded          # a working example command
+        assert "_README.md" in seeded          # authoring guide, not a command
+
+    def test_seed_commands_reaches_populated_dir(self, tmp_home):
+        # Per-item "seed if absent": a newly bundled command must reach an install
+        # that already has commands of its own.
+        commands = tmp_home / "commands"
+        commands.mkdir(parents=True, exist_ok=True)
+        (commands / "mine.md").write_text("my own command")
+        paths.seed_example_files()
+        names = {p.name for p in commands.glob("*.md")}
+        assert "mine.md" in names              # user's command untouched
+        assert "explain.md" in names           # bundled one still seeded
+        assert (commands / "mine.md").read_text() == "my own command"
+
+    def test_seed_commands_never_clobbers_user_edit(self, tmp_home):
+        paths.seed_example_files()
+        explain = tmp_home / "commands" / "explain.md"
+        explain.write_text("MY VERSION")
+        paths.seed_example_files()
+        assert explain.read_text() == "MY VERSION"
+
+    def test_pristine_installed_command_is_refreshed(self, tmp_home, monkeypatch):
+        # A bundled command whose installed copy is PRISTINE (a version we shipped)
+        # is refreshed in place, so wording improvements reach existing installs.
+        commands = tmp_home / "commands"
+        commands.mkdir(parents=True, exist_ok=True)
+        explain = commands / "explain.md"
+        explain.write_text("an old shipped prompt\n")
+        monkeypatch.setitem(
+            paths._PRISTINE_BUNDLED_COMMAND_HASHES,
+            "explain.md",
+            {paths._sha256(explain)},
+        )
+        paths.seed_example_files()
+        assert explain.read_text() != "an old shipped prompt\n"
+        assert "$ARGUMENTS" in explain.read_text()
+
+    def test_bundled_commands_are_registered_as_pristine(self):
+        # Guard: every bundled command file needs an entry, or the refresh
+        # mechanism never applies to it at all. The set may be empty until the
+        # file changes (nothing prior has shipped); the git guard below covers that.
+        from pathlib import Path
+
+        root = Path(paths.__file__).resolve().parent / "commands_example"
+        for md in sorted(root.glob("*.md")):
+            assert md.name in paths._PRISTINE_BUNDLED_COMMAND_HASHES, (
+                f"{md.name} missing from _PRISTINE_BUNDLED_COMMAND_HASHES"
+            )
+
+    def test_previously_shipped_command_hashes_are_tracked(self):
+        # An installed command file whose hash we shipped but never registered
+        # reads as "user-edited", so an improved prompt never reaches that
+        # install. Tags are enumerated from git, never hardcoded — a fixed list
+        # stops covering the releases made after it was written.
+        import hashlib
+        from pathlib import Path
+
+        tags = _shipped_tags()
+        if not tags:
+            pytest.skip("no tags available (shallow or exported checkout)")
+
+        root = Path(paths.__file__).resolve().parent / "commands_example"
+        names = [p.name for p in root.glob("*.md")]
+        current = {n: paths._sha256(root / n) for n in names}
+
+        missing = []
+        for tag in tags:
+            for name in names:
+                out = _git(
+                    "show",
+                    f"{tag}:src/mnemoai/utils/commands_example/{name}",
+                    text=False,
+                )
+                if out.returncode != 0 or not out.stdout:
+                    continue  # command didn't exist at that tag
+                digest = hashlib.sha256(out.stdout).hexdigest()
+                if digest == current[name]:
+                    continue  # still bundled today; compared live
+                if digest not in paths._PRISTINE_BUNDLED_COMMAND_HASHES.get(name, set()):
+                    missing.append(f"{name}@{tag} ({digest[:12]}…)")
+        assert not missing, (
+            "these shipped command files are not in "
+            f"_PRISTINE_BUNDLED_COMMAND_HASHES, so the refresh will treat them as "
+            f"user-edited and skip them: {sorted(set(missing))}"
+        )
+
+    def test_bundled_commands_load_as_commands(self, tmp_home):
+        # The bundled example must actually parse as a command in the store that
+        # will read it — and the authoring guide must NOT become one.
+        from mnemoai.client import user_commands
+
+        user_commands._SCAN_CACHE.clear()
+        paths.seed_example_files()
+        store = user_commands.UserCommandStore(root=paths.commands_dir())
+        assert [c.name for c in store.list_commands()] == ["explain"]
+        assert store.list_issues() == []
+        user_commands._SCAN_CACHE.clear()
+
     def test_plans_and_tasks_created(self, tmp_home):
         assert paths.plans_dir() == tmp_home / "plans"
         assert paths.tasks_dir() == tmp_home / "tasks"

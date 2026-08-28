@@ -27,6 +27,8 @@ All advanced features can be independently enabled or disabled in your config fi
 | **Memory Auto-Extraction** (background turn-end auto-save to `MEMORY.md`)     | `ENABLE_MEMORY_AUTO_EXTRACTION: false` | `false`             | Writes without a prompt; one extra background model call per turn                   |
 | **Verbose Mode** (show thinking process)                                      | CLI flag `--no-verbose`                | Enabled             | Supported by model                                                                  |
 | **Session Recording** (resume a past session with `--resume`)                 | `SESSION_MAX_AGE_DAYS: 30`             | `30` days           | `0` disables recording ([details](#resuming-a-session))                             |
+| **`@`-mention size** (per file attached with `@` in a prompt)                  | `MENTIONS.MAX_FILE_CHARS: 20000`       | `20000` chars       | `0` lifts the cap ([details](#attaching-a-file-with))                               |
+| **Turn-end notification** (bell + desktop notification when a long turn ends) | `NOTIFY.AFTER_SECONDS: 30`             | `30` seconds        | `0` disables; `NOTIFY.BELL` / `NOTIFY.DESKTOP` ([details](#when-the-terminal-wants-you-back)) |
 | **Log retention** (days a file under `~/.mnemoai/logs/` is kept)              | `LOG_MAX_AGE_DAYS: 7`                  | `7` days            | `0` keeps them forever ([details](../development/troubleshooting.md#read-the-logs)) |
 
 **Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `RAG.EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](../configuration.md#embeddings-model)).
@@ -54,10 +56,14 @@ Assistant: [Uses fs_read tool and displays content]
 | `/help`                    | Show the command reference and keyboard keys — the same box the launch banner prints, brought back after it has scrolled away                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `/exit` or `/quit`         | Exit the application                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `/clear`                   | Clear conversation history and RAG index                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `/rewind`                  | **Take back your last prompt** and everything the turn produced, from the conversation and the transcript. Moves the conversation only — **files on disk are untouched** ([details](#taking-back-your-last-prompt))                                                                                                                                                                                                                                                                                                                                                      |
 | `/context`                 | Break down **what is filling the context window** right now — system prompt, steering files, tool schemas, conversation — with each part's share and how much room is left ([details](#seeing-where-the-context-goes))                                                                                                                                                                                                                                                                                                                                                  |
 | `/save`                    | Save the current conversation. After a `/load` (or an earlier `/save`), a bare `/save` **overwrites that same file**; `/save <path>` saves to a specific file/dir; a fresh conversation (after `/clear`) saves to a new timestamped file                                                                                                                                                                                                                                                                                                                                |
 | `/load <path>`             | Load a saved conversation (no path → pick from a list; the picker has a **Delete** button to remove a saved conversation after a Yes/No confirm, then reopens). The loaded file becomes the one a later `/save` writes back to                                                                                                                                                                                                                                                                                                                                          |
 | `/usage`                   | Token totals for this session, per model — input, output and cache tokens, counting **every** model call including sub-agents, orchestrator workers and the query router. Cumulative spend, not the size of your conversation ([details](#checking-token-usage))                                                                                                                                                                                                                                                                                                        |
+| `/files`                   | **What this session touched** — every file it read, wrote or you attached with `@`, newest first, with how many times each came up. Includes sub-agent and parallel-wave work, and survives compaction ([details](#what-this-session-touched))                                                                                                                                                                                                                                                                                                                            |
+| `/diff [path]`             | **Uncommitted changes, with this session's edits marked `✎`** — staged, unstaged and untracked in one list with `+`/`−` counts. `/diff <path>` shows one file's colored diff. Read-only: it never stages, stashes or checks anything out ([details](#seeing-what-changed))                                                                                                                                                                                                                                                                                                |
+| `/copy [code\|N]`          | **Copy the last answer to the clipboard** without the terminal's line wrapping. `/copy code` takes its last fenced code block, `/copy 2` the answer before last. Uses a local helper or OSC 52, so it works over SSH too ([details](#copying-an-answer))                                                                                                                                                                                                                                                                                                                 |
 | `/export [md\|txt] [path]` | Write the conversation as a **shareable transcript** — readable Markdown (default) or plain text — into the **current directory** unless you give a path. Not the same as `/save`: an export is a one-way artifact for pasting into a bug report or PR, not something `/load` can read back. Tool _calls_ appear as one-line summaries; tool _results_ and injected context are left out. Add `reasoning` to include thinking blocks ([details](#exporting-a-transcript))                                                                                               |
 | `/branch [turn]`           | **Fork this session** and carry on in the copy. No argument → pick the turn to branch after; `/branch 3` branches directly. The original session is **never modified** — it stays resumable with `--resume` ([details](#branching-a-session))                                                                                                                                                                                                                                                                                                                           |
 | `/rename [title]`          | **Name this session** so it's recognizable in the `--resume` picker instead of being labelled by its first prompt. No argument shows the current name; `/rename clear` removes it ([details](#naming-a-session))                                                                                                                                                                                                                                                                                                                                                        |
@@ -72,6 +78,115 @@ Assistant: [Uses fs_read tool and displays content]
 | `/skills`                  | List installed skills (name + description); `/skills <name>` previews a skill's full instructions. See [Agent Skills](agent-skills.md) below                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `/memory`                  | View the curated persistent memory (`MEMORY.md`); `/memory clear` wipes it (with a y/N confirm)                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `/plan`                    | Toggle **plan mode** — an enforced read-only mode. While ON, the agent investigates and, when ready, presents a plan you **approve (y), edit in `$EDITOR` (e), or keep refining (n)**; approving turns plan mode off and the agent executes the plan in the same turn (saved to `plans/plan_<ts>.md`). Read-only shell commands (`ls`, `cat`, `grep`, `git status/log/diff`, …) still run; file edits, mutating shell, git writes, and background tasks are **hard-blocked** while ON. See [plan mode](safety.md#investigate-before-changing-anything) for full details |
+
+Beyond these, any `*.md` file you drop in `~/.mnemoai/commands/` becomes a command
+you can type — see [Your own slash commands](#your-own-slash-commands).
+
+### Your own slash commands
+
+A prompt you retype often can become a command. Every `*.md` file in
+`~/.mnemoai/commands/` is one, and **the file name is the command**:
+
+```text
+~/.mnemoai/commands/standup.md   →   /standup
+```
+
+The body of the file is the prompt that gets sent. Whatever you type after the
+name is substituted in:
+
+| Placeholder  | Becomes                                    |
+| ------------ | ------------------------------------------ |
+| `$ARGUMENTS` | everything after the command name          |
+| `$1` … `$9`  | the 1st … 9th word after the command name  |
+
+If the body uses no placeholder at all, your arguments are **appended** — so a
+one-line instruction plus a target works with no markup at all.
+
+Two optional frontmatter keys document the command in the `/` menu and in `/help`:
+
+```markdown
+---
+description: Review a diff for correctness and tests
+argument_hint: <path or branch>
+---
+
+Review $ARGUMENTS. Read the changed files first, then judge whether the tests
+cover the new behavior. Don't change anything.
+```
+
+A bundled `explain.md` is installed as a working example, next to a `_README.md`
+that repeats this page's rules.
+
+Worth knowing:
+
+- **A built-in always wins.** A file named after one (`save.md`, `plan.md`, …) is
+  skipped and `/doctor` says so, since the command would never fire.
+- **Files starting with `_` or `.` are ignored**, so notes and drafts can live in
+  the same directory.
+- **Edits apply to the next line you type** — no restart. New files show up in the
+  `/` menu immediately.
+- **This directory only.** Commands are never read from a project you clone: what a
+  name you type expands to is yours to decide.
+- **The model never learns a command was involved** — the expansion _is_ your
+  prompt, so the turn behaves like any other (a dim `⌘ /name · file.md` line
+  records which file ran). For instructions the _assistant_ should reach for on its
+  own, write a [skill](agent-skills.md) instead.
+
+### Attaching a file with `@`
+
+Type `@` anywhere in your prompt and paths complete as you type:
+
+```text
+> does @src/mnemoai/client/doctor.py check for ripgrep?
+```
+
+When you submit, **every `@path` in the line is read and sent with the question**.
+That's the difference from typing a path in prose: the file is already there, so
+the answer doesn't start with a round of searching for it — and it doesn't depend
+on the assistant deciding the file was worth opening.
+
+Completion works two ways:
+
+- **A bare name searches the project by file name.** `@chat_int` finds
+  `src/mnemoai/client/ui/chat_interface.py` — you rarely remember the directory.
+  Files ignored by git are skipped.
+- **A path completes directory by directory.** Anything with a `/`, or starting at
+  `~`, completes one segment at a time, so a file **outside** the project is
+  reachable too. Accepting a directory keeps its trailing `/`, so the next
+  keystroke continues inside it.
+
+A mentioned **directory** contributes its listing (names only, not the contents of
+everything in it) — useful for "what's in `@src/mnemoai/server/tools`".
+
+Each mention is confirmed with a dim line:
+
+```text
+@src/mnemoai/client/doctor.py · 486 lines
+@notes.mdd · no such file
+```
+
+The second line is the reason this is worth printing: attaching nothing looks
+exactly like attaching the right file, and the question still goes through — so
+without it you'd get a confident answer about a file that was never sent.
+
+Worth knowing:
+
+- **Limits.** Up to 10 files per message, 60 000 characters in total, and 20 000
+  characters per file. A file that gets cut says so in the prompt, so the assistant
+  knows to read the rest itself rather than assume the tail was empty. Raise or
+  remove the per-file cap with `MENTIONS.MAX_FILE_CHARS` in `config.yaml` (`0`
+  disables it). Keep them in mind: unlike a tool result, what you attach yourself
+  stays in the conversation at full size until it's summarized.
+- **It's the same `@` as steering files.** `@path` references inside
+  [`STEERING.md`](steering.md) work the same way, and a mentioned file's own
+  `@`-references are followed too.
+- **Anything that isn't a readable path is left alone**, so `@staticmethod`,
+  `@someone` and an email address keep meaning what they say. A path-looking
+  mention that doesn't exist gets the gray `no such file` line above.
+- **Binary files aren't inlined** (they're reported as `not a text file`) — ask
+  about an image and the vision tool handles it instead.
+- **Attaching isn't reading.** Before editing a file, the assistant still opens it
+  with its own read tool; a mention doesn't stand in for that.
 
 ### The prompt
 
@@ -104,6 +219,38 @@ A narrow terminal drops the path, then the provider, keeping the meter.
 Off an interactive terminal (a pipe, CI) there's no footer, so the context size is
 printed after each turn as `[Context: N tokens]` instead.
 
+### When the terminal wants you back
+
+A long turn is exactly the turn you stop watching. Three moments therefore ring
+the terminal:
+
+- a **turn finishes** after running longer than `NOTIFY.AFTER_SECONDS` (30s by
+  default),
+- a **confirmation prompt or a question is waiting** on you — the work is stopped
+  until it's answered, so this one is sent however short the turn has been,
+- a **background sub-agent's report arrives** while you're idle.
+
+Each sends two things: the **terminal bell**, which every terminal has and which
+tmux and screen turn into a window-activity flag, and an **OSC 9 desktop
+notification** (`mnemoai · done in 4m12s · project`), which iTerm2, WezTerm,
+kitty, Windows Terminal and others raise as a real system notification —
+terminals that don't understand it ignore it. Inside tmux or screen the sequence
+is wrapped so it reaches the outer terminal instead of being swallowed.
+
+Nothing is sent when output isn't going to a terminal (a pipe, CI), nor for a
+turn **you** cancelled, and two notifications closer together than 10 seconds
+collapse into one — a task confirming eight writes is one interruption, not eight.
+
+```yaml
+NOTIFY:
+  AFTER_SECONDS: 30 # a turn must run this long for its end to notify (0 = never)
+  BELL: true # the terminal bell
+  DESKTOP: true # the OSC 9 desktop notification
+```
+
+Set both `BELL` and `DESKTOP` to `false` to stay silent entirely; `AFTER_SECONDS: 0`
+silences only the turn-end half, keeping the ones that are waiting on you.
+
 ### Keyboard Shortcuts
 
 - `Ctrl+J`: Insert a new line in the input (`Enter` submits)
@@ -116,6 +263,8 @@ printed after each turn as `[Context: N tokens]` instead.
   `Ctrl+D`) to exit
 - `/` then a letter: shows a slash-command completion menu (↑/↓ to move,
   `Enter`/`Tab` to accept)
+- `@` then part of a path: completes files and directories anywhere in the line —
+  see [attaching a file with `@`](#attaching-a-file-with)
 
 ### Pasting long text
 
@@ -303,6 +452,56 @@ opening prompt and the two rows would otherwise look identical:
     comes from the branch's history: say what you want undone, or check `git diff`
     before continuing.
 
+### Taking back your last prompt
+
+Sometimes the prompt itself was the mistake — the wrong file, the wrong framing, a
+question that sent the whole turn somewhere you didn't want it to go. `/rewind`
+drops that prompt **and everything the turn produced** from the conversation, so
+the context is what it was the moment before you pressed Enter:
+
+```
+> /rewind
+
+⟲ withdrew your last prompt
+  "why is the FSDP config parser slow"
+  14 messages dropped from the conversation and transcript.
+
+  Files on disk are untouched — a rewind moves the conversation only.
+```
+
+The echoed prompt is there so you can see _which_ turn went, and the count covers
+the whole turn: the answer, the tool calls, their results. Run it twice and you walk
+back two turns. It looks for the last thing **you** typed, not the last message with
+your name on it, so a turn made of tool results or an [auto-delivered sub-agent
+report](orchestration.md#sub-agents-spawn_agent) can't be mistaken for a prompt.
+
+Its scope is deliberately narrow, and it is the one thing to be clear about:
+
+!!! warning "A rewind moves the conversation, not your files"
+
+    Files the withdrawn turn wrote are **still on disk** — exactly as with
+    [`/branch`](#branching-a-session). Undoing an edit is `git` territory (or
+    [`/diff`](#seeing-what-changed), to see what there is to undo); a command that
+    rolled back half a turn would be worse than one that tells you which half it
+    does.
+
+Three more things worth knowing:
+
+- **It refuses after a compaction.** If the conversation was
+  [compacted](#commands) during or right after that turn, the summary standing in
+  for it can't be un-summarized, so `/rewind` says so and changes nothing rather
+  than half-applying. Older compactions don't get in the way.
+- **The transcript records the withdrawal; it doesn't erase it.** Session
+  transcripts are append-only, so the turn is marked withdrawn: it stops being part
+  of the conversation, a [`/branch`](#branching-a-session) can no longer fork at it,
+  and `--resume` won't bring it back — but the text stays in the file. A rewind is
+  an undo, not a redaction.
+- **What the session _learned_ from the turn stays**, and the notice names which
+  stores that means. [Episodic memory](memory.md#episodic-memory) keeps entries by
+  similarity and the playbook folds a repeat strategy into an existing one, so
+  there's nothing precise left to delete; `/memory` is editable if a
+  [curated](memory.md#persistent-memory-memorymd) fact needs to go.
+
 ### Seeing where the context goes
 
 `/usage` answers "what has this session spent". `/context` answers the other
@@ -388,6 +587,95 @@ independently.
     provider's own `usage_metadata`. Not every provider populates it — if some calls
     report nothing, the report says so and treats the total as a lower bound rather
     than quietly counting them as zero.
+
+### What this session touched
+
+`/files` answers the question a long session makes hard: which files did it actually
+open, and which did it change?
+
+```
+Files this session
+
+  Changed (2)
+    ✎ tests/unit/test_diff_report.py      1 edit
+    ✎ src/mnemoai/client/diff_report.py   2 edits · 1 read
+
+  Attached with @ (1)
+    @ docs/guides/usage.md                attached
+
+  Read (2)
+    · src/mnemoai/client/ui/turn_view.py  2 reads
+    · src/mnemoai/client/agent/agent.py   1 read
+```
+
+Most recently touched first, **changed files first** — that's the group with
+consequences on disk. Worth knowing:
+
+- **It counts the work you don't see.** A sub-agent's edits and a parallel wave's
+  reads are in the list, because the record is taken where every tool call passes
+  through rather than from what got printed.
+- **Two spellings are one row.** `./src/x.py`, `src/x.py` and `~/proj/src/x.py`
+  resolve to the same file, so the counts are the real counts.
+- **It survives compaction.** A file read an hour ago may have had its content
+  summarized out of the context since; the touch still counts, and the report says
+  so rather than implying the content is still in the window.
+- **A tree-wide search isn't a touch.** `grep_search` over a directory produces no
+  file you can go and look at, so only the tools that name a single file are recorded.
+- `/clear` resets it, since a cleared conversation is a new session.
+
+### Seeing what changed
+
+`/diff` is `git status` with the one column git can't give you — **which of these
+files this conversation wrote**:
+
+```
+Changes in ~/development/mnemoai (dev)
+
+  ✎ src/mnemoai/client/diff_report.py        +402    new
+  ✎ src/mnemoai/client/ui/chat_interface.py  +24 -1
+  ✎ CHANGELOG.md                             +31
+    docs/guides/usage.md                     +6 -2
+    assets/logo.png                          binary
+
+  5 files · +463 -3 · ✎ 3 written this session
+  /diff <path> shows one file's diff.
+```
+
+Staged, unstaged and untracked files in one list. A `✎` marks the ones the session
+wrote (they sort first); **everything unmarked was already dirty when you started**,
+which is the distinction that decides what's safe to commit. `/diff <path>` shows
+that one file's unified diff, colored, with an untracked file rendered as the
+all-additions diff it effectively is.
+
+**It is read-only by construction.** The only git it runs is `rev-parse`, `diff` and
+`ls-files` — there is no code path that could stage, stash or check anything out. It
+is also bounded (a long list and a long diff both collapse), and when something is
+cut it prints the exact `git` command that shows the rest.
+
+### Copying an answer
+
+Selecting a streamed answer with the mouse takes the terminal's line wrapping with
+it, which is why a copied code block so often has to be reflowed by hand. `/copy`
+takes the message as the model wrote it:
+
+```
+/copy          # the last answer
+/copy code     # just its last fenced code block
+/copy 2        # the answer before last
+```
+
+Two transports, tried in the order that's right for where you are. A **local helper**
+(`pbcopy`, `wl-copy`, `xclip`, `xsel`, `clip.exe`) when one is installed, and
+**OSC 52** — the escape sequence that asks the terminal itself to set the clipboard —
+otherwise, so a machine with no helper still works. **Over SSH the terminal goes
+first**, because a helper running on the far end would set the clipboard of a machine
+nobody is sitting at; that's the case OSC 52 exists for. Inside tmux or screen the
+sequence is wrapped in a passthrough so it reaches the outer terminal.
+
+The notice says what was copied, how big it was and which transport carried it
+(`Copied the last sh block (1 line, 9 chars) via pbcopy.`) — a clipboard write is
+otherwise invisible until you paste. If neither transport is available it says so and
+points at `/export`, which writes to a file instead.
 
 ### Exporting a transcript
 
@@ -480,6 +768,9 @@ problem comes with the command that fixes it. What it covers:
   dropping older entries), steering files and the size each one injects **every**
   turn, how many sessions this directory has recorded, and where the app log is
   (the terminal shows one line per error; the traceback behind it is only there).
+  Your own [slash commands](#your-own-slash-commands) are listed here too, along
+  with any file that was **skipped** and why — otherwise a rejected command is
+  indistinguishable from a feature that doesn't work.
 
 It's local, cheap and read-only: no model call, nothing written, no network beyond
 that one local port probe.

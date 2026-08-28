@@ -47,6 +47,7 @@ from mnemoai.client.agent.reasoning_utils import (
     without_reasoning,
 )
 from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
+from mnemoai.client.file_ledger import FileLedger
 from mnemoai.client.ui import turn_view
 from mnemoai.client.usage_tracker import UsageTracker
 from mnemoai.models import prompt_cache
@@ -238,6 +239,10 @@ class LangGraphAgent:
         self.usage = UsageTracker()
         # Model name usage is attributed to; set by the client, which owns config.
         self.usage_model_name = ""
+        # Which files this session touched (drives /files, and marks /diff's own
+        # edits). Beside `usage` for the same reason: every tool-call path reaches
+        # the agent, including the ones with no visible turn.
+        self.files = FileLedger()
         self._code_formatter = CodeFormatter()
         # Set True once a turn has STREAMED visible answer text to the terminal.
         # The display contract is "streaming prints the answer", so any path that
@@ -1413,6 +1418,17 @@ class LangGraphAgent:
         if tracker is None:
             return  # bare test stub built via __new__
         tracker.record(response, getattr(self, "usage_model_name", "") or "")
+
+    def _record_file_activity(self, name: str, args: Dict[str, Any]) -> None:
+        """Note the file a completed tool call touched (drives ``/files``).
+
+        Called from the single tool chokepoint AFTER the call succeeded, so a
+        refused or failed call leaves no trace. Best-effort, like ``_record_usage``.
+        """
+        ledger = getattr(self, "files", None)
+        if ledger is None:
+            return  # bare test stub built via __new__
+        ledger.record_tool(name, args)
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with the current state, streaming the response."""

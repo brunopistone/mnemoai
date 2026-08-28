@@ -132,6 +132,23 @@ ENABLE_MEMORY_AUTO_EXTRACTION: false
 # per-turn cost, so each file's contribution is capped:
 STEERING:
   MAX_CHARS: 45000  # per file; content past this is dropped with a visible note (0 = no cap)
+# `@path` mentions: a file named with @ in your prompt is read and attached to it.
+# The content rides in your own message, so compaction can summarize it but the
+# cheaper tool-result eviction can never shrink it — hence a per-file cap (a line
+# is additionally limited to 10 files and 60000 characters in total):
+MENTIONS:
+  MAX_FILE_CHARS: 20000  # per mentioned file; a cut file says so in the prompt (0 = no cap)
+# Telling you the terminal wants you back: a bell (every terminal has one, and
+# tmux/screen turn it into a window-activity flag) plus an OSC 9 desktop
+# notification for the terminals that raise one (iTerm2, WezTerm, kitty, Windows
+# Terminal; others ignore it). Sent when a long turn finishes, when a
+# confirmation prompt is waiting on you, and when a background sub-agent's report
+# arrives while you are idle — never off a TTY, and never for a turn you
+# cancelled yourself (your hand is already on the keyboard):
+NOTIFY:
+  AFTER_SECONDS: 30 # a turn must run this long for its end to notify (0 = never)
+  BELL: true # the terminal bell
+  DESKTOP: true # the OSC 9 desktop notification
 # Agent Skills: authored SKILL.md instruction packs under ~/.mnemoai/skills/
 # (one <name>/SKILL.md per skill). Only each skill's name+description is injected
 # into the system prompt; the model loads a full skill body on demand via the

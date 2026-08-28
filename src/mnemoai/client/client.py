@@ -14,8 +14,11 @@ from mcp import StdioServerParameters
 from mnemoai.client import (
     context_injection,
     context_report,
+    diff_report,
     doctor,
+    file_ledger,
     hooks,
+    rewind,
     session_artifacts,
     transcript_export,
     usage_tracker,
@@ -43,7 +46,7 @@ from mnemoai.client.session_log import (
     read_session,
     turn_summaries,
 )
-from mnemoai.client.ui import turn_view
+from mnemoai.client.ui import clipboard, turn_view
 from mnemoai.client.ui.spinner import Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
@@ -891,6 +894,11 @@ class LangGraphClient:
         if tracker is not None:
             tracker.reset()
 
+        # …and so does /files: the touches belong to the conversation, not the run.
+        ledger = getattr(self.agent, "files", None) if self.agent else None
+        if ledger is not None:
+            ledger.reset()
+
     def _new_session_id(self) -> str:
         """Delegates to :func:`session_artifacts.new_session_id`."""
         return session_artifacts.new_session_id(self)
@@ -1235,6 +1243,27 @@ class LangGraphClient:
         if tracker is None:
             return "Usage tracking is unavailable (no agent running)."
         return usage_tracker.render(tracker, self._count_context_tokens())
+
+    def files_report(self) -> str:
+        """The ``/files`` report: which files this session read, changed, attached."""
+        return file_ledger.report(self)
+
+    def diff_report(self, path: str = "") -> str:
+        """The ``/diff`` report: uncommitted changes, this session's edits marked."""
+        return diff_report.report(self, path)
+
+    def copy_last(self, arg: str = "") -> str:
+        """``/copy [code|N]``: put an answer on the clipboard; returns the notice."""
+        return clipboard.report(self, arg)
+
+    def rewind_turn(self) -> str:
+        """``/rewind``: take back the last exchange; returns the notice.
+
+        The conversation only — files on disk are never touched, the same
+        boundary ``/branch`` draws. Refuses (with a reason) rather than
+        half-succeed; see :mod:`mnemoai.client.rewind`.
+        """
+        return rewind.withdraw(self)
 
     def export_transcript(
         self, path: str = None, fmt: str = None, include_reasoning: bool = False

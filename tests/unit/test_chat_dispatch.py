@@ -10,7 +10,9 @@ import re
 
 import pytest
 
+from mnemoai.client import user_commands
 from mnemoai.client.ui.chat_interface import ChatInterface
+from mnemoai.client.user_commands import UserCommandStore
 
 
 class _StubClient:
@@ -42,12 +44,35 @@ class _StubClient:
         self.calls.append("context_report")
         return "Context window — 10 tokens"
 
+    def files_report(self):
+        self.calls.append("files_report")
+        return "Files this session"
+
+    def diff_report(self, path=""):
+        self.calls.append(("diff_report", path))
+        return "Uncommitted changes"
+
+    def copy_last(self, arg=""):
+        self.calls.append(("copy_last", arg))
+        return "Copied the answer"
+
 
 @pytest.fixture
 def ci():
     c = ChatInterface.__new__(ChatInterface)
     c.client = _StubClient()
     return c
+
+
+@pytest.fixture(autouse=True)
+def _empty_app_home(tmp_path, monkeypatch):
+    """No user-defined slash commands unless a test writes one.
+
+    ``_dispatch`` consults ``~/.mnemoai/commands/`` for a slash line it doesn't
+    recognize, so without this the suite would depend on what the developer
+    running it has authored.
+    """
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path / "home"))
 
 
 def test_exit_and_quit_return_sentinel(ci):
@@ -146,6 +171,35 @@ def test_context_prints_the_client_report(ci, capsys):
     assert "Context window" in capsys.readouterr().out
 
 
+def test_files_prints_the_ledger_report(ci, capsys):
+    assert ci._dispatch("/files") is None
+    assert "files_report" in ci.client.calls
+    assert "Files this session" in capsys.readouterr().out
+
+
+def test_diff_passes_an_optional_path(ci, capsys):
+    assert ci._dispatch("/diff") is None
+    assert ci._dispatch("/diff  src/app.py ") is None
+    assert ("diff_report", "") in ci.client.calls
+    assert ("diff_report", "src/app.py") in ci.client.calls
+    assert "Uncommitted changes" in capsys.readouterr().out
+
+
+def test_copy_passes_its_argument(ci, capsys):
+    assert ci._dispatch("/copy") is None
+    assert ci._dispatch("/copy code") is None
+    assert ("copy_last", "") in ci.client.calls
+    assert ("copy_last", "code") in ci.client.calls
+    assert "Copied the answer" in capsys.readouterr().out
+
+
+def test_the_workspace_commands_never_reach_the_model(ci):
+    # Each is answered locally: a report that costs a turn is a report nobody runs.
+    for line in ("/files", "/diff", "/copy"):
+        ci._dispatch(line)
+    assert not any(isinstance(c, tuple) and c[0] == "query" for c in ci.client.calls)
+
+
 class _BoomEpisodic:
     """Episodic memory whose storage always fails (e.g. ChromaDB code 1032)."""
 
@@ -168,3 +222,106 @@ def test_episodic_storage_failure_does_not_crash_turn(ci, capsys):
     out = capsys.readouterr().out
     assert "Error:" not in out          # the turn did NOT error out
     assert "readonly database" not in out
+
+
+def _user_command(tmp_path, name, body):
+    """Point ci at a commands dir holding one authored command file."""
+    root = tmp_path / "commands"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{name}.md").write_text(body)
+    user_commands._SCAN_CACHE.clear()
+    return UserCommandStore(root=root)
+
+
+def test_a_user_command_expands_into_the_prompt(ci, tmp_path):
+    # The model never learns a command was involved: the expansion IS the prompt,
+    # so the turn is an ordinary one afterwards.
+    ci._user_commands = _user_command(tmp_path, "deploy", "Ship $ARGUMENTS carefully.")
+    ci._dispatch("/deploy staging")
+    assert ("query", "Ship staging carefully.") in ci.client.calls
+
+
+def test_the_expansion_is_announced(ci, tmp_path, capsys):
+    # The prompt the model answers is the file's body, so without this line the
+    # transcript shows an answer to a question that appears nowhere.
+    ci._user_commands = _user_command(tmp_path, "deploy", "Ship it.")
+    ci._dispatch("/deploy")
+    out = re.sub(r"\033\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "/deploy" in out and "deploy.md" in out
+
+
+def test_a_builtin_always_wins_over_a_user_command(ci, tmp_path, capsys):
+    # Expansion is checked AFTER every built-in, so a file can never shadow one.
+    ci._user_commands = _user_command(tmp_path, "help", "not the command reference")
+    assert ci._dispatch("/help") is None
+    out = capsys.readouterr().out
+    assert "Ctrl+J" in out                       # the real /help box rendered
+    assert "not the command reference" not in out
+    assert not any(isinstance(c, tuple) and c[0] == "query" for c in ci.client.calls)
+
+
+def test_an_unknown_slash_line_is_sent_as_typed(ci, tmp_path):
+    # An unknown /thing keeps its current meaning (prose), not an error.
+    ci._user_commands = _user_command(tmp_path, "deploy", "Ship it.")
+    ci._dispatch("/nope now")
+    assert ("query", "/nope now") in ci.client.calls
+
+
+def test_a_failing_store_leaves_the_line_as_typed(ci):
+    class _Boom:
+        def expand(self, line):
+            raise OSError("commands dir is on fire")
+
+    ci._user_commands = _Boom()
+    ci._dispatch("/deploy")
+    assert ("query", "/deploy") in ci.client.calls
+
+
+def test_a_mention_attaches_the_file_to_the_prompt(ci, tmp_path, monkeypatch):
+    # The point of a mention: the content is there whether or not the model would
+    # have chosen to read it.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.md").write_text("remember the milk\n")
+    ci._dispatch("summarize @notes.md")
+    sent = next(c[1] for c in ci.client.calls if isinstance(c, tuple) and c[0] == "query")
+    assert sent.startswith("summarize @notes.md")
+    assert "remember the milk" in sent
+
+
+def test_a_mention_is_announced(ci, tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.md").write_text("a\nb\n")
+    ci._dispatch("summarize @notes.md")
+    out = re.sub(r"\033\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "@notes.md · 2 lines" in out
+
+
+def test_a_typoed_mention_says_so_and_still_asks(ci, tmp_path, monkeypatch, capsys):
+    # Attaching nothing looks exactly like attaching the right file, so the line
+    # is the only way to tell — but the question still goes through.
+    monkeypatch.chdir(tmp_path)
+    ci._dispatch("summarize @notes.mdd")
+    out = re.sub(r"\033\[[0-9;]*m", "", capsys.readouterr().out)
+    assert "@notes.mdd · no such file" in out
+    assert ("query", "summarize @notes.mdd") in ci.client.calls
+
+
+def test_a_builtin_argument_is_never_expanded(ci, tmp_path, monkeypatch):
+    # Mentions are expanded after every built-in, so a path typed as an argument
+    # keeps its literal meaning.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.md").write_text("hi\n")
+    ci._dispatch("/save @notes.md")
+    saves = [c for c in ci.client.calls if isinstance(c, tuple) and c[0] == "save"]
+    assert saves[0][2] == "@notes.md"
+
+
+def test_a_failing_expansion_leaves_the_line_as_typed(ci, monkeypatch):
+    from mnemoai.client.ui import chat_interface as ci_mod
+
+    def _boom(_text):
+        raise OSError("filesystem is on fire")
+
+    monkeypatch.setattr(ci_mod.file_mentions, "expand", _boom)
+    ci._dispatch("summarize @notes.md")
+    assert ("query", "summarize @notes.md") in ci.client.calls

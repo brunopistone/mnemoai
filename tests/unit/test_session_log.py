@@ -1037,6 +1037,91 @@ class TestAResumeChainIsOneRowNotFour:
         assert "a different chat" in previews
 
 
+class TestAFileThatPinsANarrowerStateStaysOffered:
+    """A turn-less file is normally noise — the session it resumed holds the same
+    conversation — so it is dropped from the picker and unlinked at exit. But a
+    file whose only records SHRANK the context (a `/rewind` rebase over inherited
+    history, a compaction checkpoint) is the only place that shrink exists:
+    dropping it offers the parent instead and hands back the very history the user
+    just withdrew or compacted.
+    """
+
+    def _resumed(self, history):
+        """A fresh session seeded from a prior one, as `--resume` does."""
+        parent = slog.SessionLog(cwd="/proj/a")
+        for q, a in history:
+            parent.log_turn(_turn(q, a))
+        child = slog.SessionLog(cwd="/proj/a")
+        restored = convert_strands_messages_to_langchain(
+            slog.read_session(parent.path)["messages"]
+        )
+        child.seed_history(restored, source=str(parent.path))
+        return parent, child, restored
+
+    def test_a_rewind_of_inherited_history_is_offered(self, home):
+        parent, child, restored = self._resumed([("keep me", "a1"), ("drop me", "a2")])
+        child.log_rewind(kept=restored[:2])
+
+        rows = slog.list_sessions(cwd="/proj/a")
+        assert [r["path"] for r in rows] == [str(child.path)]
+        blob = str(rows[0]["messages"])
+        assert "keep me" in blob and "drop me" not in blob
+
+    def test_the_parent_is_still_suppressed(self, home):
+        # The whole point: the parent holds the withdrawn exchange, so offering it
+        # would undo the rewind at the next --resume.
+        parent, child, restored = self._resumed([("keep me", "a1"), ("drop me", "a2")])
+        child.log_rewind(kept=restored[:2])
+        assert str(parent.path) not in {
+            r["path"] for r in slog.list_sessions(cwd="/proj/a")
+        }
+
+    def test_the_row_is_sized_and_previewed_without_the_withdrawn_turn(self, home):
+        parent, child, restored = self._resumed([("keep me", "a1"), ("drop me", "a2")])
+        child.log_rewind(kept=restored[:2])
+        row = slog.list_sessions(cwd="/proj/a")[0]
+        assert row["turns"] == 0  # none of its own
+        assert row["exchanges"] == 1
+        assert row["preview"].startswith("keep me")
+
+    def test_a_rewind_that_empties_the_conversation_is_still_the_row(self, home):
+        # Degenerate but reachable: resume a one-exchange chat and withdraw it.
+        # Restoring nothing is the honest outcome; offering the parent is not.
+        parent, child, restored = self._resumed([("the only exchange", "a1")])
+        child.log_rewind(kept=[])
+        rows = slog.list_sessions(cwd="/proj/a")
+        assert [r["path"] for r in rows] == [str(child.path)]
+        assert rows[0]["messages"] == []
+
+    def test_a_compaction_only_file_survives_exit(self, home):
+        # Resume → /compact → quit without a turn. Without this the file is
+        # unlinked and the next resume re-inflates the history just summarized.
+        parent, child, restored = self._resumed([("early work", "a1")])
+        child.log_compaction(summary="they discussed early work", kept=restored[1:])
+        assert child.discard_if_empty() is False
+        assert child.path.exists()
+
+        rows = slog.list_sessions(cwd="/proj/a")
+        assert [r["path"] for r in rows] == [str(child.path)]
+        assert slog.read_session(child.path)["summary"]
+
+    def test_a_turnless_file_with_nothing_pinned_is_still_dropped(self, home):
+        # The rule it must not widen: a bare resume the user quit immediately.
+        parent, child, restored = self._resumed([("real work", "a1")])
+        assert child.discard_if_empty() is True
+        assert [r["path"] for r in slog.list_sessions(cwd="/proj/a")] == [
+            str(parent.path)
+        ]
+
+    def test_a_rewind_by_number_does_not_pin_anything(self, home):
+        # Withdrawing this file's own only turn leaves the parent's state exactly,
+        # so the file is ordinary noise again and may be discarded.
+        parent, child, restored = self._resumed([("real work", "a1")])
+        child.log_turn(_turn("a turn taken here", "b1"))
+        assert child.log_rewind(1) is True
+        assert child.discard_if_empty() is True
+
+
 class TestExchangeCountingIgnoresInjectedMessages:
     """`exchanges` sizes the row, so it must count only real prompts — a
     tool-result message and a background sub-agent report both carry

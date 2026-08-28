@@ -19,6 +19,7 @@ Start here if you know what you want to change but not where.
 | Record a durable fact about you             | `<profile>/MEMORY.md`       | One profile         | [Persistent memory](../guides/memory.md#persistent-memory-memorymd) |
 | Add a repeatable procedure                  | `skills/<name>/SKILL.md`    | Everything          | [Agent skills](../guides/agent-skills.md)                           |
 | Define a custom sub-agent                   | `agents/<name>.md`          | Everything          | [Sub-agents](../guides/orchestration.md)                            |
+| Add a slash command you type                | `commands/<name>.md`        | Everything          | [Your own commands](../guides/usage.md#your-own-slash-commands)     |
 | Connect an external tool server             | `mcp/mcp.json`              | Everything          | [External MCP servers](../guides/mcp.md)                            |
 | Run a command around every tool call        | `hooks/hooks.json`          | Everything          | [Tool hooks](../guides/hooks.md)                                    |
 
@@ -45,6 +46,8 @@ tool's instructions file is picked up as your always-on rules.
 │   └── <name>/SKILL.md       # ← you edit; on-demand procedures
 ├── agents/
 │   └── <name>.md             # ← you edit; custom sub-agent definitions
+├── commands/
+│   └── <name>.md             # ← you edit; slash commands you type (/<name>)
 ├── plans/
 │   └── plan_<ts>.md          # written on plan approval
 ├── tasks/
@@ -75,6 +78,7 @@ because the next turn overwrites it.
 | `config/config.yaml`, `config/prompts.yaml`, `mcp/mcp.json` | You                                  | **Yes** — this is the intended interface    |
 | `hooks/hooks.json`                                          | You                                  | **Yes** — read at startup, so restart after |
 | `STEERING.md` (or `CLAUDE.md`), `skills/`, `agents/`        | You                                  | **Yes**                                     |
+| `commands/<name>.md`                                        | You                                  | **Yes** — an edit applies to the next line   |
 | `<profile>/MEMORY.md`                                       | The assistant, via the `memory` tool | Yes — it's Markdown, and `/memory` shows it |
 | `<profile>/<profile>.json`                                  | The assistant, every turn            | No — EMAs and counters are recomputed       |
 | `models/*/episodic_memory/`, `models/*/playbook/`           | The assistant, every turn            | No — delete the directory to reset instead  |

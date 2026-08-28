@@ -803,3 +803,45 @@ class TestPasteAtomicDelete:
         buff = _FakeBuffer("hello")
         _backspace_binding(r).handler(_FakeEvent(buff))
         assert buff.text == "hell"            # ordinary single-char delete
+
+
+class TestFileMentionCompleter:
+    """The `@path` completer, driven with a real Document (no app, no TTY).
+
+    All the matching lives in ``client.file_mentions`` and is tested there; what
+    only exists here is the prompt_toolkit contract — the replacement span. Get
+    ``start_position`` wrong and completing a mention eats the words in front of
+    it, which is invisible in a unit test of the matcher.
+    """
+
+    @staticmethod
+    def _complete(text, cwd=None):
+        from prompt_toolkit.document import Document
+
+        from mnemoai.client.ui.tui import FileMentionCompleter
+
+        doc = Document(text, len(text))
+        return list(FileMentionCompleter(cwd=cwd).get_completions(doc, None))
+
+    def test_it_replaces_only_the_typed_fragment(self, tmp_path):
+        (tmp_path / "notes.md").write_text("x")
+        (done,) = self._complete("summarize @not", cwd=tmp_path)
+        assert done.text == "notes.md"
+        assert done.start_position == -len("not")
+
+    def test_a_bare_at_replaces_nothing(self, tmp_path):
+        (tmp_path / "notes.md").write_text("x")
+        got = self._complete("summarize @", cwd=tmp_path)
+        assert [c.start_position for c in got] == [0] * len(got)
+        assert "notes.md" in [c.text for c in got]
+
+    def test_it_stays_silent_without_a_mention(self, tmp_path):
+        (tmp_path / "notes.md").write_text("x")
+        assert self._complete("summarize notes", cwd=tmp_path) == []
+
+    def test_the_meta_names_the_parent_directory(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "notes.md").write_text("x")
+        (done,) = self._complete("@notes", cwd=tmp_path)
+        assert done.text == "src/notes.md"
+        assert done.display_meta_text == "src"

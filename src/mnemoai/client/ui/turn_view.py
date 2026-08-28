@@ -507,6 +507,29 @@ def render_turn_end(seconds: float, finished: float, stopped: bool = False) -> s
     return f"{_GRAY}· done in {duration} · {clock}{_RESET}"
 
 
+def render_command_expansion(name: str, path=None) -> str:
+    """One dim line naming the user-defined command that produced this prompt.
+
+    The turn that follows asks the FILE's question, not the line the user typed,
+    so without this the transcript (and the ``/export`` of it) shows an answer to
+    a question that appears nowhere. The file is named because that's what you
+    edit when the expansion wasn't what you meant.
+    """
+    where = f" · {path.name}" if path is not None else ""
+    return f"{_GRAY}⌘ /{name}{where}{_RESET}"
+
+
+def render_mention_notice(label: str) -> str:
+    """One dim line per ``@path`` a prompt pulled in — or failed to.
+
+    A mention attaches a file's contents silently, so without this the only
+    evidence is the answer itself, and a typo'd path (nothing attached, the model
+    guessing) looks exactly like a correct one. It is also where a truncated file
+    says so. The label already leads with the ``@``, which is marker enough.
+    """
+    return f"{_GRAY}{label}{_RESET}"
+
+
 def render_hook_notice(text: str) -> str:
     """One dim line for something a user hook did (fired, blocked, errored).
 

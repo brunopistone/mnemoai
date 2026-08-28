@@ -186,11 +186,44 @@ _PRISTINE_BUNDLED_PROMPTS_HASHES = {
 }
 
 
+# sha256 of every bundled command file a PRIOR release shipped, keyed by file name
+# (the current bundle is compared at runtime). Same contract as the skill hashes
+# above: an installed copy whose hash is here is a version WE shipped, so it is
+# safe to refresh in place; anything else is the user's file. **Maintenance:** when
+# a bundled command changes, append its PREVIOUS shipped hash here. A newly bundled
+# command starts with an empty set (nothing superseded yet).
+_PRISTINE_BUNDLED_COMMAND_HASHES = {
+    "_README.md": set(),
+    "explain.md": set(),
+}
+
+
 def _sha256(path: Path) -> str:
     """Hex sha256 of a file's bytes (matches ``shasum -a 256``)."""
     import hashlib
 
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _refresh_if_pristine(src: Path, dest: Path, known: set) -> None:
+    """Copy ``src`` over ``dest`` only when the installed copy is *pristine*.
+
+    Pristine means its sha256 is in ``known`` — a version WE shipped, unmodified —
+    so the refresh delivers our updates without ever clobbering a user's edits.
+    The one place that rule is implemented; the three callers below differ only in
+    which file they compare and which hash set they consult.
+    """
+    if not src.is_file() or not dest.is_file():
+        return
+    try:
+        installed = _sha256(dest)
+        if installed == _sha256(src):
+            return  # already current — nothing to do
+        if installed in known:
+            shutil.copyfile(src, dest)  # pristine → safe to refresh
+        # else: user-edited → leave untouched
+    except OSError:
+        pass
 
 
 def _refresh_pristine_prompts(src: Path, dest: Path) -> None:
@@ -202,17 +235,7 @@ def _refresh_pristine_prompts(src: Path, dest: Path) -> None:
     so refreshing a pristine copy lets prompt improvements (edits to existing keys,
     which the bundled-fallback loader can't deliver since it only fills MISSING
     keys) reach existing installs on upgrade, without clobbering a user's edits."""
-    if not src.is_file() or not dest.is_file():
-        return
-    try:
-        installed = _sha256(dest)
-        if installed == _sha256(src):
-            return  # already current
-        if installed in _PRISTINE_BUNDLED_PROMPTS_HASHES:
-            shutil.copyfile(src, dest)  # pristine → safe to refresh
-        # else: user-customized → leave untouched
-    except OSError:
-        pass
+    _refresh_if_pristine(src, dest, _PRISTINE_BUNDLED_PROMPTS_HASHES)
 
 
 def _refresh_pristine_skill(src_dir: Path, dest_dir: Path) -> None:
@@ -224,19 +247,21 @@ def _refresh_pristine_skill(src_dir: Path, dest_dir: Path) -> None:
     never overwritten. Only ``SKILL.md`` is touched, so any extra files the user
     added alongside it are preserved.
     """
-    src_md = src_dir / "SKILL.md"
-    dest_md = dest_dir / "SKILL.md"
-    if not src_md.is_file() or not dest_md.is_file():
-        return
-    try:
-        installed = _sha256(dest_md)
-        if installed == _sha256(src_md):
-            return  # already current — nothing to do
-        if installed in _PRISTINE_BUNDLED_SKILL_HASHES.get(dest_dir.name, set()):
-            shutil.copyfile(src_md, dest_md)  # pristine → safe to refresh
-        # else: user-edited → leave untouched
-    except OSError:
-        pass
+    _refresh_if_pristine(
+        src_dir / "SKILL.md",
+        dest_dir / "SKILL.md",
+        _PRISTINE_BUNDLED_SKILL_HASHES.get(dest_dir.name, set()),
+    )
+
+
+def _refresh_pristine_command(src: Path, dest: Path) -> None:
+    """Refresh a bundled slash command in place IF the installed copy is pristine.
+
+    A command file is a prompt the USER invokes by name, so the same rule as a
+    bundled skill applies: our wording improvements reach existing installs, an
+    edited command is the user's own and is never touched.
+    """
+    _refresh_if_pristine(src, dest, _PRISTINE_BUNDLED_COMMAND_HASHES.get(dest.name, set()))
 
 
 def seed_example_files() -> None:
@@ -248,9 +273,9 @@ def seed_example_files() -> None:
     ``*.example`` reference files are **refreshed from
     the bundle when they differ** so a new bundled key reaches an EXISTING install
     on upgrade (they're read-only reference, not loaded as config). Bundled example
-    skills are copied when absent, and an already-installed one whose ``SKILL.md``
-    is still **pristine** (a version we shipped, unmodified) is refreshed in place
-    so doc/frontmatter updates also reach existing installs. ``prompts.yaml`` is
+    skills and slash commands are copied when absent, and an already-installed one
+    whose file is still **pristine** (a version we shipped, unmodified) is refreshed
+    in place so doc/frontmatter updates also reach existing installs. ``prompts.yaml`` is
     likewise refreshed in place when pristine (so prompt improvements reach
     existing installs). ``config.yaml``/``mcp.json`` and any user-customized
     ``prompts.yaml``/skill are created when absent and otherwise NEVER overwritten.
@@ -296,6 +321,18 @@ def seed_example_files() -> None:
                         shutil.copytree(skill_dir, dest)
                     else:
                         _refresh_pristine_skill(skill_dir, dest)
+        # Bundled example slash commands, same per-file rules as the skills above:
+        # copied when absent (so a newly bundled command reaches an existing
+        # install), refreshed in place only while still pristine.
+        commands_template_root = pkg_templates / "commands_example"
+        if commands_template_root.is_dir():
+            dest_root = commands_dir()
+            for cmd_file in commands_template_root.glob("*.md"):
+                dest = dest_root / cmd_file.name
+                if not dest.exists():
+                    shutil.copyfile(cmd_file, dest)
+                else:
+                    _refresh_pristine_command(cmd_file, dest)
     except OSError:
         # Seeding examples is a convenience; never let it block startup.
         pass
@@ -352,6 +389,22 @@ def skills_dir() -> Path:
     Seeded with a bundled example on first run by :func:`seed_example_files`.
     """
     d = app_home() / "skills"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def commands_dir() -> Path:
+    """Directory holding user-defined slash commands, one ``<name>.md`` per command
+    (created). The FILE NAME is the command (``deploy.md`` → ``/deploy``); the file
+    is optional frontmatter (``description``, ``argument_hint``) plus a markdown
+    body that becomes the prompt, with ``$ARGUMENTS`` substituted.
+
+    **App home only** — like ``agents/`` and ``skills/``, and unlike a per-project
+    ``STEERING.md``: a command is invoked by the user, so a ``git clone`` must not
+    be able to redefine what a name they type expands to. Seeded with a bundled
+    example on first run by :func:`seed_example_files`.
+    """
+    d = app_home() / "commands"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

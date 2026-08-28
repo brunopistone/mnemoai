@@ -7,6 +7,131 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.16.0] — 2026-08-28
+
+### Added
+
+- **`/rewind` — take back your last prompt.** Sometimes the prompt was the mistake:
+  the wrong file, the wrong framing, a question that sent the whole turn somewhere
+  you don't want it. Until now the only ways out were `/clear` (throw the session
+  away) and `/compact` (summarize it) — neither of which undoes _one_ thing. This
+  drops the last prompt **and everything the turn produced** from the live
+  conversation and from the transcript, leaving the context exactly as it was the
+  moment before you pressed Enter, and echoes the prompt it withdrew so you can see
+  which turn went. It moves the **conversation only — files on disk are untouched**,
+  the same boundary `/branch` draws, and the notice says so every time: a command
+  that rolled back half a turn would be worse than one that tells you which half it
+  does. Two rewinds in a row walk back two turns. It finds the last thing _you_
+  typed, not the last message with your name on it, so a turn of tool results or an
+  auto-delivered sub-agent report can't be mistaken for a prompt; and it refuses,
+  with the reason, when the conversation compacted during or right after that turn —
+  a summary that already stands for the turn cannot be un-summarized. The transcript
+  stays append-only, so the withdrawal is recorded rather than cut out: a `/branch`
+  can no longer fork at a withdrawn turn, but nothing you said is scrubbed from
+  disk. What the session _learned_ from the turn does stay, and the notice names
+  which stores that means — episodic memory keeps entries by similarity and the
+  playbook merges a repeat strategy into an existing one, so there is nothing
+  precise left to delete.
+- **Your own slash commands.** A prompt you retype is now a file: every `*.md` in
+  `~/.mnemoai/commands/` becomes a command you can type, and the file name is the
+  command (`commands/review.md` → `/review`). The body is the prompt that gets
+  sent, with `$ARGUMENTS` (or `$1` … `$9`) filled in from whatever you typed after
+  the name — and if the body references no placeholder, your arguments are appended
+  rather than dropped, so a one-line instruction plus a target needs no markup at
+  all. Optional frontmatter (`description`, `argument_hint`) documents the command
+  in the `/` menu and in a "Yours" group in `/help`; without it the first line of
+  the body is used, because a plain markdown file must work with no ceremony.
+  Expansion happens after every built-in, so a file can never shadow `/save` (one
+  that tries is skipped, and `/doctor` names it with the reason instead of leaving
+  you with a command that silently does nothing); an unknown `/thing` still reaches
+  the model as prose. The model never learns a command was involved — the expansion
+  _is_ the prompt — so a dim `⌘ /name · file.md` line records which file ran, and
+  the turn is an ordinary one after that. Edits apply to the next line you type, no
+  restart; files beginning with `_` or `.` are ignored so notes can live beside the
+  commands. Read from the app home only, deliberately: what a name you type expands
+  to must not be redefinable by a repo you clone. A worked `explain.md` and an
+  authoring `_README.md` are installed for you, and refreshed on upgrade unless
+  you've edited them.
+- **Point at a file with `@`, and it comes with the question.** Typing `@` anywhere
+  in your prompt completes paths as you type — a bare name searches the whole
+  project by basename (`@chat_int` finds `src/mnemoai/client/ui/chat_interface.py`),
+  while a fragment containing `/` or starting at `~` completes directory by
+  directory, so a file outside the project is reachable too. On submit, every
+  `@path` in the line is read and attached to the prompt, which is the difference
+  that matters: the contents are there whether or not the model would have decided
+  to go and look, so "does `@config.py` handle this" doesn't start with a round of
+  searching. A mentioned directory contributes its listing rather than its files.
+  The syntax is the one steering files already use, including `@`-references from
+  inside a mentioned file's own text, and a reference that isn't a readable path is
+  simply left in the prose — so `@staticmethod`, an `@handle` and an email address
+  keep meaning what they say. Each mention is announced as a dim `@path · 412 lines`
+  line, because attaching nothing looks exactly like attaching the right file and
+  the second leaves the model guessing; a typo says `no such file` and the question
+  is still asked. Bounded on purpose, since what rides in your own message can be
+  summarized by compaction but never shrunk the way a tool result is: 10 files per
+  line, a 60k-character total, and 20 000 characters per file (`MENTIONS.MAX_FILE_CHARS`,
+  `0` to lift it) with a visible note where a file was cut. A mention is not a
+  read — an edit to a mentioned file still needs the tool that reads it first.
+- **The terminal now tells you when it wants you back.** A turn that ran longer
+  than 30 seconds rings the **bell** and raises an **OSC 9 desktop notification**
+  when it finishes (`mnemoai · done in 4m12s · project` — the directory is there
+  because a popup arrives with no idea which terminal it came from). The same goes
+  out when a confirmation prompt or a question is waiting on you, which is sent
+  however short the turn has been: that one has the work stopped behind it. And
+  when a background sub-agent's report lands while you're idle, since until now the
+  only sign was the report itself appearing in a window you'd stopped watching.
+  Inside tmux or screen the sequence is wrapped in a passthrough so it reaches the
+  outer terminal rather than being swallowed by the multiplexer. Nothing is sent
+  off a terminal (a pipe, CI) or for a turn **you** cancelled — your hand is
+  already on the keyboard — and two notifications closer together than 10 seconds
+  collapse into one, so a task confirming eight writes is one interruption rather
+  than eight. Tunable and fully silenceable via `NOTIFY` (`AFTER_SECONDS`, `BELL`,
+  `DESKTOP`).
+- **`/files` — what this session actually touched.** A long turn scrolls its own
+  record away, so after twenty minutes of work "which files did it change?" is a
+  question you can only answer by re-reading the transcript. The report groups every
+  file the conversation read, wrote or attached with `@`, newest first, with how many
+  times each one came up — and it counts the quiet paths too: a sub-agent's edits and
+  a parallel wave's reads are in there, because it is fed from the one place every
+  tool call passes through. Two spellings of the same file (`./src/x.py`,
+  `~/proj/src/x.py`) are one row, and the list survives compaction — a file
+  summarized out of the context is still a file you touched. Reset by `/clear`.
+- **`/diff` — the uncommitted changes, with yours marked.** `git status` cannot tell
+  you which of the twelve dirty files came from this conversation and which were
+  already dirty when you started; this can, because it cross-references the same
+  ledger `/files` reads and puts a `✎` on the ones the session wrote. Staged,
+  unstaged and untracked files in one list with `+`/`−` counts and a total; `/diff
+<path>` shows that one file's unified diff, colored, with an untracked file
+  rendered as the all-additions diff it effectively is. Read-only by construction —
+  it runs `rev-parse`, `diff` and `ls-files`, and nothing else — so it can never
+  stage, stash or check anything out; bounded, and when a list or a diff is cut it
+  prints the exact git command that shows the rest.
+- **`/copy` — the last answer, on the clipboard, without the line wrapping.**
+  Selecting a streamed answer with the mouse takes the terminal's wrapping with it,
+  which is why a copied code block so often has to be reflowed by hand. `/copy`
+  takes the message as the model wrote it; `/copy code` narrows to its last fenced
+  block (and names the language it copied), `/copy 2` reaches the answer before
+  last. It uses a local helper when there is one (`pbcopy`, `wl-copy`, `xclip`,
+  `xsel`, `clip.exe`) and falls back to **OSC 52**, so a terminal that supports it
+  works with no helper installed at all — and **over SSH the terminal goes first**,
+  since a helper on the far end would set the clipboard of a machine nobody is
+  sitting at. Inside tmux or screen the sequence is wrapped in a passthrough. The
+  notice says what was copied, how big it was and which transport carried it,
+  because a clipboard operation is otherwise invisible until you paste.
+
+### Fixed
+
+- **A conversation you compacted and then closed without asking anything else no
+  longer comes back at its full size.** A session file is deleted at exit when it
+  holds no turn of its own — it was written the moment you launched, so quitting
+  straight away would otherwise leave an empty conversation in the `--resume` list.
+  But resuming a chat, running `/compact` and then quitting hit exactly that rule:
+  the only thing in the new file was the compaction, and deleting it threw away the
+  one record of the smaller context. The next resume picked up the parent instead
+  and re-inflated the whole pre-compaction history, so the summary you had already
+  paid for was summarized again. A file whose records _shrank_ the context is now
+  kept and offered, however few turns it has.
+
 ## [1.15.1] — 2026-08-28
 
 ### Fixed
