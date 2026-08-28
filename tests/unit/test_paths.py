@@ -7,6 +7,7 @@ $MNEMOAI_HOME).
 
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -516,6 +517,91 @@ class TestSubdirs:
             assert not f.exists()
         assert not stale_store_dir.exists()
         assert fresh.exists()  # a live instance's fresh file is untouched
+
+    def test_sweep_reclaims_a_dead_instances_artifacts_at_once(
+        self, tmp_home, monkeypatch
+    ):
+        # Closing a terminal tab kills the app before it can clean up. The name
+        # carries the pid that owned the files, so "is this tied to a session that
+        # is still open?" is answerable now — no waiting out the age rule.
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", f"{os.getpid()}_111111")
+        d = paths.profile_dir()
+        dead = 999_999  # > any pid this OS assigns, so provably not running
+        assert not paths._pid_alive(dead)
+        orphans = [
+            d / f"rag_session_id_{dead}_222222.txt",
+            d / f"chunk_cache_default_20260828_140848_{dead}_222222.db",
+        ]
+        for f in orphans:
+            f.write_text("x")
+        orphan_dir = d / f"rag_store_default_20260828_140848_{dead}_222222"
+        orphan_dir.mkdir()
+        (orphan_dir / "data").write_text("x")
+
+        removed = paths.sweep_old_rag_artifacts(max_age_days=7)
+
+        assert removed == 3
+        assert not any(f.exists() for f in orphans) and not orphan_dir.exists()
+
+    def test_sweep_keeps_an_open_instances_artifacts_however_stale(
+        self, tmp_home, monkeypatch
+    ):
+        # The multi-tab delete-all bug, slow version: a tab left open for weeks
+        # stops touching its store, so the age rule alone would let ANOTHER
+        # instance's startup delete an index a live session is still reading.
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "iid_000000")
+        monkeypatch.setattr(paths, "_pid_is_this_app", lambda pid: True)
+        d = paths.profile_dir()
+        theirs = d / f"rag_store_default_20260728_140848_{os.getpid()}_333333"
+        theirs.mkdir()
+        old = time.time() - 30 * 86400  # stale mtime AND a live owner
+        os.utime(theirs, (old, old))
+
+        assert paths.sweep_old_rag_artifacts(max_age_days=7) == 0
+        assert theirs.exists()
+
+    def test_sweep_still_ages_out_a_recycled_pid(self, tmp_home, monkeypatch):
+        # Liveness alone would protect a dead instance's leftovers forever: pids
+        # get reused, and whatever holds this one now has nothing to do with us.
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "iid_000000")
+        monkeypatch.setattr(paths, "_pid_is_this_app", lambda pid: False)
+        d = paths.profile_dir()
+        stale = d / f"chunk_cache_default_20260728_140848_{os.getpid()}_333333.db"
+        stale.write_text("x")
+        old = time.time() - 30 * 86400
+        os.utime(stale, (old, old))
+
+        assert paths.sweep_old_rag_artifacts(max_age_days=7) == 1
+        assert not stale.exists()
+
+    def test_owner_lookup_never_raises(self, tmp_home):
+        # It only ever WIDENS protection, so an unreadable process must read as
+        # "not ours" rather than propagating out of a housekeeping sweep.
+        assert paths._pid_is_this_app(999_999) is False
+
+    def test_sweep_falls_back_to_age_when_no_pid_can_be_read(
+        self, tmp_home, monkeypatch
+    ):
+        # An implausible number is not a dead pid, it's some other layout's digits
+        # — a fresh file of that shape must not be deleted on its strength.
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "iid_000000")
+        d = paths.profile_dir()
+        fresh = d / "rag_store_default_20260828_140848.faiss"  # pre-instance-id
+        fresh.write_text("x")
+        assert paths._artifact_is_orphaned(fresh.name) is False
+        assert paths.sweep_old_rag_artifacts(max_age_days=7) == 0
+        assert fresh.exists()
+
+    def test_sweep_never_reclaims_our_own_instances_artifacts(
+        self, tmp_home, monkeypatch
+    ):
+        # Belt and braces: our own id is excluded by name, not just by the pid
+        # behind it being alive.
+        monkeypatch.setenv("MNEMOAI_INSTANCE_ID", "999999_444444")
+        d = paths.profile_dir()
+        mine = d / "chunk_cache_default_20260828_140848_999999_444444.db"
+        mine.write_text("x")
+        assert paths._artifact_is_orphaned(mine.name) is False
 
     def test_sweep_old_rag_artifacts_ignores_unrelated(self, tmp_home):
         import time

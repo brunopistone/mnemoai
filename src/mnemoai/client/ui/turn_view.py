@@ -414,15 +414,66 @@ def render_step_list(
 def render_step_done(text: str, done: int, total: int, width: int = 76) -> str:
     """One line marking a step that just finished, with the running count.
 
-    A wave's checklist is printed before any of its steps start, so a wave of
-    several steps would otherwise sit at ``0/N`` for as long as it runs. Emitted
-    per completion from the scheduling thread only (see the checklist note).
+    For the PRINTED checklist only: scrollback can't be rewritten, so a wave's
+    block — printed before any of its steps start — would otherwise sit at
+    ``0/N`` for as long as it runs, and each completion gets its own line
+    instead. With a live :class:`StepStatus` the rows themselves tick, and no
+    line like this is emitted. Emitted from the scheduling thread only.
     """
     label = " ".join(str(text or "").split())
     body = max(20, width - 6)
     if len(label) > body:
         label = label[: body - 1] + "…"
     return f"  {_GREEN}[✓]{_RESET} {_GRAY}{done}/{total} {label}{_RESET}"
+
+
+class StepStatus:
+    """Thread-safe live checklist shared between the wave scheduler (worker
+    thread, marks steps running/done) and the pinned UI (re-renders it).
+
+    A printed block is frozen the moment it lands — so ticking the EXISTING rows
+    of a plan means rendering it in the transient pinned region, where every
+    repaint replaces the whole block. The scheduler updates this sink instead of
+    printing per wave, and one final all-checked block is committed to
+    scrollback when the plan ends (see :class:`ReasoningStatus`, same shape).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._steps: list = []
+        self._running: set = set()
+        self._done: set = set()
+        self.active = False
+
+    def start(self, descriptions) -> None:
+        with self._lock:
+            self._steps = [str(d or "") for d in descriptions or []]
+            self._running = set()
+            self._done = set()
+            self.active = bool(self._steps)
+
+    def set_running(self, running) -> None:
+        """Replace the set of steps executing now (a wave runs several at once)."""
+        with self._lock:
+            self._running = {i for i in running if i not in self._done}
+
+    def mark_done(self, index: int) -> None:
+        with self._lock:
+            self._done.add(index)
+            self._running.discard(index)
+
+    def stop(self) -> None:
+        with self._lock:
+            self.active = False
+
+    def render(self, width: int = 76) -> str:
+        """The live checklist to show now, or "" when idle/empty."""
+        with self._lock:
+            if not self.active:
+                return ""
+            steps = list(self._steps)
+            running, done = set(self._running), set(self._done)
+        return render_step_list(steps, running=running, done=done, width=width)
 
 
 def render_session_notice(text: str) -> str:

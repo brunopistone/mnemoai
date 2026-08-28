@@ -11,6 +11,7 @@ import time
 
 from mnemoai.client.ui.turn_view import (
     ReasoningStatus,
+    StepStatus,
     format_duration,
     render_agent_detail,
     render_conversation,
@@ -173,6 +174,62 @@ class TestStepDone:
 
     def test_a_multi_line_description_stays_on_one_line(self):
         assert "\n" not in render_step_done("do a\nthen b", 1, 1)
+
+
+class TestStepStatus:
+    """Live checklist sink: the SAME rows tick, no line is appended per step."""
+
+    _STEPS = ["Read the config", "Update the loader", "Run the tests"]
+
+    def test_idle_renders_empty(self):
+        assert StepStatus().render() == ""
+
+    def test_an_empty_plan_stays_inactive(self):
+        s = StepStatus()
+        s.start([])
+        assert s.active is False and s.render() == ""
+
+    def test_a_finished_step_is_checked_in_the_existing_row(self):
+        # The bug this replaces: rows stayed "[ ]" and each completion was
+        # APPENDED as its own "[✓] 1/3 …" line below the block.
+        s = StepStatus()
+        s.start(self._STEPS)
+        s.set_running([0, 1, 2])
+        s.mark_done(1)
+        out = s.render()
+        rows = out.split("\n")[1:]
+        assert len(rows) == 3  # still one row per step — nothing appended
+        done_row = next(r for r in rows if self._STEPS[1] in r)
+        assert "[✓]" in done_row
+        assert "1/3" in out  # header counts up as rows tick
+
+    def test_a_done_step_stops_being_reported_as_running(self):
+        s = StepStatus()
+        s.start(self._STEPS)
+        s.set_running([0, 1])
+        s.mark_done(0)
+        s.set_running([0, 1])  # a later wave update must not un-tick it
+        assert "[✓]" in next(
+            r for r in s.render().split("\n") if self._STEPS[0] in r
+        )
+
+    def test_stop_hands_the_region_back(self):
+        s = StepStatus()
+        s.start(self._STEPS)
+        s.set_running([0])
+        assert s.render() != ""
+        s.stop()
+        assert s.render() == ""
+
+    def test_restart_forgets_the_previous_plan(self):
+        s = StepStatus()
+        s.start(self._STEPS)
+        s.mark_done(0)
+        s.start(["Something else"])
+        out = s.render()
+        assert "Something else" in out
+        assert self._STEPS[0] not in out
+        assert "0/1" in out  # the old done set is gone too
 
 
 class TestSessionNotice:

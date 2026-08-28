@@ -760,10 +760,15 @@ class ChatInterface:
         self.client.callback_handler.spinner = self.client.spinner
         # Live-reasoning sink: the agent appends chunks, the reader renders them.
         reasoning = turn_view.ReasoningStatus()
+        # Live step checklist: the wave scheduler marks steps running/done and the
+        # reader re-renders the SAME rows, so they tick in place instead of the
+        # plan growing a line per completion (a printed block is frozen).
+        steps = turn_view.StepStatus()
         if getattr(self.client, "agent", None) is not None:
             self.client.agent.callbacks = [self.client.callback_handler]
             self.client.agent.styled_turn_view = True
             self.client.agent.reasoning_sink = reasoning
+            self.client.agent.steps_sink = steps
 
         # Commands that open a full-screen dialog (or execv): a nested full-screen
         # app can't run inside the pinned app, so they go through
@@ -863,6 +868,7 @@ class ChatInterface:
             dispatch=_dispatch,
             toolbar_text=lambda: spinner_toolbar_text(status),
             reasoning_text=lambda: reasoning.render(time.monotonic()),
+            steps_text=steps.render,
             footer_text=_footer,
             on_cancel=_on_cancel,
             agents_provider=_agents_snapshot,

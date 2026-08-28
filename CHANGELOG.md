@@ -7,6 +7,36 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.15.1] — 2026-08-28
+
+### Fixed
+
+- **A running plan now ticks the steps you're looking at, instead of listing them
+  again underneath.** A multi-step task printed its checklist once per wave — and
+  since a wave is printed _before_ its steps start, all of its rows were green
+  `[ ]` and the header sat at `Steps 0/5` for as long as the work took. Progress
+  therefore arrived as extra lines below the block (`[✓] 1/5 …`, `[✓] 2/5 …`),
+  which is not where anyone was looking: the natural reading is that the five
+  rows above are still unfinished and five _more_ steps are being added. The plan
+  is now one block in the pinned region below your output, where every repaint
+  replaces it, so a finished step is checked off **in its own row** and the count
+  climbs in the header; when the plan ends, a single all-checked block is printed
+  to scrollback as its permanent record. The dead checklist is also cleared when a
+  turn is cancelled or a step fails, rather than staying pinned above the prompt.
+  Off a TTY (a pipe, CI, `--no-verbose`'s plain loop) there is no region to update,
+  so the per-wave block and its tick lines stay exactly as they were.
+- **Closing a terminal tab no longer leaves a week of scratch indexes behind.** The
+  per-session RAG artifacts under your profile (`rag_store_…`, `chunk_cache_….db`,
+  `rag_session_id_….txt`, `chunk_session_id_….txt`) are deleted when the app shuts
+  down, so closing the window instead of quitting left them sitting there until a
+  7-day sweep collected them. Each name carries the process id that created it, so
+  startup now asks the system whether that process is still running: the leftovers
+  of an instance that is provably gone are reclaimed at once, and age remains the
+  fallback for a name no owner can be read from. The same fact fixes the opposite
+  case — an instance that is still **open** keeps its files however old they are,
+  so a session you have left open for weeks can no longer have its index deleted
+  by another one starting up.
+
 ## [1.15.0] — 2026-08-28
 
 ### Added
@@ -15,7 +45,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   just above the prompt. A streamed answer simply stops: the last chunk looks like
   every other one, so nothing separated "the model is finished" from "the next
   paragraph is still coming", and the idle prompt looked identical either way. The
-  spinner that means *working* lives in the toolbar, and a toolbar is not
+  spinner that means _working_ lives in the toolbar, and a toolbar is not
   scrollback — it can't answer the question once it's gone, or ten minutes later
   when you come back to the terminal and want to know whether the long turn ever
   landed. So the line also carries the two facts you'd have to have watched for:

@@ -182,6 +182,7 @@ class PinnedPromptReader:
         history: Optional[History] = None,
         toolbar_text: Optional[Callable[[], Any]] = None,
         reasoning_text: Optional[Callable[[], str]] = None,
+        steps_text: Optional[Callable[[], str]] = None,
         footer_text: Optional[Callable[[int], Any]] = None,
         on_cancel: Optional[Callable[[], None]] = None,
         agents_provider: Optional[Callable[[], list]] = None,
@@ -200,6 +201,8 @@ class PinnedPromptReader:
             history: Optional shared prompt history.
             toolbar_text: Returns the status-line content; empty hides the line.
             reasoning_text: Returns the live-reasoning ANSI block; empty hides it.
+            steps_text: Returns the live multi-step checklist (ANSI); empty hides
+                it. Pinned rather than printed so its rows tick in place.
             footer_text: ``f(width)`` -> styled segments for the persistent footer
                 line under the input (model · provider, dir, context meter); empty
                 hides it. Called on every repaint, so it must stay cheap.
@@ -216,6 +219,7 @@ class PinnedPromptReader:
         self._dispatch = dispatch
         self._toolbar_text = toolbar_text or (lambda: "")
         self._reasoning_text = reasoning_text or (lambda: "")
+        self._steps_text = steps_text or (lambda: "")
         self._footer_provider = footer_text
         self._on_cancel = on_cancel
         # Live sub-agent activity: provider() -> list of ActivityRun snapshots for
@@ -519,6 +523,17 @@ class PinnedPromptReader:
             ),
             filter=Condition(lambda: bool(self._reasoning_text())),
         )
+        # Live multi-step checklist, directly above the spinner line: the same
+        # rows tick from [ ] to [✓] as the plan runs, which a printed block can't
+        # do. One closing block is committed to scrollback when the plan ends.
+        steps_window = ConditionalContainer(
+            Window(
+                FormattedTextControl(lambda: ANSI(self._steps_text())),
+                dont_extend_height=True,
+                wrap_lines=True,
+            ),
+            filter=Condition(lambda: bool(self._steps_text())),
+        )
         # Live "agents" panel pinned BELOW the input: one row per hidden sub-agent.
         # Height-capped (_PANEL_MAX_ROWS + hint) so it can't eat scrollback — with
         # more runs than that the panel SCROLLS (↑/↓ in nav mode) rather than
@@ -549,6 +564,7 @@ class PinnedPromptReader:
                 [
                     queued_window,
                     reasoning_window,
+                    steps_window,
                     status_window,
                     input_window,
                     agents_window,

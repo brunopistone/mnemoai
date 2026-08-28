@@ -258,10 +258,11 @@ class LangGraphClient:
             except Exception as e:
                 logger.debug(f"Plan sweep skipped: {e}")
 
-            # Prune ORPHANED per-session RAG/chunk artifacts left by a crashed
-            # instance. Age-based so a concurrently-running instance's fresh
-            # files are never deleted (fixes the multi-tab delete-all bug — exit
-            # no longer wildcard-sweeps, so this bounds crash leftovers instead).
+            # Prune ORPHANED per-session RAG/chunk artifacts left behind by an
+            # instance that never got to clean up (a closed terminal tab, a kill).
+            # Reclaimed as soon as the pid in the name is gone, else by age — a
+            # concurrently-running instance's files are never deleted under either
+            # rule (the multi-tab delete-all bug: exit no longer wildcard-sweeps).
             try:
                 sweep_old_rag_artifacts()
             except Exception as e:
