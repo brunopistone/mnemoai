@@ -725,89 +725,116 @@ class LangGraphAgent:
 
         descriptions = [str(s.get("description", "")) for s in subtasks]
 
-        while remaining:
-            ready = [
-                i for i in sorted(remaining)
-                if all(d in results for d in subtasks[i].get("depends_on", []))
-            ]
-            if not ready:  # broken/cyclic deps — force the rest so we never hang
-                ready = sorted(remaining)
+        # A live checklist (pinned UI) is the whole plan in ONE block whose rows
+        # tick as work lands. Without one — the plain off-TTY loop has no transient
+        # region — the block is re-printed per wave and each completion adds its
+        # own line, because a printed block is frozen the moment it lands.
+        steps = getattr(self, "steps_sink", None) if self.verbose else None
+        if steps is not None:
+            steps.start(descriptions)
 
-            # One checklist per WAVE, printed from this (single) scheduling thread:
-            # a parallel wave's workers run on pool threads, where interleaved
-            # prints would shred the block.
-            self._print_step_list(descriptions, running=set(ready), done=set(results))
+        try:
+            while remaining:
+                ready = [
+                    i for i in sorted(remaining)
+                    if all(d in results for d in subtasks[i].get("depends_on", []))
+                ]
+                if not ready:  # broken/cyclic deps — force the rest so we never hang
+                    ready = sorted(remaining)
 
-            # A wave of several steps can't show progress through the block (it
-            # was printed before any of them started), so each completion ticks
-            # its own line. A lone step needs none — the next block, or the
-            # closing one, marks it done a moment later.
-            tick = len(ready) > 1
+                if steps is not None:
+                    steps.set_running(ready)
+                else:
+                    # One checklist per WAVE, printed from this (single) scheduling
+                    # thread: a parallel wave's workers run on pool threads, where
+                    # interleaved prints would shred the block.
+                    self._print_step_list(
+                        descriptions, running=set(ready), done=set(results)
+                    )
 
-            if len(ready) == 1 or max_workers <= 1:
-                # A lone/sequential worker runs on THIS thread and CAN prompt for
-                # destructive-tool confirmation (only one prompt at a time). Keep a
-                # spinner up while it works — the worker runs quiet (no trace), so
-                # without this the UI looks finished while the step is still going.
-                for i in ready:
-                    desc = subtasks[i].get("description", "")
-                    label = desc[:40] + ("…" if len(desc) > 40 else "")
-                    self._start_spinner(f"step {i + 1}/{total}: {label}")
+                # A PRINTED wave of several steps can't show progress through its
+                # block (printed before any of them started), so each completion
+                # ticks its own line; a lone step needs none — the next block, or
+                # the closing one, marks it done a moment later. The live checklist
+                # ticks the rows themselves, so it emits no extra line.
+                tick = steps is None and len(ready) > 1
+
+                if len(ready) == 1 or max_workers <= 1:
+                    # A lone/sequential worker runs on THIS thread and CAN prompt for
+                    # destructive-tool confirmation (only one prompt at a time). Keep a
+                    # spinner up while it works — the worker runs quiet (no trace), so
+                    # without this the UI looks finished while the step is still going.
+                    for i in ready:
+                        desc = subtasks[i].get("description", "")
+                        label = desc[:40] + ("…" if len(desc) > 40 else "")
+                        if steps is not None:
+                            # Sequential: only one of the wave is really running.
+                            steps.set_running([i])
+                        self._start_spinner(f"step {i + 1}/{total}: {label}")
+                        try:
+                            results[i] = self._run_subtask(
+                                i, subtasks, results, history
+                            )
+                        finally:
+                            self._stop_spinner()
+                        if steps is not None:
+                            steps.mark_done(i)
+                        if tick:
+                            self._print_step_done(descriptions, i, len(results), total)
+                else:
+                    self._start_spinner(self._wave_label(len(ready)))
+
+                    # Parallel-wave workers run HEADLESS: several run at once on pool
+                    # threads, and stacking interactive confirmation prompts on one
+                    # terminal is unworkable — so an untrusted destructive tool
+                    # auto-denies (same safety rule as background sub-agents), while a
+                    # category the user already trusted this session still proceeds.
+                    def _run_headless(idx):
+                        self._set_headless(True)
+                        try:
+                            return idx, self._run_subtask(
+                                idx, subtasks, results, history
+                            )
+                        finally:
+                            self._set_headless(False)
+
                     try:
-                        results[i] = self._run_subtask(
-                            i, subtasks, results, history
-                        )
+                        with ThreadPoolExecutor(
+                            max_workers=min(max_workers, len(ready))
+                        ) as pool:
+                            # as_completed, not map: a tick must belong to the step
+                            # that ACTUALLY finished, and map yields in submission
+                            # order — so a late first step would hold every later
+                            # one's line back until it lands.
+                            futures = [pool.submit(_run_headless, i) for i in ready]
+                            left = len(futures)
+                            for future in as_completed(futures):
+                                i, res = future.result()
+                                results[i] = res
+                                if steps is not None:
+                                    steps.mark_done(i)
+                                left -= 1
+                                if tick:
+                                    # Printing stops the spinner; bring it back for
+                                    # whatever is still running.
+                                    self._print_step_done(
+                                        descriptions, i, len(results), total
+                                    )
+                                    if left:
+                                        self._start_spinner(self._wave_label(left))
                     finally:
                         self._stop_spinner()
-                    if tick:
-                        self._print_step_done(descriptions, i, len(results), total)
-            else:
-                self._start_spinner(self._wave_label(len(ready)))
+                remaining -= set(ready)
+        finally:
+            # Hand the pinned region back even on a cancel or a failed step, else
+            # the checklist stays above the prompt for the rest of the session.
+            if steps is not None:
+                steps.stop()
 
-                # Parallel-wave workers run HEADLESS: several run at once on pool
-                # threads, and stacking interactive confirmation prompts on one
-                # terminal is unworkable — so an untrusted destructive tool
-                # auto-denies (same safety rule as background sub-agents), while a
-                # category the user already trusted this session still proceeds.
-                def _run_headless(idx):
-                    self._set_headless(True)
-                    try:
-                        return idx, self._run_subtask(
-                            idx, subtasks, results, history
-                        )
-                    finally:
-                        self._set_headless(False)
-
-                try:
-                    with ThreadPoolExecutor(
-                        max_workers=min(max_workers, len(ready))
-                    ) as pool:
-                        # as_completed, not map: a tick must belong to the step
-                        # that ACTUALLY finished, and map yields in submission
-                        # order — so a late first step would hold every later
-                        # one's line back until it lands.
-                        futures = [pool.submit(_run_headless, i) for i in ready]
-                        left = len(futures)
-                        for future in as_completed(futures):
-                            i, res = future.result()
-                            results[i] = res
-                            left -= 1
-                            if tick:
-                                # Printing stops the spinner; bring it back for
-                                # whatever is still running.
-                                self._print_step_done(
-                                    descriptions, i, len(results), total
-                                )
-                                if left:
-                                    self._start_spinner(self._wave_label(left))
-                finally:
-                    self._stop_spinner()
-            remaining -= set(ready)
-
-        # Closing state. Every block so far was printed with its wave still
-        # executing, so without this the checklist ends on the last wave's green
-        # rows — a finished plan that reads as stuck at N-1/N (or at 0/N, when one
-        # wave held the whole plan).
+        # Closing state, and the plan's only permanent record when it ran live:
+        # every printed block so far showed its wave still executing, so without
+        # this the checklist ends on the last wave's green rows — a finished plan
+        # that reads as stuck at N-1/N (or at 0/N, when one wave held it all).
         self._print_step_list(descriptions, running=(), done=set(results))
         return results
 

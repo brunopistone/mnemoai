@@ -523,18 +523,126 @@ def chunk_session_pointer_path(profile: str = None) -> Path:
 # scratch; an instance cleans up its own on exit, but a crashed/killed instance
 # can leave some behind. This bounds that so they don't accumulate — WITHOUT an
 # instance deleting another live instance's files (the multi-tab delete-all bug).
+# It is the FALLBACK rule: an artifact whose owning process is provably gone is
+# reclaimed at once (see :func:`_artifact_is_orphaned`), and age covers only the
+# names that can't be attributed to a pid.
 RAG_ARTIFACT_MAX_AGE_DAYS = 7
+
+# Upper bound on a plausible OS pid (Linux's raisable ceiling, 2^22; macOS caps
+# far lower). A bigger number parsed out of a name is not a pid — some other
+# layout's digits — so it must fall back to the age rule, never be treated as a
+# dead process.
+_MAX_PID = 4_194_304
+
+# Trailing ``_{pid}_{ms}`` of an instance id in an artifact name, before an
+# optional extension: `..._34929_928845`, `..._34929_928845.db`.
+_ARTIFACT_INSTANCE_RE = re.compile(r"_(\d+)_(\d{4,})(?:\.[A-Za-z0-9]+)?$")
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` is a running process. Unknown counts as ALIVE.
+
+    Signal 0 only checks; it doesn't deliver. Every error other than "no such
+    process" (notably a pid owned by a different user, which raises
+    ``PermissionError``) means the process is there or we can't tell — and this
+    answer gates a delete, so doubt must always read as alive.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _pid_is_this_app(pid: int) -> bool:
+    """Whether ``pid`` looks like another instance of THIS app.
+
+    Liveness alone can't distinguish "that tab is still open" from "that pid was
+    recycled by something unrelated months ago", and the two want opposite
+    treatment: the first must be protected from the age rule forever, the second
+    must not be protected at all. Reading the command line settles it.
+
+    Used only to WIDEN protection — never to justify a delete — so every failure
+    (no psutil, a process we may not inspect, a launcher whose command line
+    doesn't name us) simply leaves that entry on the plain age rule.
+    psutil is imported lazily: paths.py is imported by everything, including the
+    MCP server's boot, and this is the one place that needs a process table.
+    """
+    try:
+        import psutil
+
+        return any("mnemoai" in str(part) for part in psutil.Process(pid).cmdline())
+    except Exception:
+        return False
+
+
+def _artifact_pid(name: str) -> Optional[int]:
+    """The pid embedded in a per-instance artifact name, when one can be read.
+
+    Every one of these files is namespaced by :func:`instance_id` — ``{pid}_{ms}``
+    — so the NAME says which process owned it (``chunk_session_id_34929_928845.txt``,
+    ``rag_store_bpistone_20260828_140848_34929_928845``). That is what makes "is
+    this tied to an app that is still open?" answerable directly, instead of
+    waiting out ``RAG_ARTIFACT_MAX_AGE_DAYS`` for the leftovers of a tab someone
+    closed without exiting. An unattributable name or an implausible number reads
+    as None, i.e. no owner to ask about.
+    """
+    match = _ARTIFACT_INSTANCE_RE.search(name)
+    if not match:
+        return None
+    pid = int(match.group(1))
+    return pid if 0 < pid <= _MAX_PID else None
+
+
+def _artifact_is_orphaned(name: str) -> bool:
+    """Whether a per-instance artifact's owning process is provably gone.
+
+    Deliberately one-directional: True requires a parseable, plausible pid that is
+    NOT ours and NOT running, so a live instance's files can never qualify (its
+    own pid is alive by definition). Everything ambiguous returns False and stays
+    on the age rule.
+    """
+    if instance_id() in name:  # our own scratch, whatever the pid says
+        return False
+    pid = _artifact_pid(name)
+    return pid is not None and not _pid_alive(pid)
+
+
+def _artifact_is_in_use(name: str) -> bool:
+    """Whether a per-instance artifact belongs to an instance still OPEN.
+
+    The mirror of :func:`_artifact_is_orphaned`, and the reason the age rule can't
+    be the whole story: an app left open for weeks stops touching its store, so
+    its mtime goes stale while the tab is still using it — and another instance's
+    startup sweep would then delete a live session's index. A name that
+    identifies a running instance of this app therefore vetoes the age rule
+    outright; age only applies to entries with no identifiable owner.
+
+    Requires liveness AND :func:`_pid_is_this_app`, because a pid recycled by
+    something unrelated must NOT protect a dead instance's leftovers forever.
+    """
+    if instance_id() in name:
+        return True
+    pid = _artifact_pid(name)
+    return pid is not None and _pid_alive(pid) and _pid_is_this_app(pid)
 
 
 def sweep_old_rag_artifacts(
     max_age_days: int = RAG_ARTIFACT_MAX_AGE_DAYS, profile: str = None
 ) -> int:
-    """Delete orphaned RAG/chunk session artifacts older than ``max_age_days``.
+    """Delete orphaned RAG/chunk session artifacts at startup.
 
-    Best-effort startup housekeeping (0 disables). Touches only the per-session
-    scratch files/dirs (``rag_store_*``, ``chunk_cache_*``, ``rag_session_id_*``,
-    ``chunk_session_id_*``) and only when stale, so a concurrently-running
-    instance's fresh files are left alone. Returns the count removed.
+    Best-effort startup housekeeping (0 disables both rules). Touches only the
+    per-session scratch files/dirs (``rag_store_*``, ``chunk_cache_*``,
+    ``rag_session_id_*``, ``chunk_session_id_*``), and only when they are
+    **orphaned**. Three rules, in order: the owner is provably gone
+    (:func:`_artifact_is_orphaned`) → reclaim NOW, since a dead instance will
+    never write again; the owner is still open (:func:`_artifact_is_in_use`) →
+    keep, however stale, because a live session's index must not vanish under it;
+    otherwise fall back to ``max_age_days``, which covers a name no owner can be
+    read from. Returns the count removed.
     """
     if max_age_days <= 0:
         return 0
@@ -552,8 +660,11 @@ def sweep_old_rag_artifacts(
             if not entry.name.startswith(prefixes):
                 continue
             try:
-                if entry.stat().st_mtime >= cutoff:
-                    continue  # still recent — may belong to a live instance
+                if not _artifact_is_orphaned(entry.name):
+                    if _artifact_is_in_use(entry.name):
+                        continue  # a tab that is still open, however idle
+                    if entry.stat().st_mtime >= cutoff:
+                        continue  # recent, and the owner can't be identified
                 if entry.is_dir():
                     shutil.rmtree(entry, ignore_errors=True)
                 else:
