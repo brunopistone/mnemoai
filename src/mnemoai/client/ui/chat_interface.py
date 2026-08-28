@@ -18,7 +18,7 @@ from mnemoai.client.memory.episodic_memory import (
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
-from mnemoai.client.ui import status_bar
+from mnemoai.client.ui import status_bar, turn_view
 from mnemoai.client.ui.tui import (
     _DELETE,
     PinnedPromptReader,
@@ -753,14 +753,13 @@ class ChatInterface:
             SpinnerStatus,
             spinner_toolbar_text,
         )
-        from mnemoai.client.ui.turn_view import ReasoningStatus
 
         # Route spinner control to a shared status the toolbar reads.
         status = SpinnerStatus()
         self.client.spinner = Spinner(sink=status)
         self.client.callback_handler.spinner = self.client.spinner
         # Live-reasoning sink: the agent appends chunks, the reader renders them.
-        reasoning = ReasoningStatus()
+        reasoning = turn_view.ReasoningStatus()
         if getattr(self.client, "agent", None) is not None:
             self.client.agent.callbacks = [self.client.callback_handler]
             self.client.agent.styled_turn_view = True
@@ -913,6 +912,14 @@ class ChatInterface:
             self.client.clear_context()
         except KeyboardInterrupt:
             pass
+
+    @staticmethod
+    def _turn_end_line(started: float, stopped: bool = False) -> str:
+        """The dim end-of-turn marker for a turn that began at ``started``
+        (a ``time.monotonic()`` reading)."""
+        return turn_view.render_turn_end(
+            time.monotonic() - started, time.time(), stopped=stopped
+        )
 
     @staticmethod
     def _note_interrupt(count: int, last_time: float) -> tuple:
@@ -1096,7 +1103,11 @@ class ChatInterface:
             agent = getattr(self.client, "agent", None)
             has_undelivered = getattr(agent, "has_undelivered_background", None)
             if has_undelivered is not None and has_undelivered():
+                started = time.monotonic()
                 self.client.query("")  # delivery-only turn
+                # Marked like any other turn — this one appeared without the user
+                # typing, so where it ends is even less obvious.
+                print("\n" + self._turn_end_line(started))
             else:
                 print("Input cannot be empty. Please try again.")
             return None
@@ -1111,6 +1122,7 @@ class ChatInterface:
         elif not self.client.episodic_memory:
             logger.debug("Episodic memory is disabled")
 
+        started = time.monotonic()
         try:
             response = self.client.query(query)
 
@@ -1141,12 +1153,21 @@ class ChatInterface:
                 except Exception as e:
                     logger.warning(f"Memory auto-extraction failed (non-fatal): {e}")
 
+            # Close the turn with a marker line: the answer above it is complete.
+            # Timed to HERE, not to where query() returned — the learning steps
+            # above still hold the prompt, so they are part of the wait.
             if response == "Operation was cancelled.":
                 # Resolve the transient "(cancelling…)" line to a final state.
-                print("\033[90m⊘ Stopped\033[0m")
+                print(self._turn_end_line(started, stopped=True))
             else:
-                print("\n")
+                print("\n" + self._turn_end_line(started))
         except KeyboardInterrupt:
+            # The cancel landed in this frame instead of being turned into a
+            # "cancelled" response (Esc between steps, Ctrl+C in the plain loop).
+            # The UI has already written "(cancelling…)", so it needs the same
+            # resolution the graceful path gets — otherwise this is the one turn
+            # that ends with nothing at all.
+            print(self._turn_end_line(started, stopped=True))
             return None
         except Exception as e:
             # Full traceback to the log FILE only (console=False): the red line
