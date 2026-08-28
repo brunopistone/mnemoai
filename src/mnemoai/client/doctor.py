@@ -34,6 +34,7 @@ import sys
 from pathlib import Path
 from typing import Any, List, NamedTuple, Optional, Tuple
 
+from mnemoai import app_version
 from mnemoai.client import hooks
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.steering_store import SteeringStore
@@ -94,12 +95,7 @@ def _short(path: Any) -> str:
 
 def _version() -> str:
     """Installed version, or a note that this is a checkout."""
-    try:
-        from importlib.metadata import version
-
-        return version("mnemoai-assistant")
-    except Exception:  # noqa: BLE001 — PackageNotFoundError and anything odder
-        return "(not installed — running from a checkout)"
+    return app_version() or "(not installed — running from a checkout)"
 
 
 def _install_checks() -> List[Check]:

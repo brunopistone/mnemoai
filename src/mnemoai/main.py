@@ -177,8 +177,8 @@ def _resume_session(client: Any, resume: str, chat_interface: Any = None) -> str
             return "exit"
 
     # Banner FIRST, then the transcript: the restored conversation must end up
-    # directly above the prompt (reading top-to-bottom: logo → commands → your
-    # past conversation → prompt), not scrolled off above the logo.
+    # directly above the prompt (reading top-to-bottom: logo → your past
+    # conversation → prompt), not scrolled off above the logo.
     if chat_interface is not None:
         chat_interface.show_welcome()
 

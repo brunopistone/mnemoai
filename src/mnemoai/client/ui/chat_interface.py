@@ -11,6 +11,7 @@ from typing import Any
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 
+from mnemoai import app_version
 from mnemoai.client import file_ledger, file_mentions
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
@@ -251,9 +252,9 @@ class ChatInterface:
     def _command_box(cls, footer: list, extra_groups: list = None) -> str:
         """The framed, grouped command list, with ``footer`` rows under a separator.
 
-        Shared by the launch banner and ``/help``: the box IS the command
-        reference, and ``/help`` exists because the banner scrolls away — two
-        renderers would drift apart the first time a command was added.
+        The box IS the command reference, and ``/help`` is the only thing that
+        prints it — the launch banner deliberately doesn't, so the reference is
+        somewhere you go rather than a screenful you scroll past every start.
         ``extra_groups`` appends dynamic groups (the user's own commands) in the
         same shape as :attr:`_COMMAND_GROUPS`, so they are sized and framed by the
         same code as the built-ins.
@@ -307,39 +308,50 @@ class ChatInterface:
         return "\n".join(lines)
 
     def __welcome_message(self) -> None:
-        """Display the launch banner + a framed, grouped command list."""
-        C = self._C
-        # Mention the completion menu and /help: they're how you find a command
-        # WITHOUT this box, which is what keeps the banner from having to be the
-        # whole reference.
-        # Two rows, not one: the frame widens to its widest row, and a single
-        # combined hint pushed it past 80 columns.
-        box = self._command_box(
-            [
-                f"{C['dim']}Ctrl+J{C['reset']} for new lines · "
-                f"{C['dim']}Enter{C['reset']} to submit · "
-                f"{C['dim']}/{C['reset']} to search commands",
-                f"{C['dim']}/help{C['reset']} brings this box back, with the keys",
-            ],
-            self._own_command_group(),
-        )
+        """Display the launch banner: wordmark, version, and the way in.
 
-        # --- Wordmark banner (indigo ≈ #5f5fff via 256-color 63) ---
-        # Center the wordmark AND its tagline over the command box. The box widens
-        # to its longest row (well past the wordmark's fixed 64 columns), so
-        # left-aligning both left the logo visibly adrift of the frame below it.
-        # Indent the block by half the difference; the tagline is then centered
-        # within the wordmark's own width so it stays under the letters.
+        Deliberately NOT the command reference. The box was 31 of the 41 lines
+        this printed — a screenful of chrome before the first prompt, for a list
+        that `/help` and the `/` menu each put one keystroke away (the box's own
+        last row said exactly that). What's left is what a launch has to answer:
+        which app, which version, and how to find everything else. The pinned
+        footer already carries the model, provider and directory, so the version
+        is the one fact nothing else surfaces.
+        """
+        C = self._C
+        # --- Wordmark (indigo ≈ #5f5fff via 256-color 63) ---
+        # Flush left, like the prompt and the footer under it: with the box gone
+        # there is nothing left to center the block over.
         banner_w = max(self._vlen(line) for line in self._BANNER)
-        box_w = self._vlen(box.split("\n")[0])  # the frame's own outer width
-        indent = " " * max(0, (box_w - banner_w) // 2)
         print()
         for line in self._BANNER:
-            print(f"{indent}\033[38;5;63m{line}\033[0m")
-        tagline = "local agentic AI assistant · learns & remembers"
-        print(f"{indent}{C['dim']}" + tagline.center(banner_w) + C["reset"])
+            print(f"\033[38;5;63m{line}\033[0m")
+        # Tagline and version centered on the WORDMARK's own width, so they sit
+        # under the letters rather than under the whole terminal.
+        for sub in ("local agentic AI assistant · learns & remembers", self._version()):
+            if sub:
+                print(f"{C['dim']}{sub.center(banner_w)}{C['reset']}")
         print()
-        print(box + "\n")
+        # The three ways in, and the only record of them at launch: /help brings
+        # the full reference back, / searches it, and @ is invisible otherwise.
+        print(
+            f"{C['dim']} · ".join(
+                f"{C['cmd']}{key}{C['dim']} {what}"
+                for key, what in (
+                    ("/help", "for commands"),
+                    ("/", "to search"),
+                    ("@", "to attach a file"),
+                )
+            )
+            + C["reset"]
+        )
+        print()
+
+    @staticmethod
+    def _version() -> str:
+        """``vX.Y.Z`` for the banner, or "" when running from a checkout."""
+        v = app_version()
+        return f"v{v}" if v else ""
 
     def _help_text(self) -> str:
         """The ``/help`` screen: the command box plus the keys that aren't commands."""
@@ -790,8 +802,8 @@ class ChatInterface:
     _EXIT = object()
 
     def show_welcome(self) -> None:
-        """Print the launch banner + command list (public so `--resume` can show
-        it BEFORE replaying a transcript — the banner belongs at the top)."""
+        """Print the launch banner (public so `--resume` can show it BEFORE
+        replaying a transcript — the banner belongs at the top)."""
         self.__welcome_message()
 
     def run_chat_loop(self, welcome: bool = True) -> None:

@@ -141,7 +141,7 @@ class TestLabel:
 class TestBannerOrdering:
     """The restored transcript must render BELOW the banner, next to the prompt.
 
-    Reported bug: the replayed conversation appeared ABOVE the logo/command box,
+    Reported bug: the replayed conversation appeared ABOVE the logo banner,
     because the banner was printed by run_chat_loop AFTER the resume. The banner
     is now shown from inside _resume_session, before the replay.
     """
