@@ -7,6 +7,22 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.16.1] — 2026-08-28
+
+### Changed
+
+- **Launch is ten lines instead of a full screen.** Every start printed the whole
+  command reference — 26 commands in a framed box, 31 of the 41 lines on screen
+  before you had typed anything — and the box's own last row told you that `/help`
+  brings it back. So the list now lives where that row said it did: **`/help` prints
+  the full reference** (and `/` searches it as you type, `@` completes a path), while
+  launch shows the wordmark, what this is, the **version**, and one line naming those
+  three ways in. Nothing was removed — every command is still in `/help`, which also
+  documents the keys that aren't commands — and the version is new there, since until
+  now only `/doctor` could tell you which one you were running. Resuming a session
+  gains the most: the conversation you came back for no longer sits behind a
+  screenful of commands you weren't reading.
+
 ## [1.16.0] — 2026-08-28
 
 ### Added

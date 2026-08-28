@@ -1,15 +1,21 @@
-"""Unit tests for the launch banner's command box.
+"""Unit tests for the launch banner and the ``/help`` command box.
 
 Two lists describe the same commands — ``_COMMANDS`` (the autocomplete tokens) and
-``_COMMAND_GROUPS`` (the banner box) — so they can drift: a command added to one and
-not the other is either invisible at launch or untypeable via the menu. These tests
+``_COMMAND_GROUPS`` (the ``/help`` box) — so they can drift: a command added to one
+and not the other is either undocumented or untypeable via the menu. These tests
 pin that they agree, and that the box stays inside an 80-column terminal.
+
+The banner does NOT print that box, and the first class here holds it to that: the
+box was 31 of the 41 lines a launch printed, and everything it listed is one
+keystroke away via ``/help`` or the ``/`` menu. So the banner's job is only to say
+which app, which version, and where the rest is.
 """
 
 import re
 
 import pytest
 
+from mnemoai.client.ui import chat_interface as chat_interface_mod
 from mnemoai.client.ui.chat_interface import ChatInterface
 from mnemoai.client.user_commands import UserCommand
 
@@ -41,7 +47,7 @@ class _FakeStore:
 
 
 def _box_commands():
-    """Bare command tokens shown in the banner (``/exit, /quit`` → both)."""
+    """Bare command tokens listed in the ``/help`` box (``/exit, /quit`` → both)."""
     out = []
     for _, items in ChatInterface._COMMAND_GROUPS:
         for label, _desc in items:
@@ -53,31 +59,42 @@ def _box_commands():
 
 
 class TestTheTwoCommandListsAgree:
-    def test_every_autocompletable_command_is_documented_in_the_banner(self):
+    def test_every_autocompletable_command_is_documented_in_the_box(self):
         box = set(_box_commands())
         missing = [c for c, _ in ChatInterface._COMMANDS if c not in box]
-        assert not missing, f"not shown at launch: {missing}"
+        assert not missing, f"missing from the /help reference: {missing}"
 
-    def test_every_banner_command_can_be_typed_via_the_menu(self):
+    def test_every_documented_command_can_be_typed_via_the_menu(self):
         known = {c for c, _ in ChatInterface._COMMANDS}
         missing = [c for c in _box_commands() if c not in known]
-        assert not missing, f"in the banner but not autocompletable: {missing}"
+        assert not missing, f"documented but not autocompletable: {missing}"
 
     def test_no_command_is_listed_twice_in_the_box(self):
         shown = _box_commands()
         assert len(shown) == len(set(shown))
 
 
-class TestTheBoxStaysReadable:
-    """The box is a fixed width — it does not wrap or adapt — so an over-long
-    description silently breaks the frame on a standard terminal."""
+class TestTheLaunchBanner:
+    """What a launch prints. Short, by design — the reference lives in ``/help``."""
 
     MAX_COLS = 80
+    MAX_LINES = 12
 
     def _rendered(self, capsys):
         ci = ChatInterface.__new__(ChatInterface)
         ci._ChatInterface__welcome_message()
         return capsys.readouterr().out
+
+    def test_it_does_not_print_the_command_box(self, capsys):
+        # The whole point: the box is a screenful, and /help is one keystroke.
+        rendered = _ANSI.sub("", self._rendered(capsys))
+        assert "│" not in rendered and "╭" not in rendered
+        # A description only the box carries — proof no row leaked through.
+        assert "Summarize & shrink context" not in rendered
+
+    def test_it_stays_short_enough_to_read_at_a_glance(self, capsys):
+        lines = [ln for ln in self._rendered(capsys).split("\n") if ln.strip()]
+        assert len(lines) <= self.MAX_LINES, f"banner is {len(lines)} lines"
 
     def test_it_fits_an_80_column_terminal(self, capsys):
         widths = [
@@ -85,38 +102,23 @@ class TestTheBoxStaysReadable:
         ]
         assert max(widths) <= self.MAX_COLS, f"widest row is {max(widths)} cols"
 
-    def test_every_frame_row_is_the_same_width(self, capsys):
-        # A mis-padded row shows as a ragged right border.
-        rows = [
-            _ANSI.sub("", line)
-            for line in self._rendered(capsys).split("\n")
-            if line.strip().startswith("\033[90m│") or "│" in line
-        ]
-        widths = {len(r) for r in rows if r.strip()}
-        assert len(widths) == 1, f"ragged frame widths: {sorted(widths)}"
+    def test_it_names_the_three_ways_in(self, capsys):
+        # With no box printed, this line is the ONLY thing at launch that says the
+        # reference exists — and @ is invisible anywhere else.
+        rendered = _ANSI.sub("", self._rendered(capsys))
+        for way in ("/help", "to search", "@"):
+            assert way in rendered, f"{way} is not offered at launch"
 
-    def test_each_group_stays_small_enough_to_scan(self):
-        # The reason for grouping in the first place: one group of nine reads as a
-        # wall. Split a group before it grows past this.
-        for heading, items in ChatInterface._COMMAND_GROUPS:
-            assert len(items) <= 5, f"group '{heading}' has {len(items)} entries"
-
-    def test_the_wordmark_is_centered_over_the_box(self, capsys):
-        # The box widens to its longest row (well past the wordmark's fixed 64
-        # columns), so without an indent the logo sits visibly left of the frame.
+    def test_the_wordmark_is_flush_left(self, capsys):
+        # It used to be indented to center over the box; with the box gone there
+        # is nothing to center over, and the prompt + footer below are flush.
         lines = [_ANSI.sub("", ln) for ln in self._rendered(capsys).split("\n")]
-        wordmark = next(ln for ln in lines if "█" in ln)
-        frame = next(ln for ln in lines if ln.startswith("╭"))
-
-        def span(s):
-            return len(s) - len(s.lstrip()), len(s.rstrip())
-
-        wl, wr = span(wordmark)
-        fl, fr = span(frame)
-        assert abs((wl - fl) - (fr - wr)) <= 1, "wordmark is not centered on the box"
+        wordmark = [ln for ln in lines if "█" in ln]
+        assert wordmark, "no wordmark printed"
+        assert all(not ln.startswith(" ") for ln in wordmark)
 
     def test_the_tagline_sits_under_the_wordmark(self, capsys):
-        # Centered on the WORDMARK, not the box — under the letters, not the frame.
+        # Centered on the WORDMARK's own width — under the letters, not the screen.
         lines = [_ANSI.sub("", ln) for ln in self._rendered(capsys).split("\n")]
         wordmark = next(ln for ln in lines if "█" in ln)
         tagline = next(ln for ln in lines if "learns & remembers" in ln)
@@ -129,21 +131,49 @@ class TestTheBoxStaysReadable:
         assert tl >= wl and tr <= wr, "tagline runs wider than the wordmark"
         assert abs((tl - wl) - (wr - tr)) <= 1, "tagline is not centered"
 
-    def test_the_hint_mentions_the_completion_menu(self, capsys):
-        # It's how a command is found WITHOUT this box, which is what allows the
-        # box to stay short.
-        assert "to search commands" in self._rendered(capsys)
+    def test_the_version_is_shown(self, capsys, monkeypatch):
+        # The one fact neither /help nor the pinned footer carries.
+        monkeypatch.setattr(chat_interface_mod, "app_version", lambda: "9.9.9")
+        assert "v9.9.9" in _ANSI.sub("", self._rendered(capsys))
 
-    def test_the_hint_points_at_help(self, capsys):
-        # The banner scrolls away; /help is how the box comes back.
-        assert "/help" in self._rendered(capsys)
+    def test_a_checkout_prints_no_version_line(self, capsys, monkeypatch):
+        # Running from a checkout has no distribution metadata; a placeholder
+        # ("v", "unknown") would be worse than the line being absent.
+        monkeypatch.setattr(chat_interface_mod, "app_version", lambda: "")
+        lines = [
+            _ANSI.sub("", ln).strip()
+            for ln in self._rendered(capsys).split("\n")
+            if ln.strip()
+        ]
+        assert not any(ln.startswith("v") for ln in lines), lines
 
-    def test_a_group_heading_labels_only_its_first_row(self, capsys):
+
+class TestHelpScreen:
+    """``/help`` is the command reference — the only place the box is printed.
+
+    The banner points here instead of carrying the list itself, so these are the
+    tests that the box is complete, square, and readable: the fixed-width frame
+    does not wrap or adapt, so one over-long description silently breaks it on a
+    standard terminal.
+    """
+
+    MAX_COLS = 80
+
+    def _rendered(self):
+        return ChatInterface._help_text(ChatInterface.__new__(ChatInterface))
+
+    def test_each_group_stays_small_enough_to_scan(self):
+        # The reason for grouping in the first place: one group of nine reads as a
+        # wall. Split a group before it grows past this.
+        for heading, items in ChatInterface._COMMAND_GROUPS:
+            assert len(items) <= 5, f"group '{heading}' has {len(items)} entries"
+
+    def test_a_group_heading_labels_only_its_first_row(self):
         # The heading is inlined into the gutter of its first command's row, so it
         # must not repeat down the group (that's what the blank-line spacers used
         # to cost). Checked in the GUTTER only — "Exit" also appears in a
         # description, so counting the bare substring would be misleading.
-        rendered = _ANSI.sub("", self._rendered(capsys))
+        rendered = _ANSI.sub("", self._rendered())
         headings = {h for h, _ in ChatInterface._COMMAND_GROUPS}
         gutters = [
             line.split("│")[1][:12].strip()
@@ -152,20 +182,6 @@ class TestTheBoxStaysReadable:
         ]
         labelled = [g for g in gutters if g in headings]
         assert sorted(labelled) == sorted(headings)
-
-
-class TestHelpScreen:
-    """``/help`` re-renders the SAME box as the banner, plus the keys.
-
-    The banner is only shown once and then scrolls away, so ``/help`` is the only
-    lasting reference — and it shares ``_command_box`` precisely so it can't fall
-    behind the banner when a command is added.
-    """
-
-    MAX_COLS = 80
-
-    def _rendered(self):
-        return ChatInterface._help_text(ChatInterface.__new__(ChatInterface))
 
     def test_it_fits_an_80_column_terminal(self):
         widths = [len(_ANSI.sub("", line)) for line in self._rendered().split("\n")]
