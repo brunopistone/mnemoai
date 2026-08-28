@@ -87,6 +87,37 @@ class TestTransientNetworkClassifier:
         ]:
             assert LangGraphAgent._is_transient_network_error(Exception(msg)), msg
 
+    def test_matches_bedrock_service_exceptions(self):
+        # These arrive named after their exception CLASS, and a class name has no
+        # spaces — so the prose markers missed them: "ServiceUnavailableException"
+        # does not contain "service unavailable", and throttling (the single most
+        # retryable answer Bedrock gives) matched nothing at all. Both surfaced as
+        # zero-retry failures, botocore's own retries being off by design
+        # ("reached max retries: 0").
+        for msg in [
+            "An error occurred (ServiceUnavailableException) when calling the "
+            "Converse operation (reached max retries: 0): Bedrock is unable to "
+            "process your request.",
+            "An error occurred (ThrottlingException) when calling the "
+            "ConverseStream operation (reached max retries: 0): Too many "
+            "requests, please wait before trying again.",
+            "An error occurred (ModelNotReadyException) when calling the "
+            "Converse operation: Model is not ready.",
+            "An error occurred (InternalServerException) when calling the "
+            "ConverseStream operation: boom",
+        ]:
+            assert LangGraphAgent._is_transient_network_error(Exception(msg)), msg
+
+    def test_matches_rate_limits(self):
+        # A 429 is transient by definition; the backoff already honors a
+        # provider's own retry-after when one is attached.
+        for msg in [
+            "Error code: 429 - {'type': 'error', 'error': "
+            "{'type': 'rate_limit_error', 'message': 'Number of requests'}}",
+            "rate limit exceeded",
+        ]:
+            assert LangGraphAgent._is_transient_network_error(Exception(msg)), msg
+
     def test_does_not_match_deterministic_errors(self):
         for msg in [
             "invalid_request_error: bad parameter",

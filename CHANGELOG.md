@@ -7,6 +7,27 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.14.3] — 2026-08-28
+
+### Fixed
+
+- **A provider answering "service unavailable" or "throttled" is retried instead
+  of being treated as final.** The transient-failure classifier matches an error's
+  wording, and those two arrive named after their exception class — a class name
+  has no spaces, so `ServiceUnavailableException` never contained the
+  `service unavailable` marker and `ThrottlingException` matched nothing at all.
+  Both were classified deterministic and retried **zero** times; because this
+  layer deliberately keeps botocore's own retries off, the message even said so
+  (`reached max retries: 0`). On a streamed turn that ended the answer outright; on
+  an auxiliary call it was quieter and worse — route classification took its
+  fallback on the first rejection (`! Router classification failed (…); binding the
+full toolset`), so nothing broke and the turn just got dumber. Both class-name
+  forms are now transient, as are `too many requests` / `rate limit` / `429` (a
+  429 is transient by definition, and it's the case where a provider most often
+  attaches its own `retry-after`, which the backoff already honors) and
+  `ModelNotReadyException`. Deterministic failures — validation, access denied,
+  `model not found` — stay fatal.
+
 ## [1.14.2] — 2026-08-27
 
 ### Fixed

@@ -67,6 +67,22 @@ TRANSIENT_NETWORK_MARKERS = (
     "peer closed connection",
     "remotedisconnected",
     "incomplete read",
+    # A provider names a retryable condition after its EXCEPTION CLASS, and a
+    # class name has no spaces — so "ServiceUnavailableException" does not contain
+    # "service unavailable" and read as deterministic (observed on Bedrock: the
+    # router fell back to the full toolset on the FIRST rejection). Throttling is
+    # the most retryable answer a provider can give and matched nothing at all.
+    "serviceunavailable",                 # ServiceUnavailableException (Bedrock)
+    "service_unavailable",
+    "internalserver",                     # InternalServerException (Bedrock)
+    "modelnotready",                      # ModelNotReadyException (Bedrock)
+    "model not ready",
+    "throttling",                         # ThrottlingException (Bedrock/AWS)
+    "throttled",
+    "too many requests",                  # 429 prose, most providers
+    "rate limit",                         # rate_limit_error (Anthropic/OpenAI)
+    "rate_limit",
+    "429",
     "temporarily unavailable",
     "service unavailable",
     "bad gateway",
