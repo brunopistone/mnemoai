@@ -6,6 +6,8 @@ and the non-TTY plain loop. These tests exercise its pure routing decisions
 client — no LLM, no prompt_toolkit app, no TTY.
 """
 
+import re
+
 import pytest
 
 from mnemoai.client.ui.chat_interface import ChatInterface
@@ -90,17 +92,44 @@ def test_blank_query_is_noop(ci):
 
 def test_cancelled_query_prints_stopped(ci, capsys):
     # A cancelled turn must resolve the transient "(cancelling…)" to a final
-    # "Stopped" line (not just silently swallow the response).
+    # "stopped" line (not just silently swallow the response).
     ci.client.query_return = "Operation was cancelled."
     ci._dispatch("do a long thing")
     out = capsys.readouterr().out
-    assert "Stopped" in out
+    assert "stopped" in out
 
 
 def test_normal_query_does_not_print_stopped(ci, capsys):
     ci.client.query_return = "here is your answer"
     ci._dispatch("a question")
-    assert "Stopped" not in capsys.readouterr().out
+    assert "stopped" not in capsys.readouterr().out
+
+
+def test_every_turn_ends_with_a_done_marker(ci, capsys):
+    # A streamed answer just stops mid-page: without this line nothing says the
+    # turn is over, and the idle prompt looks the same either way.
+    ci.client.query_return = "here is your answer"
+    ci._dispatch("a question")
+    out = re.sub(r"\033\[[0-9;]*m", "", capsys.readouterr().out)
+    assert re.search(r"· done in \d+\w* · \d\d:\d\d", out)
+
+
+def test_a_cancel_raised_into_the_frame_is_still_resolved(ci, capsys):
+    # Esc between steps arrives as a bare KeyboardInterrupt, not as the
+    # "Operation was cancelled." response — it must not be the one turn that ends
+    # with nothing under the UI's transient "(cancelling…)".
+    def _boom(_q):
+        raise KeyboardInterrupt
+
+    ci.client.query = _boom
+    assert ci._dispatch("do a long thing") is None
+    assert "stopped" in capsys.readouterr().out
+
+
+def test_a_slash_command_gets_no_turn_marker(ci, capsys):
+    # It marks a TURN, not every line the app prints.
+    ci._dispatch("/context")
+    assert "done in" not in capsys.readouterr().out
 
 
 def test_help_prints_the_command_reference(ci, capsys):

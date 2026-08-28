@@ -7,6 +7,26 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.15.0] — 2026-08-28
+
+### Added
+
+- **A turn now ends with a line that says so** — `· done in 7m22s · 11:08`, dim,
+  just above the prompt. A streamed answer simply stops: the last chunk looks like
+  every other one, so nothing separated "the model is finished" from "the next
+  paragraph is still coming", and the idle prompt looked identical either way. The
+  spinner that means *working* lives in the toolbar, and a toolbar is not
+  scrollback — it can't answer the question once it's gone, or ten minutes later
+  when you come back to the terminal and want to know whether the long turn ever
+  landed. So the line also carries the two facts you'd have to have watched for:
+  how long the turn took, and the clock time it finished. It is printed for **every**
+  turn, fast ones included — a terminator you can only sometimes rely on doesn't
+  terminate anything — and for the delivery-only turn a finished background
+  sub-agent triggers on its own, which is the output least likely to be expected.
+  A cancelled turn reads `⊘ stopped after 12s · 11:08`, replacing the bare
+  `⊘ Stopped`; a failed one still ends with its `✗` line, which already says the
+  turn is over and why.
+
 ## [1.14.3] — 2026-08-28
 
 ### Fixed

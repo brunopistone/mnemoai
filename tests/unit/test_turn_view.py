@@ -7,6 +7,7 @@ text and tool args survive verbatim and that empty inputs collapse to nothing.
 """
 
 import re
+import time
 
 from mnemoai.client.ui.turn_view import (
     ReasoningStatus,
@@ -20,6 +21,7 @@ from mnemoai.client.ui.turn_view import (
     render_step_done,
     render_step_list,
     render_tool_call,
+    render_turn_end,
     user_prompt_text,
 )
 
@@ -184,6 +186,28 @@ class TestSessionNotice:
     def test_collapses_whitespace_and_tolerates_empty(self):
         assert "a b" in render_session_notice(" a \n b ")
         assert render_session_notice("").endswith("\033[0m")
+
+
+class TestTurnEnd:
+    """The one-line full stop under a finished turn (duration + clock time)."""
+
+    # 2026-08-28 11:08:03 local — asserted as HH:MM, so the test is TZ-agnostic.
+    _AT = time.mktime((2026, 8, 28, 11, 8, 3, 0, 0, -1))
+
+    def test_carries_the_duration_and_the_clock_time(self):
+        out = render_turn_end(442.0, self._AT)
+        assert "7m22s" in out
+        assert time.strftime("%H:%M", time.localtime(self._AT)) in out
+        assert "\n" not in out
+
+    def test_a_fast_turn_is_marked_too(self):
+        # The terminator has to be unconditional to be worth reading.
+        assert "0s" in render_turn_end(0.2, self._AT)
+
+    def test_a_cancelled_turn_says_stopped_with_the_time_spent(self):
+        out = render_turn_end(12.0, self._AT, stopped=True)
+        assert "⊘" in out and "stopped" in out and "12s" in out
+        assert "done" not in out
 
 
 class TestFileOpRendering:

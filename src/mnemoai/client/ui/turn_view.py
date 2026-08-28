@@ -7,6 +7,7 @@ above the pinned input; colors degrade harmlessly where unsupported.
 import difflib
 import re
 import threading
+import time
 
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 
@@ -431,6 +432,28 @@ def render_session_notice(text: str) -> str:
     text stays dim, so it reads as a marker rather than something the model said.
     """
     return f"{_HEADER}⟲{_RESET} {_GRAY}{' '.join(str(text or '').split())}{_RESET}"
+
+
+def render_turn_end(seconds: float, finished: float, stopped: bool = False) -> str:
+    """One dim line closing a turn: how long it took and when it ended.
+
+    A streamed answer simply STOPS — the last chunk looks like any other, so
+    nothing says whether the model is finished or the next paragraph is still
+    coming, and the pinned prompt sits there looking identical either way (the
+    spinner that meant "working" is gone from the toolbar the moment the turn
+    ends, and a toolbar is not scrollback: it can't answer the question later).
+    This is the missing full stop, and the two facts you want once a long turn
+    has ended without you watching — the wait, and the clock time it landed.
+
+    Printed for EVERY turn including a fast one: a terminator you can only
+    sometimes rely on doesn't terminate anything. ``stopped`` words a cancelled
+    turn instead, resolving the transient "(cancelling…)" the same way.
+    """
+    clock = time.strftime("%H:%M", time.localtime(finished))
+    duration = format_duration(seconds)
+    if stopped:
+        return f"{_GRAY}⊘ stopped after {duration} · {clock}{_RESET}"
+    return f"{_GRAY}· done in {duration} · {clock}{_RESET}"
 
 
 def render_hook_notice(text: str) -> str:
