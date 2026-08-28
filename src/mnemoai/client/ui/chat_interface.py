@@ -11,6 +11,7 @@ from typing import Any
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 
+from mnemoai.client import file_ledger, file_mentions
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
     is_task_successful,
@@ -18,7 +19,7 @@ from mnemoai.client.memory.episodic_memory import (
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
-from mnemoai.client.ui import status_bar, turn_view
+from mnemoai.client.ui import notify, status_bar, turn_view
 from mnemoai.client.ui.tui import (
     _DELETE,
     PinnedPromptReader,
@@ -28,6 +29,7 @@ from mnemoai.client.ui.tui import (
     confirm_inline,
     select_from_list,
 )
+from mnemoai.client.user_commands import UserCommandStore
 from mnemoai.utils.config import config
 from mnemoai.utils.configurator import (
     run_features_override,
@@ -50,10 +52,42 @@ class ChatInterface:
     def __init__(self, client: Any) -> None:
         self.client = client
         self.command_history = InMemoryHistory()
+        # User-defined slash commands, built on first use (see user_commands).
+        self._user_commands = None
         # Decided HERE, not in _run_pinned_loop: on a TTY the footer will carry the
         # context size, so nothing else should print it — and `--resume` replays
         # (and would print it) BEFORE the loop starts, from main._resume_session.
         client.status_footer_active = _dialog_is_tty()
+
+    @property
+    def user_commands(self) -> UserCommandStore:
+        """The user's slash-command store (``~/.mnemoai/commands/*.md``).
+
+        Built on first use, not in ``__init__``: resolving the root CREATES the
+        directory, and nothing should touch the app home just because a
+        ChatInterface was constructed. The store reserves the built-in names by
+        default (``user_commands.BUILTIN_COMMANDS``, pinned to :attr:`_COMMANDS` by
+        a test) — ``_dispatch`` matches those first, so a colliding file would
+        never fire, and it is rejected with a reason instead of looking broken.
+        """
+        # getattr, not self._user_commands: the unit tests build this class with
+        # __new__ (no __init__), and a report or a dispatch must not depend on that.
+        if getattr(self, "_user_commands", None) is None:
+            self._user_commands = UserCommandStore()
+        return self._user_commands
+
+    def _completion_commands(self) -> list:
+        """Built-in + user-defined ``(cmd, desc)`` pairs for the ``/`` menu.
+
+        Re-read per keystroke (the reader takes this as a callable) so a command
+        file added mid-session appears in the menu, matching the fact that it
+        already dispatches. Best-effort: a broken commands dir must not stop the
+        built-ins from completing.
+        """
+        try:
+            return list(self._COMMANDS) + self.user_commands.completions()
+        except Exception:
+            return list(self._COMMANDS)
 
     def _prompt_html(self) -> str:
         """Build the input-prompt line, with a 🔒 plan tag while plan mode is on.
@@ -85,6 +119,7 @@ class ChatInterface:
             ("/context", "What's using the context window"),
             ("/clear", "Clear conversation context"),
             ("/compact [focus]", "Summarize & shrink context"),
+            ("/rewind", "Undo your last prompt (files untouched)"),
             ("/usage", "Token usage for this session (per model)"),
         ]),
         ("Sessions", [
@@ -93,6 +128,11 @@ class ChatInterface:
             ("/export [md|txt]", "Write a shareable transcript here"),
             ("/branch [turn]", "Fork this session and continue there"),
             ("/rename [title]", "Name this session in the --resume picker"),
+        ]),
+        ("Workspace", [
+            ("/files", "Files this session read, changed or attached"),
+            ("/diff [path]", "Uncommitted changes (this session's marked)"),
+            ("/copy [code|N]", "Copy the last answer or its code to clipboard"),
         ]),
         ("Assistant", [
             ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
@@ -128,12 +168,16 @@ class ChatInterface:
         ("/skills", "List installed skills (/skills <name> to preview)"),
         ("/clear", "Clear conversation context"),
         ("/compact", "Summarize & shrink context (optional focus)"),
+        ("/rewind", "Take back your last prompt and the turn it ran"),
         ("/memory", "View persistent memory (/memory clear to wipe)"),
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/save", "Save conversation (/save [path])"),
         ("/load", "Load a saved conversation (/load lists saved)"),
         ("/usage", "Show token usage for this session"),
         ("/context", "Show what's using the context window"),
+        ("/files", "Files this session read, changed or attached with @"),
+        ("/diff", "Show uncommitted changes (/diff <path> for one file)"),
+        ("/copy", "Copy the last answer (/copy code for its last code block)"),
         ("/export", "Export a shareable transcript (/export [md|txt] [path])"),
         ("/branch", "Fork this session at a turn and continue there"),
         ("/rename", "Name this session for the --resume picker"),
@@ -167,26 +211,66 @@ class ChatInterface:
         """Visible length (ANSI escapes don't occupy columns)."""
         return len(cls._ANSI_RE.sub("", s))
 
+    # Rows the "Yours" group shows before collapsing the rest into a count: the box
+    # is already the tallest thing on screen, and a user with 30 commands must not
+    # push the built-in reference off it.
+    _MAX_USER_COMMAND_ROWS = 6
+
+    @staticmethod
+    def _clip(text: str, width: int) -> str:
+        """``text`` trimmed to ``width`` visible chars, ending in … when cut."""
+        text = " ".join(str(text or "").split())
+        return text if len(text) <= width else text[: width - 1].rstrip() + "…"
+
     @classmethod
-    def _command_box(cls, footer: list) -> str:
+    def _user_command_group(cls, commands: list) -> list:
+        """The extra ``[("Yours", rows)]`` group for user-defined commands (or []).
+
+        **A user row must never widen the box.** The built-in labels and
+        descriptions are hand-fitted to keep the frame near 80 columns, and both
+        columns are padded to their widest member — so one verbose user
+        description (or a long ``argument_hint``) would push the entire reference
+        past the terminal. Both are therefore clipped to the built-ins' own widths,
+        and a label that only fits without its hint keeps the NAME (that's the part
+        you type; the hint is still in the ``/`` menu and in the file).
+        """
+        if not commands:
+            return []
+        cmd_w = max(cls._vlen(c) for _, items in cls._COMMAND_GROUPS for c, _ in items)
+        desc_w = max(cls._vlen(d) for _, items in cls._COMMAND_GROUPS for _, d in items)
+        rows = []
+        for c in commands[: cls._MAX_USER_COMMAND_ROWS]:
+            label = c.label if cls._vlen(c.label) <= cmd_w else f"/{c.name}"
+            rows.append((cls._clip(label, cmd_w), cls._clip(c.description, desc_w)))
+        extra = len(commands) - len(rows)
+        if extra:
+            rows.append((f"… +{extra} more", "in ~/.mnemoai/commands/"))
+        return [("Yours", rows)]
+
+    @classmethod
+    def _command_box(cls, footer: list, extra_groups: list = None) -> str:
         """The framed, grouped command list, with ``footer`` rows under a separator.
 
         Shared by the launch banner and ``/help``: the box IS the command
         reference, and ``/help`` exists because the banner scrolls away — two
         renderers would drift apart the first time a command was added.
+        ``extra_groups`` appends dynamic groups (the user's own commands) in the
+        same shape as :attr:`_COMMAND_GROUPS`, so they are sized and framed by the
+        same code as the built-ins.
         """
         C = cls._C
         vlen = cls._vlen
+        groups = list(cls._COMMAND_GROUPS) + list(extra_groups or [])
 
         # Inner width: wordmark width (64), widened to fit the longest row. A
         # command row is "<heading gutter>  <command>  <description>", so the
         # gutter that holds the inlined group heading counts toward the width too;
         # the footer rows count as well, or a long hint breaks the frame.
-        cmd_w = max(vlen(c) for _, items in cls._COMMAND_GROUPS for c, _ in items)
-        gutter_w = max(vlen(h) for h, _ in cls._COMMAND_GROUPS)
+        cmd_w = max(vlen(c) for _, items in groups for c, _ in items)
+        gutter_w = max(vlen(h) for h, _ in groups)
         widest = max(
             gutter_w + 2 + cmd_w + 2 + vlen(desc)
-            for _, items in cls._COMMAND_GROUPS for _, desc in items
+            for _, items in groups for _, desc in items
         )
         W = max(64, widest, *(vlen(f) for f in footer)) if footer else max(64, widest)
 
@@ -202,7 +286,7 @@ class ChatInterface:
         # chrome in a box that's already the tallest thing on screen at launch;
         # inlining the heading buys all of it back and still reads as grouped,
         # because the headings are the only text in the left column.
-        for heading, items in cls._COMMAND_GROUPS:
+        for heading, items in groups:
             for idx, (cmd, desc) in enumerate(items):
                 label = heading if idx == 0 else ""
                 gutter = f"{C['head']}{label}{C['reset']}" + " " * (
@@ -230,12 +314,15 @@ class ChatInterface:
         # whole reference.
         # Two rows, not one: the frame widens to its widest row, and a single
         # combined hint pushed it past 80 columns.
-        box = self._command_box([
-            f"{C['dim']}Ctrl+J{C['reset']} for new lines · "
-            f"{C['dim']}Enter{C['reset']} to submit · "
-            f"{C['dim']}/{C['reset']} to search commands",
-            f"{C['dim']}/help{C['reset']} brings this box back, with the keys",
-        ])
+        box = self._command_box(
+            [
+                f"{C['dim']}Ctrl+J{C['reset']} for new lines · "
+                f"{C['dim']}Enter{C['reset']} to submit · "
+                f"{C['dim']}/{C['reset']} to search commands",
+                f"{C['dim']}/help{C['reset']} brings this box back, with the keys",
+            ],
+            self._own_command_group(),
+        )
 
         # --- Wordmark banner (indigo ≈ #5f5fff via 256-color 63) ---
         # Center the wordmark AND its tagline over the command box. The box widens
@@ -264,6 +351,7 @@ class ChatInterface:
             ("Ctrl+J", "new line"),
             ("↑ / ↓", "history"),
             ("/", "command menu"),
+            ("@", "attach a file or directory (completes as you type)"),
             ("Esc", "interrupt the current turn"),
             ("Ctrl+A", "agents panel (↑↓ move · Enter view · x stop · Esc leave)"),
             ("Ctrl+X Ctrl+K", "stop every running agent"),
@@ -274,7 +362,18 @@ class ChatInterface:
             f"  {C['cmd']}{k.ljust(key_w)}{C['reset']}  {C['text']}{what}{C['reset']}"
             for k, what in keys
         ]
-        return self._command_box(footer)
+        return self._command_box(footer, self._own_command_group())
+
+    def _own_command_group(self) -> list:
+        """The user's own commands as a box group; [] on any failure.
+
+        Best-effort by design: the command reference is what a stuck user reaches
+        for, so a malformed commands dir must never be the reason it won't print.
+        """
+        try:
+            return self._user_command_group(self.user_commands.list_commands())
+        except Exception:
+            return []
 
     def _store_success_episode(self, task: str, tools_used: list) -> None:
         """Persist a successful episode and record the profiling outcome.
@@ -863,7 +962,7 @@ class ChatInterface:
 
         reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
-            commands=self._COMMANDS,
+            commands=self._completion_commands,
             history=self.command_history,
             dispatch=_dispatch,
             toolbar_text=lambda: spinner_toolbar_text(status),
@@ -947,6 +1046,51 @@ class ChatInterface:
             return count, now, False
         return count, now, True
 
+    def _expand_user_command(self, query: str) -> Any:
+        """Expand ``/name args`` from the user's commands dir, or return None.
+
+        Prints one dim line naming what ran: the prompt the model answers is the
+        file's body, not what the user typed, so without it the transcript shows a
+        turn whose question is nowhere on screen. Best-effort — a failure here
+        leaves the line to be sent as typed.
+        """
+        if not query.strip().startswith("/"):
+            return None
+        try:
+            match = self.user_commands.expand(query)
+        except Exception as e:
+            logger.warning(f"User command expansion failed: {one_line(e)}")
+            return None
+        if match is None:
+            return None
+        cmd, prompt = match
+        print(turn_view.render_command_expansion(cmd.name, cmd.path))
+        return prompt
+
+    def _expand_mentions(self, query: str) -> str:
+        """Attach every ``@path`` in the line to the prompt, announcing each.
+
+        One dim line per mention, because the attachment is otherwise invisible:
+        a path that resolved and one that was typo'd read identically on screen,
+        and the second leaves the model guessing about a file it never saw.
+        Best-effort — a failure here sends the line exactly as typed.
+        """
+        if "@" not in query:
+            return query
+        try:
+            expanded, mentions = file_mentions.expand(query)
+        except Exception as e:
+            logger.warning(f"File mention expansion failed: {one_line(e)}")
+            return query
+        ledger = getattr(getattr(self.client, "agent", None), "files", None)
+        for mention in mentions:
+            print(turn_view.render_mention_notice(mention.label))
+            # An attached FILE is a touch like any other, so /files can answer
+            # "what did I hand it?" — a directory listing names no single file.
+            if ledger is not None and mention.kind == "file" and mention.path:
+                ledger.record(str(mention.path), file_ledger.ATTACHED)
+        return expanded
+
     def _dispatch(self, query: str):
         """Handle one submitted line (slash command or query); returns
         :data:`_EXIT` to end the loop, else ``None``. Shared by both loops."""
@@ -981,6 +1125,24 @@ class ChatInterface:
 
         if query.lower() == "/context":
             print("\n" + self.client.context_report() + "\n")
+            return None
+
+        # /rewind — the conversation only: no file on disk is rolled back.
+        if query.lower() == "/rewind":
+            print("\n" + self.client.rewind_turn() + "\n")
+            return None
+
+        if query.lower() == "/files":
+            print("\n" + self.client.files_report() + "\n")
+            return None
+
+        # /diff [path] — read-only: it never stages, stashes or checks anything out.
+        if query.lower() == "/diff" or query.lower().startswith("/diff "):
+            print("\n" + self.client.diff_report(query[len("/diff"):].strip()) + "\n")
+            return None
+
+        if query.lower() == "/copy" or query.lower().startswith("/copy "):
+            print("\n" + self.client.copy_last(query[len("/copy"):].strip()) + "\n")
             return None
 
         # /export [md|txt] [path] — a shareable transcript, not a reloadable file.
@@ -1101,6 +1263,19 @@ class ChatInterface:
                 print_error("Failed to load conversation. Check the file path.")
             return None
 
+        # A user-defined command (~/.mnemoai/commands/<name>.md) expands INTO the
+        # prompt and then runs as an ordinary turn — checked after every built-in,
+        # so a file can never shadow one, and an unknown /thing still falls through
+        # to being sent as prose.
+        expanded = self._expand_user_command(query)
+        if expanded is not None:
+            query = expanded
+
+        # `@path` mentions attach the file itself. After the command expansion, so
+        # a command's own body can mention files; after every built-in, so a path
+        # typed as an argument to one (`/export @dir`) keeps its literal meaning.
+        query = self._expand_mentions(query)
+
         if not query.strip():
             # An empty line is normally rejected — EXCEPT a delivery-only turn
             # auto-enqueued when a background sub-agent finished (surfaces its
@@ -1114,6 +1289,7 @@ class ChatInterface:
                 # Marked like any other turn — this one appeared without the user
                 # typing, so where it ends is even less obvious.
                 print("\n" + self._turn_end_line(started))
+                notify.notify_turn_end(time.monotonic() - started)
             else:
                 print("Input cannot be empty. Please try again.")
             return None
@@ -1167,6 +1343,10 @@ class ChatInterface:
                 print(self._turn_end_line(started, stopped=True))
             else:
                 print("\n" + self._turn_end_line(started))
+                # …and, if the turn ran long enough that the user has plausibly
+                # looked away, ring the terminal. Deliberately NOT on the
+                # cancelled path above: their hand is already on the keyboard.
+                notify.notify_turn_end(time.monotonic() - started)
         except KeyboardInterrupt:
             # The cancel landed in this frame instead of being turned into a
             # "cancelled" response (Esc between steps, Ctrl+C in the plain loop).

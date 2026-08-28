@@ -321,6 +321,53 @@ class TestSizeChecks:
         assert doctor._size_checks() == []
 
 
+class TestCommandChecks:
+    """A rejected command file is exactly the invisible failure /doctor is for:
+    you type ``/deploy``, the line goes to the model as prose, and nothing ever
+    said the file was skipped."""
+
+    def _store(self, monkeypatch, tmp_path, files):
+        from mnemoai.client import user_commands
+
+        root = tmp_path / "commands"
+        root.mkdir(parents=True, exist_ok=True)
+        for name, text in files.items():
+            (root / name).write_text(text)
+        user_commands._SCAN_CACHE.clear()
+        monkeypatch.setattr(
+            doctor, "UserCommandStore", lambda: user_commands.UserCommandStore(root=root)
+        )
+
+    def test_loaded_commands_are_named(self, monkeypatch, tmp_path):
+        self._store(monkeypatch, tmp_path, {"deploy.md": "ship it", "review.md": "look"})
+        check = next(c for c in doctor._command_checks() if c.name == "your commands")
+        assert check.status == OK
+        assert "/deploy" in check.detail and "/review" in check.detail
+
+    def test_a_long_list_is_counted_not_dumped(self, monkeypatch, tmp_path):
+        self._store(monkeypatch, tmp_path, {f"c{i}.md": "body" for i in range(9)})
+        check = next(c for c in doctor._command_checks() if c.name == "your commands")
+        assert "+3" in check.detail
+
+    def test_a_rejected_file_warns_with_the_reason_and_a_fix(self, monkeypatch, tmp_path):
+        self._store(monkeypatch, tmp_path, {"compact.md": "shadowing a built-in"})
+        skipped = [c for c in doctor._command_checks() if c.name == "command skipped"]
+        assert len(skipped) == 1
+        assert skipped[0].status == WARN
+        assert "built-in" in skipped[0].detail and skipped[0].fix
+
+    def test_no_commands_means_no_row(self, monkeypatch, tmp_path):
+        self._store(monkeypatch, tmp_path, {})
+        assert doctor._command_checks() == []
+
+    def test_a_broken_store_does_not_break_the_report(self, monkeypatch):
+        def boom():
+            raise RuntimeError("no commands dir")
+
+        monkeypatch.setattr(doctor, "UserCommandStore", boom)
+        assert doctor._command_checks() == []
+
+
 class TestLogCheck:
     def test_reports_the_path_size_and_retention(self, cfg, tmp_path, monkeypatch):
         cfg.values["LOG_MAX_AGE_DAYS"] = 14

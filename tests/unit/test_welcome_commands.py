@@ -8,9 +8,36 @@ pin that they agree, and that the box stays inside an 80-column terminal.
 
 import re
 
+import pytest
+
 from mnemoai.client.ui.chat_interface import ChatInterface
+from mnemoai.client.user_commands import UserCommand
 
 _ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+@pytest.fixture(autouse=True)
+def _no_user_commands(tmp_path, monkeypatch):
+    """Render the box against an EMPTY commands dir.
+
+    The box now grows a "Yours" group from ``~/.mnemoai/commands/``, so without
+    this the width assertions would depend on whatever the developer running the
+    suite happens to have authored.
+    """
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+
+
+class _FakeStore:
+    """Stand-in for UserCommandStore with a fixed command list."""
+
+    def __init__(self, commands):
+        self._commands = commands
+
+    def list_commands(self):
+        return list(self._commands)
+
+    def completions(self):
+        return [(f"/{c.name}", c.description) for c in self._commands]
 
 
 def _box_commands():
@@ -168,3 +195,82 @@ class TestHelpScreen:
     def test_help_is_itself_listed(self):
         # Otherwise the one command you needed to find this screen is invisible.
         assert "/help" in _ANSI.sub("", self._rendered())
+
+
+class TestUserCommandsInTheBox:
+    """The user's own commands are listed too — without resizing the reference.
+
+    Both columns are padded to their widest member and the frame widens to its
+    longest row, so ONE verbose description in a file the user wrote would push the
+    whole built-in reference past an 80-column terminal.
+    """
+
+    MAX_COLS = 80
+
+    def _render(self, commands):
+        ci = ChatInterface.__new__(ChatInterface)
+        ci._user_commands = _FakeStore(commands)
+        return ChatInterface._help_text(ci)
+
+    def _width(self, rendered):
+        return max(len(_ANSI.sub("", line)) for line in rendered.split("\n"))
+
+    def test_a_user_command_is_listed_in_its_own_group(self):
+        rendered = _ANSI.sub("", self._render([UserCommand("deploy", "Ship a release")]))
+        assert "Yours" in rendered
+        assert "/deploy" in rendered
+        assert "Ship a release" in rendered
+
+    def test_a_verbose_user_command_cannot_widen_the_box(self):
+        baseline = self._width(self._render([]))
+        wide = self._render(
+            [
+                UserCommand(
+                    "deploy",
+                    "d" * 200,
+                    argument_hint="<" + "h" * 80 + ">",
+                )
+            ]
+        )
+        assert self._width(wide) == baseline
+        assert self._width(wide) <= self.MAX_COLS
+
+    def test_a_long_label_keeps_the_name_and_drops_the_hint(self):
+        # The name is what you type; the hint still shows in the / menu.
+        rendered = _ANSI.sub(
+            "",
+            self._render(
+                [UserCommand("deploy", "Ship it", argument_hint="<a very long hint here>")]
+            ),
+        )
+        assert "/deploy" in rendered
+        assert "very long hint" not in rendered
+
+    def test_the_frame_stays_square_with_user_rows(self):
+        rendered = self._render([UserCommand("deploy", "d" * 200)])
+        rows = [_ANSI.sub("", ln) for ln in rendered.split("\n") if "│" in ln]
+        widths = {len(r) for r in rows if r.strip()}
+        assert len(widths) == 1, f"ragged frame widths: {sorted(widths)}"
+
+    def test_many_commands_collapse_to_a_count(self):
+        # A user with 30 commands must not push the built-in reference off screen.
+        many = [UserCommand(f"cmd{i}", f"desc {i}") for i in range(12)]
+        rendered = _ANSI.sub("", self._render(many))
+        listed = [f"/cmd{i}" for i in range(12) if f"/cmd{i}" in rendered]
+        assert len(listed) == ChatInterface._MAX_USER_COMMAND_ROWS
+        assert f"+{12 - len(listed)} more" in rendered
+
+    def test_no_group_when_the_user_has_none(self):
+        assert "Yours" not in _ANSI.sub("", self._render([]))
+
+    def test_a_broken_commands_dir_does_not_break_the_box(self):
+        # A diagnostic (or a banner) must never become the failure it reports.
+        class _Boom:
+            def list_commands(self):
+                raise OSError("commands dir is on fire")
+
+        ci = ChatInterface.__new__(ChatInterface)
+        ci._user_commands = _Boom()
+        rendered = ChatInterface._help_text(ci)
+        assert "/help" in _ANSI.sub("", rendered)
+        assert "Yours" not in _ANSI.sub("", rendered)

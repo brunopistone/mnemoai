@@ -7,7 +7,9 @@ BEFORE anything else (a blocked tool must never even ask), then the user's
 where the post-call gate lives. A hook's ``deny`` ends the call; its ``allow``
 satisfies only the confirmation prompt, never the block above it. Every branch
 emits exactly one ``ToolMessage`` per ``tool_call_id``: an unanswered id is a
-provider-level error, so there is no path out of here that skips the reply.
+provider-level error, so there is no path out of here that skips the reply. A call
+that SUCCEEDS is also noted in the session's file ledger (the source of
+``/files``) — here rather than in either caller, for the same reason as the gates.
 
 This existed as two near-identical copies, in ``_execute_tools`` (main loop) and
 ``_run_worker_loop`` (sub-agents + orchestrator waves) — ~70 lines each, ~39 of
@@ -101,6 +103,9 @@ def run_tool_calls(
         try:
             logger.debug(f"{log_label}: {name} with args: {args}")
             result = agent._invoke_tool(tool, name, args, quiet=quiet)
+            # Note the file this call touched, for /files and /diff. AFTER the
+            # call, so a refused or failed one leaves no trace.
+            agent._record_file_activity(name, args)
             content = agent._truncate_tool_result(str(result))
             post = agent._run_hooks(hooks.POST_TOOL_USE, name, args, str(result), quiet=quiet)
             _reply(messages, tool_id, name, _with_context(content, post))

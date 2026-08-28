@@ -52,6 +52,10 @@ On first run, if no config is found, an interactive configurator launches and wa
 - **📋 Todo Tracking, 📝 Plan Mode & 🔄 Background Tasks**: Multi-step task management
 - **⚡ Bash Execution & 🛡️ Git Safety**: Shell commands with smart error handling and guardrails
 - **🪝 Tool Hooks**: Your own commands run before/after any tool call — format writes, deny paths, auto-approve safe commands ([docs](https://brunopistone.github.io/mnemoai/guides/hooks/))
+- **⌨️ Your Own Slash Commands**: A markdown file per prompt you retype — `commands/review.md` becomes `/review <path>` ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#your-own-slash-commands))
+- **📎 `@`-File Mentions**: Type `@` to complete a path anywhere in your prompt; the file is read and sent with the question ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#attaching-a-file-with))
+- **⟲ Take Back a Prompt**: `/rewind` drops your last prompt and everything the turn produced — the conversation only, files on disk untouched ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#taking-back-your-last-prompt))
+- **🗂️ Workspace Reports**: `/files` lists what the session read, changed or attached; `/diff` shows uncommitted changes with this session's edits marked; `/copy` puts the last answer on the clipboard without the terminal's wrapping ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#what-this-session-touched))
 
 ## 📄 License
 

@@ -15,7 +15,7 @@ from typing import Any, Callable, Iterable, List, Optional
 from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import Completer, Completion, merge_completers
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import History, InMemoryHistory
@@ -39,7 +39,8 @@ from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
 
-from mnemoai.client.ui import turn_view
+from mnemoai.client import file_mentions
+from mnemoai.client.ui import notify, turn_view
 
 # Override the default reverse-video bottom-toolbar so the pinned status/queue
 # lines read as dim console text, not a highlighted bar.
@@ -127,16 +128,22 @@ def _format_paste_ref(paste_id: int, num_lines: int) -> str:
 
 
 class SlashCommandCompleter(Completer):
-    """Suggest slash commands, only when the line is a single leading '/' token."""
+    """Suggest slash commands, only when the line is a single leading '/' token.
 
-    def __init__(self, commands: List[tuple]) -> None:
+    ``commands`` may be a callable returning the ``(cmd, desc)`` pairs, re-read on
+    every keystroke: user-defined commands are files, so one added mid-session has
+    to appear in the menu without a restart (it already dispatches).
+    """
+
+    def __init__(self, commands) -> None:
         self._commands = commands
 
     def get_completions(self, document, complete_event) -> Iterable[Completion]:
         text = document.text_before_cursor
         if not text.startswith("/") or " " in text:
             return
-        for cmd, desc in self._commands:
+        commands = self._commands() if callable(self._commands) else self._commands
+        for cmd, desc in commands:
             if cmd.startswith(text):
                 yield Completion(
                     cmd,
@@ -144,6 +151,31 @@ class SlashCommandCompleter(Completer):
                     display=cmd,
                     display_meta=desc,
                 )
+
+
+class FileMentionCompleter(Completer):
+    """Complete the path being typed after an ``@``, anywhere in the line.
+
+    Unlike the slash completer this fires mid-sentence ("summarize @src/cl…"),
+    because that is where a mention belongs. All the matching lives in
+    :mod:`client.file_mentions` — the same module that expands the submitted
+    line — so what the menu offers and what actually attaches can't disagree.
+    """
+
+    def __init__(self, cwd=None) -> None:
+        self._cwd = cwd
+
+    def get_completions(self, document, complete_event) -> Iterable[Completion]:
+        fragment = file_mentions.fragment_at_cursor(document.text_before_cursor)
+        if fragment is None:
+            return
+        for path, meta in file_mentions.completions(fragment, cwd=self._cwd):
+            yield Completion(
+                path,
+                start_position=-len(fragment),
+                display=path,
+                display_meta=meta,
+            )
 
 
 # Sentinel returned by a dispatch callback to end the pinned REPL.
@@ -177,7 +209,7 @@ class PinnedPromptReader:
         self,
         *,
         prompt_text: Callable[[], Any],
-        commands: List[tuple],
+        commands: Any,
         dispatch: Callable[[str], Any],
         history: Optional[History] = None,
         toolbar_text: Optional[Callable[[], Any]] = None,
@@ -195,7 +227,9 @@ class PinnedPromptReader:
         Args:
             prompt_text: Returns the input prefix each render (re-evaluated so a
                 plan-mode tag updates live).
-            commands: Slash-command ``(cmd, desc)`` pairs for completion.
+            commands: Slash-command ``(cmd, desc)`` pairs for completion, or a
+                callable returning them (re-read per keystroke, so a
+                user-defined command added mid-session shows up).
             dispatch: Called on a worker thread; returns :data:`_ExitRepl` to end
                 the REPL, else ``None``.
             history: Optional shared prompt history.
@@ -261,7 +295,12 @@ class PinnedPromptReader:
         self._buffer = Buffer(
             multiline=False,
             history=self._history,
-            completer=SlashCommandCompleter(commands),
+            # Two completers, one menu: `/` at the head of the line, `@` anywhere
+            # in it. Only one of them can match a given cursor position, so they
+            # never compete for the popup.
+            completer=merge_completers(
+                [SlashCommandCompleter(commands), FileMentionCompleter()]
+            ),
             # NOT combined with enable_history_search — ptk warns they conflict
             # (both react to text changes), making the popup appear only sometimes.
             complete_while_typing=True,
@@ -797,6 +836,10 @@ class PinnedPromptReader:
                 return  # a running/queued turn will drain the completion itself
             self._pending += 1
             self._queue.put_nowait("")  # empty line → delivery-only turn
+            # Only on the idle path (above, the user is demonstrably here), and
+            # not duration-gated: the report lands seconds later, but the work it
+            # describes ran for as long as it ran.
+            notify.notify("mnemoai · a background agent finished")
 
         loop.call_soon_threadsafe(_enqueue)
 
@@ -964,6 +1007,10 @@ class PinnedPromptReader:
             lambda: self._loop.create_task(_echo_then_paint())
         )
 
+        # Ring the terminal: from here the work is stopped until someone answers,
+        # and the user is as likely to be elsewhere as during the turn itself.
+        notify.notify_waiting()
+
         # Poll so a cancel (Esc / Ctrl+C) can break out even if the prompt never
         # painted; without this the worker thread is unreachable forever. A
         # cancelled wait always DENIES — never `default`, which is "approve" for
@@ -1081,6 +1128,10 @@ class PinnedPromptReader:
         """
         if self._app is None or self._loop is None:
             return None
+
+        # Before the app comes down for the picker: the turn is now waiting on a
+        # decision, which is exactly the pause nobody is watching for.
+        notify.notify_waiting("mnemoai · a question is waiting")
 
         def _pick() -> Optional[str]:
             choice = select_from_list(f"? {question}", [(o, o) for o in options])

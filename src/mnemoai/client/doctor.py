@@ -37,6 +37,7 @@ from typing import Any, List, NamedTuple, Optional, Tuple
 from mnemoai.client import hooks
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.steering_store import SteeringStore
+from mnemoai.client.user_commands import UserCommandStore
 from mnemoai.models import prompt_cache
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
@@ -44,6 +45,7 @@ from mnemoai.utils.paths import (
     LOG_MAX_AGE_DAYS,
     app_home,
     app_log_path,
+    commands_dir,
     config_path,
     hooks_config_path,
     mcp_config_path,
@@ -501,8 +503,42 @@ def _state_checks(client: Any) -> List[Check]:
     elif registry.hooks:
         out.append(Check("State", "tool hooks", OK, f"{len(registry.hooks)} loaded"))
 
+    out.extend(_command_checks())
     out.append(_log_check())
     out.extend(_size_checks())
+    return out
+
+
+def _command_checks() -> List[Check]:
+    """The user's own slash commands — and the ones that were skipped.
+
+    A rejected command file is the invisible failure this whole report exists for:
+    you type ``/deploy``, it goes to the model as prose, and nothing ever said the
+    file was ignored. Reported only when the directory holds something, so an
+    install that doesn't use the feature gets no row.
+    """
+    try:
+        store = UserCommandStore()
+        commands, issues = store.list_commands(), store.list_issues()
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"/doctor could not read user commands: {e}")
+        return []
+    out: List[Check] = []
+    if commands:
+        names = ", ".join(f"/{c.name}" for c in commands[:6])
+        more = f" (+{len(commands) - 6})" if len(commands) > 6 else ""
+        out.append(Check("State", "your commands", OK, f"{names}{more}"))
+    for issue in issues:
+        out.append(
+            Check(
+                "State",
+                "command skipped",
+                WARN,
+                f"{issue.name}: {issue.reason}",
+                f"Fix or rename it in {_short(commands_dir())}; typing it now just "
+                "sends the line to the model.",
+            )
+        )
     return out
 
 

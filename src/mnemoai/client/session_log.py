@@ -10,6 +10,7 @@ per line:
     {"t": "compact", "n": 3, "ts": …, "summary": "…", "messages": [ …kept… ]}
     {"t": "compact", "n": 4, "ts": …, "messages": [ …evicted history… ]}
     {"t": "label", "ts": …, "title": "…"}          # /rename, last one wins
+    {"t": "rewind", "n": 4, "ts": …}               # /rewind, turn 4 withdrawn
 
 **Why append-only instead of mirroring the live message list:** compaction
 *replaces* ``agent.messages`` wholesale (it summarizes older turns away), so a
@@ -37,6 +38,18 @@ size, a restore replayed those and handed back every token eviction had just
 reclaimed. Same defect, a path where no summary exists to record. Records written
 before 1.12.6 carry neither key and stay purely informational (they restore
 everything, which is what they always did).
+
+**A withdrawn turn is a record too, not a deletion.** ``/rewind`` takes back the
+last exchange, and append-only leaves exactly one way to say so: a ``rewind``
+record naming the turn, which every reader then skips (:func:`read_session`,
+:func:`turn_summaries`, :func:`branch_session`) — the same shape as a ``compact``
+checkpoint, which also changes what comes back without rewriting a byte. The
+withdrawn text stays on disk, which is the point: a rewind is an undo of the
+conversation, not a promise that what was said was erased. And when the withdrawn
+exchange is not a turn of this session — a restored conversation arrives as ONE
+``restore`` blob, so its last exchange has no record to skip — the rewind pins the
+surviving history exactly as a checkpoint does, or the withdrawal would hold for
+the run and then come back at the next resume.
 
 Sub-agent runs are deliberately NOT logged: they execute on their own isolated
 message list and never enter ``agent.messages``, so writing them here would
@@ -130,6 +143,10 @@ class SessionLog:
 
     def __init__(self, cwd: str = None, profile: str = None, model: str = None):
         self._turn = 0
+        # Set by any record that PINS a state narrower than the raw turns (a
+        # compaction checkpoint, a `/rewind` rebase). Such a file is worth keeping
+        # and offering even with no turn of its own: see `discard_if_empty`.
+        self._pinned_state = False
         self.path: Optional[Path] = None
         try:
             # timestamp + pid + random suffix: the first two alone collide when
@@ -165,6 +182,7 @@ class SessionLog:
         p = Path(path)
         log.path = p
         log._turn = 0
+        log._pinned_state = False
         try:
             data = read_session(p)
             log._turn = data["turns"]
@@ -233,7 +251,7 @@ class SessionLog:
             {"t": "restore", "ts": time.time(), "source": source, "messages": payload}
         )
         if summary or kept is not None:
-            self.log_compaction(summary=summary, kept=kept or [])
+            self.log_compaction(summary=summary, kept=kept or [], seeded=True)
 
     def log_turn(self, messages: List[Any]) -> None:
         """Record the messages this turn added (already-final LangChain messages)."""
@@ -252,7 +270,7 @@ class SessionLog:
         )
 
     def log_compaction(
-        self, summary: str = "", kept: Optional[List[Any]] = None
+        self, summary: str = "", kept: Optional[List[Any]] = None, seeded: bool = False
     ) -> None:
         """Record that the live context shrank — as a restorable checkpoint.
 
@@ -270,6 +288,11 @@ class SessionLog:
 
         Falls back to a bare marker if the window can't be encoded: an unusable
         checkpoint would drop real history, a marker only loses the optimization.
+
+        ``seeded`` marks a checkpoint COPIED from the session this one resumed
+        (:meth:`seed_history` re-states it so the chain doesn't re-inflate). That
+        one is not a shrink this session performed — the parent holds the same
+        state — so it must not make a turn-less file worth keeping.
         """
         record: Dict[str, Any] = {"t": "compact", "n": self._turn, "ts": time.time()}
         if summary or kept is not None:
@@ -284,6 +307,8 @@ class SessionLog:
                 record.pop("messages", None)
                 record.pop("summary", None)
         self._append(record)
+        if "messages" in record and not seeded:
+            self._pinned_state = True
 
     def set_label(self, title: str) -> bool:
         """Name this session for the ``--resume`` picker; True if recorded.
@@ -298,6 +323,62 @@ class SessionLog:
         self._append({"t": "label", "ts": time.time(), "title": str(title)[:_LABEL_CHARS]})
         return True
 
+    def log_rewind(
+        self, turn_n: Optional[int] = None, kept: Optional[List[Any]] = None
+    ) -> bool:
+        """Record that an exchange was WITHDRAWN (``/rewind``); True if recorded.
+
+        Appended, never cut out: the file is the record of what was *said*, and a
+        reader honors the withdrawal instead (:func:`read_session`). Two shapes,
+        because a withdrawn turn is not always a ``turn`` record of this session:
+
+        * **``turn_n``** — the ordinary case: name the turn, and every reader skips
+          that record. The turn counter goes back down with it, so the next turn
+          takes the number again and a session whose only turn was withdrawn is
+          discardable at exit — which is why a stored number can appear twice in
+          one file and :func:`_withdrawn_turns` matches the most recent one.
+        * **``kept``** — the withdrawn exchange came in with a RESTORED
+          conversation (``--resume`` / ``/load`` seed it as one ``restore`` blob),
+          so there is no record to skip: the rewind pins the state that survived
+          instead, exactly as a compaction checkpoint does. Without it the
+          withdrawal would hold for this run and then quietly come back the next
+          time the session was resumed.
+
+        Never both. An unencodable window records NOTHING rather than a bare
+        marker: that marker means "withdraw the last turn", which is a different
+        (and wrong) instruction here. And since the encoder yields nothing at all
+        for input that isn't LangChain messages, a non-empty window that encodes to
+        nothing is a FAILURE, not a rewind back to zero — recorded as the latter it
+        would drop the whole conversation at the next restore.
+        """
+        if self.path is None:
+            return False
+        record: Dict[str, Any] = {"t": "rewind", "ts": time.time()}
+        if turn_n is not None:
+            record["n"] = int(turn_n)
+        elif kept is not None:
+            try:
+                payload = convert_langchain_messages_to_strands(list(kept))
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"Session log rewind encode failed: {e}")
+                return False
+            if kept and not payload:
+                logger.warning(
+                    f"Session log rewind produced no records from {len(kept)} "
+                    "message(s) — expected LangChain messages; not recorded."
+                )
+                return False
+            record["messages"] = payload
+        self._append(record)
+        if turn_n is not None:
+            self._turn = max(0, self._turn - 1)
+        else:
+            # Inherited history was rebased, so this file is the only place the
+            # withdrawal exists — it must survive `discard_if_empty` and stay in
+            # the picker even with no turn of its own.
+            self._pinned_state = True
+        return True
+
     def discard_if_empty(self) -> bool:
         """Delete this session's file if no turn was ever recorded; True if removed.
 
@@ -308,8 +389,14 @@ class SessionLog:
         out. Safe by construction: it only unlinks a file with zero `turn`
         records — a seeded ``restore`` record doesn't count, and dropping such a
         file loses nothing, because the session it copied from is never mutated.
+
+        The exception is a file that PINS a narrower state — a compaction
+        checkpoint or a ``/rewind`` rebase over inherited history. It has no turn
+        of its own, but it is the only place that shrink exists: dropping it would
+        hand the next ``--resume`` the un-compacted / un-withdrawn conversation
+        back.
         """
-        if self.path is None or self._turn > 0:
+        if self.path is None or self._turn > 0 or self._pinned_state:
             return False
         try:
             if read_session(self.path)["turns"] > 0:
@@ -321,6 +408,88 @@ class SessionLog:
             return False
 
 
+def _withdrawn_turns(records: List[Dict[str, Any]]) -> set:
+    """Record indices of ``turn`` records a later ``rewind`` record withdrew.
+
+    Matched on the stored turn number, searched NEWEST first: the counter is
+    restored from the surviving turns when a session is reopened and steps back
+    on every rewind, so one number can legitimately appear on two records in one
+    file, and a ``rewind`` always means the most recent turn still carrying it. A
+    record with no usable number falls back to the last live turn, which is the
+    only turn ``/rewind`` ever withdraws — EXCEPT one carrying ``messages``, which
+    withdrew INHERITED history and pins what survived instead of naming a turn (so
+    the fallback would take back a turn nobody asked about).
+    """
+    live: List[tuple] = []
+    withdrawn = set()
+    for i, rec in enumerate(records):
+        kind = rec.get("t")
+        if kind == "turn":
+            live.append((rec.get("n"), i))
+        elif kind == "rewind" and "messages" not in rec and live:
+            n = rec.get("n")
+            pos = next(
+                (p for p in range(len(live) - 1, -1, -1) if live[p][0] == n),
+                len(live) - 1,
+            )
+            withdrawn.add(live[pos][1])
+            del live[pos]
+    return withdrawn
+
+
+def _checkpoint_indices(records: List[Dict[str, Any]]) -> set:
+    """Indices of compaction CHECKPOINT records, excluding a seeded one.
+
+    ``seed_history`` and ``branch_session`` write a checkpoint immediately after
+    their ``restore`` record to re-state the state that was carried in — that one
+    describes history this session INHERITED, not a compaction that ran here, so
+    it must not make the first turn look uncompactable.
+    """
+    return {
+        i
+        for i, rec in enumerate(records)
+        if rec.get("t") == "compact"
+        and "messages" in rec
+        and not (i and records[i - 1].get("t") == "restore")
+    }
+
+
+def last_live_turn(path) -> Optional[Dict[str, Any]]:
+    """The most recent turn a ``rewind`` record could still withdraw.
+
+    ``{"n": stored turn number, "preview": …, "compacted": bool}``, or None when
+    no turn is left. ``compacted`` is the one thing that makes a turn
+    unwithdrawable: a checkpoint written **after** it stands for a window that
+    already contains it, and one written just **before** it may be a mid-turn
+    compaction, whose window contains the turn's own prompt. The two are
+    indistinguishable from the file (same position, and ``log_compaction`` stamps
+    both with the previous turn's number), so both count — a rewind that left the
+    restorable state describing a conversation that never happened is worse than
+    one the user is told to skip.
+    """
+    records = list(_iter_records(Path(path)))
+    withdrawn = _withdrawn_turns(records)
+    turns = [
+        i for i, r in enumerate(records) if r.get("t") == "turn" and i not in withdrawn
+    ]
+    if not turns:
+        return None
+    last = turns[-1]
+    checkpoints = _checkpoint_indices(records)
+    compacted = any(i > last for i in checkpoints)
+    # …and walk back from the turn record until the previous turn: a checkpoint
+    # reached first was written with this turn already (partly) in history.
+    for i in range(last - 1, -1, -1):
+        if records[i].get("t") in ("turn", "restore"):
+            break
+        if i in checkpoints:
+            compacted = True
+            break
+    rec = records[last]
+    msgs = rec.get("messages") if isinstance(rec.get("messages"), list) else []
+    return {"n": rec.get("n"), "preview": first_user_prompt(msgs), "compacted": compacted}
+
+
 def turn_summaries(path) -> List[Dict[str, Any]]:
     """Per-turn labels for a session, for the ``/branch`` turn picker.
 
@@ -328,12 +497,17 @@ def turn_summaries(path) -> List[Dict[str, Any]]:
     record, labelled by what the USER typed that turn (same stripping as the
     ``--resume`` picker). A ``restore`` record contributes no entry: its messages
     are inherited history, so they are not a turn you can branch *at* — branching
-    before turn 1 would just duplicate the parent.
+    before turn 1 would just duplicate the parent. A withdrawn turn contributes
+    none either: ``/branch`` must not offer a point ``/rewind`` took back, and the
+    numbering here counts SURVIVORS, so it stays the numbering every other reader
+    uses.
     """
+    records = list(_iter_records(Path(path)))
+    withdrawn = _withdrawn_turns(records)
     out: List[Dict[str, Any]] = []
     n = 0
-    for rec in _iter_records(Path(path)):
-        if rec.get("t") != "turn":
+    for i, rec in enumerate(records):
+        if rec.get("t") != "turn" or i in withdrawn:
             continue
         n += 1
         msgs = rec.get("messages") if isinstance(rec.get("messages"), list) else []
@@ -377,10 +551,21 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
     checkpoint = False
     kept = 0
     limit = through_turn if (through_turn and through_turn > 0) else None
-    for rec in _iter_records(src):
+    records = list(_iter_records(src))
+    withdrawn = _withdrawn_turns(records)
+    for i, rec in enumerate(records):
         kind = rec.get("t")
         if kind == "meta":
             meta = rec
+            continue
+        if kind == "turn" and i in withdrawn:
+            continue  # /rewind took it back — a fork must not resurrect it
+        if kind == "rewind" and "messages" in rec:
+            # A rewind of inherited history: same as a checkpoint, the restorable
+            # window restarts from what it pinned.
+            window = rec.get("messages")
+            live = list(window) if isinstance(window, list) else []
+            checkpoint = True
             continue
         if kind == "compact" and "messages" in rec:
             window = rec.get("messages")
@@ -492,6 +677,14 @@ def read_session(path) -> Dict[str, Any]:
     from, and ``branched_from`` the fork point for a ``/branch``. They differ in
     kind, so the picker treats them oppositely: a resume SUPERSEDES its source (the
     child contains all of it), while a branch DIVERGES from it (both are real).
+
+    A ``rewind`` record narrows BOTH lists — the whole exchange is gone from the
+    conversation, so it must not be restored, replayed or counted, even though its
+    text is still on disk. That holds for either shape: a withdrawn ``turn`` record
+    is skipped, and a rebase (the exchange arrived inside a ``restore`` blob) pins
+    what survived. A rebase therefore also sets ``checkpoint`` — with no turn of its
+    own, that flag is the only thing telling a caller this file holds a state its
+    parent doesn't.
     """
     p = Path(path)
     meta: Dict[str, Any] = {}
@@ -504,8 +697,12 @@ def read_session(path) -> Dict[str, Any]:
     checkpoint = False
     compacted_away = 0
     turns = 0
-    for rec in _iter_records(p):
+    records = list(_iter_records(p))
+    withdrawn = _withdrawn_turns(records)
+    for i, rec in enumerate(records):
         kind = rec.get("t")
+        if kind == "turn" and i in withdrawn:
+            continue
         if kind == "meta":
             meta = rec
         elif kind == "label":
@@ -524,6 +721,20 @@ def read_session(path) -> Dict[str, Any]:
             checkpoint = True
             if "summary" in rec:
                 summary = str(rec.get("summary") or "")
+        elif kind == "rewind" and "messages" in rec:
+            # A rewind that reached into INHERITED history (a `restore` blob holds
+            # it, so there is no turn record to skip): the record pins the state
+            # that survived. BOTH lists narrow here, unlike a compaction — a
+            # withdrawal means the exchange did not happen, so it must not be
+            # replayed, previewed or counted either, which is what the by-number
+            # shape gets for free by skipping its turn record. Sound because a
+            # rebase is only written when no live turn record is left, so
+            # `all_messages` is the seeded blob and `kept` is what survived of it.
+            kept = rec.get("messages")
+            kept = list(kept) if isinstance(kept, list) else []
+            messages = kept
+            all_messages = list(kept)
+            checkpoint = True
         elif kind in ("turn", "restore"):
             if kind == "restore":
                 if isinstance(rec.get("branched_from"), dict):
@@ -579,9 +790,11 @@ def list_sessions(
     rather than superseding it, so both remain real conversations and both are
     offered (the fork is tagged in the label).
 
-    Sessions with no completed turn are skipped — resuming one would restore an
-    empty conversation. ``limit`` bounds only what's OFFERED; nothing is deleted
-    here (age-based expiry owns deletion, see ``sweep_old_sessions``).
+    Sessions with no completed turn are skipped — resuming one would restore the
+    same conversation its parent already offers — unless the file pins a narrower
+    state (a compaction checkpoint or a ``/rewind`` rebase), which exists nowhere
+    else. ``limit`` bounds only what's OFFERED; nothing is deleted here (age-based
+    expiry owns deletion, see ``sweep_old_sessions``).
 
     ``collapse_chains=False`` returns every session including superseded links.
     That's for resolving an EXPLICIT ``--resume <id>``: hiding a row from the menu
@@ -603,7 +816,14 @@ def list_sessions(
         data = read_session(f)
         # Judge emptiness on everything logged: a compaction checkpoint can leave
         # `messages` empty (summary only) in a conversation that is very much real.
-        if not data["all_messages"] or data["turns"] == 0:
+        # A file with no turn of its OWN is normally noise — the session it resumed
+        # holds the same conversation — unless it pins a narrower state (a
+        # checkpoint: compaction, or a `/rewind` that rebased inherited history).
+        # Skipping that row offers the parent instead, which hands back the very
+        # history the user just compacted or withdrew — including when a rewind
+        # emptied the conversation outright, which is why a checkpoint survives the
+        # emptiness test too (it restores nothing, and that is the honest answer).
+        if not data["checkpoint"] and (not data["all_messages"] or data["turns"] == 0):
             continue
         scanned.append((f, data))
         parent = data.get("resumed_from") or ""
