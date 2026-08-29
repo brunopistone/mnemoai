@@ -11,7 +11,11 @@
 
 A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
 
-▶️ **[Watch the demo](https://github.com/brunopistone/mnemoai/blob/main/images/assistant-demo.gif)**
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb" controls width="720">
+    <a href="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb">▶️ Watch the demo</a>
+  </video>
+</p>
 
 ## 📖 Documentation
 
