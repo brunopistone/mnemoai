@@ -6,7 +6,11 @@ A local agentic AI assistant for developers and power users. Mnemo AI runs in yo
 
 It supports local and hosted model providers: **Ollama**, **Amazon Bedrock**, **Bedrock Mantle**, **OpenAI**, **Anthropic**, **Amazon SageMaker AI**, and **LiteLLM**.
 
-![Demo](https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/assistant-demo.gif)
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb" controls width="720">
+    <a href="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb">▶️ Watch the demo</a>
+  </video>
+</p>
 
 ## Quick start
 
