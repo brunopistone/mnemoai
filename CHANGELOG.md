@@ -7,6 +7,28 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.16.2] — 2026-08-29
+
+### Changed
+
+- **The demo is a video instead of a 10 MB GIF.** The README showed a 10.5 MB
+  animated GIF, and since 1.0.0 it showed it as a bare link: GitHub serves `.gif`
+  from `raw.githubusercontent.com` as `application/octet-stream`, which PyPI's
+  image proxy refuses, so inline it rendered broken. It is now an H.264 video —
+  the same session at 4x, 6.0 MB — embedded with `<video>` and a clickable poster
+  (`images/demo-poster.png`) as the fallback child, so GitHub and the docs site
+  play it inline while PyPI, which strips `<video>` but keeps its children, shows
+  the poster linked to the video. The video is deliberately not committed: one
+  served out of the repository cannot play on GitHub at all, because
+  `raw.githubusercontent.com` is absent from the `media-src` of github.com's
+  Content-Security-Policy. It is a repository attachment instead, which also
+  keeps it out of every clone.
+
+  Maintainer note: an attachment is served to anonymous visitors only while its
+  URL is referenced from issue or pull-request content — a reference from a
+  committed markdown file is not enough. Issue #2 holds that reference and must
+  not be deleted, or the video 404s for everyone who is not logged in.
+
 ## [1.16.1] — 2026-08-28
 
 ### Changed
