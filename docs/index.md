@@ -8,7 +8,7 @@ It supports local and hosted model providers: **Ollama**, **Amazon Bedrock**, **
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb" controls width="720">
-    <a href="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb">▶️ Watch the demo</a>
+    <a href="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb"><img src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" alt="▶️ Watch the demo" width="720"></a>
   </video>
 </p>
 
