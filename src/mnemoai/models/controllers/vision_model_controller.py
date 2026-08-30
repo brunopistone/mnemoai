@@ -24,6 +24,7 @@ class VisionModelController(BaseModelController):
         "anthropic",
         "sagemaker",
         "litellm",
+        "mlx",
     )
     PROVIDER_LABEL = "vision model"
 
@@ -88,6 +89,43 @@ class VisionModelController(BaseModelController):
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatOllama(**kwargs)
+
+    def _initialize_mlx_model(self) -> None:
+        """Initialize a vision model served by a local MLX server.
+
+        Same OpenAI-shaped client and HOST/PORT convenience as the chat path; a
+        vision model there is a ``model_type: multimodal`` entry and accepts the
+        standard ``image_url`` content blocks this controller already builds.
+        ``KEEP_ALIVE`` (and ``EXTRA_PARAMS``) go in ``extra_body`` for the same
+        reason as the chat path: the openai SDK rejects unknown top-level keys.
+        """
+        from langchain_openai import ChatOpenAI
+
+        logger.debug("Initializing MLX vision model via LangChain...")
+
+        passthrough, extra_body = build_kwargs("VISION_MODEL_ID", "mlx", self)
+        kwargs = {
+            "model": self.model_name,
+            **passthrough,
+        }
+
+        base_url = self.api_base or self.endpoint_url
+        if not base_url:
+            host = self.model_id.get("HOST", "127.0.0.1")
+            port = self.model_id.get("PORT", 8000)
+            base_url = f"http://{host}:{port}/v1"
+        kwargs["base_url"] = base_url
+        kwargs["api_key"] = self.api_key or "sk-local"
+
+        keep_alive = self.model_id.get("KEEP_ALIVE")
+        if keep_alive is not None:
+            extra_body["keep_alive"] = keep_alive
+
+        extra_body.update(extra_params(self.model_id))
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        self.model = ChatOpenAI(**kwargs)
 
     def _initialize_openai_model(self) -> None:
         """Initialize OpenAI vision model using LangChain."""

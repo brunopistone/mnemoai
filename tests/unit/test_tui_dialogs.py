@@ -200,6 +200,28 @@ class TestArrowKeysCommitTheHighlightedRow:
         tui._radio_pick("t", [("a", "a"), ("b", "b")])
         assert seen.get("select_on_focus") is True
 
+    def test_every_single_pick_list_in_the_app_asks_for_it(self):
+        # One key must not behave differently depending on which dialog is open.
+        # The /model + /config pickers live in utils.configurator, not here, and
+        # shipped without the flag: arrows moved the marker in --resume but not
+        # there, where the pick had to be committed with Space first. Scanning the
+        # SOURCE covers a picker added in a third module later on.
+        import pathlib
+        import re
+
+        package = pathlib.Path(tui.__file__).parents[2]
+        sites = [
+            (path.name, args)
+            for path in sorted(package.rglob("*.py"))
+            for args in re.findall(r"RadioList\(([^)]*)\)", path.read_text())
+        ]
+        assert sites, "no RadioList construction found — did the pickers move?"
+        for name, args in sites:
+            assert "select_on_focus=True" in args, (
+                f"{name}: RadioList({args}) — arrows would move the highlight "
+                f"while the committed value stayed behind"
+            )
+
 
 class TestSelectAllowDelete:
     """allow_delete adds a Delete button on a TTY (returns (_DELETE, value)); the

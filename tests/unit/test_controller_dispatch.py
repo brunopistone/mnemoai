@@ -60,7 +60,7 @@ class TestDispatch:
 
 
 class TestRealControllersUseTheTable:
-    def test_llm_controller_declares_all_seven_providers(self):
+    def test_llm_controller_declares_all_eight_providers(self):
         from mnemoai.models.controllers.llm_controller import LangChainLLMController
 
         assert set(LangChainLLMController.PROVIDERS) == {
@@ -71,9 +71,10 @@ class TestRealControllersUseTheTable:
             "anthropic",
             "sagemaker",
             "litellm",
+            "mlx",
         }
 
-    def test_vision_controller_declares_all_seven_providers(self):
+    def test_vision_controller_declares_all_eight_providers(self):
         from mnemoai.models.controllers.vision_model_controller import (
             VisionModelController,
         )
@@ -86,9 +87,10 @@ class TestRealControllersUseTheTable:
             "anthropic",
             "sagemaker",
             "litellm",
+            "mlx",
         }
 
-    def test_embeddings_controller_declares_its_five_providers(self):
+    def test_embeddings_controller_declares_its_six_providers(self):
         from mnemoai.models.controllers.embeddings_controller import (
             EmbeddingsController,
         )
@@ -99,7 +101,36 @@ class TestRealControllersUseTheTable:
             "openai",
             "sagemaker",
             "litellm",
+            "mlx",
         }
+
+    @pytest.mark.parametrize(
+        "controller_path,section",
+        [
+            (
+                "mnemoai.models.controllers.llm_controller.LangChainLLMController",
+                "MODEL_ID",
+            ),
+            (
+                "mnemoai.models.controllers.vision_model_controller.VisionModelController",
+                "VISION_MODEL_ID",
+            ),
+            (
+                "mnemoai.models.controllers.embeddings_controller.EmbeddingsController",
+                "EMBED_MODEL_ID",
+            ),
+        ],
+    )
+    def test_declared_providers_match_the_param_registry(self, controller_path, section):
+        """A provider must be in BOTH places or it's half-wired: declared but
+        absent from the registry means build_kwargs sends nothing (params
+        silently dropped); registered but undeclared means the configurator
+        offers a TYPE that dispatch then rejects."""
+        from mnemoai.models.provider_params import providers
+
+        module_path, cls_name = controller_path.rsplit(".", 1)
+        cls = getattr(__import__(module_path, fromlist=[cls_name]), cls_name)
+        assert set(cls.PROVIDERS) == set(providers(section))
 
     @pytest.mark.parametrize(
         "controller_path,template",

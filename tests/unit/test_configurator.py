@@ -399,10 +399,12 @@ def test_provider_params_registry_shape():
     from mnemoai.models.provider_params import providers, supported_keys
 
     assert set(providers("MODEL_ID")) == {
-        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker", "litellm"
+        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker",
+        "litellm", "mlx",
     }
     assert set(providers("VISION_MODEL_ID")) == {
-        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker", "litellm"
+        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker",
+        "litellm", "mlx",
     }
     # Anthropic (direct Claude API): STOP-capable, with extended-thinking
     # specials. EXTRA_PARAMS (the generic passthrough) is supported everywhere.
@@ -428,7 +430,7 @@ def test_provider_params_registry_shape():
         "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P", "EXTRA_PARAMS"
     }
     assert set(providers("EMBED_MODEL_ID")) == {
-        "ollama", "bedrock", "openai", "sagemaker", "litellm"
+        "ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx"
     }
     # Embeddings take no inference params — only connection keys, the optional
     # DIMENSION override, and EXTRA_PARAMS.
@@ -441,6 +443,28 @@ def test_provider_params_registry_shape():
     }
     assert supported_keys("EMBED_MODEL_ID", "litellm") == {
         "API_BASE", "API_KEY", "DIMENSION", "EXTRA_PARAMS"
+    }
+    # A local MLX server: HOST/PORT is the ordinary path (API_BASE/API_KEY cover a
+    # proxied or auth'd one, ENDPOINT_URL being API_BASE's alias), plus
+    # KEEP_ALIVE — how long it keeps the model resident after a request.
+    assert supported_keys("MODEL_ID", "mlx") == {
+        "TEMPERATURE", "MAX_TOKENS", "TOP_P", "STOP",
+        "PRESENCE_PENALTY", "FREQUENCY_PENALTY",
+        "TOP_K", "MIN_P", "REPETITION_PENALTY",
+        "HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY",
+        "STREAM", "KEEP_ALIVE",
+        "EXTRA_PARAMS",
+    }
+    # Vision on MLX is a `multimodal` model, whose handler forwards only these —
+    # TOP_K is deliberately absent (it never reaches that sampler).
+    assert supported_keys("VISION_MODEL_ID", "mlx") == {
+        "TEMPERATURE", "MAX_TOKENS", "TOP_P", "STOP",
+        "HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY",
+        "KEEP_ALIVE", "EXTRA_PARAMS",
+    }
+    assert supported_keys("EMBED_MODEL_ID", "mlx") == {
+        "HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY", "DIMENSION",
+        "KEEP_ALIVE", "EXTRA_PARAMS",
     }
     # Unknown provider -> None (configurator then prunes nothing).
     assert supported_keys("MODEL_ID", "bogus") is None
@@ -480,7 +504,7 @@ def test_tunable_params_excludes_connection_keys():
     # EXTRA_PARAMS passthrough (which is not a /params-tunable scalar).
     from mnemoai.models.provider_params import _TABLES  # type: ignore
 
-    for prov in ("ollama", "bedrock", "openai", "sagemaker", "litellm"):
+    for prov in ("ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx"):
         conn = _TABLES["MODEL_ID"][prov]["connection"]
         expected = supported_keys("MODEL_ID", prov) - conn - {"EXTRA_PARAMS"}
         assert tunable_params("MODEL_ID", prov) == expected
@@ -492,6 +516,12 @@ def test_tunable_params_excludes_connection_keys():
     assert tunable_params("EMBED_MODEL_ID", "openai") == {"DIMENSION"}
     assert "HOST" not in tunable_params("EMBED_MODEL_ID", "ollama")
     assert "API_BASE" not in tunable_params("EMBED_MODEL_ID", "openai")
+    # mlx embeddings add KEEP_ALIVE (model residency) to the DIMENSION override.
+    assert tunable_params("EMBED_MODEL_ID", "mlx") == {"DIMENSION", "KEEP_ALIVE"}
+    # mlx chat: MIN_P is tunable here (its first consumer) and HOST/PORT are not.
+    tx = tunable_params("MODEL_ID", "mlx")
+    assert {"MIN_P", "TOP_K", "REPETITION_PENALTY", "KEEP_ALIVE"} <= tx
+    assert "HOST" not in tx and "PORT" not in tx and "API_BASE" not in tx
     # Unknown provider -> None.
     assert tunable_params("MODEL_ID", "bogus") is None
 
@@ -511,17 +541,28 @@ def test_validate_param_coerces_by_kind():
     # A list becomes a YAML flow sequence of quoted items.
     assert v("STOP", "list", "</s>, ###") == '["</s>", "###"]'
     assert v("STOP", "list", "   ") is None
+    # KEEP_ALIVE: bare seconds (negative pins the model) or unit-suffixed parts,
+    # exactly what the MLX server's parser accepts.
+    assert v("KEEP_ALIVE", "duration", "30m") == "30m"
+    assert v("KEEP_ALIVE", "duration", "1h30m") == "1h30m"
+    assert v("KEEP_ALIVE", "duration", "500ms") == "500ms"
+    assert v("KEEP_ALIVE", "duration", "0") == "0"
+    assert v("KEEP_ALIVE", "duration", "-1") == "-1"
+    assert v("KEEP_ALIVE", "duration", "30M") == "30m"  # normalized
+    assert v("KEEP_ALIVE", "duration", "30 minutes") is None
+    assert v("KEEP_ALIVE", "duration", "forever") is None
+    assert v("KEEP_ALIVE", "duration", "-30m") is None  # sign only on bare numbers
 
 
 def test_every_tunable_key_has_prompt_metadata():
     # Guard against drift: any key tunable_params can report must have an entry
     # in _PARAM_META and a slot in _PARAM_ORDER, else /params would skip/crash.
-    from mnemoai.models.provider_params import tunable_params
+    from mnemoai.models.provider_params import providers, tunable_params
     from mnemoai.utils.configurator import _PARAM_META, _PARAM_ORDER
 
     keys = set()
-    for section in ("MODEL_ID", "VISION_MODEL_ID"):
-        for prov in ("ollama", "bedrock", "mantle", "openai", "sagemaker", "litellm"):
+    for section in ("MODEL_ID", "VISION_MODEL_ID", "EMBED_MODEL_ID"):
+        for prov in providers(section):
             keys |= tunable_params(section, prov) or set()
     assert keys <= set(_PARAM_META)
     assert keys <= set(_PARAM_ORDER)
@@ -843,6 +884,31 @@ def test_config_litellm_sets_api_base_and_key():
     assert "HOST" not in m
 
 
+def test_config_mlx_sets_host_port_and_mirrors_vision():
+    d = _run_build(
+        "mlx", "mlx-community/Qwen3-4B-4bit",
+        # chat name, host, port, [blank base URL, blank key], MAX_TOKENS none, ctx,
+        # vision? y, "same as chat?" y (copies chat), embeddings? n, profile,
+        # brave, then 14 toggles (see the openai test).
+        ["qwen-agentcoder", "127.0.0.1", "8000", "", "", "none", "65536",
+         "y", "y", "n", "erin", "",
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+    )
+    m = d["MODEL_ID"]
+    assert m["TYPE"] == "mlx" and m["NAME"] == "qwen-agentcoder"
+    assert m["HOST"] == "127.0.0.1" and m["PORT"] == 8000
+    # Blank optional answers are not written (HOST/PORT stays the live path).
+    assert "API_BASE" not in m and "API_KEY" not in m
+    # No AWS/protocol keys leaked in from another provider's prompts.
+    for bad in ("REGION", "INPUT_FORMAT", "API_PROTOCOL"):
+        assert bad not in m
+    # An MLX server can host a multimodal model, so "same as chat" applies here
+    # too and carries the connection over.
+    v = d["VISION_MODEL_ID"]
+    assert v["TYPE"] == "mlx" and v["NAME"] == "qwen-agentcoder"
+    assert v["HOST"] == "127.0.0.1" and v["PORT"] == 8000
+
+
 def test_config_anthropic_transforms_base_template():
     # answers: chat name, API_KEY, base URL (blank), MAX_TOKENS, ctx, configure
     # vision? (y), "same as chat?" (y → copies chat), embeddings? (n), profile,
@@ -891,13 +957,20 @@ def test_config_skips_auto_extract_when_memory_off():
     # Not prompted → key stays at its template value (not forced by this run).
 
 
-def test_config_providers_menu_has_all_seven():
-    from mnemoai.utils.configurator import _PROVIDERS
+def test_config_providers_menu_covers_every_llm_provider():
+    # The first-run menu must offer every provider the LLM registry supports —
+    # a provider only reachable by hand-editing the config is a half-wired one.
+    from mnemoai.models.provider_params import providers
+    from mnemoai.utils.configurator import _PROVIDER_LABELS, _PROVIDERS
 
     types = {v[0] for v in _PROVIDERS.values()}
     assert types == {
-        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker", "litellm"
+        "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker",
+        "litellm", "mlx",
     }
+    assert types == set(providers("MODEL_ID"))
+    # Every menu entry also needs a /model label (else it shows its raw key).
+    assert types <= set(_PROVIDER_LABELS)
 
 
 # --- Shared connection-prompt helper: /config and /model ask the same params ---
@@ -926,6 +999,93 @@ def test_prompt_provider_connection_litellm_asks_base_and_key(monkeypatch):
     d = yaml.safe_load(out)
     assert d["MODEL_ID"]["API_BASE"] == "http://localhost:8000/v1"
     assert d["MODEL_ID"]["API_KEY"] == "sk-abc"
+
+
+def test_prompt_provider_connection_mlx_asks_host_port_with_its_own_defaults(
+    monkeypatch,
+):
+    # The HOST/PORT prompts are shared with the other local runner, so they must
+    # be provider-aware: Enter-through has to land on the MLX server's own
+    # 127.0.0.1:8000, not the other runner's localhost:11434.
+    from mnemoai.utils import configurator as C
+
+    prompts = []
+
+    def _fake_input(prompt=""):
+        prompts.append(prompt)
+        return ""  # Enter through every step -> the offered defaults are kept
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+    text = "MODEL_ID:\n  NAME: qwen-agentcoder\n  TYPE: mlx\n"
+    out, conn = C._prompt_provider_connection(text, "MODEL_ID", "mlx")
+    d = yaml.safe_load(out)["MODEL_ID"]
+    assert d["HOST"] == "127.0.0.1" and d["PORT"] == 8000
+    assert conn == {"HOST": "127.0.0.1", "PORT": "8000"}
+    # Optional keys: blank -> not written, so HOST/PORT stays the live path.
+    assert "API_BASE" not in d and "API_KEY" not in d
+    assert "11434" not in "".join(prompts)  # no other runner's default offered
+    assert any("MLX server host" in p for p in prompts)
+
+
+def test_prompt_provider_connection_mlx_base_url_overrides(monkeypatch):
+    from mnemoai.utils import configurator as C
+
+    answers = iter(["127.0.0.1", "8000", "https://mac.internal/mlx/v1", "tok"])
+    monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    text = "MODEL_ID:\n  NAME: qwen-agentcoder\n  TYPE: mlx\n"
+    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "mlx")
+    d = yaml.safe_load(out)["MODEL_ID"]
+    assert d["API_BASE"] == "https://mac.internal/mlx/v1"
+    assert d["API_KEY"] == "tok"
+
+
+def test_prompt_provider_connection_ollama_defaults_unchanged(monkeypatch):
+    # The provider-aware prompts must not have moved the other runner's defaults.
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "")
+    text = "MODEL_ID:\n  NAME: qwen3.5:4b\n  TYPE: ollama\n"
+    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "ollama")
+    d = yaml.safe_load(out)["MODEL_ID"]
+    assert d["HOST"] == "localhost" and d["PORT"] == 11434
+
+
+def test_every_host_port_provider_has_its_own_prompt_wording():
+    # A provider that takes HOST/PORT must have its own _HOST_PORT_PROMPTS row:
+    # borrowing another's would offer that runner's name and port for a server
+    # that is neither, and a wrong default is accepted by pressing Enter.
+    from mnemoai.models.provider_params import providers, supported_keys
+    from mnemoai.utils.configurator import _HOST_PORT_PROMPTS
+
+    for section in ("MODEL_ID", "VISION_MODEL_ID", "EMBED_MODEL_ID"):
+        for provider in providers(section):
+            keys = supported_keys(section, provider) or set()
+            if keys & {"HOST", "PORT"}:
+                assert provider in _HOST_PORT_PROMPTS, (
+                    f"{section}/{provider} takes HOST/PORT but has no prompt row"
+                )
+
+
+def test_host_port_fallback_borrows_no_other_providers_defaults(monkeypatch):
+    # The safety net behind the test above: with the row missing, the wording and
+    # the default must be neutral, and Enter must leave the port unwritten rather
+    # than silently configuring some other runner's.
+    from mnemoai.utils import configurator as C
+
+    monkeypatch.setattr(C, "_HOST_PORT_PROMPTS", {})
+    prompts = []
+
+    def _fake_input(prompt=""):
+        prompts.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+    text = "MODEL_ID:\n  NAME: m\n  TYPE: mlx\n"
+    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "mlx")
+    d = yaml.safe_load(out)["MODEL_ID"]
+    joined = "".join(prompts)
+    assert "Ollama" not in joined and "11434" not in joined
+    assert "PORT" not in d  # no default to offer -> nothing written
 
 
 def test_prompt_provider_connection_openai_optional_base_url(monkeypatch):
@@ -1368,3 +1528,77 @@ class TestFeaturesToggles:
         monkeypatch.setattr(C, "_ask", lambda *a, **k: pytest.fail("should not ask"))
         out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_PLAYBOOK"})
         assert out == self.CFG
+
+
+class TestChoiceDialogTracksTheArrowKeys:
+    """`/model` + the `/config` wizard route every single-choice prompt through
+    `_dialog_radio`, which built its `RadioList` without `select_on_focus`.
+
+    A `RadioList` keeps the highlighted row separate from its committed
+    `current_value`, and the dialog's own enter binding (needed so Enter confirms
+    without a Tab-to-OK step) shadows the one binding that reconciles them. So the
+    `(*)` marker sat on the opening row while the arrows moved only the highlight:
+    the pick had to be committed with Space — undocumented — and Enter otherwise
+    confirmed a row the user had moved off. `--resume` never had this, which is
+    how the two pickers came to answer the same key differently.
+    """
+
+    def _spy_radio(self, monkeypatch):
+        """Run _dialog_radio with a no-op Application, capturing the RadioList kwargs."""
+        import prompt_toolkit.widgets as widgets
+
+        from mnemoai.utils import configurator as C
+
+        seen = {}
+        real = widgets.RadioList
+
+        def _spy(values, **kwargs):
+            seen.update(kwargs)
+            return real(values, **kwargs)
+
+        monkeypatch.setattr(C, "RadioList", _spy)
+        monkeypatch.setattr(
+            C, "Application",
+            lambda **k: type("_A", (), {"run": lambda self: C._DIALOG_CANCEL})(),
+        )
+        return C, seen
+
+    def test_the_dialog_asks_for_select_on_focus(self, monkeypatch):
+        C, seen = self._spy_radio(monkeypatch)
+        C._dialog_radio("Which model?", [("a", "a"), ("b", "b")])
+        assert seen.get("select_on_focus") is True
+
+    def test_a_default_still_opens_on_that_row(self, monkeypatch):
+        # select_on_focus and default are independent: the pre-selected provider
+        # must still be the row the dialog opens (and commits) on.
+        C, seen = self._spy_radio(monkeypatch)
+        C._dialog_radio("Provider", [("a", "a"), ("b", "b")], default="b")
+        assert seen.get("default") == "b" and seen.get("select_on_focus") is True
+
+    def test_arrows_move_the_committed_value_on_a_real_radiolist(self):
+        # The behavior itself, on the real widget: what _ok() reads must follow
+        # the highlight, with no Space in between.
+        from prompt_toolkit.keys import Keys
+        from prompt_toolkit.widgets import RadioList
+
+        radio = RadioList(
+            values=[("a", "a"), ("b", "b"), ("c", "c")], select_on_focus=True
+        )
+        down = next(
+            b.handler for b in radio.control.key_bindings.bindings
+            if b.keys == (Keys.Down,)
+        )
+        down(None)
+        assert radio.current_value == "b"
+        down(None)
+        assert radio.current_value == "c"
+
+    def test_multi_select_keeps_space_to_toggle(self, monkeypatch):
+        # /features is a CheckboxList: there the marker MUST NOT follow the
+        # highlight (moving past a row would tick it), so it takes no such flag —
+        # and prompt_toolkit does not even offer one for multiple selection.
+        import inspect
+
+        from prompt_toolkit.widgets import CheckboxList
+
+        assert "select_on_focus" not in inspect.signature(CheckboxList).parameters

@@ -4,7 +4,7 @@ These tests exercise the real agent against the configured chat model and the
 MCP subprocess. They are skipped automatically unless:
   1. A runtime config resolves the same way the app loads it ($MNEMOAI_CONFIG →
      ~/.mnemoai/config/config.yaml → legacy → package-relative); and
-  2. The configured model looks usable — for a local Ollama model the server
+  2. The configured model looks usable — for a local server (Ollama or MLX) it
      must be reachable; for cloud providers (bedrock/mantle/openai/anthropic/
      sagemaker/litellm) a present config is treated as sufficient.
 
@@ -32,12 +32,14 @@ def _config_exists() -> bool:
 def _model_reason() -> str:
     """Return a skip reason if the configured chat model isn't usable, else "".
 
-    Provider-aware: for a local Ollama model we probe the configured host:port
-    (the server must be running). For cloud providers (bedrock, mantle, openai,
+    Provider-aware: for a model served by a local runner (Ollama, or an MLX
+    server on Apple Silicon) we probe the configured host:port — the server must
+    be running, and a forgotten one should read as a skip, not as a tier of
+    connection failures. For cloud providers (bedrock, mantle, openai,
     anthropic, sagemaker, litellm) we can't cheaply verify reachability/creds
     here, so a present config is treated as sufficient — a genuinely
     unreachable backend then surfaces as a normal test failure rather than a
-    misleading "Ollama not reachable" skip.
+    misleading "not reachable" skip.
     """
     try:
         from mnemoai.utils.config import config
@@ -46,19 +48,30 @@ def _model_reason() -> str:
     except Exception:
         return "could not load config"
 
+    # host, port, label — per local runner, since the defaults differ.
+    local_defaults = {
+        "ollama": ("localhost", 11434, "Ollama server"),
+        "mlx": ("127.0.0.1", 8000, "MLX server"),
+    }
     model_type = str(model_id.get("TYPE", "ollama")).lower()
-    if model_type != "ollama":
+    if model_type not in local_defaults:
         return ""  # cloud provider: assume usable; failures surface as failures
 
-    host = model_id.get("HOST", "localhost")
-    port = model_id.get("PORT", 11434)
+    default_host, default_port, label = local_defaults[model_type]
+    if model_id.get("API_BASE") or model_id.get("ENDPOINT_URL"):
+        # A custom base URL need not map to host:port (proxy, path prefix), so
+        # there is nothing to probe; treat it like a cloud provider.
+        return ""
+
+    host = model_id.get("HOST", default_host)
+    port = model_id.get("PORT", default_port)
     import socket
 
     try:
         with socket.create_connection((host, int(port)), timeout=2):
             return ""
     except OSError:
-        return f"Ollama server not reachable at {host}:{port}"
+        return f"{label} not reachable at {host}:{port}"
 
 
 # A single module-scoped skip guard keeps the whole tier inert in CI / dev

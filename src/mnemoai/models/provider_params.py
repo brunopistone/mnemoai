@@ -15,7 +15,11 @@ from typing import Any, Dict, Optional, Tuple
 # config_key: the YAML key under the model section
 # attr:       the controller attribute holding the parsed value
 # kwarg:      the client kwarg name to emit
-# dest:       "main" (top-level kwargs) or "model_kwargs" (nested dict)
+# dest:       "main" (top-level client kwargs) or a nested-dict name. The nested
+#             name is the client field the dict is handed to — "model_kwargs" for
+#             params the client flattens into the request body, "extra_body" for
+#             ones that must stay nested (see the mlx entry for why the
+#             difference is load-bearing). build_kwargs returns both buckets.
 ParamSpec = namedtuple("ParamSpec", ["config_key", "attr", "kwarg", "dest"])
 
 # Keys included when *truthy* (e.g. an empty STOP list is dropped); every other
@@ -136,6 +140,36 @@ _LLM = {
         "connection": {"API_BASE", "API_KEY"},
         "special": {"STREAM"},
     },
+    "mlx": {
+        # Local MLX server on Apple Silicon (OpenAI-compatible surface), reached
+        # over HOST/PORT like the other local runner rather than a full API_BASE.
+        # TOP_K / MIN_P / REPETITION_PENALTY are real knobs on its `lm` path but
+        # are not part of the OpenAI API, so their dest is "extra_body", NOT
+        # "model_kwargs": the openai SDK's create() is a typed method, so a
+        # non-OpenAI key flattened into the top-level payload (which is exactly
+        # what model_kwargs does) raises TypeError before any request is sent.
+        # extra_body is the documented passthrough for OpenAI-compatible servers.
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("STOP", "stop", "stop"),
+            _p("PRESENCE_PENALTY", "presence_penalty", "presence_penalty"),
+            _p("FREQUENCY_PENALTY", "frequency_penalty", "frequency_penalty"),
+            _p("TOP_K", "top_k", "top_k", "extra_body"),
+            _p("MIN_P", "min_p", "min_p", "extra_body"),
+            _p("REPETITION_PENALTY", "repetition_penalty", "repetition_penalty", "extra_body"),
+        ],
+        # API_BASE/API_KEY stay available for a non-default mount point or a
+        # server behind auth; HOST/PORT is the ordinary path. ENDPOINT_URL is an
+        # accepted alias for API_BASE (as on openai) — all three controllers read
+        # it, so it must be declared or a /model switch would prune it away.
+        "connection": {"HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY"},
+        # KEEP_ALIVE is MLX-specific: how long the server keeps the model
+        # resident after the request (e.g. `30m`, `0` to unload immediately,
+        # `-1` to pin). Handled inline by the controller, hence "special".
+        "special": {"STREAM", "KEEP_ALIVE"},
+    },
 }
 
 # --- VISION_MODEL_ID: mirrors vision_model_controller._initialize_*_model ----
@@ -208,6 +242,21 @@ _VISION = {
         "connection": {"API_BASE", "API_KEY"},
         "special": set(),
     },
+    "mlx": {
+        # A vision model on the MLX server is `model_type: multimodal`, whose
+        # handler forwards only temperature / top_p / max_tokens / stop (and
+        # repetition params the vision controller does not read). TOP_K is
+        # deliberately absent: that path never passes it to the sampler, so
+        # offering it here would write config that silently does nothing.
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("STOP", "stop", "stop"),
+        ],
+        "connection": {"HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY"},
+        "special": {"KEEP_ALIVE"},
+    },
 }
 
 # --- RAG.EMBED_MODEL_ID: mirrors embeddings_controller -----------------------
@@ -229,6 +278,14 @@ _EMBED = {
         "params": [],
         "connection": {"API_BASE", "API_KEY"},
         "special": {"DIMENSION"},
+    },
+    # The same MLX server serves `model_type: embeddings` entries over
+    # /v1/embeddings, so HOST/PORT reaches them; KEEP_ALIVE controls residency
+    # for the embedding worker exactly as it does for chat.
+    "mlx": {
+        "params": [],
+        "connection": {"HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY"},
+        "special": {"DIMENSION", "KEEP_ALIVE"},
     },
 }
 
@@ -279,19 +336,24 @@ def extra_params(model_id: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_kwargs(section: str, provider: str, controller: Any) -> Tuple[Dict, Dict]:
-    """Build ``(main_kwargs, model_kwargs)`` for a provider from a controller.
+    """Build ``(main_kwargs, nested_kwargs)`` for a provider from a controller.
 
     Reads each spec's value off ``controller`` and emits it under the spec's
-    client kwarg, into main or nested ``model_kwargs`` per ``dest``. STOP is
-    included when truthy; every other param when ``is not None``.
+    client kwarg, into main or the nested bucket per ``dest``. STOP is included
+    when truthy; every other param when ``is not None``.
+
+    A provider has at most one nested bucket, so the second return value is just
+    "the nested dict" — which client field it becomes (``model_kwargs`` or
+    ``extra_body``) is the caller's business, and each ``_initialize_*_model``
+    hands it over under the name its provider's ``dest`` names.
     """
     entry = _TABLES.get(section, {}).get(provider, {})
     main: Dict[str, Any] = {}
-    model_kwargs: Dict[str, Any] = {}
+    nested: Dict[str, Any] = {}
     for spec in entry.get("params", []):
         val = getattr(controller, spec.attr, None)
         include = bool(val) if spec.config_key in _TRUTHY_KEYS else val is not None
         if not include:
             continue
-        (main if spec.dest == "main" else model_kwargs)[spec.kwarg] = val
-    return main, model_kwargs
+        (main if spec.dest == "main" else nested)[spec.kwarg] = val
+    return main, nested

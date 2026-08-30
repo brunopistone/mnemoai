@@ -165,6 +165,32 @@ class TestProviderChecks:
     def test_litellm_manages_its_own_auth(self):
         assert doctor._credentials_check("litellm", {}).status == INFO
 
+    def test_an_unreachable_mlx_server_fails_with_how_to_start_it(self):
+        with socket.socket() as s:  # bind, don't listen: nothing will connect
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        check = doctor._credentials_check("mlx", {"PORT": port})
+        assert check.status == FAIL
+        assert f"127.0.0.1:{port}" in check.detail
+        assert "mlx-openai-server" in check.fix
+
+    def test_a_reachable_mlx_server_is_ok(self):
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            s.listen(1)
+            check = doctor._credentials_check(
+                "mlx", {"HOST": "127.0.0.1", "PORT": s.getsockname()[1]}
+            )
+        assert check.status == OK
+
+    def test_an_mlx_base_url_is_reported_not_probed(self):
+        # A custom base URL may not map to HOST/PORT (proxy, path prefix), so it
+        # must be shown rather than probed — probing it would report a false FAIL.
+        check = doctor._credentials_check(
+            "mlx", {"API_BASE": "https://mac.internal/mlx/v1", "PORT": 1}
+        )
+        assert check.status == OK and "mac.internal" in check.detail
+
 
 class TestProbePort:
     def test_a_closed_port_fails_with_the_fix(self):

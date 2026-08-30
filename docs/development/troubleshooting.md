@@ -54,13 +54,26 @@ Python standard library.
 Check `MODEL_ID.TYPE` and `MODEL_ID.NAME` in `config.yaml` first (`/model` edits
 both), then the provider's own prerequisite:
 
-| Provider             | Verify with                                                           |
-| -------------------- | --------------------------------------------------------------------- |
-| `ollama`             | `ollama serve` is running, and `ollama pull <model>` has been run     |
-| `bedrock` / `mantle` | `aws sts get-caller-identity`, plus region and model access           |
-| `openai`             | `OPENAI_API_KEY` is set (via the config `ENV:` block or the shell)    |
-| `anthropic`          | `ANTHROPIC_API_KEY` is set                                            |
-| `sagemaker`          | The endpoint name is correct and `InService` in the configured region |
+| Provider             | Verify with                                                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ollama`             | `ollama serve` is running, and `ollama pull <model>` has been run                                                                                |
+| `mlx`                | The server is up on `HOST`/`PORT` (`/doctor` probes it), and `NAME` matches a name it serves — `curl http://127.0.0.1:8000/v1/models` lists them |
+| `bedrock` / `mantle` | `aws sts get-caller-identity`, plus region and model access                                                                                      |
+| `openai`             | `OPENAI_API_KEY` is set (via the config `ENV:` block or the shell)                                                                               |
+| `anthropic`          | `ANTHROPIC_API_KEY` is set                                                                                                                       |
+| `sagemaker`          | The endpoint name is correct and `InService` in the configured region                                                                            |
+
+## The answer contains a tool call instead of making one
+
+A reply with a literal `<tool_call>{"name": "fs_read", …}</tool_call>` (or a bare
+JSON blob describing a tool) means the model asked for a tool correctly and the
+server never turned that into a tool call, so the agent saw plain text. It is a
+server-side parser setting, not a Mnemo AI config key.
+
+On `mlx-openai-server`, set `tool_call_parser` on the model entry — `hermes` for
+Qwen3 Instruct, `qwen3_coder` for the Coder line — and `reasoning_parser` for a
+thinking model. Ollama handles this through the model's own template, so if a
+custom `Modelfile` drops the tool section the same symptom appears.
 
 ## RAG or episodic memory returns nothing
 
@@ -327,7 +340,7 @@ the severity: `✗` an error, `!` a warning, `·` anything lower.
 ✗ Query failed: division by zero (traceback → ~/.mnemoai/logs/mnemoai.log)
 ```
 
-The pointer at the end appears only when something *was* left out — a
+The pointer at the end appears only when something _was_ left out — a
 traceback, or a message too long for one line.
 
 A warning raised by a dependency reads the same way, even though the standard

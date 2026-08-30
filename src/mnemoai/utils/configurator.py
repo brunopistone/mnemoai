@@ -55,6 +55,7 @@ _PROVIDERS = {
     "5": ("anthropic", "config.yaml.example", "Anthropic (Claude API)", "claude-opus-4-8"),
     "6": ("sagemaker", "config.yaml.example", "Amazon SageMaker AI", "your-endpoint-name"),
     "7": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
+    "8": ("mlx", "config.yaml.example", "MLX server (local, Apple Silicon)", "mlx-community/Qwen3-4B-4bit"),
 }
 
 # Human-facing menu label per provider TYPE (stored value is the canonical key).
@@ -66,7 +67,22 @@ _PROVIDER_LABELS = {
     "anthropic": "anthropic",
     "sagemaker": "sagemaker",
     "litellm": "litellm",
+    "mlx": "mlx",
 }
+
+# Wording + defaults for the shared HOST/PORT prompts, per local-runner provider
+# (the only two whose registry entry carries HOST/PORT). Every provider that
+# takes HOST/PORT needs its own row — a test pins that — because a shared default
+# would offer one runner's name and port for a server that is neither.
+_HOST_PORT_PROMPTS = {
+    "ollama": ("Ollama host", "localhost", "Ollama port", "11434"),
+    "mlx": ("MLX server host", "127.0.0.1", "MLX server port", "8000"),
+}
+
+# Fallback for a provider with no row above: neutral wording and no port to
+# suggest, since guessing one is worse than asking. A blank answer then keeps
+# whatever is already configured (see _optional_field_step).
+_GENERIC_HOST_PORT = ("Server host", "localhost", "Server port", "")
 
 # Mantle API protocol choice -> (value, description). Mirrors
 # models.mantle_factory.VALID_PROTOCOLS.
@@ -529,8 +545,16 @@ def _dialog_radio(
 
     ``options`` is ``[(value, label), …]``. ``info`` (optional) is shown above
     the list to surface the "Current setup" overview inside the dialog.
+
+    ``select_on_focus`` is REQUIRED, not cosmetic — the same reason it is on
+    ``tui._radio_pick``: a ``RadioList`` tracks the highlighted row separately from
+    its committed ``current_value``, and the enter override below shadows the one
+    binding that reconciles them. Without it the ``(*)`` marker stayed on the row
+    it opened at while the arrows moved only the highlight, so a pick had to be
+    committed with Space first (which nothing on screen says) and Enter otherwise
+    confirmed a row the user had already moved off.
     """
-    radio = RadioList(values=options, default=default)
+    radio = RadioList(values=options, default=default, select_on_focus=True)
 
     def _ok() -> None:
         get_app().exit(result=radio.current_value)
@@ -955,11 +979,13 @@ def _conn_from_text(text: str, section: str) -> dict:
     return conn
 
 
-def _optional_field_step(section: str, key: str, prompt: str):
+def _optional_field_step(section: str, key: str, prompt: str, default: str = ""):
     """A step for an optional connection field: set it only when non-blank
-    (blank keeps the provider's env/default). Returns ``fn(text, allow_back)``."""
+    (blank keeps the current value / the provider's env default). ``default`` is
+    the suggestion when nothing is configured yet. Returns
+    ``fn(text, allow_back)``."""
     def _step(text: str, allow_back: bool) -> str:
-        v = _ask(prompt, _get_field(text, section, key) or "", allow_back=allow_back)
+        v = _ask(prompt, _get_field(text, section, key) or default, allow_back=allow_back)
         return _set_field(text, section, key, v) if v else text
     return _step
 
@@ -970,14 +996,13 @@ def _connection_steps(section: str, provider: str) -> list:
     allowed = supported_keys(section, provider) or set()
     steps = []
 
+    host_label, host_default, port_label, port_default = _HOST_PORT_PROMPTS.get(
+        provider, _GENERIC_HOST_PORT
+    )
     if "HOST" in allowed:
-        steps.append(lambda t, b: _set_field(
-            t, section, "HOST",
-            _ask("Ollama host", _get_field(t, section, "HOST") or "localhost", allow_back=b)))
+        steps.append(_optional_field_step(section, "HOST", host_label, host_default))
     if "PORT" in allowed:
-        steps.append(lambda t, b: _set_field(
-            t, section, "PORT",
-            _ask("Ollama port", _get_field(t, section, "PORT") or "11434", allow_back=b)))
+        steps.append(_optional_field_step(section, "PORT", port_label, port_default))
     if "REGION" in allowed:
         steps.append(lambda t, b: _set_field(
             t, section, "REGION",
@@ -1007,6 +1032,13 @@ def _connection_steps(section: str, provider: str) -> list:
         steps.append(_optional_field_step(section, "API_BASE", "OpenAI-compatible base URL (optional, blank for the OpenAI API)"))
         if "API_KEY" in allowed:
             steps.append(_optional_field_step(section, "API_KEY", "API key (optional; blank uses OPENAI_API_KEY, local servers need none)"))
+    if provider == "mlx":
+        # HOST/PORT above is the ordinary path; these cover a server behind a
+        # proxy/path or an auth layer, so both are optional (blank = unused).
+        if "API_BASE" in allowed:
+            steps.append(_optional_field_step(section, "API_BASE", "MLX base URL (optional; blank uses http://HOST:PORT/v1)"))
+        if "API_KEY" in allowed:
+            steps.append(_optional_field_step(section, "API_KEY", "API key (optional; a local MLX server needs none)"))
 
     # Embeddings: optional vector-size override (fallback only).
     if section == "EMBED_MODEL_ID":
@@ -1044,6 +1076,10 @@ def _print_credential_note(provider: str) -> None:
         print("  Note: Anthropic (Claude API) reads the ANTHROPIC_API_KEY env")
         print("  var, or MODEL_ID.API_KEY. This is the direct api.anthropic.com")
         print("  API — not Bedrock Mantle's 'anthropic' protocol.")
+    elif provider == "mlx":
+        print("  Note: the MLX server needs no credentials. Start it before use,")
+        print("  and enter the model id it serves as NAME (its served name, or")
+        print("  the model path/repo when no served name is set).")
 
 
 def _build_config(
@@ -1053,7 +1089,7 @@ def _build_config(
 
     Only commonly-changed fields are prompted; the rest keep the template's
     values (each default read from it, so Enter-through works). openai/anthropic/
-    sagemaker/litellm reuse the Ollama-shaped base and transform their sections.
+    sagemaker/litellm/mlx reuse the Ollama-shaped base and transform their sections.
     """
     text = template_text
     transform_from_base = (
@@ -1065,12 +1101,13 @@ def _build_config(
     text = _remove_field(text, "VISION_MODEL_ID", "STOP")
 
     # For providers reusing the Ollama-shaped base, set TYPE and prune unsupported
-    # keys. OpenAI/Anthropic are multimodal, so mirror the vision section to them;
-    # SageMaker/LiteLLM leave vision as Ollama.
+    # keys. OpenAI/Anthropic serve vision too, and an MLX server can host a
+    # multimodal model, so mirror the vision section's TYPE to them (the user still
+    # picks it in the vision prompts); SageMaker/LiteLLM leave vision as Ollama.
     if transform_from_base:
         text = _set_in_section(text, "MODEL_ID", "TYPE", provider)
         text = _prune_unsupported_params(text, "MODEL_ID", provider)
-        if provider in ("openai", "anthropic") and _find_section(text.splitlines(), "VISION_MODEL_ID") >= 0:
+        if provider in ("openai", "anthropic", "mlx") and _find_section(text.splitlines(), "VISION_MODEL_ID") >= 0:
             text = _set_in_section(text, "VISION_MODEL_ID", "TYPE", provider)
             text = _prune_unsupported_params(text, "VISION_MODEL_ID", provider)
 
@@ -1421,6 +1458,7 @@ _PARAM_META = {
     "TEMPERATURE": ("float", "sampling temperature, e.g. 0.7"),
     "TOP_P": ("float", "nucleus sampling, 0-1"),
     "TOP_K": ("int", "top-k sampling, e.g. 40"),
+    "MIN_P": ("float", "min-p sampling, e.g. 0.05 (0 disables)"),
     "MAX_TOKENS": ("int", "max output tokens"),
     "PRESENCE_PENALTY": ("float", "e.g. 0.0-2.0"),
     "FREQUENCY_PENALTY": ("float", "e.g. 0.0-2.0"),
@@ -1438,15 +1476,20 @@ _PARAM_META = {
         "enum:5m,1h",
         "how long a cached prefix lives (1h costs more to write)",
     ),
+    "KEEP_ALIVE": (
+        "duration",
+        "how long the server keeps the model loaded, e.g. 30m | 0 (unload now) | -1 (pin)",
+    ),
     "DIMENSION": ("int", "embedding vector size (match your embedder; for the fallback)"),
 }
 
 # Order params are prompted in (registry membership decides which appear).
 _PARAM_ORDER = [
-    "TEMPERATURE", "TOP_P", "TOP_K", "MAX_TOKENS",
+    "TEMPERATURE", "TOP_P", "TOP_K", "MIN_P", "MAX_TOKENS",
     "PRESENCE_PENALTY", "FREQUENCY_PENALTY", "REPETITION_PENALTY",
     "STOP", "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
     "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+    "KEEP_ALIVE",
     "DIMENSION",
 ]
 
@@ -1487,6 +1530,16 @@ def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
         if not items:
             return None
         return "[" + ", ".join('"' + it.replace('"', '\\"') + '"' for it in items) + "]"
+    if kind == "duration":
+        # KEEP_ALIVE: bare seconds (negative = keep loaded indefinitely) or one or
+        # more unit-suffixed parts (30m, 1h30m, 500ms) — the forms the MLX server
+        # parses, so a typo is caught here instead of failing the first request.
+        low = raw.lower()
+        if re.fullmatch(r"-?\d+(?:\.\d+)?", low) or re.fullmatch(
+            r"(?:\d+(?:\.\d+)?(?:ms|s|m|h|d))+", low
+        ):
+            return low
+        return None
     if kind.startswith("enum:"):
         allowed = kind.split(":", 1)[1].split(",")
         return raw if raw in allowed else None

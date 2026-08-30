@@ -116,7 +116,7 @@ Model controllers and custom implementations.
 - `mantle_factory.py`: Bedrock Mantle factory (chat_completions / responses / anthropic protocols), shared by the LLM and vision controllers
 - **`controllers/`** (provider-dispatching model initialization):
   - `base_model_controller.py`: Minimal shared base type for the controllers
-  - `llm_controller.py`: LLM model initialization (Bedrock, Mantle, Ollama, OpenAI, Anthropic, SageMaker AI, LiteLLM)
+  - `llm_controller.py`: LLM model initialization (Bedrock, Mantle, Ollama, MLX, OpenAI, Anthropic, SageMaker AI, LiteLLM)
   - `vision_model_controller.py`: Vision model initialization
   - `embeddings_controller.py`: Embedding model initialization for RAG
 - **`chat_models/`** (concrete LangChain `ChatModel` subclasses):

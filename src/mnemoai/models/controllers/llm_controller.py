@@ -25,6 +25,7 @@ class LangChainLLMController(BaseModelController):
         "anthropic",
         "sagemaker",
         "litellm",
+        "mlx",
     )
     PROVIDER_LABEL = "model"
 
@@ -217,6 +218,64 @@ class LangChainLLMController(BaseModelController):
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatOllamaWrapper(**kwargs)
+
+    def _initialize_mlx_model(self, callbacks: list = None) -> None:
+        """Initialize a model served by a local MLX server (Apple Silicon).
+
+        The server speaks the OpenAI protocol, so this reuses ``ChatOpenAI``
+        rather than a bespoke client. Two things make it its own provider instead
+        of "openai with an API_BASE":
+
+        * connection is ``HOST``/``PORT`` (default ``127.0.0.1:8000``) like the
+          other local runner, so no one has to hand-write a base URL with the
+          ``/v1`` suffix;
+        * ``KEEP_ALIVE`` is passed per request — the MLX server treats it as how
+          long to keep the model resident afterwards (``30m``, ``0`` to unload at
+          once, ``-1`` to pin), which is what makes on-demand model swapping
+          usable from here.
+
+        ``TOP_K``/``MIN_P``/``REPETITION_PENALTY``/``KEEP_ALIVE`` are not part of
+        the OpenAI API, so they travel in ``extra_body`` — the openai SDK's
+        ``create()`` is typed and rejects unknown top-level keys, which is what
+        ``model_kwargs`` would produce (``TypeError: unexpected keyword argument
+        'top_k'``, raised client-side before any request goes out).
+        """
+        from langchain_openai import ChatOpenAI
+
+        logger.info("Initializing MLX model...")
+
+        passthrough, extra_body = build_kwargs("MODEL_ID", "mlx", self)
+        kwargs = {
+            "model": self.model_name,
+            "callbacks": callbacks,
+            "streaming": self.stream,
+            **passthrough,
+        }
+
+        # API_BASE wins when set (non-default mount point); otherwise HOST/PORT.
+        base_url = self.model_id.get("API_BASE") or self.endpoint_url
+        if not base_url:
+            host = self.model_id.get("HOST", "127.0.0.1")
+            port = self.model_id.get("PORT", 8000)
+            base_url = f"http://{host}:{port}/v1"
+        kwargs["base_url"] = base_url
+        logger.info(f"Using MLX server endpoint: {base_url}")
+
+        # The server ignores auth; a placeholder lets the client construct
+        # without OPENAI_API_KEY leaking in from the environment.
+        kwargs["api_key"] = self.model_id.get("API_KEY") or "sk-local"
+
+        keep_alive = self.model_id.get("KEEP_ALIVE")
+        if keep_alive is not None:
+            extra_body["keep_alive"] = keep_alive
+
+        # EXTRA_PARAMS is a body passthrough here (the MLX server accepts extra
+        # fields), so it merges into extra_body rather than the client kwargs.
+        extra_body.update(extra_params(self.model_id))
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        self.model = ChatOpenAI(**kwargs)
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
         """Initialize an OpenAI-compatible model.

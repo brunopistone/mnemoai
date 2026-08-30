@@ -11,15 +11,16 @@ Required:
 
 Choose one provider to start:
 
-| Provider                    | What you need                                                                                |
-| --------------------------- | -------------------------------------------------------------------------------------------- |
-| **Ollama** (local, easiest) | Install [Ollama](https://ollama.ai), then pull a chat model such as `ollama pull qwen3.5:4b` |
-| **Amazon Bedrock**          | AWS credentials with Bedrock model access in your target region                              |
-| **Bedrock Mantle**          | AWS credentials or a Bedrock API key, plus a Mantle model available in your account/region   |
-| **Amazon SageMaker AI**     | AWS credentials and a deployed SageMaker endpoint                                            |
-| **OpenAI**                  | `OPENAI_API_KEY` environment variable                                                        |
-| **Anthropic**               | `ANTHROPIC_API_KEY` environment variable                                                     |
-| **LiteLLM**                 | A LiteLLM-compatible provider, API base, and credentials as needed                           |
+| Provider                       | What you need                                                                                                           |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| **Ollama** (local, easiest)    | Install [Ollama](https://ollama.ai), then pull a chat model such as `ollama pull qwen3.5:4b`                            |
+| **MLX** (local, Apple Silicon) | An MLX server such as [`mlx-openai-server`](https://github.com/cubist38/mlx-openai-server) running, with a model loaded |
+| **Amazon Bedrock**             | AWS credentials with Bedrock model access in your target region                                                         |
+| **Bedrock Mantle**             | AWS credentials or a Bedrock API key, plus a Mantle model available in your account/region                              |
+| **Amazon SageMaker AI**        | AWS credentials and a deployed SageMaker endpoint                                                                       |
+| **OpenAI**                     | `OPENAI_API_KEY` environment variable                                                                                   |
+| **Anthropic**                  | `ANTHROPIC_API_KEY` environment variable                                                                                |
+| **LiteLLM**                    | A LiteLLM-compatible provider, API base, and credentials as needed                                                      |
 
 Optional, depending on features you enable:
 
@@ -64,7 +65,7 @@ mnemoai
 If no config exists, Mnemo AI opens an interactive setup wizard. It asks for:
 
 - chat model provider and model name;
-- provider connection details, such as Ollama host/port, AWS region, SageMaker input format, LiteLLM API base/key, or Mantle protocol;
+- provider connection details, such as Ollama or MLX server host/port, AWS region, SageMaker input format, LiteLLM API base/key, or Mantle protocol;
 - optional vision and embedding model settings;
 - profile name;
 - optional Brave Search API key;
