@@ -260,6 +260,16 @@ def _credentials_check(provider: str, section: dict) -> Check:
         return _probe_port("Provider", "ollama server", host, port,
                            "Start it with `ollama serve`.")
 
+    if provider == "mlx":
+        base = section.get("API_BASE") or section.get("ENDPOINT_URL")
+        if base:
+            # A custom base URL may not map to HOST/PORT, so don't probe it.
+            return Check("Provider", "endpoint", OK, str(base))
+        host = str(section.get("HOST", "127.0.0.1") or "127.0.0.1")
+        port = int(section.get("PORT", 8000) or 8000)
+        return _probe_port("Provider", "mlx server", host, port,
+                           "Start it with `mlx-openai-server launch`.")
+
     if provider in ("bedrock", "mantle", "sagemaker"):
         return _aws_credentials_check(provider, section)
 

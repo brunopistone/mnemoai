@@ -4,7 +4,7 @@
 
 A local agentic AI assistant for developers and power users. Mnemo AI runs in your terminal, connects to tools through MCP (Model Context Protocol), can read and edit files, use shell/git safely, search documents with RAG, and remember useful context across sessions.
 
-It supports local and hosted model providers: **Ollama**, **Amazon Bedrock**, **Bedrock Mantle**, **OpenAI**, **Anthropic**, **Amazon SageMaker AI**, and **LiteLLM**.
+It supports local and hosted model providers: **Ollama**, **MLX** (Apple Silicon), **Amazon Bedrock**, **Bedrock Mantle**, **OpenAI**, **Anthropic**, **Amazon SageMaker AI**, and **LiteLLM**.
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb" controls width="720">
@@ -29,7 +29,7 @@ You only need Python 3.11+ and access to at least one model provider. For the ea
 
 ## What Mnemo AI can do
 
-- **Use multiple LLM providers** — local Ollama or hosted providers such as Bedrock, OpenAI, Anthropic, SageMaker AI, and LiteLLM.
+- **Use multiple LLM providers** — a local runner (Ollama, or an MLX server on Apple Silicon) or hosted providers such as Bedrock, OpenAI, Anthropic, SageMaker AI, and LiteLLM.
 - **Work with your files** — read, search, write, and precisely edit text, code, CSV, JSON, PDF, and DOCX files.
 - **Use developer tools safely** — shell execution, git safety checks, todo tracking, plan mode, and background tasks.
 - **Search and ingest knowledge** — RAG over documents, web crawling, and optional Brave web search.

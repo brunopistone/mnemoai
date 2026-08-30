@@ -7,6 +7,57 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.17.0] — 2026-08-30
+
+### Added
+
+- **`TYPE: mlx` — a local MLX server as a first-class provider.** On Apple Silicon
+  the fast way to run a quantized model is MLX, and reaching one already half-worked:
+  `TYPE: openai` with `API_BASE: http://127.0.0.1:8000/v1` speaks the right protocol.
+  What it could not do is anything MLX-specific. `TOP_K`, `MIN_P` and
+  `REPETITION_PENALTY` are real knobs on that server but are not `ChatOpenAI` fields,
+  so they were dropped on the way out with nothing said; `KEEP_ALIVE` — how long the
+  server keeps a model resident after a request — had nowhere to go at all. `mlx` is
+  now its own `TYPE` across **all three sections** (chat, vision, and
+  `RAG.EMBED_MODEL_ID`): the connection is `HOST`/`PORT` (default `127.0.0.1:8000`, no
+  hand-written `/v1` suffix), no key is required — a placeholder is sent, so a real
+  `OPENAI_API_KEY` in your environment is never forwarded to a local server — and the
+  MLX-only params travel in the request body where the server actually reads them.
+  `API_BASE`/`API_KEY` stay available for a server behind a proxy or an auth layer.
+  `KEEP_ALIVE` takes `30m`, `1h30m`, `500ms`, bare seconds, `0` to unload the moment
+  the request finishes, or `-1` to pin, and it is set per section — which is what makes
+  one server hosting chat + vision + embeddings practical: pin what you talk to
+  constantly and let a rarely-used model fall out of memory instead of holding RAM.
+  `/config` and `/model` prompt for host/port with MLX's own wording and defaults
+  rather than Ollama's, `/params` offers `MIN_P` and `KEEP_ALIVE` (validated as a
+  duration, so a typo is caught at the prompt instead of on the first request), and
+  `/doctor` TCP-probes the server and tells you to start it rather than reporting a
+  credential that does not exist. One knob is deliberately **absent**: `TOP_K` on
+  `mlx` vision, because that server's multimodal handler never passes it to the
+  sampler — config that looks effective and does nothing is worse than a knob that
+  isn't offered. Token counting has no MLX-specific multiplier for the same reason:
+  one server can serve any tokenizer family, so it takes the conservative 1.35
+  fallback (override with `LLM.TOKEN_COUNTING.MLX_MULTIPLIER`).
+
+### Fixed
+
+- **The arrow keys move the selection in every picker, not just some of them.** In
+  `--resume` and `/load` the `(*)` marker follows ↑/↓, so ↓↓Enter opens the third
+  conversation. In the `/model` and `/config` dialogs it did not: the marker stayed
+  on the row the dialog opened at while the arrows moved only the cursor, and Enter
+  confirmed the marker — so arrowing down two rows and pressing Enter silently acted
+  on the **first** row (measured on "Which model to change?": `↓↓Enter` returned
+  _Chat_). Pressing Space committed the highlighted row first, but nothing on screen
+  said so — and the keys reference has documented these dialogs as "arrow keys move,
+  `Enter` confirms" all along. A single-choice list tracks its highlighted row
+  separately from its committed value and only its own Enter/Space binding
+  reconciles the two, which these dialogs override so that Enter confirms directly
+  instead of needing a Tab-to-OK step. The conversation pickers were fixed for this
+  in 1.8.4; the settings dialogs are built in a different module and kept the bug.
+  Both opt into commit-on-move now, and a test reads the source so a picker added in
+  a third module later can't reintroduce the split. Multi-select (`/features`) keeps
+  Space to toggle on purpose: there, moving past a row must not tick it.
+
 ## [1.16.2] — 2026-08-29
 
 ### Changed

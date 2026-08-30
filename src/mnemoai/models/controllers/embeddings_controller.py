@@ -61,7 +61,7 @@ class EmbeddingsController(BaseModelController):
     controllers require them), so the shared reads don't apply.
     """
 
-    PROVIDERS = ("ollama", "bedrock", "openai", "sagemaker", "litellm")
+    PROVIDERS = ("ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx")
     PROVIDER_METHOD_TEMPLATE = "_embed_{provider}"
     PROVIDER_LABEL = "embedding model"
 
@@ -529,6 +529,33 @@ class EmbeddingsController(BaseModelController):
         response = client.embeddings.create(
             model=self.embed_model_name, input=texts
         )
+        embeddings = [item.embedding for item in response.data]
+        return np.array(embeddings, dtype=np.float32)
+
+    def _embed_mlx(self, texts: List[str]) -> np.ndarray:
+        """One embed call against a local MLX server; raises on failure.
+
+        Its ``/v1/embeddings`` surface is OpenAI-shaped, so this reuses the same
+        client. Connection is ``HOST``/``PORT`` (default ``127.0.0.1:8000``) so no
+        one has to hand-write the ``/v1`` suffix; ``API_BASE`` still wins when set.
+        ``KEEP_ALIVE`` rides in ``extra_body`` — the server reads it as how long to
+        keep the embedding worker resident after the call. Recovery is handled by
+        the generic caller."""
+        base_url = self.api_base
+        if not base_url:
+            host = self.embed_model_config.get("HOST", "127.0.0.1")
+            port = self.embed_model_config.get("PORT", 8000)
+            base_url = f"http://{host}:{port}/v1"
+        # The server ignores auth; a placeholder key keeps OPENAI_API_KEY from
+        # the environment out of the picture.
+        client = OpenAI(base_url=base_url, api_key=self.api_key or "sk-local")
+
+        kwargs = {"model": self.embed_model_name, "input": texts}
+        keep_alive = self.embed_model_config.get("KEEP_ALIVE")
+        if keep_alive is not None:
+            kwargs["extra_body"] = {"keep_alive": keep_alive}
+
+        response = client.embeddings.create(**kwargs)
         embeddings = [item.embedding for item in response.data]
         return np.array(embeddings, dtype=np.float32)
 

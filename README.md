@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
-A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
+A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, MLX, Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic, Amazon SageMaker AI, LiteLLM).
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb" controls width="720">
@@ -43,7 +43,7 @@ On first run, if no config is found, an interactive configurator launches and wa
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), Amazon SageMaker AI (chat only — no tool calling), LiteLLM (100+ providers)
+- **🤖 Multi-Model Support**: Ollama (local), MLX (local, Apple Silicon), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), Amazon SageMaker AI (chat only — no tool calling), LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG**: Automatic document indexing and semantic (hybrid) search
 - **🧠 User Profile Learning**: Personalized responses learned from interactions

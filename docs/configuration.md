@@ -189,6 +189,65 @@ RAG:
 (Ollama remains fully supported via `TYPE: ollama`; this is an alternative, not
 a replacement.)
 
+#### MLX server (Local, Apple Silicon)
+
+`TYPE: mlx` targets a local [MLX](https://github.com/ml-explore/mlx) server such
+as [`mlx-openai-server`](https://github.com/cubist38/mlx-openai-server), which
+runs quantized models natively on Apple Silicon. Its API is OpenAI-compatible,
+so this is `TYPE: openai` with the local ergonomics filled in: the connection is
+`HOST`/`PORT` (no hand-written `/v1` suffix), no key is required, and it accepts
+MLX's own sampling knobs — `TOP_K`, `MIN_P`, `REPETITION_PENALTY` — plus
+`KEEP_ALIVE`.
+
+```yaml
+MODEL_ID:
+  NAME: qwen-agentcoder # the name the server serves it under
+  TYPE: mlx
+  HOST: 127.0.0.1 # default
+  PORT: 8000 # default
+  TEMPERATURE: 0.6
+  TOP_P: 0.95
+  TOP_K: 20
+  MIN_P: 0.05
+  REPETITION_PENALTY: 1.15
+  MAX_TOKENS: 32768
+  KEEP_ALIVE: 30m # stay resident 30 min after each request
+# No API key needed for a local server.
+```
+
+Start the server before use — e.g. `mlx-openai-server launch --model-path
+mlx-community/Qwen3-4B-4bit --model-type lm`, or `--config <file>` for a server
+that declares several models. `NAME` is whatever that server answers to: its
+served model name, a version or alias of it, or the model path/repo id when no
+served name is set.
+
+**Set a tool-call parser on the server** — in the server's own config, not here.
+Mnemo AI is tool-driven, and models emit tool calls in their own dialect (Qwen3
+writes Hermes-style `<tool_call>{…}</tool_call>`). With no parser configured the
+server hands that straight back as assistant text, so the agent talks _about_ the
+tool it meant to call instead of calling it — and nothing in the config above
+looks wrong. For `mlx-openai-server` that's `tool_call_parser` per model entry
+(`hermes` for Qwen3 Instruct, `qwen3_coder` for the Coder line), plus
+`reasoning_parser` for a thinking model.
+
+**`KEEP_ALIVE` — how long the model stays loaded.** It rides in the request, so
+each section sets its own: `30m`, `1h30m`, `500ms`, a bare number of seconds
+(`600`), `0` to unload as soon as the request finishes, or `-1` to pin the model
+in memory. Omit it to leave the server's own default in charge. It earns its keep
+when one server hosts several models — pin the chat model you talk to constantly
+and let a rarely-used vision model fall out of memory instead of holding RAM.
+
+`API_BASE` and `API_KEY` are optional, for the two exceptions: a server behind a
+reverse proxy or a path prefix (`API_BASE: https://mac.internal/mlx/v1`, which
+takes precedence over `HOST`/`PORT`; `ENDPOINT_URL` is accepted as an alias, as
+with `TYPE: openai`), and a server you have put an auth layer in front of. With
+neither set a placeholder key is sent, so a real `OPENAI_API_KEY` in your
+environment is never forwarded to a local server.
+
+The same keys work for `VISION_MODEL_ID` (an MLX `multimodal` model) and
+`RAG.EMBED_MODEL_ID` (its `/v1/embeddings`) — one server can back all three
+sections, on the same port, provided it has each model loaded.
+
 #### Anthropic (Claude API)
 
 The direct Anthropic API (`api.anthropic.com`) via `langchain-anthropic`. This is **distinct from the Bedrock Mantle `anthropic` protocol** (which reaches Claude through Bedrock) — `TYPE: anthropic` talks to Anthropic directly. `STOP` maps to Anthropic's `stop_sequences`, and extended thinking is enabled with `REASONING` (+ optional `REASONING_EFFORT` / `THINKING_TOKENS`).
@@ -295,6 +354,19 @@ VISION_MODEL_ID:
   API_KEY: your-api-key # optional (else the provider's env var)
 ```
 
+For a local MLX server (the model must be loaded as `multimodal`):
+
+```yaml
+VISION_MODEL_ID:
+  NAME: qwen3-vl-4bit
+  TYPE: mlx
+  HOST: 127.0.0.1
+  PORT: 8000
+  TEMPERATURE: 0.3
+  KEEP_ALIVE: 5m # a vision model is called rarely; don't hold RAM for long
+# TOP_K is not offered here: the multimodal path never passes it to the sampler.
+```
+
 ### Model Parameters
 
 This is the full reference for what you can put under `MODEL_ID`,
@@ -306,18 +378,18 @@ anything else a provider or model supports.
 
 #### Identity, connection & auth
 
-| Parameter      | Applies to `TYPE`                | Description                                                                                                                                      |
-| -------------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `NAME`         | all (**required**)               | Model id / Ollama model / Bedrock model id / Mantle bare id / SageMaker endpoint name                                                            |
-| `TYPE`         | all (**required**)               | `ollama`, `bedrock`, `mantle`, `openai`, `anthropic`, `sagemaker`, `litellm` (embeddings: `ollama`, `bedrock`, `openai`, `sagemaker`, `litellm`) |
-| `HOST`         | `ollama`                         | Ollama host (default `localhost`)                                                                                                                |
-| `PORT`         | `ollama`                         | Ollama port (default `11434`)                                                                                                                    |
-| `REGION`       | `bedrock`, `mantle`, `sagemaker` | AWS region (default `us-east-1`)                                                                                                                 |
-| `API_PROTOCOL` | `mantle`                         | `chat_completions` (default), `responses`, or `anthropic`                                                                                        |
-| `ENDPOINT_URL` | `bedrock`, `mantle`, `anthropic` | Override the default endpoint URL (Anthropic: custom base URL)                                                                                   |
-| `API_KEY`      | `mantle`, `anthropic`, `litellm` | Mantle: Bedrock API key (else `BEDROCK_API_KEY` env / minted token). Anthropic: else `ANTHROPIC_API_KEY` env. LiteLLM: provider key              |
-| `API_BASE`     | `litellm`                        | LiteLLM API base URL                                                                                                                             |
-| `INPUT_FORMAT` | `sagemaker`                      | `openai_chat` (default) or `huggingface`                                                                                                         |
+| Parameter      | Applies to `TYPE`                       | Description                                                                                                                                                                    |
+| -------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `NAME`         | all (**required**)                      | Model id / Ollama model / Bedrock model id / Mantle bare id / SageMaker endpoint name / MLX served name                                                                        |
+| `TYPE`         | all (**required**)                      | `ollama`, `bedrock`, `mantle`, `openai`, `anthropic`, `sagemaker`, `litellm`, `mlx` (embeddings: the same list minus `mantle`/`anthropic`)                                     |
+| `HOST`         | `ollama`, `mlx`                         | Server host (default `localhost` for ollama, `127.0.0.1` for mlx)                                                                                                              |
+| `PORT`         | `ollama`, `mlx`                         | Server port (default `11434` for ollama, `8000` for mlx)                                                                                                                       |
+| `REGION`       | `bedrock`, `mantle`, `sagemaker`        | AWS region (default `us-east-1`)                                                                                                                                               |
+| `API_PROTOCOL` | `mantle`                                | `chat_completions` (default), `responses`, or `anthropic`                                                                                                                      |
+| `ENDPOINT_URL` | `bedrock`, `mantle`, `anthropic`        | Override the default endpoint URL (Anthropic: custom base URL)                                                                                                                 |
+| `API_KEY`      | `mantle`, `anthropic`, `litellm`, `mlx` | Mantle: Bedrock API key (else `BEDROCK_API_KEY` env / minted token). Anthropic: else `ANTHROPIC_API_KEY` env. LiteLLM: provider key. MLX: optional — a local server needs none |
+| `API_BASE`     | `litellm`, `mlx`                        | API base URL — LiteLLM proxy, or an MLX server behind a proxy/path prefix (wins over `HOST`/`PORT`)                                                                            |
+| `INPUT_FORMAT` | `sagemaker`                             | `openai_chat` (default) or `huggingface`                                                                                                                                       |
 
 > Standard Bedrock also reads the `AWS_BEARER_TOKEN_BEDROCK` env var, and all AWS
 > providers honor `AWS_PROFILE` — see the API-key/profile notes under Amazon Bedrock.
@@ -326,36 +398,42 @@ anything else a provider or model supports.
 
 Optional generation settings. The **Honored by** column lists the providers that
 actually send each one (others ignore it). These apply to `MODEL_ID` and
-`VISION_MODEL_ID`; **`EMBED_MODEL_ID` takes none of them** (embeddings only use
-`NAME`/`TYPE` + connection).
+`VISION_MODEL_ID`; **`EMBED_MODEL_ID` takes no generation params** (embeddings
+only use `NAME`/`TYPE` + connection, plus `DIMENSION`, and `KEEP_ALIVE` on
+`mlx` — an embedder is worth keeping resident, not sampled).
 
 This table is derived from `models/provider_params.py` — the single source of
 truth that the controllers build their client kwargs from — so it reflects
 exactly what each provider's init path forwards. (`mantle` reads
 `TEMPERATURE`/`MAX_TOKENS`/`TOP_P` via the Mantle factory.)
 
-| Parameter            | Description                                                                                 | Honored by (`MODEL_ID`)                                        |
-| -------------------- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| `MAX_TOKENS`         | Max output tokens to generate                                                               | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
-| `TEMPERATURE`        | Sampling temperature                                                                        | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
-| `TOP_P`              | Top-p (nucleus) sampling                                                                    | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm |
-| `TOP_K`              | Top-k sampling                                                                              | ollama, anthropic, sagemaker                                   |
-| `STOP`               | Stop sequences (YAML list)                                                                  | ollama, bedrock, anthropic, sagemaker, litellm                 |
-| `STREAM`             | Stream tokens (default `true`)                                                              | mantle, openai, anthropic, litellm                             |
-| `PRESENCE_PENALTY`   | Presence penalty                                                                            | ollama, openai                                                 |
-| `FREQUENCY_PENALTY`  | Frequency penalty                                                                           | ollama                                                         |
-| `REPETITION_PENALTY` | Repetition penalty                                                                          | ollama, litellm                                                |
-| `REASONING`          | Enable extended thinking (boolean)                                                          | bedrock, anthropic                                             |
-| `THINKING_TOKENS`    | Thinking token budget (default `2048`)                                                      | bedrock, anthropic                                             |
-| `REASONING_EFFORT`   | reasoning effort (provider-dependent: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`) | openai, anthropic, bedrock, mantle, litellm                    |
-| `PROMPT_CACHE`       | Cache the stable prompt prefix (boolean, default **on** where supported)                    | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)         |
-| `PROMPT_CACHE_TTL`   | How long a cached prefix lives: `5m` (default) or `1h`                                      | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)         |
+| Parameter            | Description                                                                                                    | Honored by (`MODEL_ID`)                                             |
+| -------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `MAX_TOKENS`         | Max output tokens to generate                                                                                  | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm, mlx |
+| `TEMPERATURE`        | Sampling temperature                                                                                           | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm, mlx |
+| `TOP_P`              | Top-p (nucleus) sampling                                                                                       | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm, mlx |
+| `TOP_K`              | Top-k sampling                                                                                                 | ollama, anthropic, sagemaker, mlx                                   |
+| `MIN_P`              | Min-p sampling: drop tokens under this share of the top token's probability (`0` disables)                     | mlx                                                                 |
+| `STOP`               | Stop sequences (YAML list)                                                                                     | ollama, bedrock, anthropic, sagemaker, litellm, mlx                 |
+| `STREAM`             | Stream tokens (default `true`)                                                                                 | mantle, openai, anthropic, litellm, mlx                             |
+| `PRESENCE_PENALTY`   | Presence penalty                                                                                               | ollama, openai, mlx                                                 |
+| `FREQUENCY_PENALTY`  | Frequency penalty                                                                                              | ollama, mlx                                                         |
+| `REPETITION_PENALTY` | Repetition penalty                                                                                             | ollama, litellm, mlx                                                |
+| `REASONING`          | Enable extended thinking (boolean)                                                                             | bedrock, anthropic                                                  |
+| `THINKING_TOKENS`    | Thinking token budget (default `2048`)                                                                         | bedrock, anthropic                                                  |
+| `REASONING_EFFORT`   | reasoning effort (provider-dependent: `none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`)                    | openai, anthropic, bedrock, mantle, litellm                         |
+| `PROMPT_CACHE`       | Cache the stable prompt prefix (boolean, default **on** where supported)                                       | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)              |
+| `PROMPT_CACHE_TTL`   | How long a cached prefix lives: `5m` (default) or `1h`                                                         | bedrock, anthropic, mantle (`API_PROTOCOL: anthropic`)              |
+| `KEEP_ALIVE`         | How long the server keeps the model loaded: `30m`, `1h30m`, `600` (bare seconds), `0` (unload now), `-1` (pin) | mlx (also on `EMBED_MODEL_ID`)                                      |
 
-`VISION_MODEL_ID` supports the same seven providers as `MODEL_ID`. It accepts a
+`VISION_MODEL_ID` supports the same eight providers as `MODEL_ID`. It accepts a
 subset of params: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` across providers, plus
-`TOP_K` on ollama/anthropic/sagemaker and `STOP` on ollama/sagemaker. Connection
-keys follow the provider (host/port, region, Mantle protocol, SageMaker
-`INPUT_FORMAT`, LiteLLM/Anthropic `API_BASE`/`API_KEY`/base URL).
+`TOP_K` on ollama/anthropic/sagemaker, `STOP` on ollama/sagemaker/mlx, and
+`KEEP_ALIVE` on mlx. Connection keys follow the provider (host/port, region,
+Mantle protocol, SageMaker `INPUT_FORMAT`, LiteLLM/Anthropic/MLX
+`API_BASE`/`API_KEY`/base URL). `TOP_K` is deliberately **not** offered for
+`mlx` vision: that server's multimodal path never passes it to the sampler, so
+setting it would look effective and do nothing.
 
 > **`/params` only offers what the provider supports.** The set of tunable
 > params is taken per-provider from the registry, so `/params` never prompts for
@@ -439,8 +517,9 @@ MODEL_ID:
 ```
 
 Notes: `reasoning_effort` is lifted to a first-class argument on OpenAI-family
-clients (so it isn't double-specified); everything else is merged into
-`model_kwargs`. A non-dict `EXTRA_PARAMS` is ignored rather than crashing. It is
+clients (so it isn't double-specified); everything else is merged into the
+request body (`model_kwargs`, or `extra_body` on `mlx`, whose extra fields aren't
+part of the OpenAI API). A non-dict `EXTRA_PARAMS` is ignored rather than crashing. It is
 not offered by the `/params` interactive tuner (it's a free-form dict, not a
 scalar) — set it in `config.yaml` directly.
 
@@ -585,6 +664,11 @@ tiktoken's `o200k_base`, then scaled per provider family:
 
 `ollama` is the exception: no tokenizer is available, so the count is
 `len(text) / OLLAMA_CHARS_PER_TOKEN` (default `3.0`).
+
+`mlx` has no entry of its own and so takes the 1.35 fallback: one MLX server can
+serve any tokenizer family, so a fixed per-provider figure would be a guess, and
+the fallback errs upward — which compacts a little early rather than overflowing.
+Set `MLX_MULTIPLIER` if you want it tighter for the model you actually run.
 
 !!! note "Two vestigial keys under `TOKEN_COUNTING`"
 
@@ -787,6 +871,19 @@ RAG:
     TYPE: litellm
     API_BASE: http://localhost:4000 # optional (proxy / self-hosted)
     API_KEY: your-api-key # optional (else the provider's env var)
+```
+
+For a local MLX server:
+
+```yaml
+RAG:
+  EMBED_MODEL_ID:
+    NAME: qwen3-embedding-0.6b # the name the server serves it under
+    TYPE: mlx
+    HOST: 127.0.0.1
+    PORT: 8000
+    KEEP_ALIVE: 10m # embedding runs come in bursts; keep it warm between them
+    DIMENSION: 1024 # optional: only shapes the SHA256 fallback (see above)
 ```
 
 **Vector Store Options:**
