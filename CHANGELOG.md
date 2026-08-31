@@ -7,6 +7,50 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.17.1] — 2026-08-31
+
+### Fixed
+
+- **A turn against a local MLX (or any OpenAI-shaped) server no longer dies at
+  `No stream data for 120s` and then retries forever.** Those servers accept a
+  request and *immediately* send a contentless `{"delta": {"role": "assistant"}}`
+  — before prefill has begun — and the stream watchdog counted it as the first
+  token. That is the one thing it must never do: the long window that covers
+  prefill and reasoning (`REQUEST_TIMEOUT` + 30s) was handed back for the short
+  per-chunk one while the model still hadn't produced a word, so a large prompt
+  timed out against a perfectly healthy server, and since every retry re-sent the
+  same prompt and re-paid the same doomed prefill, the turn could never complete —
+  the exact trap the first-token window was added to fix, one layer down. Measured
+  against a local MLX server on a 43k-token prompt: the priming chunk at +0.01s,
+  the first real token at +300s, against a 120s window; on a 6k-token one, 28
+  contentless chunks (the first at +12s) before the first token at +63s. The window
+  now narrows only when a chunk carries something the model actually produced —
+  content, a tool-call fragment, reasoning, a finish reason, real usage numbers —
+  and it is a wall-clock deadline rather than a per-poll counter, so a server that
+  emits keep-alives faster than the poll interval can't hold a dead turn open
+  either. A chunk shape we can't classify still counts as a start, so nothing
+  *delays* dead-socket detection for an unknown provider.
+
+- **A provider's error now reads as a sentence instead of the raw response body it
+  arrived in.** A warning or error on screen is meant to be one line of the
+  interface, with the whole record kept in `~/.mnemoai/logs/mnemoai.log` — but when
+  the text comes from an HTTP provider it isn't prose, it's a serialized response:
+  `Stream connection failed (Error code: 503 - {'detail': {'error': {'message':
+"Failed to load on-demand model …", 'type': 'model_load_error', 'code': 503}}});
+retrying turn on a fresh connection in 1.1s` — three levels of braces, two keys
+  nobody reads, and no pointer to the log file, because the 500-character cap that
+  exists for exactly this reason never engaged on a message this short. The
+  envelope is now unwrapped down to the `message` inside it, in the one place every
+  warning, error and UI line built from an exception passes through. The reason
+  it's an unwrap rather than a tighter cap: **the actionable part sits at the end
+  of the body** — in the case above, `No module named 'aiohttp'`, the whole
+  explanation — so shortening the line by length would delete precisely the fact
+  worth showing. Since something was dropped, the dim
+  `(traceback → ~/.mnemoai/logs/mnemoai.log)` pointer now appears on these lines
+  too, which is where the untouched body still is. Conservative by construction: a
+  provider that words its failures in prose (botocore) and a body carrying no
+  `message` are left exactly as they were.
+
 ## [1.17.0] — 2026-08-30
 
 ### Added

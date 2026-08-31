@@ -13,6 +13,7 @@ it can't grow without bound. See :class:`_ConsoleFormatter` and
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import threading
 import warnings
@@ -41,14 +42,106 @@ _LEVEL_MARKS = {
 # window as effectively as the traceback we just moved to the file.
 _MAX_CONSOLE_CHARS = 500
 
+# The ``message`` key inside a rendered error body, in either quote style — a
+# provider's text is a repr'd Python dict as often as it is JSON.
+_MESSAGE_KEY = re.compile(r"""['"]message['"]\s*:\s*""")
+# Escapes worth resolving when reading that key's value back out of the body.
+_UNESCAPE = {"n": "\n", "t": "\t", "r": "\r"}
+
+
+def _balanced_span(text: str):
+    """``(start, end)`` of the first balanced ``{…}`` run in ``text``, or None.
+
+    The body is only PART of the line — our own wording wraps it on both sides
+    ("Stream connection failed (…); retrying in 1.1s") — so the run has to be
+    delimited rather than assumed to reach the end. Quote-aware, so a brace
+    inside the body's own strings can't unbalance the scan.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    quote = ""
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return start, i + 1
+        i += 1
+    return None
+
+
+def _string_at(text: str, i: int):
+    """The quoted string literal starting at ``text[i]``, or None if it isn't one."""
+    quote = text[i : i + 1]
+    if quote not in ("'", '"'):
+        return None
+    out = []
+    i += 1
+    while i < len(text):
+        ch = text[i]
+        if ch == "\\" and i + 1 < len(text):
+            out.append(_UNESCAPE.get(text[i + 1], text[i + 1]))
+            i += 2
+            continue
+        if ch == quote:
+            return "".join(out)
+        out.append(ch)
+        i += 1
+    return None
+
+
+def unwrap_error_body(text: str) -> str:
+    """Replace a rendered error body in ``text`` with the ``message`` inside it.
+
+    A provider error's text is a serialized response, not a sentence:
+    ``Error code: 503 - {'detail': {'error': {'message': "…", 'type':
+    'model_load_error', 'code': 503}}}``. On screen the envelope is noise, and
+    **the one actionable fact sits at the END of it** (``No module named
+    'aiohttp'``), so shortening the line by length alone cuts exactly the part
+    that says what went wrong — which is why this runs before the cap rather than
+    instead of it. Our own wording around the body is kept verbatim.
+
+    Deliberately conservative: the FIRST ``message`` key (outermost in every shape
+    observed — openai's ``detail.error.message``, Anthropic's ``error.message``),
+    a string value only, and any text without such a key left untouched (botocore
+    spells its errors out in prose, and a plain sentence must survive unharmed).
+    """
+    span = _balanced_span(text)
+    if span is None:
+        return text
+    start, end = span
+    body = text[start:end]
+    key = _MESSAGE_KEY.search(body)
+    if key is None:
+        return text
+    message = _string_at(body, key.end())
+    if not message:
+        return text
+    return text[:start] + message + text[end:]
+
 
 def one_line(text: str, limit: int = _MAX_CONSOLE_CHARS) -> str:
-    """First line of ``text``, capped — the console's share of a long message.
+    """First line of ``text`` with any error envelope unwrapped, capped — the
+    console's share of a long message.
 
     Used for the console record and for any UI message built from an exception:
     the whole thing is in the log file, so the screen gets the headline.
     """
-    head = str(text or "").strip().split("\n", 1)[0].strip()
+    head = unwrap_error_body(str(text or "").strip())
+    head = head.split("\n", 1)[0].strip()
     if len(head) > limit:
         head = head[: limit - 1].rstrip() + "…"
     return head
