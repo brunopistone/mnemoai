@@ -230,6 +230,12 @@ looks wrong. For `mlx-openai-server` that's `tool_call_parser` per model entry
 (`hermes` for Qwen3 Instruct, `qwen3_coder` for the Coder line), plus
 `reasoning_parser` for a thinking model.
 
+**A `reasoning_parser` gets you the `Thought for Ns…` block.** With one set the
+server reports the model's thinking as its own field instead of leaving it in the
+answer, and Mnemo AI renders it as a collapsed reasoning block (verbose mode) or
+dims it inline. Which field it lands in differs per server and per parser — every
+known shape is read, so any parser your server offers works.
+
 **`KEEP_ALIVE` — how long the model stays loaded.** It rides in the request, so
 each section sets its own: `30m`, `1h30m`, `500ms`, a bare number of seconds
 (`600`), `0` to unload as soon as the request finishes, or `-1` to pin the model
@@ -448,6 +454,25 @@ setting it would look effective and do nothing.
 > backend). When thinking is enabled this way, `temperature`/`top_p`/`top_k` are
 > dropped automatically (the providers reject them). For finer control, set the
 > raw provider parameter via `EXTRA_PARAMS` (below), which overrides this.
+>
+> **Bedrock is one endpoint for many model families**, so `REASONING_EFFORT` maps
+> to a thinking budget only for Claude there. A non-Claude family gets no
+> injection — several reason automatically, and the field name differs per family
+> — so use `EXTRA_PARAMS` for those. For an OpenAI GPT model on Bedrock
+> (`openai.gpt-*`), the working form is:
+>
+> ```yaml
+> EXTRA_PARAMS:
+>   additional_model_request_fields:
+>     reasoning:
+>       effort: high # none | low | medium | high | xhigh
+> ```
+>
+> (a bare `reasoning_effort` at that level is rejected as an unknown parameter).
+> Those models **reason but never show it**: Bedrock returns their thinking only
+> in encrypted form, at every effort and summary setting, so you get the benefit of
+> the reasoning without a `Thought for Ns…` block. That is the provider's policy,
+> not a missing feature — Claude on Bedrock does show its thinking.
 
 ##### `PROMPT_CACHE` — reuse the prompt prefix instead of re-paying for it
 

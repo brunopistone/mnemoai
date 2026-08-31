@@ -5,8 +5,8 @@ short-lived bearer token via ``aws_bedrock_token_generator``. It serves models
 under three OpenAI-/Anthropic-compatible protocols, selected per model with the
 ``API_PROTOCOL`` config key:
 
-    chat_completions  (default)  base /v1            -> ChatOpenAI
-    responses                    base /openai/v1     -> ChatOpenAI(use_responses_api=True)
+    chat_completions  (default)  base /v1            -> ChatOpenAIReasoning
+    responses                    base /openai/v1     -> …(use_responses_api=True)
     anthropic                    base /anthropic     -> ChatAnthropic (Messages API)
 
 All three were verified live against bedrock-mantle.<region>.api.aws.
@@ -198,8 +198,11 @@ def build_mantle_model(
         kwargs.update(extra)
         return ChatAnthropic(**kwargs)
 
-    # OpenAI-compatible protocols (chat_completions / responses)
-    from langchain_openai import ChatOpenAI
+    # OpenAI-compatible protocols (chat_completions / responses). The subclass
+    # keeps a reasoning field the OpenAI schema has no room for (see
+    # chat_openai_reasoning); on responses, which carries reasoning as typed
+    # content blocks through its own converters, it is inert.
+    from mnemoai.models.chat_models.chat_openai_reasoning import ChatOpenAIReasoning
 
     kwargs = {
         "model": name,
@@ -236,4 +239,4 @@ def build_mantle_model(
             kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
         if extra:
             kwargs["model_kwargs"] = extra
-    return ChatOpenAI(**kwargs)
+    return ChatOpenAIReasoning(**kwargs)
