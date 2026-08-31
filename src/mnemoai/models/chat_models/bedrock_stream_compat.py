@@ -17,6 +17,13 @@ non-streamed path runs the same converter over the whole content list and simply
 gets one block fewer — and there is nothing in it to display in any case: the
 payload is a KMS-wrapped `rsn_…` blob, not prose.
 
+The predicate ASKS the converter rather than keeping its own list of block types,
+which is what lets this retire itself as upstream catches up: langchain-aws 1.7.4
+added the missing branch, so from there on the block converts and nothing is
+dropped, while an install on 1.7.3 or older (the floor is `>=1.4.1`) still needs
+the guard to complete a turn. Hence also the version-gated tests — a test that
+pins the crash must skip where the library no longer has the hole.
+
 Applied to EVERY Converse model rather than to the families known to send it: it
 is a pure "an unconvertible event must not kill the turn" guard (a no-op for a
 model that never sends one), the same hole is one new block type away for any
