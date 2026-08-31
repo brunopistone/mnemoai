@@ -37,10 +37,17 @@ def patch_mantle(monkeypatch):
 
     Returns a dict of the kwargs the constructed model was built with, plus a
     ``_class`` key naming which class was used.
+
+    The OpenAI-shaped protocols build ``ChatOpenAIReasoning`` (the subclass that
+    keeps a server's reasoning field), so that name is patched too — where it is
+    LOOKED UP — and recorded under the same ``_class`` label, since these tests
+    assert which TRANSPORT was chosen, not the exact class.
     """
     import aws_bedrock_token_generator
     import langchain_anthropic
     import langchain_openai
+
+    import mnemoai.models.chat_models.chat_openai_reasoning as reasoning_mod
 
     captured = {}
 
@@ -54,6 +61,9 @@ def patch_mantle(monkeypatch):
         return _recorder
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", make_recorder("ChatOpenAI"))
+    monkeypatch.setattr(
+        reasoning_mod, "ChatOpenAIReasoning", make_recorder("ChatOpenAI")
+    )
     monkeypatch.setattr(
         langchain_anthropic, "ChatAnthropic", make_recorder("ChatAnthropic")
     )
@@ -883,7 +893,7 @@ class TestExtraParamsPassthrough:
         assert patch_mantle["thinking"] == {"type": "enabled", "budget_tokens": 4096}
 
     def test_direct_openai_extra_params(self, patch_mantle, monkeypatch):
-        import langchain_openai
+        import mnemoai.models.chat_models.chat_openai_reasoning as reasoning_mod
 
         captured = {}
 
@@ -892,7 +902,7 @@ class TestExtraParamsPassthrough:
             captured.update(kwargs)
             return MagicMock()
 
-        monkeypatch.setattr(langchain_openai, "ChatOpenAI", rec)
+        monkeypatch.setattr(reasoning_mod, "ChatOpenAIReasoning", rec)
         ctrl = _make_llm_controller(
             monkeypatch,
             {

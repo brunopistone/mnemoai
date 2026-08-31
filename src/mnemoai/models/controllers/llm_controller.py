@@ -5,6 +5,7 @@ from typing import Optional
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from mnemoai.models.chat_models.bedrock_stream_compat import harden_converse_stream
 from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
 from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
 from mnemoai.models.controllers.base_model_controller import BaseModelController
@@ -149,7 +150,11 @@ class LangChainLLMController(BaseModelController):
 
         kwargs.update(extra_params(self.model_id))
 
-        self.model = ChatBedrockConverse(**kwargs)
+        # Same class of problem as `disable_streaming` above: langchain-aws'
+        # stream parser indexes its own converter's result unguarded, so ONE
+        # block type it has no branch for (a GPT model's encrypted reasoning)
+        # kills the turn with an IndexError. See `bedrock_stream_compat`.
+        self.model = harden_converse_stream(ChatBedrockConverse(**kwargs))
 
     def _initialize_mantle_model(self, callbacks: list = None) -> None:
         """Initialize an AWS Bedrock Mantle model (see ``models.mantle_factory``;
@@ -239,8 +244,12 @@ class LangChainLLMController(BaseModelController):
         ``create()`` is typed and rejects unknown top-level keys, which is what
         ``model_kwargs`` would produce (``TypeError: unexpected keyword argument
         'top_k'``, raised client-side before any request goes out).
+
+        The subclass is what keeps a thinking model's reasoning visible: the
+        server's reasoning parser reports it in a non-standard field that plain
+        ``ChatOpenAI`` discards (see ``chat_openai_reasoning``).
         """
-        from langchain_openai import ChatOpenAI
+        from mnemoai.models.chat_models.chat_openai_reasoning import ChatOpenAIReasoning
 
         logger.info("Initializing MLX model...")
 
@@ -275,7 +284,7 @@ class LangChainLLMController(BaseModelController):
         if extra_body:
             kwargs["extra_body"] = extra_body
 
-        self.model = ChatOpenAI(**kwargs)
+        self.model = ChatOpenAIReasoning(**kwargs)
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
         """Initialize an OpenAI-compatible model.
@@ -285,8 +294,12 @@ class LangChainLLMController(BaseModelController):
         when a custom base URL is set. ``API_PROTOCOL`` selects chat_completions
         (default) or responses — on responses, ``REASONING_EFFORT`` is sent as
         ``reasoning={effort, summary:"auto"}`` so the summary is visible.
+
+        On chat_completions the subclass recovers a local server's reasoning
+        field (see ``chat_openai_reasoning``); it is inert against real OpenAI
+        and on the responses protocol, which has its own converters.
         """
-        from langchain_openai import ChatOpenAI
+        from mnemoai.models.chat_models.chat_openai_reasoning import ChatOpenAIReasoning
 
         logger.info("Initializing OpenAI model...")
 
@@ -337,7 +350,7 @@ class LangChainLLMController(BaseModelController):
         if model_kwargs:
             kwargs["model_kwargs"] = model_kwargs
 
-        self.model = ChatOpenAI(**kwargs)
+        self.model = ChatOpenAIReasoning(**kwargs)
 
     def _initialize_anthropic_model(self, callbacks: list = None) -> None:
         """Initialize a direct Anthropic API model (``api.anthropic.com`` or a

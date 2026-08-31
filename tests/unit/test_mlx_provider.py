@@ -24,8 +24,17 @@ import pytest
 
 @pytest.fixture
 def patch_chat_openai(monkeypatch):
-    """Replace ChatOpenAI with a kwarg-capturing mock (used by both controllers)."""
+    """Replace ChatOpenAI with a kwarg-capturing mock (used by both controllers).
+
+    Patched in two places because the two controllers reach different names: the
+    vision path imports ``ChatOpenAI`` from ``langchain_openai`` inside the
+    method, while the chat path builds the ``ChatOpenAIReasoning`` subclass that
+    keeps a local server's reasoning field. Each has to be patched where it is
+    LOOKED UP, or the mock silently misses that controller.
+    """
     import langchain_openai
+
+    import mnemoai.models.chat_models.chat_openai_reasoning as reasoning_mod
 
     captured = {}
 
@@ -35,6 +44,7 @@ def patch_chat_openai(monkeypatch):
         return MagicMock(name="ChatOpenAI")
 
     monkeypatch.setattr(langchain_openai, "ChatOpenAI", _recorder)
+    monkeypatch.setattr(reasoning_mod, "ChatOpenAIReasoning", _recorder)
     return captured
 
 
@@ -212,6 +222,16 @@ class TestParamsReachTheRequestBody:
             "top_k": 20, "min_p": 0.05, "repetition_penalty": 1.15,
             "keep_alive": "30m",
         }
+
+    def test_chat_model_preserves_the_servers_reasoning_field(self, monkeypatch):
+        # A reasoning parser reports the thinking in a non-standard field that
+        # plain ChatOpenAI drops, so the wiring — not just the subclass — is what
+        # makes a thinking model render a "Thought for Ns…" block.
+        from mnemoai.models.chat_models.chat_openai_reasoning import ChatOpenAIReasoning
+
+        ctrl = _llm(monkeypatch, dict(self.PAYLOAD_PARAMS))
+        ctrl.initialize_model()
+        assert isinstance(ctrl.get_model(), ChatOpenAIReasoning)
 
     def test_every_top_level_payload_key_is_one_the_sdk_accepts(self, monkeypatch):
         # The guard the mocked tests structurally cannot provide: compare the

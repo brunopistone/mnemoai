@@ -7,13 +7,68 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.17.2] — 2026-08-31
+
+### Fixed
+
+- **A thinking model served over the OpenAI protocol now shows its thinking.**
+  On a local MLX / llama-server / vLLM / LM Studio server with a reasoning parser
+  configured, the answer appeared out of nowhere: no `Thought for Ns…` block, no
+  gray inline reasoning, nothing in the transcript — while the same model on
+  Ollama or Bedrock showed it. The reasoning was arriving and being thrown away
+  one layer below the app. A reasoning parser splits the model's `<think>` block
+  out of the answer and reports it in a _separate response field_, but that field
+  is not part of the OpenAI schema, and the adapter for that protocol documents
+  that it drops every non-standard field: only `tool_calls` and `function_call`
+  survive. So the thinking was parsed, transmitted, and discarded — the one
+  outcome worse than not separating it at all, since with the parser turned off
+  the thinking at least reaches the screen as (mislabeled) prose.
+  Recovered now, and **not for one server**: the field name is not standardized
+  and differs per server _and_ per reasoning parser — `reasoning_content` (MLX,
+  vLLM, llama-server, SGLang, DeepSeek), `reasoning` (mlx_lm's own server,
+  OpenRouter), a structured `reasoning_details` list (OpenRouter), or
+  `thinking`/`thinking_blocks` (Anthropic-shaped proxies), each of which may hold
+  a plain string, a list of blocks, or a nested summary. All of them are read,
+  in whatever shape, and normalized to the ONE key the turn view already consumes
+  for Ollama and LiteLLM, so nothing downstream needs to know which server
+  produced the turn. Encrypted/redacted reasoning blocks are skipped (they carry
+  ciphertext, not prose), and a provider that sends the same thinking twice under
+  two names yields it once rather than doubled. Both the streamed and
+  non-streamed paths are covered, plus Bedrock Mantle's OpenAI-shaped protocols.
+  Purely additive: a response with no reasoning field is untouched, so real
+  OpenAI behaves exactly as before, and the recovered text is never echoed back
+  to the server on the next turn — the adapter's outbound direction drops it,
+  which matters for a chat template that would reject it.
+  One deliberate side effect: reasoning now counts as the stream having _started_
+  (it is the model producing tokens), so the wide first-token window from 1.17.1
+  narrows to the per-chunk one as soon as thinking begins, tightening dead-socket
+  detection on exactly the turns that used to look idle the longest.
+- **An OpenAI GPT model on Amazon Bedrock now completes a turn at all.** Every
+  turn died immediately with `IndexError: list index out of range` — before a word
+  of the answer, on any prompt, so those models were effectively unusable. Those
+  models put their reasoning in the _encrypted_ form of Bedrock's reasoning block
+  and emit it as the first block of every answer; the Converse adapter has a
+  branch for both readable forms but none for the encrypted one, and it feeds
+  each streamed block into an unguarded index of its own converter's result — so
+  the block it cannot convert took the turn down. Since the failure is
+  deterministic it was never retried either, and it only appears when streaming,
+  which this app enables on purpose. An event the adapter cannot convert is now
+  skipped rather than fatal — which is what the non-streamed path already did
+  with the same block — so the answer, the token-by-token stream and tool calls
+  all work. Encrypted reasoning still cannot be _displayed_: it is ciphertext,
+  and the provider returns no readable text at any reasoning effort or summary
+  setting, so no `Thought for Ns…` block appears for these models. The guard
+  applies to every Converse model (a no-op for one that never sends such a
+  block), and a genuinely unknown block type still surfaces as an error instead of
+  being silently dropped.
+
 ## [1.17.1] — 2026-08-31
 
 ### Fixed
 
 - **A turn against a local MLX (or any OpenAI-shaped) server no longer dies at
   `No stream data for 120s` and then retries forever.** Those servers accept a
-  request and *immediately* send a contentless `{"delta": {"role": "assistant"}}`
+  request and _immediately_ send a contentless `{"delta": {"role": "assistant"}}`
   — before prefill has begun — and the stream watchdog counted it as the first
   token. That is the one thing it must never do: the long window that covers
   prefill and reasoning (`REQUEST_TIMEOUT` + 30s) was handed back for the short
@@ -29,7 +84,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   and it is a wall-clock deadline rather than a per-poll counter, so a server that
   emits keep-alives faster than the poll interval can't hold a dead turn open
   either. A chunk shape we can't classify still counts as a start, so nothing
-  *delays* dead-socket detection for an unknown provider.
+  _delays_ dead-socket detection for an unknown provider.
 
 - **A provider's error now reads as a sentence instead of the raw response body it
   arrived in.** A warning or error on screen is meant to be one line of the
