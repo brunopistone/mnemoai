@@ -12,6 +12,7 @@ import threading
 import time
 
 import pytest
+from langchain_core.messages import AIMessageChunk
 
 from mnemoai.client.agent import stream_policy
 from mnemoai.client.agent.agent import (
@@ -226,6 +227,107 @@ class TestFirstTokenWindow:
         model = _FakeModel(["a"], stall_before=0, stall_seconds=3.0)
         with pytest.raises(_StreamIdleTimeout):
             list(a._iter_stream_with_idle_timeout(model, [], {}))
+
+
+class _EmptyChunkModel:
+    """A server that keeps the socket busy without producing a token."""
+
+    def __init__(self, chunk, interval=0.02):
+        self._chunk, self._interval = chunk, interval
+
+    def stream(self, messages, config=None):
+        while True:
+            yield self._chunk
+            time.sleep(self._interval)
+
+
+class TestPrimingChunkIsNotTheFirstToken:
+    """An OpenAI-shaped server (local MLX/llama-server/vLLM) primes the stream
+    with a contentless ``{"delta": {"role": "assistant"}}`` the instant it ACCEPTS
+    the request — before prefill has begun. Counting that as the first token hands
+    the whole prefill budget back to the per-chunk window, so a large prompt dies
+    against a healthy server and every retry re-pays the same doomed prefill.
+    Measured on a local MLX server, 43k-token prompt: chunk 1 at +0.01s, the first
+    real token at +300s, against a 120s per-chunk window.
+    """
+
+    def test_a_contentless_chunk_is_not_payload(self):
+        assert not stream_policy.chunk_has_payload(AIMessageChunk(content=""))
+        assert not stream_policy.chunk_has_payload(AIMessageChunk(content="   "))
+        assert not stream_policy.chunk_has_payload(AIMessageChunk(content=[]))
+        assert not stream_policy.chunk_has_payload(None)
+        assert not stream_policy.chunk_has_payload("")
+        assert not stream_policy.chunk_has_payload(
+            AIMessageChunk(content="", additional_kwargs={"reasoning": ""})
+        )
+        assert not stream_policy.chunk_has_payload(
+            AIMessageChunk(content="", response_metadata={"finish_reason": None})
+        )
+        # A usage dict of zeros is bookkeeping, not production.
+        zeros = AIMessageChunk(content="")
+        zeros.usage_metadata = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        assert not stream_policy.chunk_has_payload(zeros)
+
+    def test_every_shape_the_model_produces_counts(self):
+        assert stream_policy.chunk_has_payload(AIMessageChunk(content="hi"))
+        assert stream_policy.chunk_has_payload(AIMessageChunk(content=[{"text": "hi"}]))
+        assert stream_policy.chunk_has_payload("hi")
+        tool = AIMessageChunk(
+            content="",
+            tool_call_chunks=[{"name": "fs_read", "args": "", "id": "1", "index": 0}],
+        )
+        assert stream_policy.chunk_has_payload(tool)
+        for key in ("reasoning", "reasoning_content", "thinking", "function_call"):
+            chunk = AIMessageChunk(content="", additional_kwargs={key: "hm"})
+            assert stream_policy.chunk_has_payload(chunk), key
+        assert stream_policy.chunk_has_payload(
+            AIMessageChunk(content="", response_metadata={"finish_reason": "stop"})
+        )
+        used = AIMessageChunk(content="")
+        used.usage_metadata = {"input_tokens": 8107, "output_tokens": 0, "total_tokens": 8107}
+        assert stream_policy.chunk_has_payload(used)
+
+    def test_an_unclassifiable_shape_keeps_the_short_window(self):
+        # Erring the other way would DELAY dead-socket detection for a provider
+        # whose chunks we can't read.
+        assert stream_policy.chunk_has_payload(object())
+
+    def test_prefill_after_a_priming_chunk_is_not_a_timeout(self):
+        # The reported bug: `hello` on MLX died at "No stream data for 120s" and
+        # every retry re-paid the same prefill.
+        a = _agent(idle=0.15, first_token=5.0)
+        model = _FakeModel(
+            [AIMessageChunk(content=""), AIMessageChunk(content="hi")],
+            stall_before=1,
+            stall_seconds=0.6,
+        )
+        out = list(a._iter_stream_with_idle_timeout(model, [], {}))
+        assert [c.content for c in out] == ["", "hi"]
+
+    def test_the_first_real_token_still_narrows_the_window(self):
+        a = _agent(idle=0.2, first_token=30.0)
+        model = _FakeModel(
+            [AIMessageChunk(content=""), AIMessageChunk(content="hi"), "x"],
+            stall_before=2,
+            stall_seconds=3.0,
+        )
+        it = a._iter_stream_with_idle_timeout(model, [], {})
+        next(it), next(it)
+        t0 = time.time()
+        with pytest.raises(_StreamIdleTimeout, match="stream data"):
+            next(it)
+        assert time.time() - t0 < 2.0  # tripped on `idle`, not the 30s budget
+
+    def test_a_keep_alive_flood_cannot_hold_the_window_open(self):
+        # The window is a wall-clock deadline, not a per-empty-poll accumulator:
+        # chunks arriving faster than the poll must not keep a dead turn alive.
+        a = _agent(idle=1.0, first_token=0.4)
+        model = _EmptyChunkModel(AIMessageChunk(content=""))
+        t0 = time.time()
+        with pytest.raises(_StreamIdleTimeout, match="first token"):
+            for _ in a._iter_stream_with_idle_timeout(model, [], {}):
+                pass
+        assert time.time() - t0 < 2.0
 
 
 class TestCooperativeCancel:

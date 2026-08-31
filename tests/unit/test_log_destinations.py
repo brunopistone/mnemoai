@@ -170,6 +170,89 @@ class TestOneLine:
         assert logger_mod.one_line("   \n  ") == ""
 
 
+# The reported line, verbatim from ~/.mnemoai/logs/mnemoai.log: a local MLX
+# server refusing to load a model because one of its own deps was missing.
+_MLX_503 = (
+    "Stream connection failed (Error code: 503 - {'detail': {'error': {'message': "
+    "\"Failed to load on-demand model 'qwen-agentcoder': Handler process for "
+    "'qwen-agentcoder' failed to initialize: No module named 'aiohttp'\", "
+    "'type': 'model_load_error', 'code': 503}}}); retrying turn on a fresh "
+    "connection in 1.1s (attempt 1/6)"
+)
+
+
+class TestUnwrapErrorBody:
+    """A provider error's text is a serialized response, not a sentence."""
+
+    def test_the_envelope_goes_and_the_message_stays(self):
+        out = logger_mod.unwrap_error_body(_MLX_503)
+        assert "'detail'" not in out and "'code': 503" not in out
+        assert "model_load_error" not in out and "{" not in out
+        assert "Failed to load on-demand model 'qwen-agentcoder'" in out
+
+    def test_the_fact_at_the_END_of_the_body_survives(self):
+        # Why this is an unwrap and not a shorter cap: the actionable part is the
+        # last thing in the body, so trimming by length deletes precisely it.
+        assert "No module named 'aiohttp'" in logger_mod.one_line(_MLX_503)
+
+    def test_our_own_wording_around_the_body_is_kept(self):
+        out = logger_mod.unwrap_error_body(_MLX_503)
+        assert out.startswith("Stream connection failed (Error code: 503 - ")
+        assert out.endswith("); retrying turn on a fresh connection in 1.1s (attempt 1/6)")
+
+    def test_it_shortens_the_line(self):
+        assert len(logger_mod.unwrap_error_body(_MLX_503)) < len(_MLX_503)
+
+    def test_the_anthropic_shape_too(self):
+        out = logger_mod.unwrap_error_body(
+            "Error code: 529 - {'type': 'error', 'error': "
+            "{'type': 'overloaded_error', 'message': 'Overloaded'}}"
+        )
+        assert out == "Error code: 529 - Overloaded"
+
+    def test_json_quoting_is_read_as_well_as_a_python_repr(self):
+        out = logger_mod.unwrap_error_body('502 - {"error": {"message": "Bad gateway"}}')
+        assert out == "502 - Bad gateway"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # botocore spells its errors out in prose — nothing to unwrap.
+            "An error occurred (ThrottlingException) when calling ConverseStream: slow down",
+            "No stream data for 120s (connection likely dropped)",
+            # A body with no message key, a non-string message, an empty one.
+            "Error code: 400 - {'detail': 'bad request'}",
+            "Error code: 400 - {'message': {'nested': 'thing'}}",
+            "Error code: 400 - {'message': ''}",
+            # An unterminated body can't be delimited, so it is left alone.
+            "Error code: 500 - {'error': {'message': 'half",
+        ],
+    )
+    def test_anything_else_is_left_untouched(self, text):
+        assert logger_mod.unwrap_error_body(text) == text
+
+    def test_a_brace_inside_the_message_does_not_unbalance_the_scan(self):
+        out = logger_mod.unwrap_error_body(
+            "failed ({'error': {'message': 'bad payload {\"a\": 1} rejected'}}) retrying"
+        )
+        assert out == "failed (bad payload {\"a\": 1} rejected) retrying"
+
+    def test_an_escaped_quote_in_the_message_is_read_through(self):
+        out = logger_mod.unwrap_error_body(
+            "{'error': {'message': 'the field \\'name\\' is required'}}"
+        )
+        assert out == "the field 'name' is required"
+
+    def test_an_unwrapped_record_still_points_at_the_log_file(self):
+        # Something WAS dropped (the envelope), so the pointer is information
+        # rather than noise — the full body is only in the file.
+        fmt = logger_mod._ConsoleFormatter("%(message)s", use_color=False)
+        fmt.hint = " (see log)"
+        out = fmt.format(_record(_MLX_503, level=logging.WARNING))
+        assert out.startswith("! Stream connection failed")
+        assert "'detail'" not in out and out.endswith(" (see log)")
+
+
 class TestFileLogging:
     def test_traceback_goes_to_the_file_not_the_console(self, isolated_logging, capsys):
         logger_mod.enable_file_logging()

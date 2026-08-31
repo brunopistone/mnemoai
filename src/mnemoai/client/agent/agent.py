@@ -1969,10 +1969,12 @@ class LangGraphAgent:
         errors) rather than blocking on it — the whole point is not to wait. When
         the timeout is 0/disabled, we iterate directly with no extra thread.
 
-        The window before the FIRST chunk is deliberately a different, longer one
-        (``_stream_first_token_timeout``): that wait is the provider prefilling and
-        reasoning over the whole prompt, not a stalled socket, and on a large
-        context it legitimately outlasts the per-chunk budget."""
+        The window before the first real PAYLOAD is deliberately a different, longer
+        one (``_stream_first_token_timeout``): that wait is the provider prefilling
+        and reasoning over the whole prompt, not a stalled socket, and on a large
+        context it legitimately outlasts the per-chunk budget. A contentless chunk
+        does not end it (``stream_policy.chunk_has_payload``) — an OpenAI-shaped
+        server primes the stream with one on acceptance, before prefill starts."""
         idle = getattr(self, "_stream_idle_timeout", 0) or 0
         if idle <= 0:
             yield from active_model.stream(messages, config=config)
@@ -1998,33 +2000,45 @@ class LangGraphAgent:
         # ~POLL seconds instead of after the full `idle` window — a blocking
         # queue.get(timeout=120) can't be preempted by the async KeyboardInterrupt,
         # which is why a stalled-stream cancel felt stuck. We still only declare an
-        # idle-timeout once `idle` seconds have truly elapsed with no chunk.
+        # idle-timeout once the whole budget has truly elapsed with no payload.
         poll = min(idle, self._CANCEL_POLL_SECONDS)
-        waited = 0.0
         budget = first_token  # widened window until the stream actually starts
         started = False
+        # A wall-clock deadline, not an accumulator: a server that emits
+        # contentless keep-alives faster than `poll` would otherwise never let the
+        # window expire, since only an EMPTY poll advanced the count.
+        deadline = time.monotonic() + budget
         while True:
             if self._cancelled():
                 raise KeyboardInterrupt("cancelled while waiting for stream")
+            if time.monotonic() >= deadline:
+                # Nothing for `budget` seconds — the stream is wedged (likely a
+                # dead socket after sleep). Abandon the reader; let retry re-run.
+                raise _StreamIdleTimeout(
+                    f"No {'stream data' if started else 'first token'} for "
+                    f"{budget:.0f}s (connection likely dropped)"
+                )
             try:
                 item, chunk = q.get(timeout=poll)
             except queue.Empty:
-                waited += poll
-                if waited >= budget:
-                    # Nothing for `budget` seconds — the stream is wedged (likely a
-                    # dead socket after sleep). Abandon the reader; let retry re-run.
-                    raise _StreamIdleTimeout(
-                        f"No {'stream data' if started else 'first token'} for "
-                        f"{budget:.0f}s (connection likely dropped)"
-                    )
                 continue
-            waited = 0.0  # a chunk (or terminal item) arrived — reset the idle clock
-            started, budget = True, idle
             if item is self._STREAM_DONE:
                 return
             if item is not None:  # the reader captured an exception — re-raise it
                 raise item
+            # Real data resets the clock and, the first time, narrows the window from
+            # the first-token budget to the per-chunk one. A contentless priming/
+            # keep-alive chunk does NEITHER — an OpenAI-shaped server emits one the
+            # moment it ACCEPTS the request, long before prefill produces a token,
+            # and treating that as the stream starting forfeits the whole window.
+            fresh = started or stream_policy.chunk_has_payload(chunk)
+            if fresh:
+                started, budget = True, idle
             yield chunk
+            if fresh:
+                # Timed from AFTER the consumer returns, so the window covers the
+                # wait for the NEXT chunk, not the time spent rendering this one.
+                deadline = time.monotonic() + budget
 
     def _stream_once_quiet(self, active_model, messages: list, config: dict) -> tuple:
         """Stream a turn SILENTLY, accumulating the response with no display.

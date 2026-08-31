@@ -112,6 +112,17 @@ _RETRY_AFTER_CAP = 60.0
 # so a request that really did exceed its budget fails with the provider's own
 # specific error rather than our generic "no data" one.
 _FIRST_TOKEN_GRACE = 30.0
+# Chunk attributes/keys that prove the model produced something (see
+# `chunk_has_payload`); a contentless chunk carrying none of them is bookkeeping.
+_TOOL_CALL_ATTRS = ("tool_call_chunks", "tool_calls", "invalid_tool_calls")
+_PAYLOAD_KWARGS = (
+    "reasoning",
+    "reasoning_content",
+    "thinking",
+    "thinking_blocks",
+    "tool_calls",
+    "function_call",
+)
 
 
 def is_context_overflow_error(exc: Exception) -> bool:
@@ -180,6 +191,54 @@ def first_token_timeout(
     if request_timeout and request_timeout > 0:
         return max(idle, request_timeout + grace)
     return idle
+
+
+def chunk_has_payload(chunk) -> bool:
+    """True if a streamed chunk carries something the model actually PRODUCED.
+
+    The companion to :func:`first_token_timeout`: that window is only in force
+    until the stream "starts", so what counts as started decides whether it is
+    honored at all. An OpenAI-shaped server (a local MLX/llama-server/vLLM) primes
+    a stream with a contentless ``{"delta": {"role": "assistant"}}`` the instant it
+    ACCEPTS the request — before prefill has begun. Counting that as the first
+    token forfeits the whole first-token budget for the per-chunk one while the
+    model is still prefilling, so a large prompt times out against a healthy
+    server and every retry re-pays the same doomed prefill: the turn can never
+    complete. Measured against a local MLX server on a 43k-token prompt: chunk 1
+    at +0.01s, the first real token at +300s, against a 120s per-chunk window.
+
+    Payload is content text/blocks, a tool-call fragment, reasoning carried in
+    ``additional_kwargs``, real usage numbers, or a finish reason. A shape we
+    cannot classify (no ``content`` attribute at all) counts as payload: the
+    narrower window is the safer default for an unknown provider, since erring
+    the other way DELAYS dead-socket detection.
+    """
+    if chunk is None:
+        return False
+    if isinstance(chunk, str):
+        return bool(chunk.strip())
+    if not hasattr(chunk, "content"):
+        return True  # unrecognized shape — don't widen the watchdog for it
+    content = chunk.content
+    if isinstance(content, str):
+        if content.strip():
+            return True
+    elif content:
+        return True
+    if any(getattr(chunk, a, None) for a in _TOOL_CALL_ATTRS):
+        return True
+    extra = getattr(chunk, "additional_kwargs", None)
+    if isinstance(extra, dict) and any(extra.get(k) for k in _PAYLOAD_KWARGS):
+        return True
+    meta = getattr(chunk, "response_metadata", None)
+    if isinstance(meta, dict) and (meta.get("finish_reason") or meta.get("stop_reason")):
+        return True
+    # Only NON-ZERO counts: a priming chunk may carry an all-zero usage dict, and
+    # that is the very shape this function exists to reject.
+    usage = getattr(chunk, "usage_metadata", None)
+    if isinstance(usage, dict):
+        return any(isinstance(v, (int, float)) and v for v in usage.values())
+    return bool(usage)
 
 
 def aux_attempts(max_retries, cap: int = AUX_RETRY_ATTEMPTS) -> int:
