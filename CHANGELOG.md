@@ -60,7 +60,11 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   setting, so no `Thought for Ns…` block appears for these models. The guard
   applies to every Converse model (a no-op for one that never sends such a
   block), and a genuinely unknown block type still surfaces as an error instead of
-  being silently dropped.
+  being silently dropped. It asks the adapter what it can convert rather than
+  keeping a list of its own, so it retires itself where upstream catches up:
+  `langchain-aws` 1.7.4 (2026-08-26) grew the missing branch, and on it nothing is
+  dropped at all — while an install on 1.7.3 or older, which this project still
+  supports, keeps working.
 
 ## [1.17.1] — 2026-08-31
 
