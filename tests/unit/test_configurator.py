@@ -820,7 +820,12 @@ def test_prompt_provider_type_embeddings_has_no_mantle(monkeypatch):
 
 
 def _run_build(provider, default_model, answers):
-    """Drive _build_config against the base template with scripted answers."""
+    """Drive _build_config against the base template with scripted answers.
+
+    Note the two ``AREA_MODELS`` prompts that follow the ROUTING/ORCH toggles when
+    those are enabled ("use the same model as Chat?"); answering yes writes
+    nothing, which is why these sequences still produce no AREA_MODELS section.
+    """
     import builtins
 
     from mnemoai.utils import configurator as C
@@ -839,13 +844,18 @@ def test_config_openai_transforms_base_template():
         # chat name, [blank base URL, blank key], MAX_TOKENS none, context,
         # vision? y, "same as chat?" y (copies chat), embeddings? n, profile, brave,
         # then toggles: RAG, EPISODIC, PLAYBOOK, MEMORY, AUTO_EXTRACT, SKILLS,
-        # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH_CONFIRM, WRITE_CONFIRM,
-        # MEM_CONFIRM, GIT_CONFIRM.
+        # WEB_CRAWL, ROUTING, ORCH, [router + orchestrator "same as chat?"],
+        # PROFILING, BASH_CONFIRM, WRITE_CONFIRM, MEM_CONFIRM, GIT_CONFIRM.
         ["gpt-5-mini", "", "", "none", "65536", "y", "y", "n", "alice", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y",
+         "y", "y",
+         "y", "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "openai" and m["NAME"] == "gpt-5-mini"
+    # Both areas answered "same as chat" -> nothing written, so the section stays
+    # the commented example the template ships.
+    assert "AREA_MODELS" not in d
     # Ollama-only keys pruned; OpenAI-valid TEMPERATURE/PRESENCE_PENALTY kept.
     for bad in ("HOST", "PORT", "TOP_K", "FREQUENCY_PENALTY"):
         assert bad not in m
@@ -857,11 +867,12 @@ def test_config_openai_transforms_base_template():
 def test_config_sagemaker_sets_region_and_input_format():
     d = _run_build(
         "sagemaker", "my-endpoint",
-        # chat name, region, input_format, MAX_TOKENS none, ctx,
-        # vision? n, embeddings? n, profile, brave, then 14 toggles (see openai test).
+        # chat name, region, input_format, MAX_TOKENS none, ctx, vision? n,
+        # embeddings? n, profile, brave, then 14 toggles + the 2 area prompts
+        # (see the openai test).
         ["my-endpoint", "eu-west-1", "huggingface", "none", "65536", "n", "n",
          "bob", "", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y",
-         "y", "y"],
+         "y", "y", "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "sagemaker"
@@ -872,11 +883,13 @@ def test_config_sagemaker_sets_region_and_input_format():
 def test_config_litellm_sets_api_base_and_key():
     d = _run_build(
         "litellm", "openai/gpt-4o",
-        # chat name, api_base, api_key, MAX_TOKENS none, ctx,
-        # vision? n, embeddings? n, profile, brave, then 14 toggles (see openai test).
+        # chat name, api_base, api_key, MAX_TOKENS none, ctx, vision? n,
+        # embeddings? n, profile, brave, then 14 toggles + the 2 area prompts
+        # (see the openai test).
         ["openai/gpt-4o", "http://localhost:8000/v1", "sk-xyz", "none", "65536",
          "n", "n", "carol", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y",
+         "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "litellm"
@@ -889,10 +902,11 @@ def test_config_mlx_sets_host_port_and_mirrors_vision():
         "mlx", "mlx-community/Qwen3-4B-4bit",
         # chat name, host, port, [blank base URL, blank key], MAX_TOKENS none, ctx,
         # vision? y, "same as chat?" y (copies chat), embeddings? n, profile,
-        # brave, then 14 toggles (see the openai test).
+        # brave, then 14 toggles + the 2 area prompts (see the openai test).
         ["qwen-agentcoder", "127.0.0.1", "8000", "", "", "none", "65536",
          "y", "y", "n", "erin", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y",
+         "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "mlx" and m["NAME"] == "qwen-agentcoder"
@@ -913,13 +927,14 @@ def test_config_anthropic_transforms_base_template():
     # answers: chat name, API_KEY, base URL (blank), MAX_TOKENS, ctx, configure
     # vision? (y), "same as chat?" (y → copies chat), embeddings? (n), profile,
     # brave (blank), then 14 toggles: RAG, EPISODIC, PLAYBOOK, MEMORY,
-    # AUTO_EXTRACT, SKILLS, WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH_CONFIRM,
-    # WRITE_CONFIRM, MEM_CONFIRM, GIT_CONFIRM.
+    # AUTO_EXTRACT, SKILLS, WEB_CRAWL, ROUTING, ORCH, [the 2 area prompts],
+    # PROFILING, BASH_CONFIRM, WRITE_CONFIRM, MEM_CONFIRM, GIT_CONFIRM.
     d = _run_build(
         "anthropic", "claude-opus-4-8",
         ["claude-opus-4-8", "fake-anthropic-key", "", "none", "65536",
          "y", "y", "n", "dave", "",
-         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y",
+         "y", "y"],
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "anthropic" and m["NAME"] == "claude-opus-4-8"
@@ -949,9 +964,10 @@ def test_config_skips_auto_extract_when_memory_off():
         ["claude-opus-4-8", "fake-key", "", "none", "65536",
          "n", "n", "dave", "",   # vision? n, embeddings? n
          # RAG, EPISODIC, PLAYBOOK, MEMORY(n → no auto-extract prompt), SKILLS,
-         # WEB_CRAWL, ROUTING, ORCH, PROFILING, BASH, WRITE, MEM_CONFIRM,
-         # GIT_CONFIRM.
-         "y", "y", "y", "n", "y", "y", "y", "y", "y", "y", "y", "y", "y"],
+         # WEB_CRAWL, ROUTING, ORCH, [the 2 area prompts], PROFILING, BASH,
+         # WRITE, MEM_CONFIRM, GIT_CONFIRM.
+         "y", "y", "y", "n", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y",
+         "y"],
     )
     assert d["ENABLE_MEMORY"] is False
     # Not prompted → key stays at its template value (not forced by this run).
@@ -1528,6 +1544,273 @@ class TestFeaturesToggles:
         monkeypatch.setattr(C, "_ask", lambda *a, **k: pytest.fail("should not ask"))
         out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_PLAYBOOK"})
         assert out == self.CFG
+
+
+class TestPerAreaModels:
+    """AREA_MODELS in the configurator: /config offers a model for each enabled
+    area, /model and /params can change one afterwards.
+
+    The distinctive rule is what "same as chat" means here. Vision copies the chat
+    block; an area must have NO block at all — absence is what makes it follow the
+    chat model, so a copy would freeze today's model into a duplicate.
+    """
+
+    CFG = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: llama3.1:8b
+          TYPE: ollama
+          HOST: localhost
+          PORT: 11434
+          TEMPERATURE: 0.7
+        ENABLE_ROUTING: false
+        ENABLE_ORCHESTRATION: true
+        """
+    )
+
+    def _template(self):
+        from mnemoai.utils import configurator as C
+
+        return (C._templates_dir() / "config.yaml.example").read_text()
+
+    # --- the two meanings of a section name ---------------------------------
+
+    def test_an_area_is_described_by_the_chat_model_table(self):
+        # An area lives under its own block but IS a partial MODEL_ID, so every
+        # registry lookup must resolve to the chat model's providers and keys.
+        from mnemoai.models.provider_params import providers, supported_keys
+        from mnemoai.utils.configurator import _registry_section
+
+        for area in ("ROUTER", "ORCHESTRATOR", "SUMMARY"):
+            assert _registry_section(area) == "MODEL_ID"
+            assert supported_keys(_registry_section(area), "bedrock") == (
+                supported_keys("MODEL_ID", "bedrock")
+            )
+        # Not an area -> unchanged (vision has its own, narrower table).
+        assert _registry_section("VISION_MODEL_ID") == "VISION_MODEL_ID"
+        assert set(providers(_registry_section("ROUTER"))) == set(providers("MODEL_ID"))
+
+    def test_the_provider_menu_for_an_area_is_the_llm_one(self, monkeypatch):
+        # Proof through the real prompt: an area may switch provider entirely, so
+        # it must be offered every LLM provider, defaulting to the chat one.
+        from mnemoai.models.provider_params import providers
+        from mnemoai.utils import configurator as C
+
+        seen = {}
+
+        def _spy(prompt, valid, default, labels=None, **kw):
+            seen.update(valid=valid, labels=labels, default=default)
+            return default
+
+        monkeypatch.setattr(C, "_ask_choice", _spy)
+        assert C._prompt_provider_type("ROUTER", "ollama") == "ollama"
+        assert len(seen["valid"]) == len(list(providers("MODEL_ID")))
+
+    def test_area_provider_falls_back_to_the_chat_one(self):
+        from mnemoai.utils.configurator import _effective_type
+
+        text = self.CFG + "AREA_MODELS:\n  ROUTER:\n    NAME: tiny:1b\n"
+        # No TYPE of its own -> the merged block runs on the chat provider.
+        assert _effective_type(text, "ROUTER") == "ollama"
+        text = text.replace("    NAME: tiny:1b", "    NAME: tiny:1b\n    TYPE: bedrock")
+        assert _effective_type(text, "ROUTER") == "bedrock"
+
+    # --- scaffolding and clearing the block ---------------------------------
+
+    def test_scaffold_lands_under_the_commented_example(self):
+        from mnemoai.utils import configurator as C
+
+        out = C._ensure_area_section(self._template(), "ROUTER")
+        d = yaml.safe_load(out)
+        assert list(d["AREA_MODELS"]) == ["ROUTER"]
+        lines = out.splitlines()
+        at = lines.index("AREA_MODELS:")
+        # Written directly below the commented example it documents, not at EOF.
+        assert lines[at - 1].lstrip().startswith("#")
+        assert "# AREA_MODELS:" in out  # the example itself survives
+
+    def test_scaffold_is_a_noop_when_the_block_exists(self):
+        from mnemoai.utils import configurator as C
+
+        text = self.CFG + "AREA_MODELS:\n  SUMMARY:\n    NAME: tiny:1b\n"
+        assert C._ensure_area_section(text, "SUMMARY") == text
+
+    def test_scaffold_matches_an_existing_bodys_indent(self):
+        # Mixed sibling indents are a YAML error, so the new key can't assume the
+        # two spaces we would write ourselves.
+        from mnemoai.utils import configurator as C
+
+        text = self.CFG + "AREA_MODELS:\n    SUMMARY: tiny:1b\n"
+        out = C._ensure_area_section(text, "ROUTER")
+        d = yaml.safe_load(out)  # would raise on mixed indents
+        assert set(d["AREA_MODELS"]) == {"ROUTER", "SUMMARY"}
+
+    def test_bare_name_shorthand_expands_to_a_block(self):
+        # `ROUTER: tiny:1b` is valid config, so a prompt that needs to write TYPE
+        # has to expand it in place — keeping the name, without duplicating the key.
+        from mnemoai.utils import configurator as C
+
+        text = self.CFG + "AREA_MODELS:\n  ROUTER: tiny:1b\n"
+        out = C._ensure_area_section(text, "ROUTER")
+        d = yaml.safe_load(out)
+        assert d["AREA_MODELS"]["ROUTER"] == {"NAME": "tiny:1b"}
+        assert out.count("ROUTER:") == 1
+        # And it's now writable through the ordinary section helpers.
+        out = C._set_field(out, "ROUTER", "TYPE", "bedrock")
+        assert yaml.safe_load(out)["AREA_MODELS"]["ROUTER"]["TYPE"] == "bedrock"
+
+    def test_clearing_removes_the_emptied_header_and_keeps_the_comments(self):
+        from mnemoai.utils import configurator as C
+
+        template = self._template()
+        out = C._clear_area_override(C._ensure_area_section(template, "ROUTER"), "ROUTER")
+        # Back to byte-for-byte what shipped: the commented example is what
+        # documents the section, so removing the block must not eat it.
+        assert out == template
+        assert "AREA_MODELS" not in (yaml.safe_load(out) or {})
+
+    def test_clearing_keeps_a_sibling_area(self):
+        from mnemoai.utils import configurator as C
+
+        text = (
+            self.CFG
+            + "AREA_MODELS:\n  ROUTER: tiny:1b\n  SUMMARY:\n    NAME: small:3b\n"
+        )
+        d = yaml.safe_load(C._clear_area_override(text, "ROUTER"))
+        assert d["AREA_MODELS"] == {"SUMMARY": {"NAME": "small:3b"}}
+
+    def test_clearing_a_bare_name_shorthand(self):
+        from mnemoai.utils import configurator as C
+
+        text = self.CFG + "AREA_MODELS:\n  ORCHESTRATOR: big:70b\n"
+        out = C._clear_area_override(text, "ORCHESTRATOR")
+        assert "AREA_MODELS" not in yaml.safe_load(out)
+        assert C._clear_area_override(out, "ORCHESTRATOR") == out  # absent -> no-op
+
+    def test_configured_sees_both_config_shapes(self):
+        from mnemoai.utils import configurator as C
+
+        assert not C._area_configured(self.CFG, "ROUTER")
+        inline = self.CFG + "AREA_MODELS:\n  ROUTER: tiny:1b\n"
+        block = self.CFG + "AREA_MODELS:\n  ROUTER:\n    NAME: tiny:1b\n"
+        assert C._area_configured(inline, "ROUTER")
+        assert C._area_configured(block, "ROUTER")
+        assert not C._area_configured(block, "SUMMARY")
+
+    # --- the feature gate ---------------------------------------------------
+
+    def test_the_gate_names_the_feature_that_is_off(self):
+        from mnemoai.utils import configurator as C
+
+        assert C._area_gate(self.CFG, "ROUTER") == ("ENABLE_ROUTING", "Query routing")
+        assert C._area_gate(self.CFG, "ORCHESTRATOR") is None  # explicitly on
+        on = self.CFG.replace("ENABLE_ROUTING: false", "ENABLE_ROUTING: true")
+        assert C._area_gate(on, "ROUTER") is None
+
+    def test_compaction_always_runs_so_summary_is_never_gated(self):
+        from mnemoai.utils import configurator as C
+
+        assert C._area_gate(self.CFG, "SUMMARY") is None
+        assert C._area_gate(self.CFG, "MODEL_ID") is None
+
+    # --- what the pickers offer --------------------------------------------
+
+    def test_every_area_is_reachable_from_model_and_params(self):
+        # A model that can only be set by hand-editing the config is half-wired.
+        from mnemoai.models.area_models import AREAS, DESCRIPTIONS
+        from mnemoai.utils.configurator import _MODEL_SECTIONS, _PARAM_SECTIONS
+
+        model_labels = {s: lbl for s, lbl, _ in _MODEL_SECTIONS.values()}
+        assert set(AREAS) <= set(model_labels)
+        assert set(AREAS) <= {s for s, _ in _PARAM_SECTIONS.values()}
+        # The job wording comes from the area registry, so /model and /doctor
+        # describe the same call the same way.
+        for area in AREAS:
+            assert DESCRIPTIONS[area] in model_labels[area]
+
+    def test_the_overview_lists_every_area(self):
+        from mnemoai.utils import configurator as C
+
+        out = C._current_setup_text(self.CFG)
+        rows = dict(
+            line.strip().split(":", 1) for line in out.splitlines()[1:]
+        )
+        # Absence is an answer to "which model does the router use", not a gap.
+        assert rows["Router"].strip().startswith("same as chat")
+        assert "query routing is off" in rows["Router"]
+        assert rows["Orchestrator"].strip() == "same as chat"
+        assert rows["Summary"].strip() == "same as chat"
+
+    def test_the_overview_shows_a_configured_area(self):
+        from mnemoai.utils import configurator as C
+
+        inline = self.CFG + "AREA_MODELS:\n  SUMMARY: tiny:1b\n"
+        rows = C._current_setup_text(inline).splitlines()
+        # The shorthand names no provider, so the chat model's fills it in.
+        assert any("Summary:" in r and "ollama / tiny:1b" in r for r in rows)
+
+    # --- the prompt itself --------------------------------------------------
+
+    def _script(self, monkeypatch, *, same_as_chat, provider="ollama", name="tiny:1b"):
+        """Answer the area prompts: same-as-chat y/n, then provider, name, conn."""
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(C, "_ask_bool", lambda p, default=True, **k: same_as_chat)
+        monkeypatch.setattr(C, "_prompt_provider_type", lambda s, cur: provider)
+        monkeypatch.setattr(
+            C, "_ask",
+            lambda p, default=None, **k: name if "Model name" in p else (default or ""),
+        )
+        monkeypatch.setattr(C, "_ask_number", lambda *a, **k: None)
+        return C
+
+    def test_same_as_chat_writes_nothing(self, monkeypatch):
+        C = self._script(monkeypatch, same_as_chat=True)
+        template = self._template()
+        assert C._prompt_model_section(template, "ROUTER", is_llm=False) == template
+
+    def test_same_as_chat_removes_an_existing_override(self, monkeypatch):
+        C = self._script(monkeypatch, same_as_chat=True)
+        text = self.CFG + "AREA_MODELS:\n  ROUTER:\n    NAME: tiny:1b\n    TYPE: mlx\n"
+        out = C._prompt_model_section(text, "ROUTER", is_llm=False)
+        assert "AREA_MODELS" not in yaml.safe_load(out)
+
+    def test_declining_configures_the_area_on_its_own_provider(self, monkeypatch):
+        C = self._script(monkeypatch, same_as_chat=False, provider="bedrock",
+                         name="global.anthropic.claude-haiku-4-5")
+        out = C._prompt_model_section(self.CFG, "ROUTER", is_llm=False)
+        d = yaml.safe_load(out)
+        r = d["AREA_MODELS"]["ROUTER"]
+        assert r["TYPE"] == "bedrock"
+        assert r["NAME"] == "global.anthropic.claude-haiku-4-5"
+        assert r["REGION"] == "us-east-1"
+        # An area is a partial MODEL_ID: the chat model is left alone.
+        assert d["MODEL_ID"]["NAME"] == "llama3.1:8b"
+        assert d["MODEL_ID"]["TYPE"] == "ollama"
+        # The context-window prompt belongs to the chat model only.
+        assert "MAX_CONVERSATION_TOKENS" not in d
+
+    def test_a_blank_name_keeps_the_chat_model(self, monkeypatch):
+        # Nothing named -> no block, rather than one that says nothing.
+        C = self._script(monkeypatch, same_as_chat=False, name="")
+        out = C._prompt_model_section(self.CFG, "SUMMARY", is_llm=False)
+        assert "AREA_MODELS" not in yaml.safe_load(out)
+
+    def test_params_scaffold_a_shorthand_before_tuning(self, monkeypatch):
+        # /params writes into the block, so the bare-name form has to grow one —
+        # and the params offered are the chat provider's.
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(C, "_ask", lambda p, default=None, **k: default or "")
+        monkeypatch.setattr(
+            C, "_prompt_one_param",
+            lambda t, s, key, kind, hint, back: C._set_field(t, s, key, "0.3")
+            if key == "TEMPERATURE" else t,
+        )
+        text = self.CFG + "AREA_MODELS:\n  ROUTER: tiny:1b\n"
+        d = yaml.safe_load(C._prompt_inference_params(text, "ROUTER"))
+        assert d["AREA_MODELS"]["ROUTER"] == {"NAME": "tiny:1b", "TEMPERATURE": 0.3}
+        assert d["MODEL_ID"]["TEMPERATURE"] == 0.7  # chat model untouched
 
 
 class TestChoiceDialogTracksTheArrowKeys:

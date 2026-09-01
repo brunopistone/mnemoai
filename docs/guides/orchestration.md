@@ -43,8 +43,10 @@ AREA_MODELS:
   ROUTER: qwen3.5:1.7b
 ```
 
-See [per-area models](../configuration.md#per-area-models-area_models) for the
-full shape (any partial `MODEL_ID`, including a different provider).
+`/model` sets it without editing YAML (it lists a **Router model** row, which
+starts by asking whether to keep using the chat model). See
+[per-area models](../configuration.md#per-area-models-area_models) for the full
+shape (any partial `MODEL_ID`, including a different provider).
 
 ## Orchestrator-Workers
 
@@ -102,7 +104,9 @@ AREA_MODELS:
 ```
 
 The workers and the aggregator keep using `MODEL_ID` — the aggregator writes the
-answer you read, so it stays on the main model by design. Details in
+answer you read, so it stays on the main model by design. Both areas are offered
+by the first-run configurator (once the toggle above is on) and by `/model`
+afterwards. Details in
 [per-area models](../configuration.md#per-area-models-area_models).
 
 **When orchestration is disabled**, `full` routes use all tools in a single agent loop (the previous behavior). No regression. Distinct from model-initiated **sub-agents** (`spawn_agent`): the orchestrator is framework-driven (it decomposes complex `full` queries for you), while sub-agents are the model's own on-demand delegation — both now share the same bounded concurrency engine.

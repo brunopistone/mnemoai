@@ -7,6 +7,36 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.19.0] — 2026-09-01
+
+### Added
+
+- **The models for the internal calls are set from the app now, not by hand.**
+  `AREA_MODELS` shipped as YAML you had to know existed and write yourself, which
+  for optional config is close to not shipping it: nothing in the setup flow
+  mentioned it, and the one place you go to change a model — `/model` — listed chat,
+  vision and embeddings only. All three areas are now offered where the models
+  already are. The first-run configurator asks for a **router** model when query
+  routing is on and an **orchestrator** model when orchestration is on — only when
+  the toggle is on, since a model for a feature that never runs is dead config —
+  and afterwards `/model` lists Router, Orchestrator and Summary beside the existing
+  sections, with `/params` tuning an area that has its own block.
+  Each one opens with the same question, **"use the same model as Chat?"**, and
+  answering yes writes **nothing at all**. That is the design rather than a
+  shortcut: an area with no entry follows `MODEL_ID`, so it goes on following it
+  the next time you change the chat model — copying the block would instead freeze
+  today's model in place under a second name. Answering no runs the ordinary
+  provider flow (provider menu, model name, connection details, optional max output
+  tokens), so an area can be set up on any provider the chat model could use,
+  including a different one — a local model classifying while a hosted one answers.
+  Removing an override is the same question answered yes, or a blank model name.
+  An area whose feature is switched off is still listed, tagged
+  `[query routing is off]`, and picking it offers to switch that feature on first;
+  hiding the row would be indistinguishable from the feature not existing. `SUMMARY`
+  is never gated, because compaction runs whatever the toggles say. Your
+  `config.yaml` keeps its comments either way — including the commented
+  `AREA_MODELS` example, which survives an override being added and removed again.
+
 ## [1.18.0] — 2026-09-01
 
 ### Added
