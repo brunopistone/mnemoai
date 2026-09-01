@@ -7,6 +7,80 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.18.0] — 2026-09-01
+
+### Added
+
+- **`/auto` — a session mode that stops the `Proceed?` prompt from interrupting.**
+  The confirmation gate is the right default and the wrong one for a task made of
+  thirty small edits: the prompt is the only thing standing between the model and
+  a tree you are watching change anyway, and answering `y` thirty times is not a
+  decision, it is a keystroke tax. The existing escape hatches both overshoot —
+  `a` at a prompt trusts a whole category for the rest of the session with no way
+  back, and setting `REQUIRE_WRITE_CONFIRMATION: false` in `config.yaml` is
+  permanent, global, and outlives the task by months. `/auto` is a **tiered,
+  session-scoped, reversible** middle: `off` (the shipped behavior), `edits` (file
+  writes whose target resolves inside the working directory), `writes` (any path,
+  plus curated-memory updates), `all` (the above plus shell commands). Bare `/auto`
+  steps to the next tier, `/auto <tier>` sets one, and the active tier is shown as
+  a colored badge on the input line — green, amber, red as the ladder widens — so
+  a mode you turned on for one task can't be forgotten silently. For a run that is
+  meant to go uninterrupted from the first turn there is **`mnemoai --auto`**,
+  which opens the session at the top tier; it is a bare switch, with the
+  granularity left to the command.
+  The tier that matters is `edits`, and its scoping is the point: it resolves
+  symlinks on both sides and compares on a separator boundary, so a link pointing
+  out of the tree cannot smuggle a write past the scope and a sibling directory
+  sharing a name prefix (`/repo-old` next to `/repo`) is not inside it. A target
+  it cannot resolve is treated as outside — whenever the scope is unknowable the
+  prompt is the safe answer.
+  **It replaces the keypress and nothing else.** Every gate above the prompt is
+  decided before auto-approve is consulted, so no tier can reach past them: the
+  server-side safety floor still refuses a catastrophic command or a system-path
+  write, plan mode still hard-blocks the mutating tools (and `/plan` resets the
+  tier to `off`, since "read-only" and "don't ask" cannot both be in force), and a
+  tool hook's `deny` still wins. One category is auto-approved by **no** tier: the
+  `git` gate, which is how a tool's own `requires_confirmation` refusal gets
+  overridden — that is a server-side safety check the model is asking to waive, so
+  it stays a human decision at every tier, and the switch-on notice says so rather
+  than leaving you to infer it.
+- **`AREA_MODELS` — a different model for the internal calls beside the answer.**
+  A turn is not one request. Before the answer there is a classification (one
+  route label), sometimes a decomposition (a JSON list of subtasks), and when
+  history outgrows the window a compaction summary — none of them user-visible,
+  and none of them necessarily deserving the model that writes prose. Picking a
+  route is a job for a 1.7B; splitting a hard task is arguably worth a **bigger**
+  model than the answer, because a bad split wastes the whole task; a summary
+  wants throughput, not reasoning. Until now all three ran on `MODEL_ID`, so the
+  cheap calls paid the expensive model's rate and its time-to-first-byte.
+  Each area now takes an optional model of its own:
+
+  ```yaml
+  AREA_MODELS:
+    ROUTER: qwen3.5:1.7b # query classification
+    ORCHESTRATOR: qwen3.5:32b # task decomposition
+    SUMMARY: # conversation compaction
+      NAME: qwen3.5:1.7b
+      TEMPERATURE: 0.3
+  ```
+
+  A value is either a bare model name or a **partial `MODEL_ID` block** merged over
+  the main one and rebuilt through the ordinary provider dispatch — so an area may
+  override `TYPE` and run on a different provider entirely (a local model for
+  classification, a hosted one for the answer), and any param the target provider
+  doesn't support is dropped for it exactly as it is for the main model.
+  Absence is the default: **no section means the main model everywhere**, so no
+  existing install changes and no config edit is required. A failure is a
+  non-event by design — an area whose model can't be built logs once and falls back
+  to the main model, because an unreachable side model must degrade to a working
+  turn rather than end it. `/usage` attributes each area's tokens to the model that
+  actually served them, and `/doctor` lists the areas running on their own model
+  (plus any misspelled area name, which otherwise looks exactly like the setting
+  having no effect). `/params` re-derives them in place, so an override can be
+  added or removed without restarting. The **aggregator is deliberately not an
+  area**: its output is the answer you read, so a model swap there would change the
+  answer's voice rather than the cost of an internal step.
+
 ## [1.17.2] — 2026-08-31
 
 ### Fixed
@@ -25,7 +99,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   the thinking at least reaches the screen as (mislabeled) prose.
   Recovered now, and **not for one server**: the field name is not standardized
   and differs per server _and_ per reasoning parser — `reasoning_content` (MLX,
-  vLLM, llama-server, SGLang, DeepSeek), `reasoning` (mlx_lm's own server,
+  vLLM, llama-server, SGLang, DeepSeek), `reasoning` (mlx*lm's own server,
   OpenRouter), a structured `reasoning_details` list (OpenRouter), or
   `thinking`/`thinking_blocks` (Anthropic-shaped proxies), each of which may hold
   a plain string, a list of blocks, or a nested summary. All of them are read,
@@ -39,7 +113,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   OpenAI behaves exactly as before, and the recovered text is never echoed back
   to the server on the next turn — the adapter's outbound direction drops it,
   which matters for a chat template that would reject it.
-  One deliberate side effect: reasoning now counts as the stream having _started_
+  One deliberate side effect: reasoning now counts as the stream having \_started*
   (it is the model producing tokens), so the wide first-token window from 1.17.1
   narrows to the per-chunk one as soon as thinking begins, tightening dead-socket
   detection on exactly the turns that used to look idle the longest.

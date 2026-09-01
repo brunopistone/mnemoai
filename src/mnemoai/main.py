@@ -19,7 +19,9 @@ from mnemoai.utils.startup_loader import StartupLoader
 _client: Optional[Any] = None
 
 
-def main(verbose: bool = False, resume: Optional[str] = None) -> None:
+def main(
+    verbose: bool = False, resume: Optional[str] = None, auto: bool = False
+) -> None:
     """Initialize the application and start the chat loop.
 
     Args:
@@ -27,6 +29,7 @@ def main(verbose: bool = False, resume: Optional[str] = None) -> None:
         resume: Resume a previous session from THIS directory — a session id (or
             file path) to restore directly, ``"latest"`` for the most recent, or
             ``"pick"`` to choose from a list.
+        auto: Start with auto-approve at its widest tier, as ``/auto all`` does.
 
     Returns:
         None
@@ -46,6 +49,13 @@ def main(verbose: bool = False, resume: Optional[str] = None) -> None:
 
         loader.set_phase("Connecting model")
         _client.start(verbose)
+
+        if auto:
+            # Through the same setter `/auto` uses (which also drops plan mode):
+            # a launch flag must not become a second way into the tier, or the
+            # two can disagree. Nothing else is needed for the badge — the input
+            # line reads the mode off the client on every repaint.
+            _client.set_auto_approve_mode("all")
 
         chat_interface = ChatInterface(_client)
     finally:
@@ -203,6 +213,12 @@ def cli() -> None:
         action="store_true",
         help="Disable verbose mode (hide thinking process)",
     )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Start with auto-approve on (same as /auto all): file writes, memory "
+        "updates and shell commands run without asking, for this session only",
+    )
     # `--resume` with no value opens the picker; `--resume <id>` restores that
     # session directly. Scoped to the current directory either way.
     parser.add_argument(
@@ -243,7 +259,7 @@ def cli() -> None:
     # --continue is the non-interactive form of --resume (most recent session);
     # an explicit --resume value wins if both are given.
     resume = args.resume or ("latest" if args.continue_latest else None)
-    main(verbose=verbose, resume=resume)
+    main(verbose=verbose, resume=resume, auto=args.auto)
 
 
 if __name__ == "__main__":

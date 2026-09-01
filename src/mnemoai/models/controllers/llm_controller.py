@@ -32,13 +32,25 @@ class LangChainLLMController(BaseModelController):
 
     def __init__(self, verbose: bool = False) -> None:
         self.verbose_mode = verbose
-        # Shared reads (model_id/name/type, region, endpoint_url, max_tokens,
-        # max_conversation_tokens, temperature, top_p, top_k, stop, stream).
         # The config.get calls stay HERE so tests can patch this module's config.
-        self._init_model_config(
+        self._apply_model_id(
             config.get("MODEL_ID"),
             config.get("MAX_CONVERSATION_TOKENS", 1024 * 8),
         )
+
+        self.model: Optional[BaseChatModel] = None
+
+    def _apply_model_id(self, model_id: dict, max_conversation_tokens: int) -> None:
+        """Snapshot every inference param this controller reads from a model block.
+
+        Separate from ``__init__`` because a model block is also applied *after*
+        construction, by :meth:`build_model_variant` — every ``_initialize_*``
+        path reads these attributes, never ``self.model_id``, so a variant that
+        patched only the dict would build the new model with the old params.
+        """
+        # Shared reads (model_id/name/type, region, endpoint_url, max_tokens,
+        # max_conversation_tokens, temperature, top_p, top_k, stop, stream).
+        self._init_model_config(model_id, max_conversation_tokens)
         # LLM-only knobs.
         self.frequency_penalty = self.model_id.get("FREQUENCY_PENALTY", None)
         self.min_p = self.model_id.get("MIN_P", None)
@@ -47,8 +59,6 @@ class LangChainLLMController(BaseModelController):
         self.reasoning_model = self.model_id.get("REASONING", False)
         self.repetition_penalty = self.model_id.get("REPETITION_PENALTY", None)
         self.thinking_tokens = self.model_id.get("THINKING_TOKENS", 1024 * 2)
-
-        self.model: Optional[BaseChatModel] = None
 
     def initialize_model(self, callbacks: list[BaseCallbackHandler] = None) -> None:
         """Initialize the LLM model based on the configured ``TYPE``."""
@@ -443,8 +453,45 @@ class LangChainLLMController(BaseModelController):
             self.initialize_model()
         return self.model
 
+    def build_model_variant(
+        self,
+        overrides: Optional[dict] = None,
+        callbacks: list[BaseCallbackHandler] = None,
+        non_reasoning: bool = False,
+    ) -> BaseChatModel:
+        """Build an independent model from this config, with ``overrides`` merged in.
+
+        The one way to get a model that is *nearly* the configured one: a peer
+        controller is constructed (which re-reads the config, so a ``/params``
+        edit is picked up), ``overrides`` are merged over its ``MODEL_ID`` block,
+        and the whole snapshot is re-applied through :meth:`_apply_model_id` before
+        dispatch. Going through the ordinary provider path is what makes an
+        override of ``TYPE`` work — the variant may be a different provider
+        entirely, not just a different model name.
+
+        Args:
+            overrides: Partial ``MODEL_ID`` merged over the configured one.
+            callbacks: LangChain callbacks for the new instance.
+            non_reasoning: Disable extended thinking on the variant.
+
+        Returns:
+            A new model instance. Never mutates this controller or its model.
+        """
+        peer = LangChainLLMController(verbose=self.verbose_mode and not non_reasoning)
+        if overrides:
+            peer._apply_model_id(
+                {**peer.model_id, **overrides}, peer.max_conversation_tokens
+            )
+        if non_reasoning:
+            peer.reasoning_effort = None
+            peer.reasoning_model = False
+        peer.initialize_model(callbacks=callbacks)
+        return peer.get_model()
+
     def build_non_reasoning_model(
-        self, callbacks: list[BaseCallbackHandler] = None
+        self,
+        callbacks: list[BaseCallbackHandler] = None,
+        overrides: Optional[dict] = None,
     ) -> BaseChatModel:
         """Build a fresh model instance with extended thinking/reasoning DISABLED.
 
@@ -457,11 +504,9 @@ class LangChainLLMController(BaseModelController):
         there. Used for compaction summaries, which don't benefit from a slow
         reasoning pass. Returns an independent instance; never mutates this one.
         """
-        peer = LangChainLLMController(verbose=False)
-        peer.reasoning_effort = None
-        peer.reasoning_model = False
-        peer.initialize_model(callbacks=callbacks)
-        return peer.get_model()
+        return self.build_model_variant(
+            overrides=overrides, callbacks=callbacks, non_reasoning=True
+        )
 
     def get_model_type(self) -> str:
         """The model type string (bedrock, ollama, openai, …)."""

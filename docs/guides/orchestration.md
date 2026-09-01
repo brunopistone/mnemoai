@@ -34,6 +34,18 @@ ROUTING_PROMPT: |
   ...
 ```
 
+**Classification can run on its own model.** It produces a one-word label, so a
+large reasoning model spends real latency on it — on every turn. Point the
+`ROUTER` area at something small:
+
+```yaml
+AREA_MODELS:
+  ROUTER: qwen3.5:1.7b
+```
+
+See [per-area models](../configuration.md#per-area-models-area_models) for the
+full shape (any partial `MODEL_ID`, including a different provider).
+
 ## Orchestrator-Workers
 
 When enabled alongside routing, tasks classified as `full` (spanning multiple categories) are automatically decomposed into focused subtasks executed by specialized workers.
@@ -78,6 +90,20 @@ ENABLE_ORCHESTRATION: true # Activates orchestrator for 'full' route
 LLM:
   SUBAGENT_MAX_CONCURRENCY: 4 # 1 = force sequential
 ```
+
+**Decomposition can run on its own model too** — with the opposite trade-off to
+the router. A bad split wastes the whole task, so this is the one internal call
+that may deserve a _bigger_ model than the one answering:
+
+```yaml
+AREA_MODELS:
+  ROUTER: qwen3.5:1.7b # small: it only picks a label
+  ORCHESTRATOR: qwen3.5:32b # large: the split decides everything downstream
+```
+
+The workers and the aggregator keep using `MODEL_ID` — the aggregator writes the
+answer you read, so it stays on the main model by design. Details in
+[per-area models](../configuration.md#per-area-models-area_models).
 
 **When orchestration is disabled**, `full` routes use all tools in a single agent loop (the previous behavior). No regression. Distinct from model-initiated **sub-agents** (`spawn_agent`): the orchestrator is framework-driven (it decomposes complex `full` queries for you), while sub-agents are the model's own on-demand delegation — both now share the same bounded concurrency engine.
 

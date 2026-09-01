@@ -23,6 +23,7 @@ from mnemoai.client import (
     transcript_export,
     usage_tracker,
 )
+from mnemoai.client.agent import auto_approve
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
@@ -49,6 +50,7 @@ from mnemoai.client.session_log import (
 from mnemoai.client.ui import clipboard, turn_view
 from mnemoai.client.ui.spinner import Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
+from mnemoai.models import area_models
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import log_file_hint, logger, one_line
@@ -122,6 +124,12 @@ class LangGraphClient:
         # tools and tells the model to research + present a plan.
         self.plan_mode_active: bool = False
 
+        # User-toggled (/auto), plan mode's opposite: which confirmation
+        # categories run WITHOUT asking. A tier name from `auto_approve.MODES`,
+        # read per tool call by the confirmation gate. Session-scoped — never
+        # persisted, so a new run always starts back at "off".
+        self.auto_approve_mode: str = auto_approve.DEFAULT_MODE
+
         # Set by the pinned UI, which shows the context size in its footer: the
         # per-turn `[Context: N tokens]` line then has nothing left to add and is
         # suppressed (see :meth:`_print_context_size`).
@@ -131,6 +139,10 @@ class LangGraphClient:
         # Cache of same-provider models built for a custom sub-agent's 'model'
         # override (keyed by model name), so repeated spawns don't rebuild.
         self._subagent_model_cache = {}
+        # Cache of per-area models (config AREA_MODELS), keyed by area name. A None
+        # entry is a real answer — "this area has no override, or building it
+        # failed" — so a failure is reported once, not on every turn.
+        self._area_model_cache = {}
 
         self.conversation_manager = AgentConversationManager(
             max_tokens=config.get("MAX_CONVERSATION_TOKENS", 1024 * 4)
@@ -309,7 +321,9 @@ class LangGraphClient:
                 router = None
                 tool_routes = None
                 if config.get("ENABLE_ROUTING", False):
-                    router = QueryRouter(self.model)
+                    # Classification is one label per turn, so it may run on its own
+                    # (typically smaller) model; None falls back to the main one.
+                    router = QueryRouter(self._area_model("ROUTER") or self.model)
                     tool_routes = ROUTE_TOOLS
                     logger.info("Query routing enabled")
 
@@ -330,6 +344,7 @@ class LangGraphClient:
                     tool_routes=tool_routes,
                     orchestrator_enabled=orchestrator_enabled,
                     plan_mode_provider=lambda: self.plan_mode_active,
+                    auto_approve_provider=lambda: self.auto_approve_mode,
                 )
                 # Mid-loop compaction hook: the agent calls this (sync) before a
                 # model call when history exceeds its high-water mark, reusing the
@@ -340,7 +355,11 @@ class LangGraphClient:
                 self.agent.usage_model_name = self.model_name_for_log() or "model"
                 if router is not None:
                     router.usage = self.agent.usage
-                    router.usage_model_name = self.agent.usage_model_name
+                    # Under its own model the router's tokens are attributed to THAT
+                    # model, so /usage shows what each area actually cost.
+                    router.usage_model_name = self._area_usage_name("ROUTER")
+                # Own model for task decomposition, when configured (None = main).
+                self.agent.orchestrator_model = self._area_model("ORCHESTRATOR")
                 # Per-agent model override (custom sub-agent frontmatter 'model'):
                 # build a same-provider model with the NAME swapped, on demand.
                 self.agent._subagent_model_factory = self._subagent_model_factory
@@ -481,8 +500,8 @@ class LangGraphClient:
         Every holder of a built model must be re-pointed or the change half-applies:
         the tool-bound ``model_with_tools`` and each entry of ``models_by_route``
         are derived bindings, the router keeps its own reference, and the summary
-        twin + sub-agent overrides are separate cached builds (dropped so they
-        rebuild lazily off the new config).
+        twin, the per-area models and the sub-agent overrides are separate cached
+        builds (dropped so they rebuild lazily off the new config).
         """
         if not self.agent:
             return False
@@ -501,13 +520,17 @@ class LangGraphClient:
         self.llm_controller = controller
         self.model = model
         self.agent.rebind_model(model)
-        router = getattr(self.agent, "router", None)
-        if router is not None:
-            router.model = model
-        # Both are lazily rebuilt from the (now reloaded) config on next use.
+        # Every cached side model is rebuilt from the (now reloaded) config on next
+        # use; the area caches are cleared BEFORE they're re-read below.
         self._subagent_model_cache.clear()
+        self._area_model_cache.clear()
         if hasattr(self, "_summary_model_cached"):
             del self._summary_model_cached
+        router = getattr(self.agent, "router", None)
+        if router is not None:
+            router.model = self._area_model("ROUTER") or model
+            router.usage_model_name = self._area_usage_name("ROUTER")
+        self.agent.orchestrator_model = self._area_model("ORCHESTRATOR")
         logger.info("Applied new inference params without restarting")
         return True
 
@@ -520,13 +543,22 @@ class LangGraphClient:
         Provider-agnostic (the controller clears REASONING/REASONING_EFFORT, a
         no-op for providers without thinking). Set ``LLM.SUMMARIZATION_THINK: true``
         to keep thinking on (then the main model is reused). Falls back to the main
-        model if building the variant fails."""
+        model if building the variant fails.
+
+        ``AREA_MODELS.SUMMARY`` overrides which model that variant is built from —
+        compaction is a long, purely internal call, so it is the area where running
+        a cheaper model pays most. The reasoning-off treatment still applies on top;
+        ``SUMMARIZATION_THINK`` short-circuits to the main model and so ignores the
+        override, since it means "summarize with the full model, thinking and all".
+        """
         if config.get("LLM", {}).get("SUMMARIZATION_THINK", False):
             return self.model
         cached = getattr(self, "_summary_model_cached", "unset")
         if cached == "unset":
             try:
-                cached = self.llm_controller.build_non_reasoning_model()
+                cached = self.llm_controller.build_non_reasoning_model(
+                    overrides=area_models.overrides_for("SUMMARY") or None
+                )
             except Exception as e:
                 logger.warning(f"Non-reasoning summary model unavailable, using main model: {e}")
                 cached = self.model
@@ -711,20 +743,53 @@ class LangGraphClient:
             return self._subagent_model_cache[model_name]
         model = None
         try:
-            ctrl = LangChainLLMController(verbose=self.verbose_mode)
-            # Copy model_id (never mutate the shared config dict) and set both
-            # forms of the name — mantle_factory reads model_id['NAME'], the
-            # other providers read self.model_name.
-            ctrl.model_id = {**ctrl.model_id, "NAME": model_name}
-            ctrl.model_name = model_name
-            ctrl.initialize_model(callbacks=None)
-            model = ctrl.get_model()
+            model = self.llm_controller.build_model_variant({"NAME": model_name})
         except Exception as e:
             logger.error(
                 f"Sub-agent model override '{model_name}' failed to build; "
                 f"using the default model: {e}"
             )
         self._subagent_model_cache[model_name] = model
+        return model
+
+    def _area_usage_name(self, area: str) -> str:
+        """The model name ``/usage`` should attribute this area's calls to."""
+        main = self.agent.usage_model_name if self.agent else ""
+        if self._area_model(area) is None:
+            return main or "model"
+        name = str(area_models.overrides_for(area).get("NAME") or "").strip()
+        return name or main or "model"
+
+    def _area_model(self, area: str):
+        """The model configured for an internal ``area``, or None for the main one.
+
+        Backs ``AREA_MODELS`` (see :mod:`mnemoai.models.area_models`): the router,
+        the decomposer and the summarizer each make a short, invisible call that
+        needn't run on the model that writes the answer. Cached per area — these are
+        built once at startup and reused for every turn.
+
+        None means "use the main model", which is also what a failed build returns:
+        an unreachable side model must degrade to a working turn, not break one.
+        """
+        if area in self._area_model_cache:
+            return self._area_model_cache[area]
+        model = None
+        overrides = area_models.overrides_for(area)
+        if overrides:
+            try:
+                # No callbacks: these calls are internal, and the streaming handler
+                # belongs to the visible turn.
+                model = self.llm_controller.build_model_variant(overrides)
+                logger.info(
+                    "%s uses %s",
+                    area_models.DESCRIPTIONS.get(area, area).capitalize(),
+                    area_models.label(overrides, self.llm_controller.model_name),
+                )
+            except Exception as e:
+                logger.error(
+                    f"{area} model override failed to build; using the main model: {e}"
+                )
+        self._area_model_cache[area] = model
         return model
 
     def _invoke_model_once(self, prompt: str) -> str:
@@ -821,6 +886,21 @@ class LangGraphClient:
     def _steering_reminder(self) -> str:
         """Delegates to :func:`context_injection.steering_reminder`."""
         return context_injection.steering_reminder(self)
+
+    def set_auto_approve_mode(self, mode: Optional[str]) -> str:
+        """Set the session's auto-approve tier and return the mode now in force.
+
+        The two modes are mutually exclusive by necessity, not by taste: plan
+        mode blocks the mutating tools ABOVE the confirmation gate, so leaving it
+        on while auto-approve is raised would silently do nothing — the writes
+        stay blocked and the mode reads as broken. Raising a tier therefore
+        drops plan mode (and vice versa in ``/plan``).
+        """
+        resolved = auto_approve.normalize(mode)
+        self.auto_approve_mode = resolved
+        if resolved != auto_approve.DEFAULT_MODE:
+            self.plan_mode_active = False
+        return resolved
 
     def _approve_plan(self, plan: str) -> None:
         """Approve the current plan (the agent's _exit_plan_mode_provider): turn

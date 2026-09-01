@@ -373,6 +373,61 @@ VISION_MODEL_ID:
 # TOP_K is not offered here: the multimodal path never passes it to the sampler.
 ```
 
+### Per-area models (`AREA_MODELS`)
+
+A turn is not one model call. Before the answer is streamed, the query is
+**classified** by the router and — with orchestration on — **split into subtasks**
+by the decomposer; afterwards a **summarizer** may compact the history. Those
+calls are short, structured and invisible, and they don't have to run on the model
+that writes the answer.
+
+`AREA_MODELS` gives each of them its own model. Nothing here is required: an area
+you don't list uses `MODEL_ID`, which is what happens today.
+
+```yaml
+AREA_MODELS:
+  ROUTER: qwen3.5:1.7b # shorthand — just a model name
+  ORCHESTRATOR: qwen3.5:32b
+  SUMMARY:
+    NAME: qwen3.5:7b
+    TEMPERATURE: 0.3
+```
+
+| Area           | The call it covers                                     | Why change it                                                                                     |
+| -------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `ROUTER`       | Query classification (which tools to bind this turn)   | It produces a one-word label. A large reasoning model spends real latency on it — on _every_ turn |
+| `ORCHESTRATOR` | Task decomposition (splitting a request into subtasks) | The opposite trade-off: a bad split wastes the whole task, so this one may deserve a bigger model |
+| `SUMMARY`      | Conversation compaction                                | A long, mechanical rewrite — throughput matters more than depth                                   |
+
+Each entry is a **partial `MODEL_ID`, merged over the main one**, so you only
+write what differs. That includes `TYPE`: an area can run on a different provider
+entirely — a local model classifying while the answer comes from a hosted one.
+
+```yaml
+AREA_MODELS:
+  ROUTER:
+    TYPE: ollama
+    NAME: qwen3.5:1.7b
+    TEMPERATURE: 0
+```
+
+Notes:
+
+- **A misconfigured area falls back to the main model.** An unreachable endpoint
+  or a bad model name is logged once at startup and that area keeps using
+  `MODEL_ID` — a side model must not break your turns.
+- **`/doctor` lists what's active**, one row per configured area, and warns about
+  an area name it doesn't recognize (a typo is otherwise silent — the area simply
+  keeps the main model).
+- **`/usage` attributes each call to the model that ran it**, so a smaller router
+  shows up as its own row.
+- `/params` re-derives them, so an edit applies without restarting.
+- `LLM.SUMMARIZATION_THINK: true` takes precedence over the `SUMMARY` area: it
+  means "summarize with the full model, thinking and all".
+- The **aggregator is deliberately not an area.** Its output is the answer you
+  read, so a different model there would change the voice of the reply rather than
+  the cost of an internal step.
+
 ### Model Parameters
 
 This is the full reference for what you can put under `MODEL_ID`,

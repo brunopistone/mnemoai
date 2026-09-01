@@ -822,7 +822,8 @@ class TestAuxiliaryCallsRetryOverload:
         self._no_backoff(monkeypatch, mod)
         a = LangGraphAgent.__new__(LangGraphAgent)
         model = self._FlakyModel('[{"description": "step one", "category": "code"}]')
-        a._non_reasoning = lambda: model
+        a.orchestrator_model = None
+        a._non_reasoning = lambda model_=None: model
 
         subtasks = a._decompose_task("q", "orchestrator prompt", {"code", "full"})
         assert model.calls == 2  # 529, retried, decomposed
@@ -836,7 +837,8 @@ class TestAuxiliaryCallsRetryOverload:
         self._no_backoff(monkeypatch, mod)
         a = LangGraphAgent.__new__(LangGraphAgent)
         model = self._FlakyModel("[]", fail_times=99)
-        a._non_reasoning = lambda: model
+        a.orchestrator_model = None
+        a._non_reasoning = lambda model_=None: model
 
         subtasks = a._decompose_task("q", "orchestrator prompt", {"code", "full"})
         assert model.calls == stream_policy.AUX_RETRY_ATTEMPTS

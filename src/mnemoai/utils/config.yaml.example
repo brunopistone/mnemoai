@@ -15,6 +15,19 @@ MODEL_ID:
     - "<|im_start|>"
     - "<|im_end|>"
     - "<|endoftext|>"
+# Optional: give a specific INTERNAL call its own model. Each turn makes short,
+# invisible calls beside the answer — classifying the query, splitting a complex
+# task, summarizing history when it gets long — and none of them has to run on the
+# model that writes the answer. An area listed here uses that model; an area left
+# out (or the whole section, which is the default) uses MODEL_ID.
+# A value is either a bare model name, or a partial MODEL_ID block when more than
+# the name differs (TYPE included, so an area may use a different provider).
+# AREA_MODELS:
+#   ROUTER: qwen3.5:1.7b            # query classification (one label per turn)
+#   ORCHESTRATOR: qwen3.5:4b        # task decomposition into subtasks
+#   SUMMARY:                        # conversation compaction
+#     NAME: qwen3.5:1.7b
+#     TEMPERATURE: 0.3
 VISION_MODEL_ID:
   NAME: qwen2.5vl:3b
   TYPE: ollama
