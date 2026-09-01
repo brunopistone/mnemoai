@@ -5,6 +5,7 @@ Decide what runs without asking, what asks first, and what is refused outright.
 This page covers:
 
 - [Approve actions as they happen](#approve-actions-as-they-happen) — the `Proceed?` prompt and its toggles
+- [Stop being asked, for a while](#stop-being-asked-for-a-while) — `/auto` and its tiers
 - [Investigate before changing anything](#investigate-before-changing-anything) — plan mode
 - [Understand the safety floor](#understand-the-safety-floor) — what is refused even with confirmations off
 - [Keep git operations recoverable](#keep-git-operations-recoverable) — git-specific protections
@@ -57,6 +58,59 @@ the safety floor below.
     prompt. An untrusted destructive tool there **auto-denies** — the safe
     direction. It proceeds only if you already trusted that category with `a`.
 
+## Stop being asked, for a while
+
+On a task that touches thirty files the prompt stops being a safeguard and becomes
+a keystroke tax. `/auto` turns it off for a **tier of operations**, for **this
+session only** — and unlike the two other ways out, it's reversible: `a` trusts a
+whole category with no way back, and setting `REQUIRE_WRITE_CONFIRMATION: false`
+is permanent and applies everywhere.
+
+| Tier     | Runs without asking                                  |
+| -------- | ---------------------------------------------------- |
+| `off`    | Nothing — every destructive tool asks (the default)  |
+| `edits`  | File writes **inside the current working directory** |
+| `writes` | All file writes, any path, plus `MEMORY.md` updates  |
+| `all`    | The above plus shell commands                        |
+
+`/auto` steps to the next tier and wraps back to `off`; `/auto edits` (or any tier
+name) jumps straight there. While a tier is active the input prompt carries a
+colored badge — green `⏵ auto-edits`, amber `⏵⏵ auto-writes`, red `⏵⏵ auto-all` —
+so the state is visible on every line you type, not just at the moment you set it.
+
+For a run that should go uninterrupted from the very first turn, start there:
+
+```bash
+mnemoai --auto
+```
+
+That opens the session at `all`. It's a bare switch on purpose — the tiers live in
+the command, so use `/auto` at the prompt to narrow or drop it. Either way it's the
+same session state, with the same red badge.
+
+`edits` is the tier to reach for. It waives the prompt for exactly the thing that
+interrupts most, scoped to the tree you're working in: a write to `~/.ssh/config`
+or `/etc/hosts` still asks, and so does one whose path can't be resolved — when
+the scope is unknowable, asking is the safe answer. Symlinks are resolved on both
+sides, so a link pointing out of the directory can't smuggle a write past the
+scope.
+
+**It replaces the keypress and nothing else.** Everything below the prompt still
+applies, unchanged:
+
+- The [server-side safety floor](#understand-the-safety-floor) still refuses
+  system-destroying commands and system-directory writes.
+- [Plan mode](#investigate-before-changing-anything) still hard-blocks the
+  mutating tools — and turning plan mode on resets the tier to `off`, since a mode
+  that blocks and a mode that waives would leave one of the two doing nothing.
+- A [tool hook](hooks.md) that denies a call still denies it.
+- **Git safety overrides are never auto-approved, at any tier.** When a tool
+  refuses an operation as risky and asks to override it, that stays your decision
+  — a flagged operation asks in every mode.
+
+The tier is session state: it's gone on restart, and `/auto off` ends it
+immediately.
+
 ## Investigate before changing anything
 
 Toggle plan mode with `/plan` before asking for a complex change. The assistant
@@ -101,12 +155,12 @@ a floor that is **always on** and lives inside the MCP server, so it holds even
 with confirmations disabled, in non-interactive runs, or if the server is driven
 by a different client.
 
-| Layer                        | What it does                                                         | Can be disabled?     |
-| ---------------------------- | -------------------------------------------------------------------- | -------------------- |
-| Your [tool hooks](hooks.md)  | Whatever you scripted — can deny a call, or waive its prompt         | Yes (it's your file) |
-| Client confirmation prompt   | Asks `Proceed? (y/N/a)` before each shell, file, or memory operation | Yes (`REQUIRE_*`)    |
-| Plan mode, while on          | Hard-blocks every mutating and executing tool                        | Yes (`/plan`)        |
-| **Server-side safety floor** | Refuses system-destroying commands and system-directory writes       | **No**               |
+| Layer                        | What it does                                                         | Can be disabled?           |
+| ---------------------------- | -------------------------------------------------------------------- | -------------------------- |
+| Your [tool hooks](hooks.md)  | Whatever you scripted — can deny a call, or waive its prompt         | Yes (it's your file)       |
+| Client confirmation prompt   | Asks `Proceed? (y/N/a)` before each shell, file, or memory operation | Yes (`REQUIRE_*`, `/auto`) |
+| Plan mode, while on          | Hard-blocks every mutating and executing tool                        | Yes (`/plan`)              |
+| **Server-side safety floor** | Refuses system-destroying commands and system-directory writes       | **No**                     |
 
 Shell commands (`execute_bash`, `start_background_task`) are refused when they
 would:

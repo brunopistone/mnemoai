@@ -241,6 +241,7 @@ class TestFlattenToolBlocks:
         from mnemoai.client.agent.agent import LangGraphAgent
 
         a = LangGraphAgent.__new__(LangGraphAgent)
+        a.orchestrator_model = None
         seen = {}
 
         class _M:
@@ -251,8 +252,8 @@ class TestFlattenToolBlocks:
                 return AIMessage(content="[]")
 
         a.model = _M()
-        a._disable_reasoning = lambda: {}
-        a._restore_reasoning = lambda saved: None
+        a._disable_reasoning = lambda model=None: {}
+        a._restore_reasoning = lambda saved, model=None: None
         a._decompose_task("now what?", "decompose", {"full"}, history=self._history())
 
         msgs = seen["messages"]

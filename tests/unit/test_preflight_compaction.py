@@ -260,7 +260,7 @@ class TestSummaryModel:
 
     def test_default_builds_non_reasoning_variant(self, monkeypatch):
         class _Ctrl:
-            def build_non_reasoning_model(self):
+            def build_non_reasoning_model(self, overrides=None):
                 return "NO_THINK"
 
         c = self._client_with_ctrl(monkeypatch, think=False, ctrl=_Ctrl())

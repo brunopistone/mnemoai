@@ -154,6 +154,7 @@ class LangGraphAgent:
         tool_routes: Optional[Dict[str, Optional[List[str]]]] = None,
         orchestrator_enabled: bool = False,
         plan_mode_provider: Optional[Callable[[], bool]] = None,
+        auto_approve_provider: Optional[Callable[[], str]] = None,
     ) -> None:
         """Initialize the LangGraph agent.
 
@@ -168,8 +169,13 @@ class LangGraphAgent:
             orchestrator_enabled: Enable the orchestrator for the 'full' route
             plan_mode_provider: Callable returning True while plan mode is active
                 (gates the mutating tools client-side).
+            auto_approve_provider: Callable returning the session's auto-approve
+                mode (see `auto_approve`), read by the confirmation gate.
         """
         self._plan_mode_provider = plan_mode_provider or (lambda: False)
+        # Which confirmation categories run without a prompt this session. Read
+        # per call so a mid-session toggle applies immediately (like plan mode).
+        self._auto_approve_provider: Optional[Callable[[], str]] = auto_approve_provider
         # Plan-mode approval hooks, set by the client (like _confirm_ui). None on
         # bare test objects / non-TTY → exit_plan_mode auto-approves so scripted
         # runs never block. `_plan_approval_ui(plan) -> "approve"|"edit"|
@@ -239,6 +245,9 @@ class LangGraphAgent:
         self.usage = UsageTracker()
         # Model name usage is attributed to; set by the client, which owns config.
         self.usage_model_name = ""
+        # Optional own model for task decomposition (config AREA_MODELS.ORCHESTRATOR,
+        # built by the client). None = decompose on the main model, as before.
+        self.orchestrator_model: Optional[BaseChatModel] = None
         # Which files this session touched (drives /files, and marks /diff's own
         # edits). Beside `usage` for the same reason: every tool-call path reaches
         # the agent, including the ones with no visible turn.
@@ -1010,12 +1019,18 @@ class LangGraphAgent:
             messages.extend(message_sanitizer.flatten_tool_blocks(history))
         messages.append(HumanMessage(content=query))
 
+        # Decomposition is a short structured call, so it may warrant a different
+        # model than the answer — a cheaper one, or a stronger one (a bad split
+        # wastes the whole task). None (nothing configured for the area) means the
+        # main model, which is what `_non_reasoning` already resolves it to.
+        base = self.orchestrator_model
+
         # Reasoning off so the JSON subtask list lands in response.content
         # (reasoning models otherwise leave content empty and parsing fails), and
         # callbacks suppressed so this internal call doesn't drive the spinner.
         # On a twin both are just fields on a throwaway object; the in-place
         # fallback has to save and restore them on the shared model.
-        aux = self._non_reasoning()
+        aux = self._non_reasoning(base)
         if aux is not None:
             aux.callbacks = None
             try:
@@ -1027,20 +1042,22 @@ class LangGraphAgent:
                 logger.warning(f"Task decomposition failed: {e}; using single subtask")
                 return [{"description": query, "category": "full"}]
 
-        saved_callbacks = getattr(self.model, "callbacks", None)
+        # Untwinnable: mutate in place, on the model actually being invoked.
+        base = base or self.model
+        saved_callbacks = getattr(base, "callbacks", None)
         saved_reasoning = None
         try:
-            self.model.callbacks = None
-            saved_reasoning = self._disable_reasoning()
-            response = self._aux_invoke(self.model, messages, "Task decomposition")
+            base.callbacks = None
+            saved_reasoning = self._disable_reasoning(base)
+            response = self._aux_invoke(base, messages, "Task decomposition")
             return parse_subtasks(response.content, query, valid_categories)
         except Exception as e:
             logger.warning(f"Task decomposition failed: {e}; using single subtask")
             return [{"description": query, "category": "full"}]
         finally:
             if saved_reasoning is not None:
-                self._restore_reasoning(saved_reasoning)
-            self.model.callbacks = saved_callbacks
+                self._restore_reasoning(saved_reasoning, base)
+            base.callbacks = saved_callbacks
 
     def _run_worker_loop(
         self,
@@ -2360,13 +2377,14 @@ class LangGraphAgent:
         """Delegates to :func:`response_parsing.extract_visible`."""
         return response_parsing.extract_visible(content)
 
-    def _disable_reasoning(self) -> dict:
-        """Temporarily disable reasoning; returns saved state for _restore."""
-        return disable_reasoning(self.model)
+    def _disable_reasoning(self, model=None) -> dict:
+        """Temporarily disable reasoning on ``model`` (default ``self.model``);
+        returns saved state for _restore."""
+        return disable_reasoning(self.model if model is None else model)
 
-    def _restore_reasoning(self, saved: dict) -> None:
+    def _restore_reasoning(self, saved: dict, model=None) -> None:
         """Restore reasoning settings saved by _disable_reasoning()."""
-        restore_reasoning(self.model, saved)
+        restore_reasoning(self.model if model is None else model, saved)
 
     def _non_reasoning(self, model=None):
         """A reasoning-disabled twin of ``model`` (default ``self.model``).

@@ -138,9 +138,10 @@ class TestDecomposeDoesNotMutateTheSharedModel:
 
     def test_decomposes_on_a_twin_and_leaves_the_parent_alone(self):
         a = LangGraphAgent.__new__(LangGraphAgent)
+        a.orchestrator_model = None
         sentinel = object()
         a.model = _DecomposerModel(reasoning=True, callbacks=sentinel, seen=[])
-        a._disable_reasoning = lambda: (_ for _ in ()).throw(
+        a._disable_reasoning = lambda model=None: (_ for _ in ()).throw(
             AssertionError("must not mutate the shared model when a twin is available")
         )
         out = a._decompose_task("do a thing", "decompose", VALID)
@@ -151,6 +152,7 @@ class TestDecomposeDoesNotMutateTheSharedModel:
 
     def test_falls_back_to_in_place_disable_when_untwinnable(self):
         a = LangGraphAgent.__new__(LangGraphAgent)
+        a.orchestrator_model = None
 
         class _M:
             callbacks = None
@@ -160,7 +162,9 @@ class TestDecomposeDoesNotMutateTheSharedModel:
 
         a.model = _M()
         disabled = []
-        a._disable_reasoning = lambda: disabled.append(True) or {"reasoning": True}
-        a._restore_reasoning = lambda saved: None
+        a._disable_reasoning = lambda model=None: (
+            disabled.append(True) or {"reasoning": True}
+        )
+        a._restore_reasoning = lambda saved, model=None: None
         assert a._decompose_task("do a thing", "decompose", VALID)
         assert disabled == [True]

@@ -14,6 +14,17 @@ MODEL_ID:
   # it. On by default for the Claude/Nova families; set false to opt out.
   # PROMPT_CACHE: true
   # PROMPT_CACHE_TTL: 5m       # 5m | 1h (1h costs more to write)
+# Optional: give a specific INTERNAL call its own model. Each turn makes short,
+# invisible calls beside the answer — classifying the query, splitting a complex
+# task, summarizing history when it gets long — and none of them has to run on the
+# model that writes the answer. An area listed here uses that model; an area left
+# out (or the whole section, which is the default) uses MODEL_ID.
+# A value is either a bare model name, or a partial MODEL_ID block when more than
+# the name differs (TYPE included, so an area may use a different provider).
+# AREA_MODELS:
+#   ROUTER: global.anthropic.claude-haiku-4-5   # classification (one label/turn)
+#   ORCHESTRATOR: global.anthropic.claude-opus-4-8  # task decomposition
+#   SUMMARY: global.anthropic.claude-haiku-4-5  # conversation compaction
 VISION_MODEL_ID:
   NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock

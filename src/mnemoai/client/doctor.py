@@ -39,7 +39,7 @@ from mnemoai.client import hooks
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.steering_store import SteeringStore
 from mnemoai.client.user_commands import UserCommandStore
-from mnemoai.models import prompt_cache
+from mnemoai.models import area_models, prompt_cache
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import (
@@ -233,6 +233,8 @@ def _provider_checks() -> List[Check]:
 
     out.append(_credentials_check(provider, section))
 
+    out.extend(_area_model_checks(section))
+
     policy = prompt_cache.policy(section)
     if policy.control:
         out.append(
@@ -247,6 +249,42 @@ def _provider_checks() -> List[Check]:
                 "off for this provider/model",
                 f"Supported on {', '.join(prompt_cache.CACHEABLE_TYPES)} with a Claude/Nova "
                 "model (mantle needs API_PROTOCOL: anthropic).",
+            )
+        )
+    return out
+
+
+def _area_model_checks(section: dict) -> List[Check]:
+    """Which internal calls run on their own model, and any misspelled area.
+
+    Reported because the whole feature is silent: an area with an override behaves
+    exactly like one without, and a mistyped area name simply keeps the main
+    model — indistinguishable from the setting having no effect.
+    """
+    out: List[Check] = []
+    for area, overrides in area_models.configured().items():
+        out.append(
+            Check(
+                "Provider",
+                area_models.DESCRIPTIONS.get(area, area),
+                OK,
+                area_models.label(
+                    overrides,
+                    str(section.get("NAME", "") or ""),
+                    str(section.get("TYPE", "") or ""),
+                ),
+            )
+        )
+    unknown = area_models.unknown_keys()
+    if unknown:
+        out.append(
+            Check(
+                "Provider",
+                "area models",
+                WARN,
+                f"unknown area(s): {', '.join(sorted(unknown))}",
+                f"{area_models.CONFIG_SECTION} accepts "
+                f"{', '.join(area_models.AREAS)} — the rest are ignored.",
             )
         )
     return out

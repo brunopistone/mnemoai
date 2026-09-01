@@ -41,9 +41,10 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # (``/doctor`` counts commands too); a test pins the two lists together, so adding
 # a built-in without reserving it fails the suite.
 BUILTIN_COMMANDS = (
-    "branch", "clear", "compact", "config", "context", "copy", "diff", "doctor",
-    "exit", "export", "features", "files", "help", "hooks", "load", "mcp", "memory",
-    "model", "params", "plan", "quit", "rename", "rewind", "save", "skills", "usage",
+    "auto", "branch", "clear", "compact", "config", "context", "copy", "diff",
+    "doctor", "exit", "export", "features", "files", "help", "hooks", "load", "mcp",
+    "memory", "model", "params", "plan", "quit", "rename", "rewind", "save", "skills",
+    "usage",
 )
 
 # A leading `_` marks a file in the commands dir that is NOT a command (notes, a

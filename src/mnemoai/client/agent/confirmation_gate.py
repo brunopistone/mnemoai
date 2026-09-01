@@ -4,9 +4,9 @@ The hard client-side gate that asks the user before running a destructive tool �
 shell (``execute_bash``), file writes (``fs_write``/``file_edit``), and memory
 writes — each behind its ``REQUIRE_*`` toggle. It must live client-side: the MCP
 server is a piped subprocess and can't prompt the terminal. Handles session-trust
-("a" = allow this category), headless auto-deny (a background sub-agent has no
-TTY), non-TTY auto-proceed, cross-thread prompt serialization, and the
-pre-approved-bash bypass (a plan's ``allowed_bash``).
+("a" = allow this category), the session's :mod:`auto_approve` mode, headless
+auto-deny (a background sub-agent has no TTY), non-TTY auto-proceed, cross-thread
+prompt serialization, and the pre-approved-bash bypass (a plan's ``allowed_bash``).
 
 Pure of the prompt mechanics: the functions take the agent as the first arg and
 dispatch back through its methods (``_prompt_confirm``, ``_is_headless``,
@@ -20,7 +20,7 @@ points), so the extraction is transparent to them.
 import json
 import sys
 
-from mnemoai.client.agent import plan_policy
+from mnemoai.client.agent import auto_approve, plan_policy
 from mnemoai.utils.config import config
 
 # Destructive-tool confirmation categories (each gated behind a REQUIRE_* toggle).
@@ -78,6 +78,7 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
             f"{tool_name} {tool_args.get('command') or ''}".strip(),
         )
 
+    target = None  # the path a write would touch, for auto-approve scoping
     if tool_name in CONFIRM_BASH_TOOLS:
         # A command the plan pre-declared (via exit_plan_mode allowed_bash)
         # runs without a prompt — approving the plan approved these.
@@ -94,6 +95,7 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
         # Both spellings: file_edit calls it file_path, fs_write calls it path.
         # Reading one made the prompt read a bare "edit" with no filename.
         path = plan_policy.write_target(tool_args)
+        target = path
         op = tool_args.get("command", "edit")  # fs_write: create/str_replace/…
         category, toggle, toggle_default, header, detail = (
             "write",
@@ -118,7 +120,28 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
     else:
         return True
 
-    return _gated_prompt(agent, category, toggle, toggle_default, header, detail)
+    return _gated_prompt(
+        agent, category, toggle, toggle_default, header, detail, target=target
+    )
+
+
+def _auto_approved(agent, category: str, target) -> bool:
+    """True when the session's auto-approve mode covers this call.
+
+    Reads the mode through the agent's provider (the ``plan_mode_provider``
+    pattern: a lambda onto ``client.auto_approve_mode``), so the live value is
+    picked up per call and a bare test object without one simply has no mode.
+    Non-raising — a broken provider must not take a tool call down, and the
+    prompt is the safe answer.
+    """
+    provider = getattr(agent, "_auto_approve_provider", None)
+    if provider is None:
+        return False
+    try:
+        mode = provider()
+    except Exception:
+        return False
+    return auto_approve.covers(mode, category, target=target)
 
 
 def _gated_prompt(
@@ -128,11 +151,14 @@ def _gated_prompt(
     toggle_default: bool,
     header: str,
     detail: str,
+    target=None,
 ) -> bool:
-    """Run the toggle → trust → headless → TTY ladder, then prompt. True to proceed.
+    """Run the toggle → trust → auto → headless → TTY ladder, then prompt.
 
-    Shared by the pre-call gate (:func:`confirm`) and the post-call one
-    (:func:`confirm_result`) so the two can't drift apart on who gets asked.
+    True to proceed. Shared by the pre-call gate (:func:`confirm`) and the
+    post-call one (:func:`confirm_result`) so the two can't drift apart on who
+    gets asked. ``target`` is the path a write would touch — only the
+    workspace-scoped auto-approve tier reads it.
     """
     if not config.get(toggle, toggle_default):
         return True
@@ -140,6 +166,15 @@ def _gated_prompt(
     # sub-agent inherits these — a category the user pre-approved runs.
     trusted = getattr(agent, "_trusted_confirm_categories", None)
     if trusted is not None and category in trusted:
+        return True
+    # Auto-approve mode: the same kind of standing session trust as "a" above,
+    # just revocable per tier — so it sits at the same rung, ABOVE the headless
+    # branch (a background sub-agent inherits it for exactly the reason it
+    # inherits "a"). It can never widen anything: the safety floors, the
+    # plan-mode block and a hook's deny are all decided in `tool_loop` before
+    # this gate runs, and `auto_approve.NEVER_AUTO` keeps the safety-override
+    # category (``git``) asking in every mode.
+    if _auto_approved(agent, category, target):
         return True
     # Background sub-agent (no TTY of its own): it CANNOT prompt, so an
     # untrusted destructive tool auto-DENIES (the safe direction — never

@@ -13,6 +13,7 @@ from prompt_toolkit.history import InMemoryHistory
 
 from mnemoai import app_version
 from mnemoai.client import file_ledger, file_mentions
+from mnemoai.client.agent import auto_approve
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
     is_task_successful,
@@ -91,12 +92,19 @@ class ChatInterface:
             return list(self._COMMANDS)
 
     def _prompt_html(self) -> str:
-        """Build the input-prompt line, with a 🔒 plan tag while plan mode is on.
+        """Build the input-prompt line, tagged with the active session mode.
 
-        The (potentially long) model name is intentionally omitted — use /model.
+        A mode that changes whether the app stops to ask has to be visible at the
+        moment of typing — the two are mutually exclusive, so at most one tag
+        shows. The (potentially long) model name is intentionally omitted — use
+        /model.
         """
         if getattr(self.client, "plan_mode_active", False):
             return "<ansiyellow>🔒 plan</ansiyellow> <ansiblue>></ansiblue> "
+        badge = auto_approve.badge(getattr(self.client, "auto_approve_mode", None))
+        if badge is not None:
+            label, color = badge
+            return f"<{color}>{label}</{color}> <ansiblue>></ansiblue> "
         return "<ansiblue>></ansiblue> "
 
     # ASCII wordmark shown on launch (ANSI "Shadow" style), rendered in indigo.
@@ -135,8 +143,11 @@ class ChatInterface:
             ("/diff [path]", "Uncommitted changes (this session's marked)"),
             ("/copy [code|N]", "Copy the last answer or its code to clipboard"),
         ]),
-        ("Assistant", [
+        ("Modes", [
             ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
+            ("/auto [tier]", "Skip confirmations: off/edits/writes/all"),
+        ]),
+        ("Assistant", [
             ("/memory [clear]", "View (or clear) persistent memory"),
             ("/skills [name]", "List installed skills (or preview one)"),
             ("/mcp", "List configured MCP servers & tools"),
@@ -172,6 +183,7 @@ class ChatInterface:
         ("/rewind", "Take back your last prompt and the turn it ran"),
         ("/memory", "View persistent memory (/memory clear to wipe)"),
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
+        ("/auto", "Skip confirmations (/auto off|edits|writes|all)"),
         ("/save", "Save conversation (/save [path])"),
         ("/load", "Load a saved conversation (/load lists saved)"),
         ("/usage", "Show token usage for this session"),
@@ -706,6 +718,40 @@ class ChatInterface:
                 "(SESSION_MAX_AGE_DAYS is 0)."
             )
 
+    def _handle_auto_command(self, arg: str) -> None:
+        """Handle ``/auto`` (step to the next tier) and ``/auto <tier>`` (set one).
+
+        An unrecognized tier is REFUSED rather than normalized: `auto_approve`
+        falls back to ``off`` for robustness, but silently dropping a typed tier
+        to the narrowest one would read as the mode not working.
+        """
+        want = arg.strip().lower()
+        if want and want not in auto_approve.MODES:
+            print(
+                f"Unknown tier '{want}'. Use one of: "
+                f"{', '.join(auto_approve.MODES)} — or /auto to step through them."
+            )
+            return
+
+        setter = getattr(self.client, "set_auto_approve_mode", None)
+        if setter is None:
+            print("Auto-approve is unavailable on this client.")
+            return
+        if not want:
+            want = auto_approve.cycle(getattr(self.client, "auto_approve_mode", None))
+        mode = setter(want)
+        detail = auto_approve.notice(mode)
+        if mode == auto_approve.DEFAULT_MODE:
+            print(f"\n\033[92m✓ Auto-approve OFF\033[0m — {detail}.\n")
+            return
+        # Name the two things that DON'T change, because the whole risk of this
+        # mode is assuming it turned off more than it did.
+        print(
+            f"\n\033[93m⏵ Auto-approve: {mode}\033[0m — {detail}. Blocked commands "
+            "and flagged operations still ask; plan mode is off. Type /auto to "
+            "step on, or /auto off to stop.\n"
+        )
+
     def _handle_memory_command(self, arg: str) -> None:
         """Handle ``/memory`` (view) and ``/memory clear`` over ``MemoryStore``."""
         store = MemoryStore()
@@ -1238,6 +1284,11 @@ class ChatInterface:
                 if agent is not None:
                     agent._preapproved_bash = []
                     agent._execute_plan_route = False
+                # The opposite mode: blocking the mutating tools while claiming to
+                # auto-approve them would be one of the two doing nothing.
+                setter = getattr(self.client, "set_auto_approve_mode", None)
+                if setter is not None:
+                    setter(auto_approve.DEFAULT_MODE)
                 print(
                     "\n\033[93m🔒 Plan mode ON\033[0m — read-only. I'll research "
                     "and present a plan for your approval; approving turns plan "
@@ -1249,6 +1300,11 @@ class ChatInterface:
                 print(
                     "\n\033[92m🔓 Plan mode OFF\033[0m — changes allowed again.\n"
                 )
+            return None
+
+        # Raise/lower how much runs without a confirmation prompt.
+        if query.lower() == "/auto" or query.lower().startswith("/auto "):
+            self._handle_auto_command(query[len("/auto"):].strip())
             return None
 
         # /compact [focus instructions]
