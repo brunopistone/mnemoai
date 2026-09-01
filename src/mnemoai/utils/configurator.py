@@ -25,6 +25,9 @@ from prompt_toolkit.widgets import (
     TextArea,
 )
 
+from mnemoai.models.area_models import AREAS
+from mnemoai.models.area_models import CONFIG_SECTION as AREA_SECTION
+from mnemoai.models.area_models import DESCRIPTIONS as AREA_DESCRIPTIONS
 from mnemoai.models.provider_params import (
     providers,
     supported_keys,
@@ -161,6 +164,18 @@ def _find_section(lines: list, section: str) -> int:
     return -1
 
 
+def _body_indent(lines: list, idx: int) -> int:
+    """The direct-child indent of the section header at ``idx`` (taken from its
+    first non-comment body line), or two past the header when it has no body."""
+    header = _indent_of(lines[idx])
+    for line in lines[idx + 1:]:
+        if line.strip() and _indent_of(line) <= header:
+            break
+        if line.strip() and not line.lstrip().startswith("#"):
+            return _indent_of(line)
+    return header + 2
+
+
 def _get_field(text: str, section: str, key: str) -> Optional[str]:
     """Read ``key`` from within ``section`` at any depth (comments stripped)."""
     lines = text.splitlines()
@@ -271,10 +286,22 @@ def _list_section_keys(text: str, section: str) -> list:
     return keys
 
 
+def _registry_section(section: str) -> str:
+    """The provider-registry section that describes ``section``.
+
+    A section name is two things at once here: WHERE a value is written in the
+    YAML, and WHICH provider table describes it. For an ``AREA_MODELS`` entry the
+    two differ — it lives under its own block (``ROUTER``) but is a partial
+    ``MODEL_ID``, same providers and same keys — so every registry lookup goes
+    through this and every text lookup keeps the block name.
+    """
+    return "MODEL_ID" if section in AREAS else section
+
+
 def _prune_unsupported_params(text: str, section: str, provider: str) -> str:
     """Drop keys the ``provider`` doesn't consume for ``section`` (per the
     registry); keeps NAME/TYPE; unknown provider prunes nothing."""
-    allowed = supported_keys(section, provider)
+    allowed = supported_keys(_registry_section(section), provider)
     if allowed is None:
         return text  # unknown provider/section — don't touch anything
     keep = allowed | {"NAME", "TYPE"}
@@ -292,9 +319,10 @@ def _clear_inference_params(text: str, section: str, keep: set = None) -> str:
     of every provider's tunable set so leftovers from another provider go too.
     """
     keep = keep or set()
+    reg = _registry_section(section)
     inference: set = set()
-    for prov in providers(section):
-        t = tunable_params(section, prov)
+    for prov in providers(reg):
+        t = tunable_params(reg, prov)
         if t:
             inference |= t
     present = set(_list_section_keys(text, section))
@@ -349,6 +377,90 @@ def _ensure_embed_section(text: str) -> str:
     else:
         lines = ["RAG:", *block, *lines]  # no RAG block yet — prepend one
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _commented_section_end(lines: list, section: str) -> int:
+    """Index just past a commented-out ``# section:`` example block, or -1.
+
+    Every template documents ``AREA_MODELS`` as a comment block; a real block
+    written directly below it reads as that example's live counterpart, instead of
+    landing wherever the file happens to end."""
+    for i, line in enumerate(lines):
+        if re.match(rf"#\s*{re.escape(section)}:\s*$", line.strip()):
+            j = i + 1
+            while j < len(lines) and lines[j].lstrip().startswith("#"):
+                j += 1
+            return j
+    return -1
+
+
+def _ensure_area_section(text: str, area: str) -> str:
+    """Ensure ``AREA_MODELS.<area>`` exists as a block the prompts can write into.
+
+    Every template ships ``AREA_MODELS`` commented out — the section's ABSENCE is
+    what makes an area use the main model — so the block normally has to be
+    created. The bare-name shorthand (``ROUTER: qwen3.5:1.7b``) is expanded in
+    place, keeping the name: a block is needed as soon as TYPE or a connection key
+    is set. No-op when the block already exists."""
+    if _find_section(text.splitlines(), area) >= 0:
+        return text
+
+    name = _get_field(text, AREA_SECTION, area) or ""
+    if area in _list_section_keys(text, AREA_SECTION):
+        text = _remove_field(text, AREA_SECTION, area)  # shorthand -> block
+
+    lines = text.splitlines()
+    idx = _find_section(lines, AREA_SECTION)
+    if idx >= 0:
+        # Match the existing children's indent — mixed sibling indents are a YAML
+        # error, so this can't assume the two spaces we'd write ourselves.
+        indent = _body_indent(lines, idx)
+        lines[idx + 1:idx + 1] = [
+            f"{' ' * indent}{area}:",
+            f"{' ' * (indent + 2)}NAME: {name}",
+        ]
+    else:
+        at = _commented_section_end(lines, AREA_SECTION)
+        if at < 0:
+            at = len(lines)
+        lines[at:at] = [f"{AREA_SECTION}:", f"  {area}:", f"    NAME: {name}"]
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _clear_area_override(text: str, area: str) -> str:
+    """Remove ``AREA_MODELS.<area>`` so the area follows the main chat model.
+
+    "Same as chat" for an area is the ABSENCE of an override, not a copy of the
+    chat block the way vision needs one: absence is what makes the area track a
+    later chat-model change instead of freezing today's model into a duplicate.
+    A now-empty ``AREA_MODELS:`` header goes too — by hand, since
+    ``_remove_top_section`` would also absorb the commented example above it."""
+    if area not in _list_section_keys(text, AREA_SECTION):
+        return text
+    text = _remove_field(text, AREA_SECTION, area)
+    lines = text.splitlines()
+    idx = _find_section(lines, AREA_SECTION)
+    if idx >= 0 and not _list_section_keys(text, AREA_SECTION):
+        del lines[idx]
+        text = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+    return text
+
+
+def _area_configured(text: str, area: str) -> bool:
+    """True when ``area`` has an override — block or bare-name shorthand."""
+    return area in _list_section_keys(text, AREA_SECTION)
+
+
+def _effective_type(text: str, section: str) -> str:
+    """The provider TYPE in force for ``section``.
+
+    An ``AREA_MODELS`` block is merged OVER ``MODEL_ID``, so an area that names no
+    provider runs on the chat one — that, not a generic default, is what a prompt
+    must offer and what decides which params are tunable."""
+    typ = (_get_field(text, section, "TYPE") or "").lower()
+    if not typ and section in AREAS:
+        typ = (_get_field(text, "MODEL_ID", "TYPE") or "").lower()
+    return typ or "ollama"
 
 
 def _set_top_level(text: str, key: str, value: str) -> str:
@@ -923,7 +1035,7 @@ def _explicit_bool(value: Optional[str]) -> bool:
 def _prompt_provider_type(section: str, current: str) -> str:
     """Prompt for a provider TYPE (from the registry), returning the chosen
     canonical key; ``current`` is the default."""
-    options = list(providers(section))
+    options = list(providers(_registry_section(section)))
     if current not in options:
         # Offer an unknown/legacy current value so it can be kept.
         options = [current] + options
@@ -993,7 +1105,7 @@ def _optional_field_step(section: str, key: str, prompt: str, default: str = "")
 def _connection_steps(section: str, provider: str) -> list:
     """Back-able steps for the connection/auth keys ``provider`` needs (per the
     registry). Each is ``fn(text, allow_back) -> text``; shared by /config, /model."""
-    allowed = supported_keys(section, provider) or set()
+    allowed = supported_keys(_registry_section(section), provider) or set()
     steps = []
 
     host_label, host_default, port_label, port_default = _HOST_PORT_PROMPTS.get(
@@ -1184,6 +1296,16 @@ def _build_config(
         orchestration = False
     text = _set_bool(text, "ENABLE_ORCHESTRATION", orchestration)
 
+    # --- Per-area models (the internal calls that run beside the answer) ---
+    # Only for the areas whose feature was just switched ON — a model for a call
+    # that never happens is dead config. Each offers "same as chat" first, and
+    # answering yes writes NOTHING (absence is what makes the area follow the chat
+    # model), so Enter-through leaves the template exactly as it was. SUMMARY has
+    # no toggle to hang off, so it stays a /model-only choice.
+    for area, enabled in (("ROUTER", routing), ("ORCHESTRATOR", orchestration)):
+        if enabled:
+            text = _prompt_model_section(text, area, is_llm=False)
+
     text = _set_bool(text, "USE_PROFILING", _ask_bool("Enable user profiling (personalized responses)?", _truthy(_get_in_section(text, "PROFILE", "USE_PROFILING"))), section="PROFILE")
 
     text = _set_bool(text, "REQUIRE_BASH_CONFIRMATION", _ask_bool("Ask for confirmation before each shell command (execute_bash)?", _truthy(_get_top_level(text, "REQUIRE_BASH_CONFIRMATION"))))
@@ -1307,16 +1429,41 @@ _MODEL_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)", True),
     "2": ("VISION_MODEL_ID", "Vision model", False),
     "3": ("EMBED_MODEL_ID", "Embeddings model", False),
+    # The internal calls that may run on their own model (AREA_MODELS). Each is a
+    # partial MODEL_ID, so they reuse the chat model's provider table; the job
+    # wording is the area registry's, so /model and /doctor say the same thing.
+    "4": ("ROUTER", f"Router model — {AREA_DESCRIPTIONS['ROUTER']}", False),
+    "5": ("ORCHESTRATOR", f"Orchestrator model — {AREA_DESCRIPTIONS['ORCHESTRATOR']}", False),
+    "6": ("SUMMARY", f"Summary model — {AREA_DESCRIPTIONS['SUMMARY']}", False),
+}
+
+# The feature each area's work depends on: area -> (toggle, its name in a prompt).
+# A model for an area whose feature is off would never run, so the row SAYS so
+# rather than disappearing — a missing row reads as a missing feature. SUMMARY has
+# no gate: compaction always runs.
+_AREA_FEATURE = {
+    "ROUTER": ("ENABLE_ROUTING", "Query routing"),
+    "ORCHESTRATOR": ("ENABLE_ORCHESTRATION", "Orchestration"),
 }
 
 
-def _section_summary(text: str, section: str) -> Optional[str]:
+def _area_gate(text: str, section: str) -> Optional[tuple]:
+    """``(toggle, name)`` when ``section`` is an area whose feature is currently
+    off, else None (not an area, or already enabled)."""
+    entry = _AREA_FEATURE.get(section)
+    if entry and not _truthy(_get_top_level(text, entry[0])):
+        return entry
+    return None
+
+
+def _section_summary(text: str, section: str, fallback_type: str = "") -> Optional[str]:
     """One-line summary of a model section (e.g. ``bedrock-mantle / … (us-east-1,
-    anthropic)``), or None if not configured."""
+    anthropic)``), or None if not configured. ``fallback_type`` names the provider
+    when the section itself doesn't (an area inherits the chat model's)."""
     name = _get_field(text, section, "NAME")
     if not name:
         return None
-    raw_type = _get_field(text, section, "TYPE") or "?"
+    raw_type = _get_field(text, section, "TYPE") or fallback_type or "?"
     typ = _PROVIDER_LABELS.get(raw_type, raw_type)
     extras = []
     host = _get_field(text, section, "HOST")
@@ -1348,21 +1495,39 @@ def _prompt_max_tokens(text: str, section: str, allow_back: bool = False) -> str
     return _set_field(text, section, "MAX_TOKENS", answer)
 
 
+def _area_summary(text: str, area: str) -> Optional[str]:
+    """One-line summary of an area override — block form or the bare-name
+    shorthand — or None when the area has none (it uses the chat model)."""
+    chat_type = (_get_field(text, "MODEL_ID", "TYPE") or "").lower()
+    inline = _get_field(text, AREA_SECTION, area)
+    if inline:
+        return f"{_PROVIDER_LABELS.get(chat_type, chat_type or '?')} / {inline}"
+    return _section_summary(text, area, fallback_type=chat_type)
+
+
 def _current_setup_text(text: str) -> str:
-    """The "Current setup" overview (chat/vision/embeddings) as a string, so it
-    can print to scrollback (non-TTY) or render inside the selection dialog."""
-    vision = _section_summary(text, "VISION_MODEL_ID")
-    embeddings = _section_summary(text, "EMBED_MODEL_ID")
-    return (
-        "Current setup:\n"
-        f"  Chat (LLM):  {_section_summary(text, 'MODEL_ID') or '(not set)'}\n"
-        f"  Vision:      {vision if vision else '(not configured)'}\n"
-        f"  Embeddings:  {embeddings if embeddings else '(not configured)'}"
-    )
+    """The "Current setup" overview (the three models + every per-area override)
+    as a string, so it can print to scrollback (non-TTY) or render inside the
+    selection dialog. Areas are always listed — "same as chat" is the answer to
+    "which model does the router use", not an omission."""
+    rows = [
+        ("Chat (LLM)", _section_summary(text, "MODEL_ID") or "(not set)"),
+        ("Vision", _section_summary(text, "VISION_MODEL_ID") or "(not configured)"),
+        ("Embeddings", _section_summary(text, "EMBED_MODEL_ID") or "(not configured)"),
+    ]
+    for area in AREAS:
+        summary = _area_summary(text, area) or "same as chat"
+        gate = _area_gate(text, area)
+        if gate:
+            summary += f"  ({gate[1].lower()} is off)"
+        rows.append((area.capitalize(), summary))
+    width = max(len(name) for name, _ in rows) + 1
+    body = "\n".join(f"  {name + ':':<{width}} {value}" for name, value in rows)
+    return f"Current setup:\n{body}"
 
 
 def _print_current_setup(text: str) -> None:
-    """Print the current chat/vision/embeddings models (indented for scrollback)."""
+    """Print the current models + per-area overrides (indented for scrollback)."""
     for line in _current_setup_text(text).splitlines():
         print(f"  {line}")
 
@@ -1412,12 +1577,27 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         ):
             return _copy_chat_to_vision(text)
 
+    # Same offer for an internal-call area — but "same as chat" REMOVES the
+    # override instead of copying the chat block, because absence is what makes
+    # the area follow the chat model (see _clear_area_override). Defaults to Yes
+    # only when the area has no model of its own yet.
+    if section in AREAS:
+        chat_type = (_get_field(text, "MODEL_ID", "TYPE") or "").lower()
+        chat_name = _get_field(text, "MODEL_ID", "NAME") or ""
+        if chat_name and _ask_bool(
+            f"{section.capitalize()} — use the same model as Chat?"
+            f"  ({chat_type} / {chat_name})",
+            default=not _area_configured(text, section),
+        ):
+            return _clear_area_override(text, section)
+        text = _ensure_area_section(text, section)
+
     # Embeddings can be (re)configured even with RAG off, when its block may not
     # exist yet — scaffold it so the prompts below have somewhere to write.
     if section == "EMBED_MODEL_ID":
         text = _ensure_embed_section(text)
 
-    cur_type = (_get_field(text, section, "TYPE") or "ollama").lower()
+    cur_type = _effective_type(text, section)
     new_type = _prompt_provider_type(section, cur_type)
     text = _set_field(text, section, "TYPE", new_type)
 
@@ -1434,7 +1614,7 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         return _set_field(t, section, "NAME", name) if name else t
 
     steps = [_name_step, *_connection_steps(section, new_type)]
-    if section in ("MODEL_ID", "VISION_MODEL_ID"):
+    if section in ("MODEL_ID", "VISION_MODEL_ID") or section in AREAS:
         steps.append(lambda t, b: _prompt_max_tokens(t, section, allow_back=b))
     if is_llm:
         # Context window (feeds num_ctx + compaction budget); defaults to 65536.
@@ -1446,6 +1626,12 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         steps.append(_ctx_step)
 
     text = _run_steps(text, steps)
+    if section in AREAS and not _get_field(text, section, "NAME"):
+        # Nothing named — drop the block rather than leave one that says nothing
+        # (the reader would ignore it anyway, but it would still read as an
+        # override the area doesn't have).
+        print(f"  No model name given — {section.capitalize()} keeps the chat model.")
+        return _clear_area_override(text, section)
     _print_credential_note(new_type)
     return text
 
@@ -1499,6 +1685,11 @@ _PARAM_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)"),
     "2": ("VISION_MODEL_ID", "Vision model"),
     "3": ("EMBED_MODEL_ID", "Embeddings model"),
+    # An area is offered only once it HAS a model of its own; until then its
+    # params ARE the chat model's, tuned on row 1.
+    "4": ("ROUTER", "Router model"),
+    "5": ("ORCHESTRATOR", "Orchestrator model"),
+    "6": ("SUMMARY", "Summary model"),
 }
 
 
@@ -1587,8 +1778,11 @@ def _prompt_one_param(
 def _prompt_inference_params(text: str, section: str) -> str:
     """Prompt every inference param the section's provider accepts (from the
     registry). Context window and connection keys are /model's job, not here."""
-    provider = (_get_field(text, section, "TYPE") or "ollama").lower()
-    tunable = tunable_params(section, provider)
+    if section in AREAS:
+        # A bare-name area override has no block to write params into.
+        text = _ensure_area_section(text, section)
+    provider = _effective_type(text, section)
+    tunable = tunable_params(_registry_section(section), provider)
     if not tunable:
         print(f"  Provider '{provider}' exposes no tunable inference parameters here.")
         return text
@@ -1621,6 +1815,9 @@ def run_params_override() -> Optional[Path]:
         "2": _get_field(text, "VISION_MODEL_ID", "NAME") is not None,
         "3": _get_field(text, "EMBED_MODEL_ID", "NAME") is not None,
     }
+    for key, (section, _) in _PARAM_SECTIONS.items():
+        if section in AREAS:
+            available[key] = _area_configured(text, section)
 
     labels = {
         k: label for k, (_, label) in _PARAM_SECTIONS.items() if available.get(k)
@@ -1708,15 +1905,20 @@ def run_model_override() -> Optional[Path]:
 
     text = dest.read_text()
 
-    # Chat + embeddings are always offered (embeddings can be set even with RAG
-    # off — its block may not exist yet; we scaffold it). Vision is offered only
-    # when configured (it's genuinely optional and has no downstream toggle).
-    available = {"1": True, "3": True}
+    # Everything is offered except vision, which is genuinely optional and has no
+    # downstream toggle — it's shown only when configured. (Embeddings can be set
+    # even with RAG off; its block may not exist yet, and we scaffold it. So can
+    # an area whose feature is off: its row carries the reason and offers to turn
+    # the feature on.)
+    available = {k: True for k in _MODEL_SECTIONS}
     available["2"] = _get_field(text, "VISION_MODEL_ID", "NAME") is not None
 
-    labels = {
-        k: label for k, (_, label, _) in _MODEL_SECTIONS.items() if available.get(k)
-    }
+    labels = {}
+    for key, (section, label, _) in _MODEL_SECTIONS.items():
+        if not available.get(key):
+            continue
+        gate = _area_gate(text, section)
+        labels[key] = f"{label}  [{gate[1].lower()} is off]" if gate else label
     # On a TTY the picker dialog carries the title + overview (info=); print here
     # only for the non-TTY fallback.
     if not _is_tty():
@@ -1740,7 +1942,22 @@ def run_model_override() -> Optional[Path]:
             info=_current_setup_text(text),
         )
         section, label, is_llm = _MODEL_SECTIONS[choice]
-        new_text = _prompt_model_section(text, section, is_llm)
+        # An area whose feature is off would never call its model, so offer to
+        # turn the feature on rather than writing config that does nothing.
+        # Threaded through `base` so `text` stays the original — flipping the
+        # toggle alone still counts as a change worth saving.
+        base = text
+        gate = _area_gate(text, section)
+        if gate:
+            toggle, name = gate
+            if not _ask_bool(
+                f"{name} is off, so this model would never run. Enable it?",
+                default=True,
+            ):
+                print(f"  Left unchanged — enable {toggle} (/features) first.")
+                return None
+            base = _set_top_level_or_add(base, toggle, "true")
+        new_text = _prompt_model_section(base, section, is_llm)
         # After configuring embeddings, offer to turn on the features that use
         # them if they're currently off (embeddings alone do nothing otherwise).
         if section == "EMBED_MODEL_ID":
@@ -1754,10 +1971,14 @@ def run_model_override() -> Optional[Path]:
         return None
 
     dest.write_text(new_text)
-    print(f"\n  Updated {label} in:\n    {dest}")
-    print("  Inference parameters were reset to model defaults for this change;")
-    print("  use /params to tune them. For the full per-provider parameter list,")
-    print("  see the README's 'Model Parameters' section.")
+    print(f"\n  Updated {label.split(' — ')[0]} in:\n    {dest}")
+    if section in AREAS and not _area_configured(new_text, section):
+        print(f"  {section.capitalize()} now runs on the chat model, and follows it")
+        print("  whenever you change it.")
+    else:
+        print("  Inference parameters were reset to model defaults for this change;")
+        print("  use /params to tune them. For the full per-provider parameter list,")
+        print("  see the README's 'Model Parameters' section.")
     print("=" * 64 + "\n")
     return dest
 

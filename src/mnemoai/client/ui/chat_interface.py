@@ -155,7 +155,7 @@ class ChatInterface:
         ]),
         ("Configure", [
             ("/config", "Reconfigure config.yaml (overwrites it)"),
-            ("/model", "Override one model (LLM/vision/embeddings)"),
+            ("/model", "Override one model (LLM/vision/embeds/router…)"),
             ("/params", "Tune inference params (temp, top_p, …)"),
             ("/features", "Enable/disable features (RAG, memory, web, …)"),
         ]),
@@ -172,7 +172,7 @@ class ChatInterface:
     # welcome-box labels carry arg hints / alternates instead).
     _COMMANDS = [
         ("/config", "Reconfigure config.yaml (overwrites it)"),
-        ("/model", "Override one model (LLM/vision/embeddings)"),
+        ("/model", "Override one model (LLM, vision, embeddings, router, …)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/features", "Enable/disable features (RAG, memory, web search, …)"),
         ("/mcp", "List configured MCP servers & their tools"),

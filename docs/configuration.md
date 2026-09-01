@@ -393,6 +393,17 @@ AREA_MODELS:
     TEMPERATURE: 0.3
 ```
 
+**You don't have to write it by hand.** The first-run configurator offers a
+router model when `ENABLE_ROUTING` is on and an orchestrator model when
+`ENABLE_ORCHESTRATION` is on, and `/model` lists all three areas beside the chat,
+vision and embeddings sections (`/params` tunes an area you've already
+configured). Each starts with the same question — _use the same model as chat?_ —
+and answering yes writes **nothing**, because that is exactly what "no entry"
+means: the area follows `MODEL_ID`, including whenever you change it later.
+Answering no runs the ordinary provider flow, so an area can be set up on any
+provider the chat model could use. Picking an area whose feature is switched off
+offers to enable it first (compaction always runs, so `SUMMARY` is never gated).
+
 | Area           | The call it covers                                     | Why change it                                                                                     |
 | -------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | `ROUTER`       | Query classification (which tools to bind this turn)   | It produces a one-word label. A large reasoning model spends real latency on it — on _every_ turn |
