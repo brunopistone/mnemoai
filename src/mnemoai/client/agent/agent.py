@@ -1573,9 +1573,15 @@ class LangGraphAgent:
                     )
             else:
                 logger.error(f"Model request failed: {e}", exc_info=True)
+                # NAME the recovery. "Can't recover automatically" is true and
+                # useless on its own: the commands that resolve each class of
+                # failure all exist and nothing pointed at any of them.
                 msg = (
                     "The model request failed with an error I can't recover from "
-                    "automatically. Your conversation is intact — please try again."
+                    "automatically. "
+                ) + (
+                    turn_failure.recovery_advice(e)
+                    or "Your conversation is intact — please try again."
                 )
             return {"messages": [AIMessage(content=msg)], "thinking": None}
 

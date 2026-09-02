@@ -23,7 +23,7 @@ from mnemoai.client import (
     transcript_export,
     usage_tracker,
 )
-from mnemoai.client.agent import auto_approve
+from mnemoai.client.agent import auto_approve, turn_failure
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
@@ -448,10 +448,16 @@ class LangGraphClient:
             # so the record is file-only — a second red line about the same
             # exception is noise. The traceback never leaves the log file.
             logger.error(f"Query failed: {e}", exc_info=True, extra={"console": False})
+            # NAME the recovery rather than implying it. Which command actually
+            # unsticks this depends on the failure (see turn_failure), and a turn
+            # that dies without saying leaves the user to guess between /rewind,
+            # /compact, /model and starting over.
+            recovery = turn_failure.recovery_advice(e) or (
+                "Your conversation is intact — please try again or rephrase."
+            )
             msg = (
                 "Something went wrong while processing that request "
-                f"({type(e).__name__}). Your conversation is intact — "
-                "please try again or rephrase."
+                f"({type(e).__name__}). {recovery}"
             )
             # The turn errored before/without streaming an answer, so PRINT this
             # (nothing else will) — otherwise the turn ends silently with only
@@ -460,7 +466,7 @@ class LangGraphClient:
             details = log_file_hint()
             print(
                 f"\n\033[91m✗ {type(e).__name__}: {one_line(e)}\033[0m\n"
-                f"\033[90m  Your conversation is intact — try again or rephrase."
+                f"\033[90m  {recovery}"
                 f"{f'  Details: {details}' if details else ''}\033[0m",
                 flush=True,
             )

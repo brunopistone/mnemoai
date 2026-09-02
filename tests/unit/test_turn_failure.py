@@ -1,13 +1,15 @@
 """A turn that dies must leave a RECORD and name a way out.
 
-Two defects are pinned here, each of which made a failed turn worse than the
+Three defects are pinned here, each of which made a failed turn worse than the
 failure itself:
 
 * the user's prompt reached live history but not the transcript, because
   ``_commit_turn`` returned before logging when the turn produced nothing — so
   the two disagreed until the next ``--resume``;
 * nothing marked the turn as failed, leaving history ending on a dangling user
-  message that the provider adapters MERGE with the next prompt.
+  message that the provider adapters MERGE with the next prompt;
+* the user was told the failure couldn't be recovered from automatically and
+  never told which command recovers it manually.
 """
 
 import pytest
@@ -88,6 +90,70 @@ class TestFailureMarkerText:
         assert not turn_failure.is_failure_marker("Turn failed, sorry")
         assert not turn_failure.is_failure_marker(None)
         assert not turn_failure.is_failure_marker(12)
+
+
+class TestClassification:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("prompt is too long: 1200000 tokens", turn_failure.OVERSIZED),
+            ("input is too long", turn_failure.OVERSIZED),
+            ("ValidationException: messages.216 unsupported", turn_failure.REJECTED),
+            ("invalid_request_error", turn_failure.REJECTED),
+            ("stop_reason: refusal", turn_failure.REJECTED),
+            ("Connection was closed before we received a valid response",
+             turn_failure.CONNECTION),
+            ("ThrottlingException", turn_failure.CONNECTION),
+            ("something nobody has seen before", turn_failure.UNKNOWN),
+        ],
+    )
+    def test_classes(self, text, expected):
+        assert turn_failure.classify(Exception(text)) == expected
+
+    def test_the_class_name_alone_is_enough(self):
+        # A provider names a condition after its exception CLASS, and a class name
+        # has no spaces — the same trap stream_policy documents.
+        class ValidationException(Exception):
+            pass
+
+        assert turn_failure.classify(ValidationException("")) == turn_failure.REJECTED
+
+    def test_oversized_wins_over_rejected(self):
+        # Both are deterministic; "too long" is the more specific and more
+        # actionable reading, so it must not be shadowed by a generic "invalid".
+        exc = Exception("invalid request: prompt is too long")
+        assert turn_failure.classify(exc) == turn_failure.OVERSIZED
+
+
+class TestRecoveryAdvice:
+    def test_oversized_names_compact(self):
+        advice = turn_failure.recovery_advice(Exception("prompt is too long"))
+        assert "/compact" in advice
+
+    def test_rejected_names_rewind_and_model(self):
+        advice = turn_failure.recovery_advice(Exception("ValidationException"))
+        assert "/rewind" in advice and "/model" in advice
+
+    def test_rejected_says_retrying_is_pointless(self):
+        # The one thing the old wording got actively wrong: "please try again" on
+        # a deterministic rejection sends the user around the same loop.
+        advice = turn_failure.recovery_advice(Exception("ValidationException")).lower()
+        assert "same way" in advice or "fail the same" in advice
+
+    def test_connection_defers_to_the_caller(self):
+        # "Just send it again" already IS the recovery there; a list of repair
+        # commands beside it would imply the conversation needs fixing.
+        assert turn_failure.recovery_advice(Exception("connection reset")) == ""
+
+    def test_unknown_still_names_something(self):
+        advice = turn_failure.recovery_advice(Exception("???"))
+        assert "/rewind" in advice
+
+    def test_no_backticks_anywhere(self):
+        # This text is rendered both through the markdown formatter and as a plain
+        # ANSI line; only one of the two would render ticks away.
+        for text in ("prompt is too long", "ValidationException", "???"):
+            assert "`" not in turn_failure.recovery_advice(Exception(text))
 
 
 class TestFailedTurnReachesTheTranscript:
@@ -246,3 +312,62 @@ class TestFailedTurnIsClosedOut:
         a = _agent(_SeededBoom())
         with pytest.raises(ValueError, match="No generation chunks"):
             a.invoke("q")
+
+
+class TestTheUserIsToldWhatToDo:
+    """The advice has to reach the message the user actually reads.
+
+    `_call_model` turns a dead stream into the turn's ANSWER, so this text is the
+    entire report — "an error I can't recover from automatically" was all of it.
+    """
+
+    def _agent_for_call_model(self, model):
+        a = _agent()
+        a.verbose = False
+        a.callbacks = []
+        a.styled_turn_view = False
+        a.system_prompt = "SYS"
+        a._start_spinner = lambda label="Thinking": None
+        a._get_route_model = lambda state: model
+        a._sanitize_tool_pairs = lambda msgs: list(msgs)
+        a._extract_thinking = lambda r: None
+        a._was_truncated_by_tokens = lambda r: False
+        a._strip_malformed_reasoning = lambda m: list(m)
+        a._cancelled = lambda: False
+        return a
+
+    class _RejectingModel:
+        """Fails deterministically with a provider rejection, on both paths."""
+
+        def stream(self, messages, config=None):
+            raise RuntimeError("ValidationException: messages.216 unsupported block")
+            yield  # pragma: no cover — makes this a generator
+
+        def invoke(self, messages, config=None):
+            raise RuntimeError("ValidationException: messages.216 unsupported block")
+
+    def _answer(self, model):
+        a = self._agent_for_call_model(model)
+        out = a._call_model({"messages": [HumanMessage(content="hi")]})
+        assert isinstance(out["messages"][0], AIMessage)
+        return out["messages"][0].content
+
+    def test_the_answer_names_the_commands(self):
+        text = self._answer(self._RejectingModel())
+        assert "/rewind" in text and "/model" in text
+
+    def test_the_answer_still_says_what_happened(self):
+        text = self._answer(self._RejectingModel())
+        assert "can't recover" in text
+
+    def test_an_undiagnosable_failure_still_gets_a_usable_line(self):
+        class _Odd:
+            def stream(self, messages, config=None):
+                raise RuntimeError("something nobody has seen before")
+                yield  # pragma: no cover
+
+            def invoke(self, messages, config=None):
+                raise RuntimeError("something nobody has seen before")
+
+        text = self._answer(_Odd())
+        assert "conversation is intact" in text
