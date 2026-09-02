@@ -6,6 +6,7 @@ from typing import Any, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
+from mnemoai.models.chat_models.bedrock_stream_compat import harden_converse_stream
 from mnemoai.models.controllers.base_model_controller import BaseModelController
 from mnemoai.models.provider_params import build_kwargs, extra_params
 from mnemoai.utils.config import config
@@ -48,27 +49,54 @@ class VisionModelController(BaseModelController):
         """Initialize the vision model based on configured type."""
         self._dispatch_provider(self.model_type)
 
+    def _boto_config(self):
+        """botocore Config for the Bedrock client (see ``_boto_request_config``).
+
+        The ``config.get`` stays here, not in the base, so a test can patch this
+        module's ``config``.
+        """
+        return self._boto_request_config(config.get("LLM", {}))
+
     def _initialize_bedrock_model(self) -> None:
-        """Initialize AWS Bedrock vision model using LangChain."""
-        from langchain_aws import ChatBedrock
+        """Initialize AWS Bedrock vision model using the Converse API.
+
+        Converse, not the legacy ``ChatBedrock``/InvokeModel client this used to
+        build — the same migration the chat path made, in the one path that never
+        followed. InvokeModel takes inference params as RAW BODY fields
+        (``model_kwargs``), and each family defines its own body: an OpenAI GPT
+        model on Bedrock rejects ours outright (``ValidationException:
+        Unsupported parameter: 'max_tokens' is not supported with this model``),
+        so EVERY describe_image call failed for a configuration the app was happy
+        to accept — while the same model id worked for chat. Converse takes them
+        as top-level client fields that become ``inferenceConfig``, which every
+        family understands; hence the registry sends them to ``main`` now, and
+        there is no ``model_kwargs`` bucket to fill.
+
+        Two deliberate differences from the chat path: no ``disable_streaming``
+        (a description is one ``invoke``, so there is no stream to force on), and
+        no Claude thinking fields (a vision reply is a caption, not a reasoning
+        turn). ``harden_converse_stream`` is applied anyway — it is inert unless
+        something streams, and leaving it off would make the two Bedrock paths
+        disagree the day one does.
+        """
+        from langchain_aws import ChatBedrockConverse
 
         logger.debug("Initializing Bedrock vision model via LangChain...")
 
-        _, model_kwargs = build_kwargs("VISION_MODEL_ID", "bedrock", self)
-        model_kwargs.update(extra_params(self.model_id))
-
-        region = self.model_id.get("REGION", "us-east-1")
-
-        bedrock_kwargs = {
-            "model_id": self.model_name,
-            "region_name": region,
-            "model_kwargs": model_kwargs,
+        passthrough, _ = build_kwargs("VISION_MODEL_ID", "bedrock", self)
+        kwargs = {
+            "model": self.model_name,
+            "region_name": self.region,
+            "config": self._boto_config(),
+            **passthrough,
         }
         if self.endpoint_url:
-            bedrock_kwargs["endpoint_url"] = self.endpoint_url
+            kwargs["endpoint_url"] = self.endpoint_url
             logger.debug(f"Using custom Bedrock endpoint: {self.endpoint_url}")
 
-        self.model = ChatBedrock(**bedrock_kwargs)
+        kwargs.update(extra_params(self.model_id))
+
+        self.model = harden_converse_stream(ChatBedrockConverse(**kwargs))
 
     def _initialize_ollama_model(self) -> None:
         """Initialize Ollama vision model using LangChain."""

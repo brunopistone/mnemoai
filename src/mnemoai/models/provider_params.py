@@ -175,11 +175,15 @@ _LLM = {
 # --- VISION_MODEL_ID: mirrors vision_model_controller._initialize_*_model ----
 _VISION = {
     "bedrock": {
-        # Bedrock vision passes these inside model_kwargs (nested).
+        # Top-level, like the chat entry: vision goes through Converse, which
+        # takes these as client fields it maps to `inferenceConfig`. They used to
+        # be nested in `model_kwargs` for the legacy InvokeModel client, where
+        # they landed in the raw request body — and a body field is per-family, so
+        # `max_tokens` there is rejected outright by a GPT model on Bedrock.
         "params": [
-            _p("TEMPERATURE", "temperature", "temperature", "model_kwargs"),
-            _p("TOP_P", "top_p", "top_p", "model_kwargs"),
-            _p("MAX_TOKENS", "max_tokens", "max_tokens", "model_kwargs"),
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
         ],
         "connection": {"REGION", "ENDPOINT_URL"},
         "special": set(),

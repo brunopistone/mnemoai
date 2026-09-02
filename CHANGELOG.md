@@ -7,6 +7,61 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.19.1] — 2026-09-02
+
+### Fixed
+
+- **Describing an image works on Amazon Bedrock again — including with a model
+  that already worked for chat.** With `VISION_MODEL_ID` pointing at an OpenAI GPT
+  model on Bedrock, every `describe_image` call failed instantly with
+  `Unsupported parameter: 'max_tokens' is not supported with this model` — the
+  provider rejecting the request before it ever looked at the picture, on a
+  configuration the app had accepted without complaint and that the very same
+  model id handled fine as the chat model. Vision was the one path still talking
+  to Bedrock through its older, per-model interface, where settings like
+  `MAX_TOKENS` travel inside the request body and each model family defines that
+  body differently: what Claude reads there, a GPT model refuses outright. It now
+  uses the same unified interface the chat model talks to, which carries those
+  settings as standard fields every family understands. Also brought in line
+  with chat: the request timeout from `LLM.REQUEST_TIMEOUT` now applies here
+  too, so a large image no longer runs into the AWS SDK's own 60s default, and
+  the stream guard from 1.17.2 is applied for consistency. Verified live
+  end-to-end on Bedrock with a GPT and a Claude vision model, across PNG, JPEG,
+  GIF, WebP and BMP.
+- **A vision model that can't be built no longer takes every other tool with
+  it.** The tools server decided whether to offer `describe_image` by _building_
+  the vision model and seeing whether one came back — so anything that made that
+  build fail raised while the server was still registering, and that server is
+  what holds **all** the tools. A mistyped `TYPE`, a local vision server that
+  wasn't running, a region that doesn't carry the model, credentials that had
+  expired: any of them turned one line in an optional config section into a
+  session with no file reads, no shell, no search, and nothing on screen
+  explaining why. The gate reads the **configuration** now instead of a built
+  model: `describe_image` is offered whenever `VISION_MODEL_ID` is set, the model
+  is built the first time an image is actually described, and a build that fails
+  then reports itself as that one tool returning an error — which is all that was
+  ever wrong.
+- **Startup is ~2.5s shorter, and the tools server no longer loads two
+  conflicting math runtimes at once.** Building the vision model pulls in a deep
+  numerical stack (a tokenizer library and the tensor framework under it), which
+  is why it has been deferred to first use since 1.8.7. It wasn't actually
+  deferred: the registration gate above built it on every launch, and the image
+  tool then bound its model at import time as well, so the cost was paid twice
+  over before the first prompt appeared — with the deferral machinery in place
+  and doing nothing. That stack is now genuinely absent until an image is
+  described, which also closes a real hazard rather than just a delay: the tensor
+  framework and the vector-search library each bundle their own copy of the same
+  parallel runtime, and a process holding both aborts outright the moment a
+  search runs. With document search enabled and a vision model configured — a
+  perfectly ordinary pair of settings — every tools server was starting up
+  holding both. Two smaller gates were leaking the same way and are closed too:
+  web crawling and web search now load their dependencies only when those
+  features are switched on.
+- **Two parallel image descriptions no longer build two vision models.** First
+  use is now a tool call, and tool calls run on concurrent threads, so a wave of
+  sub-agents describing several images at once could each start their own build.
+  One is built, once, and the rest wait for it.
+
 ## [1.19.0] — 2026-09-01
 
 ### Added
