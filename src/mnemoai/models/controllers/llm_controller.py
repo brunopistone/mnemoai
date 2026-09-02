@@ -65,32 +65,12 @@ class LangChainLLMController(BaseModelController):
         self._dispatch_provider(self.model_type, callbacks)
 
     def _boto_config(self):
-        """botocore Config for Bedrock with a read timeout that fits a big prompt.
+        """botocore Config for the Bedrock client (see ``_boto_request_config``).
 
-        botocore's DEFAULT read_timeout is 60s, and it is the wall-clock budget
-        for the FIRST response byte — not an idle timeout. With a large context
-        the model spends that budget on prefill + reasoning before emitting
-        anything: measured against live Bedrock, a ~440k-token turn at
-        `REASONING_EFFORT: max` took **123s to first byte**, so every attempt
-        died at 60s and the turn could never complete. Worse, "read timed out"
-        is classified transient, so all `MAX_RETRIES` attempts re-sent the same
-        oversized prompt and re-paid the same doomed prefill — minutes of
-        retries that could not succeed.
-
-        `LLM.REQUEST_TIMEOUT` (default 600s) is the per-attempt ceiling; our own
-        `STREAM_IDLE_TIMEOUT` watchdog remains the shorter, smarter guard for a
-        genuinely dead socket mid-stream. botocore's internal retries are
-        disabled so this layer's retry/backoff isn't multiplied by boto's.
+        The ``config.get`` stays here, not in the base, so a test can patch this
+        module's ``config``.
         """
-        from botocore.config import Config as BotoConfig
-
-        llm_cfg = config.get("LLM", {}) or {}
-        read_timeout = int(llm_cfg.get("REQUEST_TIMEOUT", 600))
-        return BotoConfig(
-            read_timeout=read_timeout,
-            connect_timeout=int(llm_cfg.get("CONNECT_TIMEOUT", 30)),
-            retries={"max_attempts": 0, "mode": "standard"},
-        )
+        return self._boto_request_config(config.get("LLM", {}))
 
     def _initialize_bedrock_model(self, callbacks: list = None) -> None:
         """Initialize AWS Bedrock model using LangChain Converse API."""

@@ -416,6 +416,207 @@ class TestStandardBedrockEndpoint:
         assert captured.get("reasoning") is not True  # no reasoning on the summary model
 
 
+class TestBedrockVisionModel:
+    """Vision on Bedrock must go through Converse, like every other path here.
+
+    It was the one path still building the legacy ``ChatBedrock`` (InvokeModel)
+    client, which takes inference params as RAW BODY fields — and a body field is
+    defined per family, so ``max_tokens`` there is rejected outright by an OpenAI
+    GPT model on Bedrock: ``ValidationException: Unsupported parameter:
+    'max_tokens' is not supported with this model``, raised before any image is
+    looked at. Every ``describe_image`` call failed for a config the app was
+    happy to accept, and the same model id worked for chat — because chat had
+    already migrated. Converse sends them as top-level client fields it maps to
+    ``inferenceConfig``, which every family understands.
+    """
+
+    def test_uses_converse_not_the_legacy_client(self, patch_bedrock, monkeypatch):
+        ctrl = _make_vision_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        assert "ChatBedrockConverse" in patch_bedrock
+        assert "ChatBedrock" not in patch_bedrock, (
+            "the legacy InvokeModel client is back; its params are raw body "
+            "fields, which are per-family and break non-Claude models"
+        )
+
+    def test_inference_params_are_top_level_not_body_fields(
+        self, patch_bedrock, monkeypatch
+    ):
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {
+                "NAME": "global.anthropic.claude-opus-5",
+                "TYPE": "bedrock",
+                "MAX_TOKENS": 4096,
+                "TEMPERATURE": 0.2,
+                "TOP_P": 0.9,
+            },
+        )
+        ctrl.initialize_model()
+        kwargs = patch_bedrock["ChatBedrockConverse"]
+        assert kwargs["max_tokens"] == 4096
+        assert kwargs["temperature"] == 0.2
+        assert kwargs["top_p"] == 0.9
+        # The whole failure was these arriving as request-body fields instead.
+        assert "model_kwargs" not in kwargs
+
+    def test_a_gpt_model_on_bedrock_gets_no_body_params(
+        self, patch_bedrock, monkeypatch
+    ):
+        # The configuration that failed: MAX_TOKENS in the body is what Bedrock
+        # rejected for this family, so it must arrive as an inferenceConfig field.
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {"NAME": "global.openai.gpt-5.6-sol", "TYPE": "bedrock",
+             "MAX_TOKENS": 128000},
+        )
+        ctrl.initialize_model()
+        kwargs = patch_bedrock["ChatBedrockConverse"]
+        assert kwargs["model"] == "global.openai.gpt-5.6-sol"
+        assert kwargs["max_tokens"] == 128000
+        assert "model_kwargs" not in kwargs
+
+    def test_unset_params_are_omitted(self, patch_bedrock, monkeypatch):
+        # Same reason as the chat path: newer Claude rejects a temperature it was
+        # never given, so an unset knob must not be sent at all.
+        ctrl = _make_vision_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        kwargs = patch_bedrock["ChatBedrockConverse"]
+        assert "temperature" not in kwargs and "top_p" not in kwargs
+
+    def test_boto_request_timeout_is_configured(self, patch_bedrock, monkeypatch):
+        # A description of a large image has the same first-byte problem as a big
+        # chat prompt, and botocore's own default is 60s. This path had no Config.
+        ctrl = _make_vision_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        cfg = patch_bedrock["ChatBedrockConverse"].get("config")
+        assert cfg is not None, "no botocore Config — boto's 60s default applies"
+        assert cfg.read_timeout == 600 and cfg.connect_timeout == 30
+        assert cfg.retries["max_attempts"] == 0
+
+    def test_request_timeout_follows_the_llm_section(self, monkeypatch):
+        # Read through the VISION module's own config, per the patch-where-it's-
+        # looked-up convention — the base builder is pure, the read is local.
+        import mnemoai.models.controllers.vision_model_controller as mod
+
+        monkeypatch.setattr(
+            mod.config,
+            "get",
+            lambda k, d=None: (
+                {"REQUEST_TIMEOUT": 900, "CONNECT_TIMEOUT": 5} if k == "LLM" else d
+            ),
+        )
+        ctrl = mod.VisionModelController.__new__(mod.VisionModelController)
+        cfg = ctrl._boto_config()
+        assert cfg.read_timeout == 900 and cfg.connect_timeout == 5
+
+    def test_endpoint_url_passed_when_configured(self, patch_bedrock, monkeypatch):
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {
+                "NAME": "global.anthropic.claude-opus-5",
+                "TYPE": "bedrock",
+                "ENDPOINT_URL": "https://example.invalid",
+            },
+        )
+        ctrl.initialize_model()
+        assert patch_bedrock["ChatBedrockConverse"]["endpoint_url"] == (
+            "https://example.invalid"
+        )
+
+    def test_endpoint_url_omitted_when_not_configured(
+        self, patch_bedrock, monkeypatch
+    ):
+        ctrl = _make_vision_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        assert "endpoint_url" not in patch_bedrock["ChatBedrockConverse"]
+
+    def test_extra_params_reach_the_client_top_level(self, patch_bedrock, monkeypatch):
+        # EXTRA_PARAMS is applied last on this path too, so it stays the escape
+        # hatch for a provider field we don't model (and can override ours).
+        ctrl = _make_vision_controller(
+            monkeypatch,
+            {
+                "NAME": "global.openai.gpt-5.6-sol",
+                "TYPE": "bedrock",
+                "MAX_TOKENS": 4096,
+                "EXTRA_PARAMS": {
+                    "additional_model_request_fields": {"reasoning": {"effort": "low"}},
+                    "max_tokens": 2048,
+                },
+            },
+        )
+        ctrl.initialize_model()
+        kwargs = patch_bedrock["ChatBedrockConverse"]
+        assert kwargs["additional_model_request_fields"] == {
+            "reasoning": {"effort": "low"}
+        }
+        assert kwargs["max_tokens"] == 2048  # applied last, so a deliberate override
+
+    def test_no_streaming_flag_is_forced(self, patch_bedrock, monkeypatch):
+        # Deliberately unlike the chat path: describing an image is a single
+        # invoke, so there is no stream to force on — and pinning
+        # disable_streaming=False here would demand a stream nothing consumes.
+        ctrl = _make_vision_controller(
+            monkeypatch, {"NAME": "global.anthropic.claude-opus-5", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        assert "disable_streaming" not in patch_bedrock["ChatBedrockConverse"]
+
+    def test_stream_guard_is_applied(self, patch_bedrock, monkeypatch):
+        # Inert while nothing streams, but the two Bedrock paths must not disagree
+        # about it: an unparseable event killing the turn is transport-level.
+        import mnemoai.models.controllers.vision_model_controller as mod
+
+        seen = []
+
+        def _record(model):
+            seen.append(model)
+            return model
+
+        monkeypatch.setattr(mod, "harden_converse_stream", _record)
+        ctrl = _make_vision_controller(
+            monkeypatch, {"NAME": "global.openai.gpt-5.6-sol", "TYPE": "bedrock"}
+        )
+        ctrl.initialize_model()
+        assert len(seen) == 1 and ctrl.model is seen[0]
+
+    def test_no_module_builds_the_legacy_bedrock_client(self):
+        """Source guard: the legacy client must not come back anywhere.
+
+        A behavioral test only covers the path it drives, and this is a one-line
+        mistake to repeat — ``ChatBedrock`` is the obvious name to reach for, and
+        it silently sends every inference param as a raw body field again.
+        """
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[2] / "src/mnemoai"
+        offenders = []
+        for path in sorted(src.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "langchain_aws":
+                    names = {a.name for a in node.names}
+                    if "ChatBedrock" in names:
+                        offenders.append(f"{path.name}:{node.lineno}")
+                elif isinstance(node, ast.Attribute) and node.attr == "ChatBedrock":
+                    offenders.append(f"{path.name}:{node.lineno}")
+        assert offenders == [], (
+            "these build the legacy InvokeModel client, whose inference params "
+            f"are per-family raw body fields: {offenders} — use "
+            "ChatBedrockConverse"
+        )
+
+
 class TestMantleModelType:
     def test_builds_chatopenai_with_token_and_default_endpoint(
         self, patch_mantle, monkeypatch

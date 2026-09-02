@@ -85,6 +85,45 @@ class BaseModelController:
 
         return model_id
 
+    @staticmethod
+    def _boto_request_config(llm_cfg: Dict[str, Any]):
+        """botocore Config for Bedrock with a read timeout that fits a big prompt.
+
+        botocore's DEFAULT read_timeout is 60s, and it is the wall-clock budget
+        for the FIRST response byte — not an idle timeout. With a large context
+        the model spends that budget on prefill + reasoning before emitting
+        anything: measured against live Bedrock, a ~440k-token turn at
+        ``REASONING_EFFORT: max`` took **123s to first byte**, so every attempt
+        died at 60s and the turn could never complete. Worse, "read timed out"
+        is classified transient, so all ``MAX_RETRIES`` attempts re-sent the same
+        oversized prompt and re-paid the same doomed prefill — minutes of
+        retries that could not succeed.
+
+        ``LLM.REQUEST_TIMEOUT`` (default 600s) is the per-attempt ceiling; our
+        own ``STREAM_IDLE_TIMEOUT`` watchdog remains the shorter, smarter guard
+        for a genuinely dead socket mid-stream. botocore's internal retries are
+        disabled so this layer's retry/backoff isn't multiplied by boto's.
+
+        Pure in its input (the already-read ``LLM`` block) so both Bedrock paths
+        — chat and vision — share one definition of the timeouts while each
+        controller keeps its own ``config.get`` call; a vision request has the
+        same first-byte problem, and a per-controller copy would drift.
+
+        Args:
+            llm_cfg: The root ``LLM`` config block (may be empty).
+
+        Returns:
+            A ``botocore.config.Config`` to hand the Bedrock client.
+        """
+        from botocore.config import Config as BotoConfig
+
+        llm_cfg = llm_cfg or {}
+        return BotoConfig(
+            read_timeout=int(llm_cfg.get("REQUEST_TIMEOUT", 600)),
+            connect_timeout=int(llm_cfg.get("CONNECT_TIMEOUT", 30)),
+            retries={"max_attempts": 0, "mode": "standard"},
+        )
+
     def _provider_method(self, provider: str):
         """Resolve the bound per-provider method, or raise the standard error.
 

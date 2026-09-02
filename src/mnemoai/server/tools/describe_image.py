@@ -7,7 +7,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
 
-from . import validate_file_path, vision_model, vision_model_controller
+from . import tool_manager, validate_file_path
 
 
 def register_image_tools(mcp: FastMCP) -> None:
@@ -65,17 +65,33 @@ def register_image_tools(mcp: FastMCP) -> None:
 
             image_ext = normalized_path.split(".")[-1]
 
+            # Resolved per CALL, never bound at import: at module level these
+            # names run the vision build (BaseChatModel→transformers→torch) while
+            # the server is still registering tools, and then hold that one model
+            # for the life of the process. Deliberately after the cheap
+            # validations above, so a bad path or an unsupported format costs no
+            # model build at all. See ToolManager._ensure_vision.
+            controller = tool_manager.vision_model_controller
+            model = tool_manager.vision_model
+            if model is None or controller is None:
+                return json.dumps(
+                    {
+                        "error": True,
+                        "message": "No vision model is configured "
+                        "(set VISION_MODEL_ID in config.yaml).",
+                        "file_path": normalized_path,
+                    }
+                )
+
             # Create message with image and question using LangChain format
-            message = vision_model_controller.format_request(
-                question, image_bytes, image_ext
-            )
+            message = controller.format_request(question, image_bytes, image_ext)
 
             # Use LangChain model invoke
-            response = vision_model.invoke([message])
+            response = model.invoke([message])
             content = response.content if hasattr(response, "content") else response
             # Normalize: some protocols (e.g. OpenAI Responses, Anthropic) return
             # content as a list of blocks rather than a plain string.
-            description = vision_model_controller._content_to_text(content)
+            description = controller._content_to_text(content)
 
             return json.dumps(
                 {
