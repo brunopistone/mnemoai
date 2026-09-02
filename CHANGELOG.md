@@ -7,7 +7,7 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
-## [Unreleased]
+## [1.20.0] — 2026-09-02
 
 ### Fixed
 
@@ -47,7 +47,6 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   abandoned after a few seconds if it doesn't come back, and pressing Esc ends the
   wait — it happens after the turn has already failed, so at worst it briefly
   delays a message you were about to read anyway.
-
 - **The app starts on a fresh screen.** Launching in a terminal that already had
   output in it appended the banner directly under whatever was there — the tail
   of a build, the `Exiting...` line of the session you just left — so a new run
