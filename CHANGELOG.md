@@ -62,6 +62,28 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   sub-agents describing several images at once could each start their own build.
   One is built, once, and the rest wait for it.
 
+### Security
+
+- **The pinned dependency set is current again, closing 11 published
+  advisories.** `uv.lock` — the exact versions a development checkout and CI
+  install — had drifted behind on two indirect dependencies: `nltk` (pulled in by
+  the web-crawling stack) is now 3.10.3, resolving ten advisories including a
+  critical one, and `cryptography` is now 50.0.1, resolving one rated high. This
+  is lag rather than exposure: nothing in the project caps either package, so a
+  fresh `pip install mnemoai-assistant` already resolved to these versions — the
+  lock was simply describing an older resolution. Two companions moved with them
+  because they were what held `cryptography` back (`langchain-litellm` 0.7.1,
+  `pyopenssl` 26.4.0), and `langchain-core` came along at 1.6.1, which is what a
+  new install has been getting for some time. The full suite, both tiers, passes
+  unchanged against the new set. Five advisories remain open because **no fixed
+  version exists upstream**: one in `nltk` (its model-artifact loaders can reach
+  outside the directory they are given) and four in ChromaDB, whose latest
+  release is still in range. The ChromaDB four all require its **HTTP server** —
+  two are code injection through the collections endpoint, two concern
+  permissions across tenants — and this app never starts one, using only the
+  embedded on-disk client, so there is no endpoint to reach and no tenant
+  boundary to cross.
+
 ## [1.19.0] — 2026-09-01
 
 ### Added
