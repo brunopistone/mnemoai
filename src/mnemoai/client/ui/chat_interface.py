@@ -21,7 +21,7 @@ from mnemoai.client.memory.episodic_memory import (
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
-from mnemoai.client.ui import notify, status_bar, turn_view
+from mnemoai.client.ui import notify, screen, status_bar, turn_view
 from mnemoai.client.ui.tui import (
     _DELETE,
     PinnedPromptReader,
@@ -213,11 +213,12 @@ class ChatInterface:
     _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
     def __clear_screen(self) -> None:
-        """Clear screen + scrollback, cursor home (skipped when not a TTY)."""
-        if not (hasattr(sys.stdout, "isatty") and sys.stdout.isatty()):
-            return
-        # 3J scrollback, H home, 2J visible screen.
-        print("\033[3J\033[H\033[2J", end="", flush=True)
+        """Clear screen + scrollback, cursor home (skipped when not a TTY).
+
+        `/clear` discards the conversation, so the scrollback behind it goes too
+        — unlike the launch reset, which only scrolls (see `ui/screen.py`).
+        """
+        screen.wipe()
 
     @classmethod
     def _vlen(cls, s: str) -> int:

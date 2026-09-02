@@ -7,6 +7,57 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.20.0] — 2026-09-02
+
+### Fixed
+
+- **A turn that fails is now recorded, so resuming doesn't lose the question you
+  asked.** When a turn died before producing an answer, the prompt stayed on
+  screen and in the live conversation but never reached the session transcript —
+  so `--resume` came back missing that exchange, and a session whose only turn
+  failed was discarded entirely at exit as if nothing had been said. The failed
+  turn is now written to the transcript like any other, as a single record.
+- **A failed turn no longer runs into the next question.** History was left
+  ending on your unanswered message, with nothing saying the turn had produced
+  nothing. Some providers join two consecutive user messages into one, so the
+  question that failed was silently glued onto the front of whatever you asked
+  next — the model answered a merged question you never typed. The turn is now
+  closed out with a short note that it produced no answer, exactly as an
+  interrupted turn is. The note carries only the failure's type, never the
+  provider's error text, so nothing bulky enters the conversation.
+
+### Changed
+
+- **A failed turn now tells you which command fixes it.** "An error I can't
+  recover from automatically" was the whole report, leaving the choice between
+  `/rewind`, `/compact`, `/model` and starting over to guesswork. The message now
+  names the ones that apply: `/compact` (or `/rewind`) when the conversation has
+  outgrown the model's context window; `/rewind`, `/compact` or `/model` when the
+  model rejected the conversation's contents — which also says plainly that
+  sending the same thing again will fail the same way, the one case where "please
+  try again" was actively misleading. A dropped connection still just says to send
+  the message again, because that is genuinely all it takes.
+- **A model that returns nothing at all is now diagnosed instead of reported as a
+  mystery.** Some models on Amazon Bedrock can accept a request, send back not one
+  word, and close the connection cleanly — the app saw only "no output was
+  returned", which is true and explains nothing, and neither did the log. The same
+  request is now quietly re-issued once without streaming, where the provider does
+  say what it objected to, and that answer is what gets reported and logged. The
+  re-issue is a diagnosis only: it never becomes the turn's answer, it is
+  abandoned after a few seconds if it doesn't come back, and pressing Esc ends the
+  wait — it happens after the turn has already failed, so at worst it briefly
+  delays a message you were about to read anyway.
+- **The app starts on a fresh screen.** Launching in a terminal that already had
+  output in it appended the banner directly under whatever was there — the tail
+  of a build, the `Exiting...` line of the session you just left — so a new run
+  read as a continuation of the old one, with the wordmark buried mid-screen
+  instead of introducing anything. The launch now begins at the top of a blank
+  screen. **Nothing is erased:** the previous output is scrolled away, so it is
+  still there a flick of the wheel up — which is the difference from `/clear`,
+  where discarding the conversation means discarding the scrollback behind it
+  too. Only in a real terminal; a piped or redirected run writes no escape
+  sequences, so logs and CI output stay clean.
+
 ## [1.19.1] — 2026-09-02
 
 ### Fixed
