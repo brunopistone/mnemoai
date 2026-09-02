@@ -33,6 +33,7 @@ from mnemoai.client.agent import (
     subagent_runner,
     tool_formatting,
     tool_loop,
+    turn_failure,
 )
 from mnemoai.client.agent.agent_activity import ActivitySink, AgentActivityStore
 from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
@@ -2943,7 +2944,10 @@ class LangGraphAgent:
             # the last streamed snapshot, so it goes into history exactly as a
             # completed turn's would. Losing it meant the user's next message
             # arrived with no record that any of the work had happened.
-            recovered = self._commit_turn(result, turn_log) if result else []
+            # `log=False`: both branches below may still append to `turn_log`, and
+            # ONE turn must produce ONE record — two would be counted as two turns
+            # by everything downstream (the picker's count, `discard_if_empty`).
+            recovered = self._commit_turn(result, turn_log, log=False) if result else []
             # Only fall back to salvaging text when the turn produced NOTHING —
             # and then scan only this turn's messages, never the whole history
             # (`_last_visible_from(self._messages)` would return the PREVIOUS
@@ -2969,12 +2973,12 @@ class LangGraphAgent:
                 marker = AIMessage(content=INTERRUPTED_MARKER)
                 self._messages.append(marker)
                 turn_log.append(marker)
-                self._log_turn(turn_log)
+            self._log_turn(turn_log)
             self._last_input_tokens = None  # stale after this turn's rewrite
             self._emit_answer(msg)  # never streamed on this path — show it
             return msg
 
-        except Exception:
+        except Exception as e:
             # ANY other mid-turn failure (a dropped provider connection, an MCP
             # error, a bug). Whatever the turn produced stays in LIVE history and
             # the user keeps talking, so the transcript MUST record it too:
@@ -2983,10 +2987,19 @@ class LangGraphAgent:
             # a fraction of it even though `/save` has the whole thing.
             # Log-then-re-raise — the caller still owns the error; this only
             # makes the record agree with the history the user can see.
+            # CLOSE the turn out, as a cancel does. Without a marker the history
+            # ends on a dangling user message: nothing says the question went
+            # unanswered, and the provider adapters merge consecutive user
+            # messages — so the failed prompt would silently ride along as a
+            # prefix of the next one. Committed with `log=False` so the marker
+            # lands in the SAME turn record as the work above it (a second record
+            # would count as a second turn everything downstream reads).
             if result:
-                self._commit_turn(result, turn_log)
-            else:
-                self._log_turn(turn_log)
+                self._commit_turn(result, turn_log, log=False)
+            marker = AIMessage(content=turn_failure.failure_marker(e))
+            self._messages.append(marker)
+            turn_log.append(marker)
+            self._log_turn(turn_log)
             self._last_input_tokens = None
             raise
 
@@ -3020,13 +3033,20 @@ class LangGraphAgent:
         self._emit_answer(fallback)
         return fallback
 
-    def _commit_turn(self, result: dict, turn_log: List[BaseMessage]) -> List[BaseMessage]:
+    def _commit_turn(
+        self, result: dict, turn_log: List[BaseMessage], log: bool = True
+    ) -> List[BaseMessage]:
         """Move a graph run's NEW messages into history + the session log.
 
         Shared by the normal path and the recursion-limit path — the latter
         commits the work recovered from the last streamed snapshot, so hitting
         the step limit keeps everything the turn produced instead of discarding
         it. Returns the messages that were added.
+
+        ``log=False`` buffers into ``turn_log`` without writing it: the failure
+        path appends its marker afterwards and writes ONE record for the whole
+        turn, since anything downstream that counts records would read two as two
+        turns.
 
         Skips System/Human: the user turn was already stored as the clean prompt,
         so the reminder-bearing ``HumanMessage`` the model ran on must not be
@@ -3038,6 +3058,15 @@ class LangGraphAgent:
         or tool-result eviction REPLACES that list mid-turn: every message
         compaction just summarized away would be appended back — undoing the
         compaction and re-logging it to the transcript as this turn's work.
+
+        A run that produced NOTHING is still logged. ``stream_mode="values"``
+        yields the seeded state before any node runs, so a turn that failed on its
+        very first model call arrives here with a truthy ``result`` and no new
+        messages — and an early return skipped ``_log_turn`` entirely, dropping
+        the user's own prompt from the transcript while it stayed in live history.
+        The two then disagreed until the next ``--resume`` produced a conversation
+        missing the question, and a session whose only turn failed was deleted
+        outright by ``discard_if_empty``.
         """
         produced = list((result or {}).get("messages", []))[
             getattr(self, "_turn_seed_len", 0) :
@@ -3048,11 +3077,10 @@ class LangGraphAgent:
             if not isinstance(m, (SystemMessage, HumanMessage))
             and m not in self._messages
         ]
-        if not new_messages:
-            return []
         self._messages.extend(new_messages)
         turn_log.extend(new_messages)
-        self._log_turn(turn_log)
+        if log:
+            self._log_turn(turn_log)
         return new_messages
 
     def _log_turn(self, messages: List[BaseMessage]) -> None:
@@ -3074,9 +3102,13 @@ class LangGraphAgent:
         for msg in reversed(messages):
             if isinstance(msg, AIMessage):
                 visible = self._extract_visible(msg.content)
-                # The interrupted marker is bookkeeping, not an answer — never
-                # surface it to the user as "the work so far".
-                if visible and visible.strip() != INTERRUPTED_MARKER:
+                # A marker is bookkeeping, not an answer — never surface either of
+                # them to the user as "the work so far".
+                if (
+                    visible
+                    and visible.strip() != INTERRUPTED_MARKER
+                    and not turn_failure.is_failure_marker(visible)
+                ):
                     return visible
         return ""
 
