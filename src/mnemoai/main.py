@@ -8,7 +8,9 @@ from typing import Any, Optional
 # (LangGraphClient/ChatInterface → langchain-core → transformers, multi-second)
 # is imported INSIDE main() so the startup spinner can animate during that cost
 # instead of the terminal sitting frozen. configurator/console/paths/
-# startup_loader are all dependency-free.
+# startup_loader are all dependency-free — and `client.ui.screen` is too (stdlib
+# only; `client/__init__` resolves LangGraphClient lazily, so this costs nothing).
+from mnemoai.client.ui import screen
 from mnemoai.utils.configurator import config_exists, run_first_run_setup
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import enable_file_logging
@@ -35,6 +37,13 @@ def main(
         None
     """
     global _client
+
+    # Start on a blank screen: whatever the shell left behind is not part of this
+    # session, and a banner appended under the previous run's output reads as a
+    # continuation of it. Scrolled away, not erased — the prior output is still
+    # in scrollback (`/clear` is the one that discards it). Done before the
+    # spinner so anything the startup itself prints stays on screen.
+    screen.fresh()
 
     loader = StartupLoader().start("Loading libraries")
     try:

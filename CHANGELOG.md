@@ -7,6 +7,21 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [Unreleased]
+
+### Changed
+
+- **The app starts on a fresh screen.** Launching in a terminal that already had
+  output in it appended the banner directly under whatever was there — the tail
+  of a build, the `Exiting...` line of the session you just left — so a new run
+  read as a continuation of the old one, with the wordmark buried mid-screen
+  instead of introducing anything. The launch now begins at the top of a blank
+  screen. **Nothing is erased:** the previous output is scrolled away, so it is
+  still there a flick of the wheel up — which is the difference from `/clear`,
+  where discarding the conversation means discarding the scrollback behind it
+  too. Only in a real terminal; a piped or redirected run writes no escape
+  sequences, so logs and CI output stay clean.
+
 ## [1.19.1] — 2026-09-02
 
 ### Fixed
