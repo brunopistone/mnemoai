@@ -10,13 +10,23 @@ failure itself:
   message that the provider adapters MERGE with the next prompt;
 * the user was told the failure couldn't be recovered from automatically and
   never told which command recovers it manually.
+
+Plus the diagnostic that makes the first two legible: a stream which closes
+having yielded nothing carries no reason at all, so the same request is re-issued
+non-streamed purely to obtain the provider's real error.
 """
+
+import time
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from mnemoai.client.agent import turn_failure
-from mnemoai.client.agent.agent import LangGraphAgent
+from mnemoai.client.agent.agent import (
+    LangGraphAgent,
+    _EmptyStream,
+    _StreamIdleTimeout,
+)
 
 
 class _Log:
@@ -123,6 +133,12 @@ class TestClassification:
         # actionable reading, so it must not be shadowed by a generic "invalid".
         exc = Exception("invalid request: prompt is too long")
         assert turn_failure.classify(exc) == turn_failure.OVERSIZED
+
+    def test_an_empty_stream_is_not_guessed_at(self):
+        # `No generation chunks were returned` says nothing; claiming a cause here
+        # would send the user to the wrong command.
+        exc = _EmptyStream(ValueError("No generation chunks were returned"))
+        assert turn_failure.classify(exc) == turn_failure.UNKNOWN
 
 
 class TestRecoveryAdvice:
@@ -314,6 +330,178 @@ class TestFailedTurnIsClosedOut:
             a.invoke("q")
 
 
+class TestEmptyStreamIsMarked:
+    """A stream that yields NOTHING must be distinguishable by type.
+
+    It is the only failure with no provider detail in it, and it is the one worth
+    re-asking non-streamed. Detected by "did we accumulate anything", never by
+    matching langchain's sentence — that string is a library's, not a contract.
+    """
+
+    def _streaming_agent(self, chunks=(), error=None):
+        a = _agent()
+        a.callbacks = []
+        a.verbose = False
+        a.styled_turn_view = False
+        a._start_spinner = lambda *_a, **_k: None
+        a._extract_content = lambda chunk: (getattr(chunk, "content", ""), "")
+
+        def _iter(model, messages, config):
+            for c in chunks:
+                yield c
+            if error is not None:
+                raise error
+
+        a._iter_stream_with_idle_timeout = _iter
+        return a
+
+    def test_zero_chunks_then_an_error_is_wrapped(self):
+        a = self._streaming_agent(error=ValueError("No generation chunks were returned"))
+        with pytest.raises(_EmptyStream):
+            a._stream_once(object(), [], {})
+
+    def test_the_original_message_survives_the_wrapping(self):
+        a = self._streaming_agent(error=ValueError("No generation chunks were returned"))
+        with pytest.raises(_EmptyStream) as caught:
+            a._stream_once(object(), [], {})
+        # Every path that only reads str(exc) must be unaffected.
+        assert str(caught.value) == "No generation chunks were returned"
+
+    def test_a_failure_after_real_content_is_not_wrapped(self):
+        # Something arrived, so the provider did answer; this is a mid-stream drop.
+        a = self._streaming_agent(
+            chunks=[AIMessage(content="partial")], error=RuntimeError("boom")
+        )
+        with pytest.raises(RuntimeError):
+            a._stream_once(object(), [], {})
+
+    def test_a_transient_failure_stays_unwrapped(self):
+        # It has to keep reaching the retry wrapper, which re-runs the turn on a
+        # fresh connection rather than diagnosing anything.
+        a = self._streaming_agent(error=OSError("Connection reset by peer"))
+        with pytest.raises(OSError):
+            a._stream_once(object(), [], {})
+
+    def test_an_idle_timeout_stays_unwrapped(self):
+        a = self._streaming_agent(
+            error=_StreamIdleTimeout("No stream data for 120s")
+        )
+        with pytest.raises(_StreamIdleTimeout):
+            a._stream_once(object(), [], {})
+
+    def test_a_context_overflow_still_wins(self):
+        from mnemoai.client.agent.agent import _ContextOverflow
+
+        a = self._streaming_agent(error=ValueError("prompt is too long"))
+        with pytest.raises(_ContextOverflow):
+            a._stream_once(object(), [], {})
+
+
+class TestEmptyStreamDiagnostic:
+    def _probe_agent(self):
+        a = _agent()
+        a._strip_malformed_reasoning = lambda m: list(m)
+        a._cancelled = lambda: False
+        return a
+
+    class _Model:
+        def __init__(self, error=None, delay=0.0):
+            self.error = error
+            self.delay = delay
+            self.calls = 0
+            self.configs = []
+
+        def invoke(self, messages, config=None):
+            self.calls += 1
+            self.configs.append(config)
+            if self.delay:
+                time.sleep(self.delay)
+            if self.error is not None:
+                raise self.error
+            return AIMessage(content="fine")
+
+    def test_the_providers_real_error_is_returned(self):
+        a = self._probe_agent()
+        real = RuntimeError("ValidationException: messages.216 unsupported content")
+        model = self._Model(error=real)
+        got = a._diagnose_empty_stream(
+            model, [HumanMessage(content="q")], _EmptyStream(ValueError("no chunks"))
+        )
+        assert got is real
+        assert model.calls == 1
+
+    def test_only_an_empty_stream_is_probed(self):
+        # Every other failure already says what went wrong; re-issuing the request
+        # would cost a second one for nothing.
+        a = self._probe_agent()
+        model = self._Model(error=RuntimeError("x"))
+        assert a._diagnose_empty_stream(model, [], RuntimeError("boom")) is None
+        assert model.calls == 0
+
+    def test_a_probe_that_succeeds_reports_nothing(self):
+        # The finding is in the log, not in the return: the request is fine and the
+        # failure is specific to streaming. The answer is deliberately discarded.
+        a = self._probe_agent()
+        model = self._Model()
+        assert (
+            a._diagnose_empty_stream(model, [], _EmptyStream(ValueError("no chunks")))
+            is None
+        )
+
+    def test_the_probe_never_renders(self):
+        # No callbacks: a diagnostic must not touch the spinner or the formatter.
+        a = self._probe_agent()
+        model = self._Model(error=RuntimeError("ValidationException"))
+        a._diagnose_empty_stream(model, [], _EmptyStream(ValueError("x")))
+        assert model.configs == [{}]
+
+    def test_a_hanging_probe_is_abandoned_not_awaited(self, monkeypatch):
+        # The failure it must never reproduce: a blocking invoke can't be preempted
+        # by Esc, so waiting on one wedged the turn for the whole request timeout.
+        monkeypatch.setattr(
+            "mnemoai.client.agent.agent._DIAGNOSTIC_PROBE_SECONDS", 0.3
+        )
+        a = self._probe_agent()
+        started = time.monotonic()
+        got = a._diagnose_empty_stream(
+            self._Model(delay=30), [], _EmptyStream(ValueError("x"))
+        )
+        assert got is None
+        assert time.monotonic() - started < 5, "the diagnostic blocked the turn"
+
+    def test_a_cancel_ends_the_wait(self):
+        a = self._probe_agent()
+        a._cancelled = lambda: True
+        started = time.monotonic()
+        assert (
+            a._diagnose_empty_stream(
+                self._Model(delay=30), [], _EmptyStream(ValueError("x"))
+            )
+            is None
+        )
+        assert time.monotonic() - started < 5
+
+    def test_a_broken_probe_never_raises(self):
+        # It runs on an already-failed turn; a diagnostic that throws would replace
+        # the real error with its own.
+        a = self._probe_agent()
+
+        class _Hostile:
+            def invoke(self, messages, config=None):
+                raise BaseException("not even an Exception")  # noqa: TRY002
+
+        got = a._diagnose_empty_stream(_Hostile(), [], _EmptyStream(ValueError("x")))
+        assert isinstance(got, BaseException)
+
+    def test_the_probed_error_drives_the_advice(self):
+        # The whole chain: an empty stream says nothing (UNKNOWN), while the error
+        # the probe recovers names the cause — and so names the right command.
+        opaque = _EmptyStream(ValueError("No generation chunks were returned"))
+        assert "/model" not in turn_failure.recovery_advice(opaque)
+        probed = RuntimeError("ValidationException: unsupported content block")
+        assert "/model" in turn_failure.recovery_advice(probed)
+
+
 class TestTheUserIsToldWhatToDo:
     """The advice has to reach the message the user actually reads.
 
@@ -359,6 +547,22 @@ class TestTheUserIsToldWhatToDo:
     def test_the_answer_still_says_what_happened(self):
         text = self._answer(self._RejectingModel())
         assert "can't recover" in text
+
+    def test_an_empty_stream_is_diagnosed_before_reporting(self):
+        # The point of the probe: the streamed call says only "no chunks", so
+        # without re-asking there is nothing to base the advice on.
+        class _SilentThenHonest:
+            def stream(self, messages, config=None):
+                # What langchain-core actually raises for a stream that closed
+                # having yielded nothing — a bare ValueError with no cause in it.
+                raise ValueError("No generation chunks were returned")
+                yield  # pragma: no cover — makes this a generator
+
+            def invoke(self, messages, config=None):
+                raise RuntimeError("ValidationException: unsupported content block")
+
+        text = self._answer(_SilentThenHonest())
+        assert "/model" in text, f"the probe's finding never reached the user: {text}"
 
     def test_an_undiagnosable_failure_still_gets_a_usable_line(self):
         class _Odd:

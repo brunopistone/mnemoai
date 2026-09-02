@@ -37,6 +37,17 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   sending the same thing again will fail the same way, the one case where "please
   try again" was actively misleading. A dropped connection still just says to send
   the message again, because that is genuinely all it takes.
+- **A model that returns nothing at all is now diagnosed instead of reported as a
+  mystery.** Some models on Amazon Bedrock can accept a request, send back not one
+  word, and close the connection cleanly — the app saw only "no output was
+  returned", which is true and explains nothing, and neither did the log. The same
+  request is now quietly re-issued once without streaming, where the provider does
+  say what it objected to, and that answer is what gets reported and logged. The
+  re-issue is a diagnosis only: it never becomes the turn's answer, it is
+  abandoned after a few seconds if it doesn't come back, and pressing Esc ends the
+  wait — it happens after the turn has already failed, so at worst it briefly
+  delays a message you were about to read anyway.
+
 - **The app starts on a fresh screen.** Launching in a terminal that already had
   output in it appended the banner directly under whatever was there — the tail
   of a build, the `Exiting...` line of the session you just left — so a new run

@@ -73,6 +73,26 @@ class _StreamIdleTimeout(Exception):
     partial and re-runs the turn on a fresh connection."""
 
 
+class _EmptyStream(Exception):
+    """Wraps the failure of a stream that closed having yielded NOTHING.
+
+    This is the one failure that arrives with no information at all: the socket
+    opened, the provider sent zero chunks and closed cleanly, and langchain-core
+    raises a bare ``No generation chunks were returned`` — so the reason the
+    provider produced nothing is nowhere, not in the exception, not in the log.
+    Distinguishing it by TYPE (rather than by matching that sentence) is what lets
+    the caller ask the same question non-streamed, where the provider does answer
+    with its real error. Wrapping keeps ``str()`` equal to the original's text, so
+    every path that only reads the message is unaffected."""
+
+
+# How long the diagnostic re-issue is given before it's abandoned. A provider that
+# is REJECTING the request answers at validation time — before prefill — so this
+# only has to cover uploading the body; a wait long enough to be useful for a
+# healthy-but-slow model would just stall the failure the user is already seeing.
+_DIAGNOSTIC_PROBE_SECONDS = 15.0
+
+
 class AgentState(TypedDict):
     """State schema for the LangGraph agent."""
 
@@ -1572,7 +1592,12 @@ class LangGraphAgent:
                         "/compact to shrink the prompt)."
                     )
             else:
-                logger.error(f"Model request failed: {e}", exc_info=True)
+                # A stream that closed empty says nothing about WHY; ask the same
+                # question without streaming, where the provider does answer, and
+                # report whichever error actually names the cause.
+                probed = self._diagnose_empty_stream(active_model, messages, e)
+                cause = probed if probed is not None else e
+                logger.error(f"Model request failed: {cause}", exc_info=True)
                 # NAME the recovery. "Can't recover automatically" is true and
                 # useless on its own: the commands that resolve each class of
                 # failure all exist and nothing pointed at any of them.
@@ -1580,7 +1605,7 @@ class LangGraphAgent:
                     "The model request failed with an error I can't recover from "
                     "automatically. "
                 ) + (
-                    turn_failure.recovery_advice(e)
+                    turn_failure.recovery_advice(cause)
                     or "Your conversation is intact — please try again."
                 )
             return {"messages": [AIMessage(content=msg)], "thinking": None}
@@ -1911,6 +1936,70 @@ class LangGraphAgent:
                 self._start_spinner()
         return response, had_reasoning
 
+    def _diagnose_empty_stream(
+        self, active_model, messages: list, exc: Exception
+    ) -> Optional[BaseException]:
+        """Re-ask non-streamed, purely to learn why an empty stream was empty.
+
+        Only for :class:`_EmptyStream` — the one failure that carries no reason at
+        all (see that class). Streaming is forced ON for the families where this
+        happens, so the provider's real error (a ``ValidationException`` naming
+        what it refused) exists but is never seen: the streamed call reports a bare
+        ``No generation chunks were returned`` and the non-streamed one answers
+        properly. Returns the provider's exception, or ``None`` when there is
+        nothing better to say than what we already have.
+
+        Deliberately NOT a fallback that could produce the turn's answer. That is
+        what used to live in ``_stream_once`` and it wedged turns: a blocking
+        ``invoke`` can't be preempted by Esc, so an unresponsive provider held the
+        worker for the whole request timeout. Here the call is fire-and-forget on a
+        daemon thread with a short deadline — abandoned, never awaited to
+        completion — and it runs only AFTER the turn has already failed, so at
+        worst it delays a message the user is going to read anyway. A probe that
+        SUCCEEDS is discarded, and is itself the finding: the request is fine and
+        the failure is specific to streaming.
+        """
+        if not isinstance(exc, _EmptyStream):
+            return None
+        outcome: Dict[str, BaseException] = {}
+        # No callbacks: a diagnostic must not touch the spinner, the code
+        # formatter, or anything else that renders — the turn's own error message
+        # is the only thing the user should see from this path.
+        body = self._strip_malformed_reasoning(list(messages))
+
+        def _probe() -> None:
+            try:
+                active_model.invoke(body, config={})
+            except BaseException as probe_exc:  # noqa: BLE001 — this IS the payload
+                outcome["error"] = probe_exc
+
+        thread = threading.Thread(
+            target=_probe, name="empty-stream-diagnostic", daemon=True
+        )
+        thread.start()
+        # Poll rather than one long join so Esc lands during the wait: the turn has
+        # already failed, and nobody should have to sit through a diagnostic.
+        deadline = time.monotonic() + _DIAGNOSTIC_PROBE_SECONDS
+        while thread.is_alive() and time.monotonic() < deadline:
+            if self._cancelled():
+                return None
+            thread.join(0.2)
+        if thread.is_alive():
+            logger.debug(
+                "Empty-stream diagnostic gave no answer within %.0fs; abandoning it",
+                _DIAGNOSTIC_PROBE_SECONDS,
+            )
+            return None
+        probed = outcome.get("error")
+        if probed is None:
+            logger.warning(
+                "The streamed request returned no chunks, but the same request "
+                "succeeded WITHOUT streaming — the failure is specific to the "
+                "streaming path for this model."
+            )
+            return None
+        return probed
+
     def _network_retry_delay(self, attempt: int) -> float:
         """Jittered exponential backoff (seconds) for a network-error stream retry,
         using the same LLM.RETRY_DELAY / RETRY_BACKOFF knobs as the rest of the app.
@@ -2227,6 +2316,20 @@ class LangGraphAgent:
                 if sink is not None:
                     sink.stop()
                 raise _ContextOverflow(e) from e
+            # A stream that yielded NOTHING is the one failure with no provider
+            # detail in it (see _EmptyStream). Mark it by type so the caller can
+            # ask again non-streamed and learn the actual reason. A transient
+            # failure stays UNWRAPPED whatever it produced — it has to keep
+            # reaching the retry wrapper, which re-runs the turn on a fresh
+            # connection rather than diagnosing anything.
+            if (
+                response is None
+                and not isinstance(e, _StreamIdleTimeout)
+                and not self._is_transient_network_error(e)
+            ):
+                if sink is not None:
+                    sink.stop()
+                raise _EmptyStream(e) from e
             # Any other stream error (idle timeout, transient network drop, or a
             # mid-stream API error like a 500/overloaded/api_error): RE-RAISE so
             # the retry wrapper (_stream_response) re-runs the turn on a fresh
