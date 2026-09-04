@@ -7,7 +7,7 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
-## [Unreleased]
+## [1.21.0] — 2026-09-04
 
 ### Added
 
