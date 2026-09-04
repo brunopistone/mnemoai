@@ -168,6 +168,141 @@ class TestTheAnswerReachesTheModel:
         assert "3" in out
 
 
+class TestTheNoteRidesAlongWithTheChoice:
+    """The options were guessed by the model, so "this one, but…" has to be
+    expressible — otherwise the user's only outlet is the closest wrong row."""
+
+    def test_a_note_is_collapsed_to_one_line(self):
+        assert ask_user.normalize_note(" only\n for  local\truns ") == (
+            "only for local runs"
+        )
+
+    def test_no_note_is_empty_not_none(self):
+        assert ask_user.normalize_note(None) == ""
+        assert ask_user.normalize_note("   ") == ""
+
+    def test_a_long_note_is_capped(self):
+        got = ask_user.normalize_note("z" * (ask_user.MAX_NOTE_CHARS + 500))
+        assert len(got) == ask_user.MAX_NOTE_CHARS
+        assert got.endswith("…")
+
+    def test_the_note_is_far_more_generous_than_an_option_label(self):
+        # It's prose the model reads, not a row to render.
+        assert ask_user.MAX_NOTE_CHARS > ask_user.MAX_LABEL_CHARS
+
+    def test_the_choice_and_the_note_both_reach_the_model(self):
+        out = ask_user.format_answer("SQLite", "only for local runs")
+        assert "SQLite" in out and "only for local runs" in out
+
+    def test_the_wording_is_unchanged_when_there_is_no_note(self):
+        assert ask_user.format_answer("SQLite") == ask_user.format_answer("SQLite", "")
+
+    def test_ask_reports_a_choice_with_its_note(self):
+        stub = _Stub(ui=lambda q, o: ("Postgres", "as long as it's managed"))
+        out = ask_user.ask(stub, "Which db?", ["Postgres", "SQLite"])
+        assert "Postgres" in out and "as long as it's managed" in out
+        assert "re-ask" in out or "second-guess" in out
+
+
+class TestDecliningEveryOptionIsItsOwnAnswer:
+    """Three outcomes, not two. Dismissing the picker means "decide for me";
+    taking the escape row means the opposite — settle it in conversation. Before
+    the row existed, a user who agreed with none of the options could only Esc,
+    which told the model to press on with its own guess."""
+
+    def test_the_escape_row_is_appended_to_every_question(self):
+        rows = ask_user.picker_rows(["a", "b"])
+        assert [r[0] for r in rows] == ["a", "b", ask_user.DISCUSS]
+
+    def test_its_row_is_last_so_the_options_keep_their_order(self):
+        rows = ask_user.picker_rows(["first", "second"])
+        assert rows[-1] == (ask_user.DISCUSS, ask_user.DISCUSS_LABEL)
+
+    def test_even_a_two_option_question_gets_it(self):
+        assert len(ask_user.picker_rows(["a", "b"])) == 3
+
+    def test_a_model_option_cannot_impersonate_it(self):
+        # The row's identity must not depend on its wording.
+        rows = ask_user.picker_rows(["a", ask_user.DISCUSS])
+        assert [r[0] for r in rows].count(ask_user.DISCUSS) == 1
+
+    def test_picking_it_yields_no_choice_but_keeps_the_note(self):
+        assert ask_user.picker_reply(ask_user.DISCUSS, " neither fits ") == (
+            None,
+            "neither fits",
+        )
+
+    def test_picking_an_option_yields_the_pair(self):
+        assert ask_user.picker_reply("a", "sure") == ("a", "sure")
+
+    def test_cancelling_is_a_dismissal_even_with_a_note_typed(self):
+        # A note accompanies an answer; it is not one on its own.
+        assert ask_user.picker_reply(None, "typed then escaped") is None
+
+    def test_the_model_is_told_to_reply_not_to_proceed(self):
+        out = ask_user.format_discussion("why not both?")
+        assert "why not both?" in out
+        assert "don't proceed" in out.lower()
+        assert "again" in out  # and not to re-open the picker
+
+    def test_it_works_with_no_note_at_all(self):
+        out = ask_user.format_discussion()
+        assert "talk it through" in out and "don't proceed" in out.lower()
+
+    def test_it_does_not_read_like_a_dismissal(self):
+        # The dismissed wording hands the decision BACK to the model; this must
+        # not, or the escape row would be indistinguishable from pressing Esc.
+        assert "best judgment" not in ask_user.format_discussion()
+        assert "best judgment" in ask_user.format_dismissed()
+
+    def test_ask_routes_the_escape_row_to_the_discussion_wording(self):
+        stub = _Stub(ui=lambda q, o: (None, "neither, they'd both leak"))
+        out = ask_user.ask(stub, "Which db?", ["Postgres", "SQLite"])
+        assert "neither, they'd both leak" in out
+        assert "Do NOT ask again" not in out  # not the dismissed path
+
+    def test_ask_still_distinguishes_a_real_dismissal(self):
+        assert "Do NOT ask again" in ask_user.ask(
+            _Stub(ui=lambda q, o: None), "Q", ["a", "b"]
+        )
+
+
+class TestTheUiReplyShapesAreTolerated:
+    """``question_ui`` grew a note without breaking its old contract: a bare
+    string still means "this option was chosen"."""
+
+    def test_a_bare_string_is_still_a_choice(self):
+        assert ask_user.normalize_reply("SQLite") == ("SQLite", "", True)
+
+    def test_none_is_a_dismissal(self):
+        assert ask_user.normalize_reply(None) == (None, "", False)
+
+    def test_a_pair_carries_the_note(self):
+        assert ask_user.normalize_reply(("a", " x  y ")) == ("a", "x y", True)
+
+    def test_a_pair_with_no_choice_is_answered_but_unchosen(self):
+        assert ask_user.normalize_reply((None, "nope")) == (None, "nope", True)
+
+    def test_an_answered_reply_with_neither_is_still_not_a_dismissal(self):
+        # The escape row taken with an empty note: nothing chosen, nothing said,
+        # but the user DID answer — so the model must not decide for itself.
+        assert ask_user.normalize_reply((None, "")) == (None, "", True)
+
+    def test_a_lone_value_in_a_tuple_is_a_choice(self):
+        assert ask_user.normalize_reply(("a",)) == ("a", "", True)
+
+    def test_an_empty_string_is_read_as_a_dismissal(self):
+        # Nothing chosen and nothing said, with no pair to prove it was submitted.
+        assert ask_user.normalize_reply("") == (None, "", False)
+
+    def test_an_empty_pair_is_read_as_the_escape_row(self):
+        # A pair at all means the dialog was submitted, so it can't be a dismissal.
+        assert ask_user.normalize_reply(()) == (None, "", True)
+
+    def test_a_non_string_choice_survives(self):
+        assert ask_user.normalize_reply((3, "")) == ("3", "", True)
+
+
 class TestTheSpinnerIsHandedBack:
     """Nothing else restarts the spinner on this client-side path, so a lost
     restore leaves the terminal at a dead `>` for the rest of the turn."""

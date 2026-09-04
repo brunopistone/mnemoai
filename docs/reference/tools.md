@@ -238,6 +238,22 @@ blocked outright versus what asks first.
 | `spawn_agent`       | `agent_type` **(required)**, `prompt` **(required)**, `description` = `""`, `run_in_background` = `True` | Delegate a self-contained task to a fresh sub-agent.                 |
 | `resume_agent`      | `agent_id` **(required)**, `prompt` **(required)**, `run_in_background` = `True`                         | Continue a previous sub-agent with a follow-up, keeping its context. |
 
+The `ask_user_question` picker always offers more than the options it was given:
+a free-text **note** field (Tab to reach it, Enter to submit from either field)
+and a final **"None of these — let's talk about it"** row. The note rides along
+with whichever option you pick, so "that one, but only for local runs" is a
+single answer. The three ways out mean three different things:
+
+| You do this          | The model is told                                   |
+| -------------------- | --------------------------------------------------- |
+| Pick an option       | Proceed on it; any note qualifies the choice.       |
+| Pick _None of these_ | Don't act on any option — answer in prose instead.  |
+| Press Esc            | Decide for itself and say which assumption it made. |
+
+So dismissing the picker is not the way to disagree with every option — the
+escape row is. Off a TTY the same three outcomes are reachable: the numbered
+rows are printed, Enter alone dismisses, and a second prompt takes the note.
+
 `agent_type` is `general-purpose` (full toolset), `explore` (read-only), or
 `plan` (read-only) — plus any custom agent in `~/.mnemoai/agents/`. Entries in
 `allowed_bash` become pre-approved commands, matched by prefix, so an approved

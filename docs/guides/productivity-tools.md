@@ -149,19 +149,46 @@ sensible default — it puts the question to you as a short list instead of gues
 writing out every alternative for you to sort through:
 
 ```
-? Which caching layer should the new store use?
-
-  ▸ In-process LRU (recommended)
-    Redis
-    Memcached
+┌──────────| ? Which caching layer should the new store use? |──────────┐
+│ ↑/↓ to choose · Tab for a note · Enter to confirm · Esc to dismiss    │
+│                                                                       │
+│ (*) In-process LRU (recommended)                                      │
+│ ( ) Redis                                                             │
+│ ( ) Memcached                                                         │
+│ ( ) None of these — let's talk about it                               │
+│                                                                       │
+│ note ▸ fine for now, but it has to survive a restart later            │
+│                                                                       │
+│                       <    OK    > <  Cancel  >                       │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
-Arrow keys move, `Enter` picks, `Esc` dismisses. Your choice is echoed above the
-prompt so the conversation keeps a record of what was asked and what you answered.
+Arrow keys move, `Tab` reaches the note, `Enter` confirms from either field, `Esc`
+dismisses. What you answered is echoed above the prompt, so the conversation keeps a
+record of the question and your reply.
 
-**Dismissing is a real answer.** Press `Esc` and the assistant carries on with its
-own best judgment and tells you which assumption it made — it won't ask again. That's
-deliberate: a question you didn't want to answer shouldn't stall the work.
+**The options are never the whole answer.** They were guessed by the assistant, so two
+things are always there that it didn't offer:
+
+- **A free-text note.** It rides along with whatever you pick, which makes "that one,
+  but only for local runs" a single answer instead of a choice you then have to correct.
+- **A "None of these" row.** Take it when you disagree with every option: the assistant
+  drops all of them and answers you in prose — with your note, if you left one, as the
+  thing it responds to.
+
+**And there are three ways out, not two.** Choosing settles the question; declining every
+option turns it into a conversation; dismissing hands the decision back:
+
+| You do this          | The assistant then                                             |
+| -------------------- | -------------------------------------------------------------- |
+| Pick an option       | Proceeds on it, reading your note as a qualification.          |
+| Pick _None of these_ | Drops every option and replies about the real tradeoff.        |
+| Press `Esc`          | Carries on with its own best judgment and says what it assumed. |
+
+That last one is deliberate: a question you didn't want to answer shouldn't stall the
+work. But it also means `Esc` is **not** how you disagree with the options — it's how you
+tell the assistant to decide for you. Use the "None of these" row for the other case.
+Either way it won't ask the same question again.
 
 This is meant to be **rare**. The assistant is instructed to prefer acting on a
 reasonable default and saying what it assumed, because one question you have to answer

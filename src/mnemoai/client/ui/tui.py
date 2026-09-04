@@ -37,9 +37,10 @@ from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import Button, Dialog, Label, RadioList
+from prompt_toolkit.widgets import Button, Dialog, Label, RadioList, TextArea
 
 from mnemoai.client import file_mentions
+from mnemoai.client.agent import ask_user
 from mnemoai.client.ui import notify, turn_view
 
 # Override the default reverse-video bottom-toolbar so the pinned status/queue
@@ -1113,16 +1114,20 @@ class PinnedPromptReader:
             decision = "keep_planning" if verdict in ("keep_planning", "no") else "approve"
             return (decision, plan)
 
-    def question_ui(self, question: str, options: List[str]) -> Optional[str]:
-        """Ask the user to pick one of ``options`` (worker thread); None = dismissed.
+    def question_ui(self, question: str, options: List[str]) -> Optional[tuple]:
+        """Put a question to the user (worker thread) and return their answer.
+
+        ``None`` is a dismissal; otherwise ``(choice, note)`` — with ``choice``
+        None when the user took the "none of these" row, i.e. wants to settle it
+        in conversation rather than by picking (see :func:`question_dialog`).
 
         Runs through :meth:`run_dialog` because a full-screen picker can't be
         nested inside the running pinned app — the same exit → run → relaunch
         path the plan-approval "edit" branch already uses mid-turn.
 
-        The chosen answer is echoed to scrollback from INSIDE the dialog function,
-        i.e. while the app is down and the terminal is cooked. That is the one
-        window where a plain ``print`` is safe, and it's needed: the picker is
+        The answer is echoed to scrollback from INSIDE the dialog function, i.e.
+        while the app is down and the terminal is cooked. That is the one window
+        where a plain ``print`` is safe, and it's needed: the picker is
         full-screen, so without the echo the conversation would show a tool call
         whose question and answer left no trace.
         """
@@ -1133,14 +1138,20 @@ class PinnedPromptReader:
         # decision, which is exactly the pause nobody is watching for.
         notify.notify_waiting("mnemoai · a question is waiting")
 
-        def _pick() -> Optional[str]:
-            choice = select_from_list(f"? {question}", [(o, o) for o in options])
+        def _pick() -> Optional[tuple]:
+            reply = question_dialog(question, options)
             print(f"\n\033[93m? {question}\033[0m")
+            if reply is None:
+                print("  \033[90m(dismissed)\033[0m")
+                return reply
+            choice, note = reply
             print(
                 f"  \033[1m{choice}\033[0m" if choice
-                else "  \033[90m(dismissed)\033[0m"
+                else "  \033[90m(none of these — talking it through)\033[0m"
             )
-            return choice
+            if note:
+                print(f"  \033[90m↳ {note}\033[0m")
+            return reply
 
         return self.run_dialog(_pick)
 
@@ -1474,6 +1485,51 @@ def select_from_list(
     return options[idx - 1][0]
 
 
+def question_dialog(question: str, options: List[str]) -> Optional[tuple]:
+    """Ask the user a question: pick one of ``options``, add a free-text note, or
+    decline every option and say so instead.
+
+    Returns ``None`` for a dismissal, else ``(choice, note)`` with ``choice``
+    None when the escape row was taken (see :func:`ask_user.picker_reply`).
+    Deliberately NOT built on :func:`select_from_list`, which backs ``/load`` /
+    ``--resume`` / the configurator — there the options ARE the whole answer, so
+    a note and a "none of these" row would be meaningless. Here they aren't: the
+    model guessed the alternatives, and forcing the closest wrong one is the
+    failure mode this dialog exists to remove.
+
+    Non-TTY it degrades to a numbered ``input()`` prompt (plus one optional note
+    line, EOF-tolerant) so pipes and tests never block.
+    """
+    rows = ask_user.picker_rows(options)
+
+    if _dialog_is_tty():
+        result = _question_pick(f"? {question}", rows)
+        if result is _CANCEL:
+            return None
+        return ask_user.picker_reply(result[0], result[1])
+
+    print(f"\n? {question}")
+    for i, (_, label) in enumerate(rows, 1):
+        print(f"  {i}) {label}")
+    try:
+        answer = input("  Select [1, or Enter to dismiss]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    try:
+        idx = int(answer)
+    except ValueError:
+        return None
+    if not (1 <= idx <= len(rows)):
+        return None
+    try:
+        note = input("  Note (optional, Enter to skip): ")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        note = ""
+    return ask_user.picker_reply(rows[idx - 1][0], note)
+
+
 def _run_detail_app(ansi_text: str) -> None:
     """Full-screen scrollable viewer for one sub-agent's activity transcript.
 
@@ -1623,6 +1679,64 @@ def _radio_pick(title: str, options: List[tuple], *, allow_delete: bool = False)
         title=title,
         body=HSplit([Label(text=hint), radio], padding=1),
         buttons=buttons,
+        with_background=True,
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:
+        _cancel()
+
+    app = Application(
+        layout=Layout(dialog),
+        key_bindings=kb,
+        mouse_support=False,
+        full_screen=True,
+    )
+    return app.run()
+
+
+def _question_pick(title: str, rows: List[tuple]):
+    """Full-screen pick-one-**plus-a-note** dialog; returns ``(value, note)`` or
+    ``_CANCEL``.
+
+    A one-line note field sits under the rows. Enter confirms from EITHER side —
+    the row list or the note — so writing something down stays optional and
+    nobody has to Tab out to submit. ``Dialog`` already binds Tab/Shift-Tab to
+    move focus, and ``select_on_focus`` is required for the same reason as in
+    :func:`_radio_pick` (the highlighted row is not the committed value).
+    """
+    radio = RadioList(values=rows, select_on_focus=True)
+
+    def _ok() -> None:
+        get_app().exit(result=(radio.current_value, note.text))
+
+    def _cancel() -> None:
+        get_app().exit(result=_CANCEL)
+
+    note = TextArea(
+        multiline=False,
+        prompt="note ▸ ",
+        accept_handler=lambda _buf: _ok() or True,
+    )
+    radio.control.key_bindings.add("enter")(lambda event: _ok())
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit(
+            [
+                Label(
+                    text="↑/↓ to choose · Tab for a note · Enter to confirm · "
+                    "Esc to dismiss"
+                ),
+                radio,
+                note,
+            ],
+            padding=1,
+        ),
+        buttons=[Button(text="OK", handler=_ok), Button(text="Cancel", handler=_cancel)],
         with_background=True,
     )
 

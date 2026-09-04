@@ -4,8 +4,9 @@ When a decision is genuinely the user's to make (and can't be resolved from the
 request, the code, or a sensible default), the model calls
 ``ask_user_question(question=…, options=[…])`` instead of guessing or writing a
 wall of alternatives. The call is intercepted client-side (the MCP server is a
-piped subprocess and can't prompt the terminal): the client shows a picker and
-returns the chosen option as the tool result.
+piped subprocess and can't prompt the terminal): the client shows a picker —
+options, a free-text note, and a row for declining every option — and returns
+the answer as the tool result.
 
 Thin server surface, client-side logic — the same split as ``exit_plan_mode``
 (``plan_mode_exit.py``) and ``use_skill`` (``skill_tool.py``). The body here is a
@@ -49,12 +50,16 @@ def register_ask_user_tools(mcp: FastMCP) -> None:
         Args:
             question: The specific question, phrased so the options are the answer.
             options: 2-8 short, distinct, mutually exclusive choices. Put the one
-                you'd recommend first. Don't add a "something else" entry — the
-                user can always dismiss the question and reply in their own words.
+                you'd recommend first. Don't add a "something else" or "none of
+                these" entry, and don't ask for a comment: the picker always
+                offers both a free-text note and a "none of these" row, so such an
+                option would only waste a slot.
 
         Returns:
-            The option the user chose. Handled client-side; this stub reply only
-            appears when the tool is driven without the client interception.
+            The option the user chose, plus any note they added — or, if they took
+            the "none of these" row, what they said instead (which you answer in
+            prose rather than by re-asking). Handled client-side; this stub reply
+            only appears when the tool is driven without the client interception.
         """
         return (
             "No interactive user is attached, so this question cannot be answered. "

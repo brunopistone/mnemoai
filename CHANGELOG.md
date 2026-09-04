@@ -7,6 +7,24 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [Unreleased]
+
+### Added
+
+- **When the assistant asks you to choose, you can now add a note — or refuse
+  every option.** The picker accepted exactly one of the offered rows, so the
+  only way to say "that one, but only for local runs" was to pick the closest
+  wrong answer and correct it afterwards, and the only way out was `Esc` — which
+  means _decide for yourself_, the opposite of what disagreeing with all the
+  options meant. Every question now carries a free-text **note** field (`Tab` to
+  reach it, `Enter` confirms from either field) that rides along with whatever
+  you pick, plus a final **"None of these — let's talk about it"** row. That
+  makes three distinct answers: choosing settles the question, declining every
+  option turns it into a conversation (the assistant drops all of them and
+  replies in prose, to your note if you left one), and `Esc` still hands the
+  decision back with the assumption stated. The same three are reachable outside
+  a full terminal, where the rows are printed and a second prompt takes the note.
+
 ## [1.20.0] — 2026-09-02
 
 ### Fixed
