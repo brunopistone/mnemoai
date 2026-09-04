@@ -10,6 +10,7 @@ import sys
 
 import pytest
 
+from mnemoai.client.agent import ask_user
 from mnemoai.client.ui import tui
 
 
@@ -249,11 +250,23 @@ class TestQuestionUi:
             r.run_dialog = dialog
         return r
 
+    @staticmethod
+    def _answers(*lines):
+        """An ``input()`` stub that returns each line in turn (then EOF)."""
+        it = iter(lines)
+
+        def _input(*_):
+            try:
+                return next(it)
+            except StopIteration:
+                raise EOFError
+        return _input
+
     def test_it_goes_through_run_dialog(self, not_a_tty, monkeypatch):
-        # Calling select_from_list directly would try to nest a full-screen app
-        # inside the running one.
+        # Calling the dialog directly would try to nest a full-screen app inside
+        # the running one.
         seen = {}
-        monkeypatch.setattr(builtins, "input", lambda *_: "2")
+        monkeypatch.setattr(builtins, "input", self._answers("2", ""))
 
         def _run_dialog(func):
             seen["called"] = True
@@ -261,7 +274,7 @@ class TestQuestionUi:
 
         got = self._reader(_run_dialog).question_ui("Which?", ["a", "b"])
         assert seen.get("called") is True
-        assert got == "b"
+        assert got == ("b", "")
 
     def test_no_running_app_yields_none(self):
         # Off-TTY / plain loop: there is no app to suspend, so there is no one to
@@ -277,27 +290,173 @@ class TestQuestionUi:
     def test_the_answer_is_echoed_to_scrollback(self, capsys, monkeypatch):
         # The picker is full-screen, so without this echo the turn would leave no
         # trace of what was asked or chosen.
-        monkeypatch.setattr(tui, "select_from_list", lambda *a, **k: "SQLite")
+        monkeypatch.setattr(tui, "question_dialog", lambda *a, **k: ("SQLite", ""))
         self._reader(lambda func: func()).question_ui("Which db?", ["x", "y"])
         out = capsys.readouterr().out
         assert "Which db?" in out and "SQLite" in out
 
     def test_a_dismissal_is_echoed_too(self, capsys, monkeypatch):
-        monkeypatch.setattr(tui, "select_from_list", lambda *a, **k: None)
+        monkeypatch.setattr(tui, "question_dialog", lambda *a, **k: None)
         self._reader(lambda func: func()).question_ui("Which db?", ["x", "y"])
         assert "dismissed" in capsys.readouterr().out
 
-    def test_options_are_passed_as_value_label_pairs(self, monkeypatch):
+    def test_the_note_is_echoed_beside_the_choice(self, capsys, monkeypatch):
+        monkeypatch.setattr(
+            tui, "question_dialog", lambda *a, **k: ("SQLite", "only for local runs")
+        )
+        self._reader(lambda func: func()).question_ui("Which db?", ["x", "y"])
+        out = capsys.readouterr().out
+        assert "SQLite" in out and "only for local runs" in out
+
+    def test_declining_every_option_is_echoed_as_such_not_as_a_dismissal(
+        self, capsys, monkeypatch
+    ):
+        # The two are different answers, so they must not read identically:
+        # dismissed = "decide for me", none-of-these = "talk to me".
+        monkeypatch.setattr(tui, "question_dialog", lambda *a, **k: (None, "why both?"))
+        self._reader(lambda func: func()).question_ui("Which db?", ["x", "y"])
+        out = capsys.readouterr().out
+        assert "dismissed" not in out
+        assert "none of these" in out and "why both?" in out
+
+    def test_the_question_and_options_reach_the_dialog(self, monkeypatch):
         seen = {}
 
-        def _pick(title, opts, **k):
-            seen["title"], seen["opts"] = title, opts
+        def _dialog(question, options):
+            seen["question"], seen["options"] = question, options
             return None
 
-        monkeypatch.setattr(tui, "select_from_list", _pick)
+        monkeypatch.setattr(tui, "question_dialog", _dialog)
         self._reader(lambda func: func()).question_ui("Q", ["a", "b"])
-        assert seen["opts"] == [("a", "a"), ("b", "b")]
-        assert "Q" in seen["title"]
+        assert seen == {"question": "Q", "options": ["a", "b"]}
+
+
+class TestQuestionDialog:
+    """The ``ask_user_question`` picker is not just a list: the options were
+    GUESSED by the model, so it also offers a free-text note and a row for
+    declining all of them. Driven here through the non-TTY fallback, which must
+    offer the same three affordances as the full-screen dialog."""
+
+    def _input(self, *lines):
+        it = iter(lines)
+
+        def _stub(*_):
+            try:
+                return next(it)
+            except StopIteration:
+                raise EOFError
+        return _stub
+
+    def test_an_option_is_returned_with_an_empty_note(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input("1", ""))
+        assert tui.question_dialog("Q", ["a", "b"]) == ("a", "")
+
+    def test_a_note_rides_along_with_the_choice(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input("2", "  but only in CI "))
+        assert tui.question_dialog("Q", ["a", "b"]) == ("b", "but only in CI")
+
+    def test_the_escape_row_is_always_offered_last(self, not_a_tty, monkeypatch, capsys):
+        monkeypatch.setattr(builtins, "input", self._input("3", "neither fits"))
+        # Row 3 of a 2-option question is the escape row: no choice, just a note.
+        assert tui.question_dialog("Q", ["a", "b"]) == (None, "neither fits")
+        assert ask_user.DISCUSS_LABEL in capsys.readouterr().out
+
+    def test_the_escape_row_needs_no_note(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input("3", ""))
+        assert tui.question_dialog("Q", ["a", "b"]) == (None, "")
+
+    def test_blank_dismisses(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input(""))
+        assert tui.question_dialog("Q", ["a", "b"]) is None
+
+    def test_out_of_range_dismisses(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input("9"))
+        assert tui.question_dialog("Q", ["a", "b"]) is None
+
+    def test_eof_on_the_note_is_no_note_not_a_dismissal(self, not_a_tty, monkeypatch):
+        # A pipe with one line of input must still deliver the choice.
+        monkeypatch.setattr(builtins, "input", self._input("1"))
+        assert tui.question_dialog("Q", ["a", "b"]) == ("a", "")
+
+    def test_eof_on_the_pick_dismisses(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input())
+        assert tui.question_dialog("Q", ["a", "b"]) is None
+
+    def test_it_does_not_reuse_the_plain_picker(self, not_a_tty, monkeypatch):
+        # select_from_list backs /load, --resume and the configurator, where the
+        # options ARE the whole answer — growing a note there would be wrong.
+        monkeypatch.setattr(
+            tui, "select_from_list", lambda *a, **k: pytest.fail("wrong picker")
+        )
+        monkeypatch.setattr(builtins, "input", self._input("1", ""))
+        tui.question_dialog("Q", ["a", "b"])
+
+
+class TestQuestionPickKeys:
+    """Drives the REAL full-screen question dialog with REAL key presses over a
+    pipe input — the non-TTY fallback above can't show that Tab reaches the note,
+    that Enter submits from either side, or that the highlighted row is the one
+    committed (the ``select_on_focus`` trap, in the one dialog that also has a
+    second focusable widget to Tab into)."""
+
+    OPTIONS = ["Postgres", "SQLite"]
+
+    def _drive(self, keys: str, options=None):
+        import asyncio
+        import unittest.mock as m
+
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+
+        holder = {}
+        real_init = Application.__init__
+
+        def cap_init(self, *a, **k):
+            k = dict(k)
+            k["input"] = holder["pipe"]
+            k["output"] = DummyOutput()
+            real_init(self, *a, **k)
+
+        def fake_run(self):
+            # wait_for so a dialog that never exits FAILS instead of hanging.
+            return asyncio.run(asyncio.wait_for(self.run_async(), timeout=10))
+
+        with create_pipe_input() as pipe:
+            holder["pipe"] = pipe
+            # Fed BEFORE the app starts: the bytes sit in the pipe, so nothing can
+            # be dropped by racing the first render.
+            pipe.send_text(keys)
+            with m.patch.object(tui, "_dialog_is_tty", lambda: True), m.patch.object(
+                Application, "__init__", cap_init
+            ), m.patch.object(Application, "run", fake_run):
+                return tui.question_dialog("Which db?", options or self.OPTIONS)
+
+    def test_enter_confirms_the_highlighted_row(self):
+        assert self._drive("\r") == ("Postgres", "")
+
+    def test_arrows_move_the_committed_row_not_just_the_highlight(self):
+        assert self._drive("\x1b[B\r") == ("SQLite", "")
+
+    def test_tab_reaches_the_note_and_enter_submits_from_there(self):
+        # If focus were still on the rows, these letters would drive the widget's
+        # type-ahead search instead of landing in the note.
+        assert self._drive("\tonly for local runs\r") == (
+            "Postgres",
+            "only for local runs",
+        )
+
+    def test_the_escape_row_is_reachable_by_arrows(self):
+        assert self._drive("\x1b[B\x1b[B\r") == (None, "")
+
+    def test_a_note_on_the_escape_row_is_kept(self):
+        assert self._drive("\x1b[B\x1b[B\tneither, both leak\r") == (
+            None,
+            "neither, both leak",
+        )
+
+    def test_escape_dismisses(self):
+        assert self._drive("\x1b") is None
 
 
 class TestAgentsPanelVisibility:
