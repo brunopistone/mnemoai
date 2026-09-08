@@ -33,6 +33,7 @@ import os
 from typing import Any, List, NamedTuple, Tuple
 
 from mnemoai.client import context_injection
+from mnemoai.client.memory.playbook_store import PLAYBOOK_BLOCK_MARKER
 from mnemoai.client.memory.steering_store import SteeringStore
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
@@ -61,7 +62,7 @@ _SYSTEM_SEGMENTS = (
     ("[Persistent Memory]", "Persistent memory (MEMORY.md)"),
     ("<available_skills>", "Skills listing"),
     ("<available_subagents>", "Sub-agent types"),
-    ("[Playbook - Learned Strategies]", "Learned strategies"),
+    (PLAYBOOK_BLOCK_MARKER, "Tool-use notes"),
     ("<conversation_summary>", "Compaction summary"),
 )
 

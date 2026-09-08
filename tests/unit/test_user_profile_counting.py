@@ -291,11 +291,13 @@ class TestAnInflatedProfileIsRepaired:
         assert first == second, "repair re-applied and shrank the count again"
 
     def test_a_healthy_profile_is_untouched(self):
-        path = self._profile(interaction_count=42, technical_level=0.0002)
+        # Below the inflation threshold nothing is assumed corrupt. A LOW trait may
+        # be real — but a trait at the FLOOR no longer can be (see the
+        # technical_level repair below), so this uses a low-but-honest value.
+        path = self._profile(interaction_count=42, technical_level=0.2)
         m = UserProfileManager(profile_path=path)
         assert m.profile["interaction_count"] == 42
-        # Below the threshold nothing is assumed corrupt — a low trait may be real.
-        assert m.profile["technical_level"] == 0.0002
+        assert m.profile["technical_level"] == 0.2
 
     def test_a_fresh_profile_needs_no_repair(self):
         m = UserProfileManager(profile_path=os.path.join(tempfile.mkdtemp(), "n.json"))
@@ -305,3 +307,108 @@ class TestAnInflatedProfileIsRepaired:
     def test_a_non_numeric_count_does_not_crash_the_repair(self):
         m = UserProfileManager(profile_path=self._profile(interaction_count="lots"))
         assert m.profile.get("_recount_repaired") is True
+
+
+class TestTechnicalLevelNeedsEvidence:
+    """A prompt with no listed technical term is NO evidence, not evidence of a
+    beginner.
+
+    ``TECHNICAL_TERMS`` is 21 words, so most real prompts match nothing. Folding a
+    0.0 observation on each of those turns drove the EMA to the floor for any user
+    — one real profile read 0.00018 after 915 interactions and rendered
+    ``beginner-level`` into every single turn's system prompt. The three sibling
+    traits each default their signal to 0.5 when no marker matches; this one had no
+    neutral case.
+    """
+
+    def _fresh(self):
+        return UserProfileManager(profile_path=os.path.join(tempfile.mkdtemp(), "p.json"))
+
+    def _say(self, m, text, turns=1):
+        for _ in range(turns):
+            m.analyze_conversation([{"role": "user", "content": [{"text": text}]}])
+        return m.profile["technical_level"]
+
+    def test_a_prompt_without_listed_terms_does_not_move_the_trait(self):
+        m = self._fresh()
+        before = m.profile["technical_level"]
+        after = self._say(m, "please check what memory features I am shipping", turns=20)
+        assert after == before == 0.5, "absence of jargon was folded as a 0.0 signal"
+
+    def test_twenty_ordinary_prompts_no_longer_reach_the_beginner_bucket(self):
+        # The exact live failure: the label is "beginner" below 0.4, and the old
+        # code reached it within a few dozen ordinary turns whoever was typing.
+        m = self._fresh()
+        level = self._say(m, "what did you change in the file", turns=20)
+        assert level >= 0.4, f"an ordinary user was profiled as a beginner ({level})"
+
+    def test_a_technical_prompt_still_raises_the_trait(self):
+        # The fix must not make the trait inert — real evidence must still move it.
+        m = self._fresh()
+        level = self._say(m, "refactor the async endpoint middleware", turns=10)
+        assert level > 0.5, "technical evidence no longer registers"
+
+    def test_a_single_listed_term_is_still_weak_evidence(self):
+        # One term = 1/3, below the current EMA, so it may pull DOWN — that is real
+        # signal, unlike the absence of any term at all.
+        m = self._fresh()
+        level = self._say(m, "check the api", turns=1)
+        assert level != 0.5, "an actual term match was ignored"
+
+
+class TestADegenerateTechLevelIsRepaired:
+    """The floor repair, for profiles the signal fix arrives too late for.
+
+    ``_repair_inflated_counts`` already reset saturated traits, but it ran BEFORE
+    the signal was fixed, so the trait simply degenerated again (the live profile
+    was back to 0.00018 with ``_recount_repaired: true`` on disk). Post-fix the
+    smallest folded observation is 1/3, so a value at the floor can no longer be
+    honestly accrued — it is proof of the old bug regardless of turn count.
+    """
+
+    def _profile(self, **overrides):
+        path = os.path.join(tempfile.mkdtemp(), "p.json")
+        data = {
+            "interaction_count": 915,
+            "verbosity": 0.37,
+            "directness": 0.26,
+            "technical_level": 0.00018,
+            "abstraction": 0.56,
+            "top_domains": [],
+            "tool_patterns": {},
+            "_legacy_migrated": True,
+            "_recount_repaired": True,
+        }
+        data.update(overrides)
+        with open(path, "w") as f:
+            json.dump(data, f)
+        return path
+
+    def test_a_floored_trait_is_reset_to_the_neutral_prior(self):
+        m = UserProfileManager(profile_path=self._profile())
+        assert m.profile["technical_level"] == 0.5
+
+    def test_the_already_repaired_count_is_not_touched_again(self):
+        # It carries its own flag, so the count repair must not re-run.
+        m = UserProfileManager(profile_path=self._profile())
+        assert m.profile["interaction_count"] == 915
+
+    def test_an_unsaturated_trait_is_preserved(self):
+        m = UserProfileManager(profile_path=self._profile(technical_level=0.31))
+        assert m.profile["technical_level"] == 0.31
+
+    def test_the_repair_runs_only_once(self):
+        path = self._profile()
+        first = UserProfileManager(profile_path=path)
+        first.profile["technical_level"] = 0.004  # re-floor it by hand
+        first._save_profile()
+        second = UserProfileManager(profile_path=path)
+        assert second.profile["technical_level"] == 0.004, "repair re-applied"
+
+    def test_a_non_numeric_trait_does_not_crash_the_repair(self):
+        m = UserProfileManager(profile_path=self._profile(technical_level="low"))
+        assert m.profile.get("_tech_signal_repaired") is True
+
+    def test_the_summary_stops_calling_the_user_a_beginner(self):
+        m = UserProfileManager(profile_path=self._profile())
+        assert "beginner-level" not in m.get_profile_summary()

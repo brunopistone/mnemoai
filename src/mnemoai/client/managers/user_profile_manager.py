@@ -120,6 +120,11 @@ class UserProfileManager:
         if not self.profile.get("_recount_repaired", False):
             self._repair_inflated_counts()
 
+        # Repair a technical_level driven to the floor by the missing neutral
+        # case (one-shot, separate flag — the count repair ran before that fix).
+        if not self.profile.get("_tech_signal_repaired", False):
+            self._repair_degenerate_tech_level()
+
     def _load_profile(self) -> Dict:
         """Load existing profile or create new one.
 
@@ -261,6 +266,31 @@ class UserProfileManager:
                     self.profile[trait] = 0.5
 
         self.profile["_recount_repaired"] = True
+        self._save_profile()
+
+    def _repair_degenerate_tech_level(self) -> None:
+        """Reset a ``technical_level`` sitting at the floor (one-shot).
+
+        Every turn whose prompt held none of the 21 listed terms used to fold a 0.0
+        observation, so the EMA converged to zero for any user — and the summary
+        then tells the model "beginner-level" on every turn. ``analyze_conversation``
+        no longer folds without evidence, but an EMA already at the floor needs many
+        technical turns to climb out of the "beginner" bucket, so it is reset to the
+        neutral prior and re-learns from real evidence only.
+
+        Only a **saturated** value is touched, the same rule (and epsilon) as
+        :meth:`_repair_inflated_counts`: an unsaturated one still carries signal.
+        """
+        value = self.profile.get("technical_level")
+        if isinstance(value, (int, float)) and value <= _SATURATION_EPSILON:
+            logger.info(
+                f"Resetting degenerate profile technical_level ({value:.5f} → 0.5): "
+                "a prompt without listed technical terms was counted as evidence "
+                "of a beginner"
+            )
+            self.profile["technical_level"] = 0.5
+
+        self.profile["_tech_signal_repaired"] = True
         self._save_profile()
 
     def _save_profile(self) -> None:
@@ -496,12 +526,20 @@ class UserProfileManager:
         )
 
         # === TECHNICAL LEVEL ===
+        # A prompt with none of the listed terms is NO evidence, not evidence of a
+        # beginner: the list is 21 words, so most real prompts match nothing and
+        # folding a 0.0 observation on each of those turns drags the EMA to the
+        # floor whoever is typing (observed: 0.0002 after 915 interactions — and it
+        # got there AGAIN after _repair_inflated_counts had reset it, because that
+        # repair fixed the inflation, not this signal). The three sibling traits
+        # each default their signal to 0.5 when no marker matches; this one had no
+        # neutral case, so it skips the fold entirely instead.
         tech_count = sum(1 for term in self.TECHNICAL_TERMS if term in content_lower)
-        tech_signal = min(1.0, tech_count / 3)  # 3+ technical terms = expert level
-
-        self.profile["technical_level"] = self._update_ema(
-            self.profile.get("technical_level", 0.5), tech_signal
-        )
+        if tech_count:
+            tech_signal = min(1.0, tech_count / 3)  # 3+ technical terms = expert
+            self.profile["technical_level"] = self._update_ema(
+                self.profile.get("technical_level", 0.5), tech_signal
+            )
 
         # === ABSTRACTION ===
         concrete_markers = [

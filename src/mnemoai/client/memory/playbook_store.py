@@ -9,6 +9,23 @@ from mnemoai.client.memory.reflector import PlaybookEntry
 from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
 
+# Opens the injected block. Public because context_report segments the LIVE system
+# prompt by marker, so the two must never drift (a stale marker silently stops
+# attributing this block in /context).
+#
+# The wording claims nothing about learning or effectiveness, because nothing here
+# can support either claim: the strategies come from Reflector's static tables, and
+# no entry records whether it ever helped (there is no usefulness count, and
+# `confidence` can only ever rise). A block titled "Learned Strategies" listing
+# "Effective strategies" was asserting both.
+PLAYBOOK_BLOCK_MARKER = "[Tool-use notes from past sessions]"
+
+# Injected on EVERY turn and never reclaimable by compaction, so an unverified note
+# is kept cheap. Capped in code rather than by lowering PLAYBOOK.MAX_INJECT, whose
+# default reaches only fresh installs — every config.yaml written so far sets it to
+# 10 explicitly, so a default change would not reach a single existing user.
+_MAX_INJECT_PER_GROUP = 2
+
 
 class PlaybookStore:
     """Stores and retrieves playbook entries with semantic deduplication."""
@@ -309,21 +326,21 @@ class PlaybookStore:
         if not entries:
             return ""
 
-        lines = ["[Playbook - Learned Strategies]"]
+        lines = [PLAYBOOK_BLOCK_MARKER]
 
         # Group by outcome
         successes = [e for e in entries if e.get("outcome") == "success"]
         failures = [e for e in entries if e.get("outcome") == "failure"]
 
         if failures:
-            lines.append("Avoid these patterns:")
-            for entry in failures[:5]:
-                lines.append(f"  ✗ [{entry.get('context')}]: {entry.get('strategy')}")
+            lines.append("Noted after past errors:")
+            for entry in failures[:_MAX_INJECT_PER_GROUP]:
+                lines.append(f"  · [{entry.get('context')}]: {entry.get('strategy')}")
 
         if successes:
-            lines.append("Effective strategies:")
-            for entry in successes[:5]:
-                lines.append(f"  ✓ [{entry.get('context')}]: {entry.get('strategy')}")
+            lines.append("Noted after past successes:")
+            for entry in successes[:_MAX_INJECT_PER_GROUP]:
+                lines.append(f"  · [{entry.get('context')}]: {entry.get('strategy')}")
 
         return "\n".join(lines)
 

@@ -57,3 +57,67 @@ class TestMergeByStrategyKey:
         s = _store()
         one = [{"strategy": "x", "confidence": 1.0, "timestamp": "1"}]
         assert s._merge_similar(one) == one
+
+
+class TestTheInjectedBlockClaimsOnlyWhatItCanSupport:
+    """The block is paid on EVERY turn and never reclaimable by compaction, so
+    what it asserts and how big it gets both matter.
+
+    Nothing in the store can support a claim of learning or effectiveness: the
+    strategies come from Reflector's static tables (no model call exists in the
+    reflection path) and no entry records whether one ever helped — there is no
+    usefulness count, and ``confidence`` can only ever rise. A block headed
+    "Learned Strategies" listing "Effective strategies" asserted both.
+    """
+
+    def _entries(self, n_fail=6, n_ok=6):
+        fail = [
+            {"outcome": "failure", "context": f"ctx{i}", "strategy": f"avoid {i}"}
+            for i in range(n_fail)
+        ]
+        ok = [
+            {"outcome": "success", "context": f"ctx{i}", "strategy": f"do {i}"}
+            for i in range(n_ok)
+        ]
+        return fail + ok
+
+    def test_the_header_does_not_claim_the_notes_were_learned(self):
+        block = _store().format_for_prompt(self._entries())
+        first = block.splitlines()[0]
+        assert "learned" not in first.lower()
+        assert "strategies" not in first.lower()
+
+    def test_no_group_label_claims_effectiveness(self):
+        block = _store().format_for_prompt(self._entries()).lower()
+        assert "effective" not in block
+        assert "avoid these patterns" not in block
+
+    def test_each_group_is_capped_regardless_of_how_many_are_passed(self):
+        # MAX_INJECT is set explicitly to 10 in every config.yaml written so far,
+        # so lowering its default would reach no existing install — the cap has to
+        # live here, at the one chokepoint that produces the injected text.
+        block = _store().format_for_prompt(self._entries(n_fail=50, n_ok=50))
+        assert len([ln for ln in block.splitlines() if ln.startswith("  ")]) == 4
+
+    def test_the_whole_block_stays_small(self):
+        # The live 10-entry block measured 1050 chars (~262 tokens per turn).
+        block = _store().format_for_prompt(self._entries(n_fail=50, n_ok=50))
+        assert len(block) < 400
+
+    def test_no_entries_still_injects_nothing(self):
+        assert _store().format_for_prompt([]) == ""
+
+    def test_one_group_alone_does_not_emit_the_other_label(self):
+        block = _store().format_for_prompt(self._entries(n_fail=0, n_ok=3))
+        assert "past errors" not in block
+        assert "past successes" in block
+
+    def test_the_marker_is_the_one_context_report_segments_on(self):
+        # /context splits the LIVE prompt by marker, so a drifted header silently
+        # stops attributing this block.
+        from mnemoai.client import context_report
+        from mnemoai.client.memory.playbook_store import PLAYBOOK_BLOCK_MARKER
+
+        block = _store().format_for_prompt(self._entries())
+        assert block.startswith(PLAYBOOK_BLOCK_MARKER)
+        assert PLAYBOOK_BLOCK_MARKER in [m for m, _ in context_report._SYSTEM_SEGMENTS]
