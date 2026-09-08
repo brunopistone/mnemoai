@@ -7,6 +7,34 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.21.1] — 2026-09-08
+
+### Fixed
+
+- **The learned profile no longer tells the model you're a beginner.** Four
+  traits are inferred from what you type, and three of them treat "no marker
+  matched" as no evidence. The technical-level trait had no such neutral case: it
+  folded a zero into the running average on every turn whose prompt contained
+  none of its twenty-one listed terms — which is most real prompts, whoever is
+  typing. The value therefore converged to the floor, and once it crossed below
+  the threshold the profile block injected into **every** turn described the user
+  as `beginner-level` (one real profile read 0.00018 after 915 interactions).
+  Answers were being pitched at a beginner because of the shape of the
+  measurement, not because of anything anyone wrote. Ordinary prompts now leave
+  the trait alone and only real evidence moves it. A profile already sitting at
+  the floor cannot have got there honestly, so it is reset once to the neutral
+  starting point and re-learns from there; a low-but-plausible value is left
+  untouched, since it still carries signal.
+- **The notes from past sessions no longer claim to be learned strategies.** The
+  block injected on every turn was headed `Playbook - Learned Strategies` and
+  listed up to ten entries under `Effective strategies` and `Avoid these
+  patterns`. Neither claim was supported by anything behind it: the notes come
+  from a fixed set of phrasings, and no entry records whether it ever helped, so
+  "effective" was asserted and never measured. The header and labels now say only
+  what is true — these are notes taken after past successes and errors — and the
+  block is capped at two entries per group, which cuts what it costs you every
+  turn by roughly half. The `/context` breakdown lists it under its new name.
+
 ## [1.21.0] — 2026-09-04
 
 ### Added

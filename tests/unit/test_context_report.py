@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 
 from mnemoai.client import context_injection, context_report
 from mnemoai.client.context_report import Part
+from mnemoai.client.memory.playbook_store import PLAYBOOK_BLOCK_MARKER
 
 
 class TestSplitSystemPrompt:
@@ -32,7 +33,7 @@ class TestSplitSystemPrompt:
                 "[Persistent Memory]\nUser prefers uv.",
                 "<available_skills>\nskills here\n</available_skills>",
                 "<available_subagents>\nagents here\n</available_subagents>",
-                "[Playbook - Learned Strategies]\nstrategy",
+                f"{PLAYBOOK_BLOCK_MARKER}\nstrategy",
                 "<conversation_summary>\nearlier turns\n</conversation_summary>",
             ]
         )
@@ -43,7 +44,7 @@ class TestSplitSystemPrompt:
             "Persistent memory (MEMORY.md)",
             "Skills listing",
             "Sub-agent types",
-            "Learned strategies",
+            "Tool-use notes",
             "Compaction summary",
         ]
 

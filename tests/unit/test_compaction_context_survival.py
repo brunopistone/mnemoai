@@ -17,10 +17,13 @@ from mnemoai.client import context_injection
 from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
 )
+from mnemoai.client.memory.playbook_store import PLAYBOOK_BLOCK_MARKER
 
 MEMORY_TEXT = "[user] Prefers pytest over unittest."
 PROFILE_TEXT = "<profile>\nStyle: concise\n</profile>"
-PLAYBOOK_TEXT = "[Playbook - Learned Strategies]\nAvoid: guessing paths"
+# Built from the real marker, not a copy of it: this text stands in for the live
+# block, so a header change must not leave the test asserting a string nothing sends.
+PLAYBOOK_TEXT = f"{PLAYBOOK_BLOCK_MARKER}\nNoted after past errors: guessing paths"
 
 
 @pytest.fixture
