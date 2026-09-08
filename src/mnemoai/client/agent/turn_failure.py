@@ -28,6 +28,7 @@ one refusing — and nothing pointed at any of them.
 from typing import Union
 
 from mnemoai.client.agent import stream_policy
+from mnemoai.utils.exceptions import exception_signature, leaf_exception
 
 # One sentence, one class name — see the module docstring on why it stays small.
 _MARKER_PREFIX = "[Turn failed before it produced an answer"
@@ -61,8 +62,10 @@ def failure_marker(exc: Union[BaseException, str]) -> str:
 
     ``exc`` may be the exception or an already-resolved class name (the
     diagnostic probe can name the failure better than the exception that escaped).
+    A task group's own class name says only that the failure was wrapped, so the
+    marker names the leaf inside it.
     """
-    name = exc if isinstance(exc, str) else type(exc).__name__
+    name = exc if isinstance(exc, str) else type(leaf_exception(exc)).__name__
     name = (name or "").strip()
     return f"{_MARKER_PREFIX}: {name}.]" if name else f"{_MARKER_PREFIX}.]"
 
@@ -81,7 +84,10 @@ def classify(exc: Exception) -> str:
     """
     if stream_policy.is_context_overflow_error(exc):
         return OVERSIZED
-    text = f"{type(exc).__name__}: {exc}".lower()
+    # Read through a task group: its wrapper text matches no marker, so a
+    # rejection that arrived inside one classified as UNKNOWN and the user was
+    # advised to "try again" for a request that fails identically every time.
+    text = exception_signature(exc).lower()
     if any(m in text for m in _REJECTED_MARKERS):
         return REJECTED
     if stream_policy.is_transient_network_error(exc):

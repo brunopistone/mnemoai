@@ -7,6 +7,32 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.21.2] — 2026-09-08
+
+### Fixed
+
+- **A failure no longer reports the plumbing that wrapped it.** An external MCP
+  server that failed to start said so like this: `✗ MCP server 'aws' failed to
+start; skipping. (unhandled errors in a TaskGroup (1 sub-exception))` — a line
+  that names neither the error nor anything you can act on. The reason is that
+  the MCP client fails inside nested task groups, and a group's own text is all
+  you get from it, even after unwrapping it once. The real failure sat two levels
+  down and is now what you are shown (`McpError: Invalid request parameters`),
+  with any sibling failures counted rather than printed.
+- **And it leaves a record.** That startup line was the _only_ trace of the
+  failure: nothing was written to the log, so a server skipped for a typo in
+  `mcp.json` was indistinguishable from one skipped for a lapsed credential, and
+  the traceback that would have told you which existed nowhere. The full nested
+  traceback now goes to `~/.mnemoai/logs/mnemoai.log` (still one line on screen,
+  which points there), and `/doctor`'s "not running" row names the log file too.
+- **A dropped connection inside a task group is retried again.** The same
+  wrapper hid the failure from the retry policy, which matches provider
+  phrasings: a dead socket or a 429 that arrived wrapped matched nothing, so it
+  was classified as a deterministic error and retried **zero** times. Retry
+  classification, the recovery advice a failed turn prints, and the marker it
+  leaves in the conversation all now read through the wrapper to the real
+  failure.
+
 ## [1.21.1] — 2026-09-08
 
 ### Fixed
@@ -28,7 +54,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 - **The notes from past sessions no longer claim to be learned strategies.** The
   block injected on every turn was headed `Playbook - Learned Strategies` and
   listed up to ten entries under `Effective strategies` and `Avoid these
-  patterns`. Neither claim was supported by anything behind it: the notes come
+patterns`. Neither claim was supported by anything behind it: the notes come
   from a fixed set of phrasings, and no entry records whether it ever helped, so
   "effective" was asserted and never measured. The header and labels now say only
   what is true — these are notes taken after past successes and errors — and the

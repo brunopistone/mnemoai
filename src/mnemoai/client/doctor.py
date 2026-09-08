@@ -447,7 +447,10 @@ def _external_mcp_checks(client: Any) -> List[Check]:
             "external MCP servers",
             WARN,
             f"{len(live)}/{len(declared)} connected — not running: {', '.join(missing)}",
-            "Check the command in mcp.json (a disabled entry is expected here too).",
+            # The startup line scrolls away, but the traceback behind it doesn't:
+            # a failed member logs one (file-only) record naming the real error.
+            "Check the command in mcp.json (a disabled entry is expected here too); "
+            f"the startup failure is in {_short(app_log_path())}.",
         )
     ]
 

@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, create_model
 
 from mnemoai.utils.config import config
 from mnemoai.utils.console import print_error
-from mnemoai.utils.logger import logger
+from mnemoai.utils.logger import exception_line, log_file_hint, logger
 from mnemoai.utils.paths import open_mcp_log
 
 # Default upper bound for a single MCP tool call, in seconds. This is a FLOOR,
@@ -655,7 +655,7 @@ class MultiMCPClient:
                 if name == "builtin":
                     # The built-in server is essential — re-raise.
                     raise
-                print_error(f"MCP server '{name}' failed to start; skipping. ({e})")
+                self._report_member_failure(f"MCP server '{name}' failed to start", e)
         self._members = live
         return self
 
@@ -681,7 +681,7 @@ class MultiMCPClient:
             try:
                 tools = wrapper.list_tools_sync()
             except Exception as e:
-                print_error(f"MCP server '{name}': could not list tools; skipping. ({e})")
+                self._report_member_failure(f"MCP server '{name}': could not list tools", e)
                 continue
             for tool in tools:
                 display = tool.name
@@ -704,3 +704,27 @@ class MultiMCPClient:
                 wrapper.shutdown()
             except Exception as e:
                 logger.debug(f"MCP server shutdown error (ignored): {e}")
+
+    @staticmethod
+    def _report_member_failure(what: str, exc: Exception) -> None:
+        """Say what actually failed, and leave the traceback somewhere.
+
+        Two defects in one line, both from reporting ``exc`` as-is: the MCP client
+        stack fails inside NESTED anyio task groups, whose ``str()`` is the
+        wrapper's own text (``unhandled errors in a TaskGroup (1
+        sub-exception)``), so the message named the plumbing instead of the
+        ``McpError`` two levels down — and with no log call beside it the
+        traceback was written NOWHERE, for a failure the user is shown. A server
+        skipped for a bad command was then indistinguishable from one skipped for
+        a lapsed credential.
+
+        One report: the record is file-only (``console: False``) and the red line
+        below IS the user-facing error, with the pointer to the rest of it.
+        """
+        logger.error("%s: %s", what, exception_line(exc), exc_info=True,
+                     extra={"console": False})
+        details = log_file_hint()
+        print_error(
+            f"{what}; skipping. ({exception_line(exc)})"
+            f"{f'  Details: {details}' if details else ''}"
+        )
