@@ -53,7 +53,8 @@ from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models import area_models
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
 from mnemoai.utils.config import config
-from mnemoai.utils.logger import log_file_hint, logger, one_line
+from mnemoai.utils.exceptions import leaf_exception
+from mnemoai.utils.logger import exception_line, log_file_hint, logger
 from mnemoai.utils.paths import (
     LOG_MAX_AGE_DAYS,
     SESSION_MAX_AGE_DAYS,
@@ -447,7 +448,8 @@ class LangGraphClient:
             # ONE report per failure: the print below IS the user-facing error,
             # so the record is file-only — a second red line about the same
             # exception is noise. The traceback never leaves the log file.
-            logger.error(f"Query failed: {e}", exc_info=True, extra={"console": False})
+            logger.error(f"Query failed: {exception_line(e)}", exc_info=True,
+                         extra={"console": False})
             # NAME the recovery rather than implying it. Which command actually
             # unsticks this depends on the failure (see turn_failure), and a turn
             # that dies without saying leaves the user to guess between /rewind,
@@ -457,7 +459,7 @@ class LangGraphClient:
             )
             msg = (
                 "Something went wrong while processing that request "
-                f"({type(e).__name__}). {recovery}"
+                f"({type(leaf_exception(e)).__name__}). {recovery}"
             )
             # The turn errored before/without streaming an answer, so PRINT this
             # (nothing else will) — otherwise the turn ends silently with only
@@ -465,7 +467,7 @@ class LangGraphClient:
             # the app's own shape: what failed, then what to do about it.
             details = log_file_hint()
             print(
-                f"\n\033[91m✗ {type(e).__name__}: {one_line(e)}\033[0m\n"
+                f"\n\033[91m✗ {exception_line(e)}\033[0m\n"
                 f"\033[90m  {recovery}"
                 f"{f'  Details: {details}' if details else ''}\033[0m",
                 flush=True,

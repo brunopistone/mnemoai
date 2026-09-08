@@ -1,6 +1,7 @@
 """Provider retry/error classification policy (pure logic).
 
-Decides — from an exception's text alone — whether a model call failed because
+Decides — from an exception's text alone, read THROUGH any task-group wrapper
+(``utils.exceptions``) — whether a model call failed because
 the prompt overflowed the context window (the caller must compact, never retry)
 or because of a transient connection/5xx failure (retry on a fresh connection
 with backoff), and computes the backoff delay. Provider-agnostic: matches
@@ -25,6 +26,8 @@ config import.
 import asyncio
 import random
 import time
+
+from mnemoai.utils.exceptions import exception_text
 
 # Provider phrasings for "the prompt exceeded the model's context window".
 CONTEXT_OVERFLOW_MARKERS = (
@@ -131,7 +134,7 @@ def is_context_overflow_error(exc: Exception) -> bool:
     Matches the provider phrasings so the backstop can compact + terminate
     instead of retrying the same oversized prompt in a loop.
     """
-    text = str(exc).lower()
+    text = exception_text(exc).lower()
     return any(m in text for m in CONTEXT_OVERFLOW_MARKERS)
 
 
@@ -141,8 +144,13 @@ def is_transient_network_error(exc: Exception) -> bool:
 
     Kept provider-agnostic (matches the exception text) so it works for every
     LangChain provider — a dead socket surfaces differently per httpx/requests/
-    boto3 stack but the phrasings above cover them."""
-    text = str(exc).lower()
+    boto3 stack but the phrasings above cover them.
+
+    Reads THROUGH an exception group: a wrapper's own text ("unhandled errors in
+    a TaskGroup") matches no phrasing, so a dropped socket that arrived inside one
+    was classified deterministic and retried zero times — the same silent gap as a
+    provider that words a failure differently, in its most extreme form."""
+    text = exception_text(exc).lower()
     return any(m in text for m in TRANSIENT_NETWORK_MARKERS)
 
 

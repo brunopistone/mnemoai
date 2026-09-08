@@ -19,6 +19,8 @@ import threading
 import warnings
 from typing import Optional
 
+from mnemoai.utils.exceptions import exception_leaves
+
 # ANSI colors per level. ERROR/CRITICAL red, WARNING yellow; DEBUG/INFO dim.
 _LEVEL_COLORS = {
     logging.WARNING: "\033[93m",   # yellow
@@ -145,6 +147,24 @@ def one_line(text: str, limit: int = _MAX_CONSOLE_CHARS) -> str:
     if len(head) > limit:
         head = head[: limit - 1].rstrip() + "…"
     return head
+
+
+def exception_line(exc: BaseException, limit: int = _MAX_CONSOLE_CHARS) -> str:
+    """``Type: message`` for what actually FAILED — the headline for the screen.
+
+    Built from the leaf rather than from ``exc`` itself because a failure wrapped
+    in a task group reports the wrapper: ``ExceptionGroup: unhandled errors in a
+    TaskGroup (1 sub-exception)`` names neither the error nor anything the user
+    can act on (see :mod:`mnemoai.utils.exceptions`). Sibling failures are
+    counted, not printed — this is one line, and the log file has them all.
+    """
+    leaves = exception_leaves(exc)
+    name = type(leaves[0]).__name__
+    message = one_line(leaves[0], limit)
+    # A bare TimeoutError's str() is empty — the class name is then the whole fact.
+    head = f"{name}: {message}" if message else name
+    extra = len(leaves) - 1
+    return f"{head} (+{extra} more)" if extra > 0 else head
 
 
 class _CursorTracker:
