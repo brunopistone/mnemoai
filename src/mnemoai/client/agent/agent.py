@@ -1458,15 +1458,29 @@ class LangGraphAgent:
         tracker.record(response, getattr(self, "usage_model_name", "") or "")
 
     def _record_file_activity(self, name: str, args: Dict[str, Any]) -> None:
-        """Note the file a completed tool call touched (drives ``/files``).
+        """Note the file a completed tool call touched (drives ``/files``, ``/why``).
 
         Called from the single tool chokepoint AFTER the call succeeded, so a
         refused or failed call leaves no trace. Best-effort, like ``_record_usage``.
+        Both records are fed from here rather than per-caller, which is what makes
+        them account for work nobody watched (a background sub-agent, a parallel
+        wave) without either of them knowing such callers exist.
         """
         ledger = getattr(self, "files", None)
-        if ledger is None:
-            return  # bare test stub built via __new__
-        ledger.record_tool(name, args)
+        if ledger is not None:  # None on a bare test stub built via __new__
+            ledger.record_tool(name, args)
+
+        provenance = getattr(self, "provenance", None)
+        if provenance is None:
+            return
+        log = getattr(self, "session_log", None)
+        provenance.record(
+            name,
+            args,
+            turn=getattr(log, "next_turn", 0) if log is not None else 0,
+            prompt=getattr(self, "_turn_prompt", "") or "",
+            session=getattr(log, "session_id", "") if log is not None else "",
+        )
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with the current state, streaming the response."""
@@ -2958,6 +2972,10 @@ class LangGraphAgent:
         turn_log: List[BaseMessage] = []
 
         stored_prompt = self._strip_ephemeral(prompt)
+        # What the change index quotes as the cause of this turn's edits: the
+        # prompt as STORED, so a tool call fired from a sub-agent or a parallel
+        # wave still names the request the user actually made.
+        self._turn_prompt = stored_prompt
         if not stored_prompt.strip():
             if delivered == 0:
                 # Nothing to do — no prompt and no completion to deliver.

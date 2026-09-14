@@ -125,6 +125,10 @@ class UserProfileManager:
         if not self.profile.get("_tech_signal_repaired", False):
             self._repair_degenerate_tech_level()
 
+        # Drop tool outcomes recorded when a failure could not be (one-shot).
+        if not self.profile.get("_outcomes_repaired", False):
+            self._repair_unlabeled_outcomes()
+
     def _load_profile(self) -> Dict:
         """Load existing profile or create new one.
 
@@ -293,6 +297,46 @@ class UserProfileManager:
         self.profile["_tech_signal_repaired"] = True
         self._save_profile()
 
+    def _repair_unlabeled_outcomes(self) -> None:
+        """Drop tool patterns recorded when only successes could be (one-shot).
+
+        ``record_tool_outcome`` was only ever called with a hardcoded ``True``,
+        from the success path, so every sample was a success: one real profile
+        held 39,375 samples at a 100.00% rate with not one recorded failure. A
+        counter whose denominator equals its numerator carries no information —
+        it ranks tools by *frequency* while labelling the result a success rate.
+
+        **A pre-fix profile and a young profile that has genuinely only succeeded
+        are indistinguishable**, so the rule is simply "no failure anywhere →
+        start over". The cost for the young one is a handful of samples; the cost
+        of keeping them is a ``Tools:`` hint nothing can tell apart from the
+        poisoned kind. Runs once, flagged in the profile.
+        """
+        patterns = self.profile.get("tool_patterns") or {}
+        samples = 0
+        labelled = False
+        for tools in patterns.values():
+            if not isinstance(tools, dict):
+                continue
+            for stats in tools.values():
+                if not isinstance(stats, dict):
+                    continue
+                total = stats.get("total", 0) or 0
+                samples += total
+                if total > (stats.get("success", 0) or 0):
+                    labelled = True
+
+        if samples and not labelled:
+            logger.info(
+                f"Clearing {samples} unlabelled tool-outcome samples: every one "
+                "was recorded as a success, so the success rate was 100% by "
+                "construction. Outcomes now record failures too."
+            )
+            self.profile["tool_patterns"] = {}
+
+        self.profile["_outcomes_repaired"] = True
+        self._save_profile()
+
     def _save_profile(self) -> None:
         """Save profile to disk."""
         os.makedirs(os.path.dirname(self.profile_path), exist_ok=True)
@@ -352,14 +396,24 @@ class UserProfileManager:
         self,
         intent: str,
         tools_used: List[Dict[str, Any]],
-        success: bool = True,
+        success: bool,
     ) -> None:
         """Update tool success patterns from task outcomes.
+
+        One sample per (intent, tool) per turn, so the ratio reads "of the turns
+        that used this tool for this intent, this fraction ended in success" —
+        turn-level attribution, not per-call: a turn that used eight tools and
+        ended badly counts against all eight.
+
+        ``success`` is deliberately **required**. It used to default to True and
+        the one call site passed the literal, so every sample was a success and
+        the ratio could only ever be 1.00 — a frequency count wearing a success
+        label (see :meth:`_repair_unlabeled_outcomes`).
 
         Args:
             intent: Classified intent (debug, implement, etc.)
             tools_used: List of tools from extract_tools_from_messages()
-            success: Whether task was successful
+            success: Whether the turn that used these tools succeeded
         """
         if not tools_used:
             return
@@ -675,6 +729,14 @@ class UserProfileManager:
 
         for intent, tools in sorted_intents:
             if not tools:
+                continue
+            # A ranking needs something to rank BY: with no failure recorded for
+            # this intent every rate is 1.00, so `max` returns whichever tool the
+            # dict happened to yield first — a hint chosen by nothing. Say nothing
+            # until the outcomes discriminate.
+            if not any(
+                s.get("total", 0) > s.get("success", 0) for s in tools.values()
+            ):
                 continue
             # Get best tool by success rate (min 3 uses)
             qualified_tools = [

@@ -63,6 +63,7 @@ Assistant: [Uses fs_read tool and displays content]
 | `/usage`                   | Token totals for this session, per model — input, output and cache tokens, counting **every** model call including sub-agents, orchestrator workers and the query router. Cumulative spend, not the size of your conversation ([details](#checking-token-usage))                                                                                                                                                                                                                                                                                                        |
 | `/files`                   | **What this session touched** — every file it read, wrote or you attached with `@`, newest first, with how many times each came up. Includes sub-agent and parallel-wave work, and survives compaction ([details](#what-this-session-touched))                                                                                                                                                                                                                                                                                                                          |
 | `/diff [path]`             | **Uncommitted changes, with this session's edits marked `✎`** — staged, unstaged and untracked in one list with `+`/`−` counts. `/diff <path>` shows one file's colored diff. Read-only: it never stages, stashes or checks anything out ([details](#seeing-what-changed))                                                                                                                                                                                                                                                                                              |
+| `/why [path]`              | **Which prompt asked for this change** — per change to a file: the turn, the request behind it, and what the call did, grouped by session. A bare `/why` lists every file with a recorded change. Answered from a small per-project index, so it costs no turn and reaches back past sessions that have expired ([details](#why-a-file-looks-like-this))                                                                                                                                                                                                                  |
 | `/copy [code\|N]`          | **Copy the last answer to the clipboard** without the terminal's line wrapping. `/copy code` takes its last fenced code block, `/copy 2` the answer before last. Uses a local helper or OSC 52, so it works over SSH too ([details](#copying-an-answer))                                                                                                                                                                                                                                                                                                                |
 | `/export [md\|txt] [path]` | Write the conversation as a **shareable transcript** — readable Markdown (default) or plain text — into the **current directory** unless you give a path. Not the same as `/save`: an export is a one-way artifact for pasting into a bug report or PR, not something `/load` can read back. Tool _calls_ appear as one-line summaries; tool _results_ and injected context are left out. Add `reasoning` to include thinking blocks ([details](#exporting-a-transcript))                                                                                               |
 | `/branch [turn]`           | **Fork this session** and carry on in the copy. No argument → pick the turn to branch after; `/branch 3` branches directly. The original session is **never modified** — it stays resumable with `--resume` ([details](#branching-a-session))                                                                                                                                                                                                                                                                                                                           |
@@ -652,6 +653,62 @@ all-additions diff it effectively is.
 `ls-files` — there is no code path that could stage, stash or check anything out. It
 is also bounded (a long list and a long diff both collapse), and when something is
 cut it prints the exact `git` command that shows the rest.
+
+### Why a file looks like this
+
+`/files` says what was touched and `/diff` says what is different. Neither answers
+the question you actually have when you open a file later and don't recognize a
+function in it: **which prompt asked for this?** `/why` does:
+
+```
+Why src/mnemoai/client/status_bar.py looks like this
+
+  This session
+    ✎ turn 7 · 16:04 · file_edit · +12 -3
+        > make the footer stop wrapping on a narrow terminal
+
+  Earlier · session session_20260908_143012_5511_a1b2
+    ✎ turn 2 · 09-08 14:36 · fs_write · wrote 397 lines
+        > add a pinned status line under the input
+
+  2 recorded changes. The prompt under each is the one that asked for
+  it. A change made outside this app, or before the index existed, isn't here.
+```
+
+A bare `/why` lists every file with a recorded change instead, each with its count
+and the most recent prompt behind it — this session's files when it changed any,
+the project's history otherwise. `/why <path>` then drills into one file.
+
+Worth knowing:
+
+- **It reaches past the conversation that made the change.** The record is kept per
+  project in a small index (`~/.mnemoai/{profile}/provenance/`), so it survives the
+  session ending, and it outlives the transcripts themselves — those are swept at
+  `SESSION_MAX_AGE_DAYS`, while a line of code lives for years.
+- **It names the session, so the whole turn is still reachable.** The heading of an
+  earlier group is a session id you can pass to `mnemoai --resume <id>`; the index
+  holds a summary, the transcript holds the conversation.
+- **Like the other two, it costs nothing.** No model call, no tool, no write beyond
+  its own index — so it's cheap to run on a hunch.
+- **It records what this app changed, and only that.** An edit you made in your
+  editor, a `git` operation, or anything from before the index existed is not in it,
+  and the report says so rather than implying the file has no history.
+- **A `/rewind` doesn't withdraw an entry, deliberately.** Rewinding takes back the
+  conversation; the file on disk is untouched, so the prompt that caused the change
+  is still the true answer to why it's there.
+- Setting `SESSION_MAX_AGE_DAYS: 0` turns recording off — the index stores what you
+  typed, so the switch that stops recording sessions stops this too.
+
+The turn-end line carries the same pointer for the turn you just ran:
+
+```
+· done in 1m12s · 3 files · /why · 16:19
+```
+
+The count is the number of files that turn changed, and it's left out entirely when
+a turn changed nothing — so seeing it there means something. It survives a cancel
+too (`⊘ stopped after 12s · 2 files · /why`), which is exactly when knowing what
+already landed on disk matters most.
 
 ### Copying an answer
 

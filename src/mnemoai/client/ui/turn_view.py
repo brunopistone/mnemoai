@@ -485,7 +485,9 @@ def render_session_notice(text: str) -> str:
     return f"{_HEADER}⟲{_RESET} {_GRAY}{' '.join(str(text or '').split())}{_RESET}"
 
 
-def render_turn_end(seconds: float, finished: float, stopped: bool = False) -> str:
+def render_turn_end(
+    seconds: float, finished: float, stopped: bool = False, files: int = 0
+) -> str:
     """One dim line closing a turn: how long it took and when it ended.
 
     A streamed answer simply STOPS — the last chunk looks like any other, so
@@ -499,12 +501,19 @@ def render_turn_end(seconds: float, finished: float, stopped: bool = False) -> s
     Printed for EVERY turn including a fast one: a terminator you can only
     sometimes rely on doesn't terminate anything. ``stopped`` words a cancelled
     turn instead, resolving the transient "(cancelling…)" the same way.
+
+    ``files`` is the count of files this turn CHANGED, and naming `/why` beside
+    it is the point: a turn's edits are the part with consequences on disk, and
+    the one line that survives in scrollback is where a pointer to the record of
+    them is worth having. Omitted entirely when the turn changed nothing, so the
+    marker means something whenever it is there.
     """
     clock = time.strftime("%H:%M", time.localtime(finished))
     duration = format_duration(seconds)
+    changed = f" · {files} file{'s' if files != 1 else ''} · /why" if files > 0 else ""
     if stopped:
-        return f"{_GRAY}⊘ stopped after {duration} · {clock}{_RESET}"
-    return f"{_GRAY}· done in {duration} · {clock}{_RESET}"
+        return f"{_GRAY}⊘ stopped after {duration}{changed} · {clock}{_RESET}"
+    return f"{_GRAY}· done in {duration}{changed} · {clock}{_RESET}"
 
 
 def render_command_expansion(name: str, path=None) -> str:

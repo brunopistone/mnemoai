@@ -829,6 +829,21 @@ def sweep_old_sessions(
     return removed
 
 
+def provenance_path(cwd=None, profile: str = None) -> Path:
+    """Per-(profile, project) index of which prompt changed which file (created).
+
+    Scoped like :func:`sessions_dir` — the question ``/why`` answers is about a
+    file in THIS project — but a flat file rather than a directory, and
+    deliberately **not swept**: it exists to outlive the transcripts it was
+    derived from, so it bounds itself by size instead (see
+    :mod:`mnemoai.client.provenance`).
+    """
+    base = cwd if cwd is not None else os.getcwd()
+    d = profile_dir(profile) / "provenance"
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{sanitize_cwd(base)}.jsonl"
+
+
 def memory_file_path(profile: str = None) -> Path:
     """Path to the curated ``MEMORY.md`` (profile-scoped, not auto-created).
 
@@ -1000,12 +1015,37 @@ def sanitize_model_name(name: str) -> str:
     return safe or "default"
 
 
+# Bedrock cross-region inference profiles prefix the base model id with the
+# routing scope (`global.anthropic.claude-opus-5`, `us.anthropic.claude-opus-5`).
+# The prefix picks which regions may serve the request — same weights, same
+# tokenizer, same answers — so it must not fork the model-scoped memory: a user
+# who switches from a regional to the global profile is the SAME model to
+# episodic memory and the playbook, and forking silently restarts both.
+_MODEL_ROUTING_PREFIXES = ("global.", "us-gov.", "us.", "eu.", "apac.")
+
+
+def normalize_model_key(name: str) -> str:
+    """The memory-scope key for a model id: routing prefix off, path-sanitized.
+
+    One prefix only, and only when what remains is still provider-qualified
+    (contains a ``.``) — an Ollama tag like ``us.something`` is not a Bedrock
+    inference profile, and a model whose whole name is a prefix must keep it.
+    Idempotent, so it is safe to apply to an already-normalized directory name.
+    """
+    safe = sanitize_model_name(name)
+    for prefix in _MODEL_ROUTING_PREFIXES:
+        if safe.startswith(prefix) and "." in safe[len(prefix) :]:
+            return safe[len(prefix) :]
+    return safe
+
+
 def model_dir(model_name: str, profile: str = None) -> Path:
     """Per-(profile, chat-model) directory for episodic memory + playbook (created).
 
     Scoping memory by model keeps a store built with one model from
-    contaminating another.
+    contaminating another. Keyed by :func:`normalize_model_key`, so a Bedrock
+    routing prefix is not a different model.
     """
-    d = profile_dir(profile) / "models" / sanitize_model_name(model_name)
+    d = profile_dir(profile) / "models" / normalize_model_key(model_name)
     d.mkdir(parents=True, exist_ok=True)
     return d

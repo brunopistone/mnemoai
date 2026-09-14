@@ -57,13 +57,14 @@ _GROUP_TITLES = {WRITTEN: "Changed", ATTACHED: "Attached with @", READ: "Read"}
 class Entry:
     """One file and what this session did to it."""
 
-    __slots__ = ("path", "display", "counts", "seq")
+    __slots__ = ("path", "display", "counts", "seq", "written_seq")
 
     def __init__(self, path: str, display: str, seq: int) -> None:
         self.path = path
         self.display = display
         self.counts: Dict[str, int] = {READ: 0, WRITTEN: 0, ATTACHED: 0}
         self.seq = seq  # touch order, so the report can lead with the recent ones
+        self.written_seq = 0  # last CHANGE, so one turn's edits can be counted
 
     @property
     def kind(self) -> str:
@@ -89,7 +90,7 @@ class FileLedger:
         try:
             if not path or action not in (READ, WRITTEN, ATTACHED):
                 return
-            key, display = _resolve(path)
+            key, display = resolve_path(path)
             if not key:
                 return
             with self._lock:
@@ -103,6 +104,8 @@ class FileLedger:
                     self._entries[key] = entry
                 entry.counts[action] += 1
                 entry.seq = self._seq
+                if action == WRITTEN:
+                    entry.written_seq = self._seq
         except Exception:  # noqa: BLE001 — never break a tool call over this
             pass
 
@@ -126,6 +129,18 @@ class FileLedger:
         with self._lock:
             return {e.path for e in self._entries.values() if e.counts[WRITTEN]}
 
+    def mark(self) -> int:
+        """The ledger's position now, to count changes made from here onwards."""
+        with self._lock:
+            return self._seq
+
+    def changed_since(self, mark: int) -> int:
+        """Distinct files changed after ``mark`` — one turn's work, not the
+        session's: a file edited three times counts once, one merely re-read
+        counts not at all."""
+        with self._lock:
+            return sum(1 for e in self._entries.values() if e.written_seq > mark)
+
     @property
     def overflow(self) -> int:
         """Distinct files seen after the cap (counted, not kept)."""
@@ -140,13 +155,14 @@ class FileLedger:
             self._overflow = 0
 
 
-def _resolve(path: str):
+def resolve_path(path: str):
     """``(key, display)`` for a path: one key per file, a short display form.
 
     The key is the read-before-write gate's key, so `./x.py`, `x.py` and an
     absolute spelling are ONE row. The display form is CWD-relative when the file
     is under the directory the session runs in (which is what the user typed), and
-    home-relative otherwise.
+    home-relative otherwise. Public because `/why` must key its own records the
+    same way — one definition, or the two reports disagree about what one file is.
     """
     raw = str(path).strip()
     if not raw:

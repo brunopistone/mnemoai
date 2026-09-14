@@ -44,7 +44,7 @@ BUILTIN_COMMANDS = (
     "auto", "branch", "clear", "compact", "config", "context", "copy", "diff",
     "doctor", "exit", "export", "features", "files", "help", "hooks", "load", "mcp",
     "memory", "model", "params", "plan", "quit", "rename", "rewind", "save", "skills",
-    "usage",
+    "usage", "why",
 )
 
 # A leading `_` marks a file in the commands dir that is NOT a command (notes, a

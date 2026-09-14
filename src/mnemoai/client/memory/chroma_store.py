@@ -359,7 +359,7 @@ class ChromaEpisodicStore:
                 if timestamp > cutoff_date:
                     valid_ids.append(id)
                     valid_metadatas.append(metadata)
-            except:
+            except (TypeError, ValueError):
                 valid_ids.append(id)  # Keep if can't parse
                 valid_metadatas.append(metadata)
 
