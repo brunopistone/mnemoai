@@ -7,6 +7,32 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.22.1] — 2026-09-14
+
+### Fixed
+
+- **The one-off memory repair no longer runs silently.** Folding a model's memory
+  directories and compacting the episodic storage are seconds of startup nobody
+  asked for — on a large store, ten of them — and both announced themselves
+  through the operational log, whose console side sits at `WARNING`: the lines
+  reached `~/.mnemoai/logs/mnemoai.log` and never the screen, so the first start
+  after upgrading paused with nothing to explain it, which is what the
+  announcement exists to prevent. They are printed now (dim, above the startup
+  spinner, which keeps animating either side of them), and still recorded in the
+  log, since the screen line scrolls away and the file answers a later question
+  about that startup.
+- **A tools value the repair cannot read is left alone instead of emptied.** The
+  rewrite turned any unparseable `tools` payload into an empty string and wrote
+  that to both places the store keeps it — erasing the only record an episode has
+  of the tools it used, with no second copy to recover it from. Worst case was a
+  payload above the reader's 2 MB parse cap, i.e. exactly the biggest ones the
+  repair exists for: they came back as `""`. Now a value no name could be read out
+  of is written back unchanged, and the one-shot repair parses at any size (the
+  per-turn reader keeps its cap, where the cost is paid on every prompt). No
+  episode on disk was affected — measured across a real 2,310-row store, every
+  name-less value was the harmless two-character `[]` — so this was a latent
+  hazard rather than data already lost.
+
 ## [1.22.0] — 2026-09-14
 
 ### Added
