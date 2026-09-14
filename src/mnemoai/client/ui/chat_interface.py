@@ -141,6 +141,7 @@ class ChatInterface:
         ("Workspace", [
             ("/files", "Files this session read, changed or attached"),
             ("/diff [path]", "Uncommitted changes (this session's marked)"),
+            ("/why [path]", "Which prompt asked for a file's changes"),
             ("/copy [code|N]", "Copy the last answer or its code to clipboard"),
         ]),
         ("Modes", [
@@ -190,6 +191,7 @@ class ChatInterface:
         ("/context", "Show what's using the context window"),
         ("/files", "Files this session read, changed or attached with @"),
         ("/diff", "Show uncommitted changes (/diff <path> for one file)"),
+        ("/why", "Why a file looks like this (/why <path> for one file)"),
         ("/copy", "Copy the last answer (/copy code for its last code block)"),
         ("/export", "Export a shareable transcript (/export [md|txt] [path])"),
         ("/branch", "Fork this session at a turn and continue there"),
@@ -404,16 +406,32 @@ class ChatInterface:
         """Persist a successful episode and record the profiling outcome.
 
         The shared tail of both storage paths (legacy-delayed + immediate): store
-        the episode, then, when profiling is on, classify the task's intent and
-        record the tool outcome. ``task`` is the same value used for both.
+        the episode, then record the tool outcome. ``task`` is the same value used
+        for both.
         """
         self.client.episodic_memory.store_episode(
             task=task, tools_used=tools_used, outcome="success"
         )
         logger.debug("✓ Episode stored successfully")
-        if config.get("PROFILE", {}).get("USE_PROFILING", False):
+        self._record_tool_outcome(task, tools_used, True)
+
+    def _record_tool_outcome(self, task: str, tools_used: list, success: bool) -> None:
+        """Record how the turn that used these tools ended, when profiling is on.
+
+        Deliberately NOT part of episode storage, which only ever runs on the
+        success path: a success rate needs both outcomes, so a failed turn's tools
+        are recorded even though there is no episode to store. Best-effort — the
+        turn is over, and a profiling write must not surface as a turn failure.
+        """
+        if not tools_used:
+            return
+        if not config.get("PROFILE", {}).get("USE_PROFILING", False):
+            return
+        try:
             intent = self.client.profile_manager.classify_intent(task)
-            self.client.profile_manager.record_tool_outcome(intent, tools_used, True)
+            self.client.profile_manager.record_tool_outcome(intent, tools_used, success)
+        except Exception:
+            logger.debug("Could not record the tool outcome", exc_info=True)
 
     def __store_episode_in_episodic_memory(self, query: str) -> None:
         """Store the PREVIOUS interaction in episodic memory if successful (legacy
@@ -434,6 +452,21 @@ class ChatInterface:
                 current_turn_messages(self.client.previous_messages)
             )
 
+            # First user message in the conversation. Derived before the branch so
+            # a failure is filed under the same intent a success would have been —
+            # keyed on the previous query instead, the two outcomes of one task
+            # could land in different buckets.
+            initial_query = self.client.previous_query
+            for msg in self.client.previous_messages:
+                if msg.get("role") == "user":
+                    content = msg.get("content", [])
+                    if isinstance(content, list):
+                        for item in content:
+                            if isinstance(item, dict) and "text" in item:
+                                initial_query = item["text"]
+                                break
+                    break
+
             # Only store if actual work was done (tools used or substantial response).
             if not tools_used and len(self.client.previous_response) < 300:
                 logger.debug(
@@ -448,19 +481,6 @@ class ChatInterface:
                     "✓ Previous task marked as successful - storing in episodic memory"
                 )
                 logger.debug(f"Tools used: {[t.get('name') for t in tools_used]}")
-
-                # First user message in the conversation.
-                initial_query = self.client.previous_query
-                for msg in self.client.previous_messages:
-                    if msg.get("role") == "user":
-                        content = msg.get("content", [])
-                        if isinstance(content, list):
-                            for item in content:
-                                if isinstance(item, dict) and "text" in item:
-                                    initial_query = item["text"]
-                                    break
-                        break
-
                 logger.debug(f"Initial query extracted: {initial_query[:100]}...")
                 logger.debug(
                     f"Conversation length: {len(self.client.previous_messages)} messages"
@@ -471,6 +491,9 @@ class ChatInterface:
                 logger.debug(
                     "✗ Previous task not marked as successful - skipping storage"
                 )
+                # No episode to store, but the outcome is exactly what the success
+                # rate was missing.
+                self._record_tool_outcome(initial_query, tools_used, False)
         else:
             logger.debug("No previous interaction to evaluate")
 
@@ -509,6 +532,9 @@ class ChatInterface:
             self._store_success_episode(query, tools_used)
         else:
             logger.debug("✗ Task not marked as successful - skipping storage")
+            # No episode to store, but the outcome is exactly what the success rate
+            # was missing.
+            self._record_tool_outcome(query, tools_used, False)
 
     def _print_mcp_status(self) -> None:
         """Show configured MCP servers (built-in + external) and tool counts.
@@ -1077,13 +1103,41 @@ class ChatInterface:
         except KeyboardInterrupt:
             pass
 
-    @staticmethod
-    def _turn_end_line(started: float, stopped: bool = False) -> str:
+    def _turn_end_line(
+        self, started: float, mark: int = 0, stopped: bool = False
+    ) -> str:
         """The dim end-of-turn marker for a turn that began at ``started``
-        (a ``time.monotonic()`` reading)."""
+        (a ``time.monotonic()`` reading) with the file ledger at ``mark``."""
         return turn_view.render_turn_end(
-            time.monotonic() - started, time.time(), stopped=stopped
+            time.monotonic() - started,
+            time.time(),
+            stopped=stopped,
+            files=self._files_changed_since(mark),
         )
+
+    def _files_mark(self) -> int:
+        """The file ledger's position now, so a turn's own edits can be counted."""
+        return self._ledger_call("mark")
+
+    def _files_changed_since(self, mark: int) -> int:
+        """How many distinct files this turn changed.
+
+        Counted from the file LEDGER rather than the ``/why`` index: the ledger
+        already collapses two spellings and repeated edits of one file into one
+        row, and the marker must not depend on whether the index could be written.
+        """
+        return self._ledger_call("changed_since", mark)
+
+    def _ledger_call(self, method: str, *args) -> int:
+        """One guarded read of the agent's file ledger — 0 when there isn't one."""
+        ledger = getattr(getattr(self.client, "agent", None), "files", None)
+        fn = getattr(ledger, method, None)
+        if fn is None:
+            return 0
+        try:
+            return int(fn(*args))
+        except Exception:  # noqa: BLE001 — a marker must never break a turn
+            return 0
 
     @staticmethod
     def _note_interrupt(count: int, last_time: float) -> tuple:
@@ -1198,6 +1252,12 @@ class ChatInterface:
         # /diff [path] — read-only: it never stages, stashes or checks anything out.
         if query.lower() == "/diff" or query.lower().startswith("/diff "):
             print("\n" + self.client.diff_report(query[len("/diff"):].strip()) + "\n")
+            return None
+
+        # /why [path] — which prompt asked for a file's changes. Reads the index
+        # only: no model call, and nothing about the working tree is touched.
+        if query.lower() == "/why" or query.lower().startswith("/why "):
+            print("\n" + self.client.why_report(query[len("/why"):].strip()) + "\n")
             return None
 
         if query.lower() == "/copy" or query.lower().startswith("/copy "):
@@ -1353,11 +1413,11 @@ class ChatInterface:
             agent = getattr(self.client, "agent", None)
             has_undelivered = getattr(agent, "has_undelivered_background", None)
             if has_undelivered is not None and has_undelivered():
-                started = time.monotonic()
+                started, mark = time.monotonic(), self._files_mark()
                 self.client.query("")  # delivery-only turn
                 # Marked like any other turn — this one appeared without the user
                 # typing, so where it ends is even less obvious.
-                print("\n" + self._turn_end_line(started))
+                print("\n" + self._turn_end_line(started, mark))
                 notify.notify_turn_end(time.monotonic() - started)
             else:
                 print("Input cannot be empty. Please try again.")
@@ -1373,7 +1433,7 @@ class ChatInterface:
         elif not self.client.episodic_memory:
             logger.debug("Episodic memory is disabled")
 
-        started = time.monotonic()
+        started, mark = time.monotonic(), self._files_mark()
         try:
             response = self.client.query(query)
 
@@ -1408,10 +1468,12 @@ class ChatInterface:
             # Timed to HERE, not to where query() returned — the learning steps
             # above still hold the prompt, so they are part of the wait.
             if response == "Operation was cancelled.":
-                # Resolve the transient "(cancelling…)" line to a final state.
-                print(self._turn_end_line(started, stopped=True))
+                # Resolve the transient "(cancelling…)" line to a final state. The
+                # file count still belongs on it: a cancel doesn't undo the edits
+                # the turn had already made, so that is exactly when it's needed.
+                print(self._turn_end_line(started, mark, stopped=True))
             else:
-                print("\n" + self._turn_end_line(started))
+                print("\n" + self._turn_end_line(started, mark))
                 # …and, if the turn ran long enough that the user has plausibly
                 # looked away, ring the terminal. Deliberately NOT on the
                 # cancelled path above: their hand is already on the keyboard.
@@ -1422,7 +1484,7 @@ class ChatInterface:
             # The UI has already written "(cancelling…)", so it needs the same
             # resolution the graceful path gets — otherwise this is the one turn
             # that ends with nothing at all.
-            print(self._turn_end_line(started, stopped=True))
+            print(self._turn_end_line(started, mark, stopped=True))
             return None
         except Exception as e:
             # Full traceback to the log FILE only (console=False): the red line

@@ -75,7 +75,7 @@ class TestRecord:
         assert ledger.snapshot() == []
 
     def test_record_never_raises(self, ledger, monkeypatch):
-        monkeypatch.setattr(file_ledger, "_resolve", lambda p: 1 / 0)
+        monkeypatch.setattr(file_ledger, "resolve_path", lambda p: 1 / 0)
         ledger.record("/tmp/a", READ)  # must not propagate
         assert ledger.snapshot() == []
 
@@ -85,6 +85,24 @@ class TestRecord:
         changed = ledger.changed_paths()
         assert len(changed) == 1
         assert next(iter(changed)).endswith("write-me")
+
+    def test_changed_since_counts_one_turns_work(self, ledger):
+        # What the end-of-turn marker reports: files changed AFTER the mark, each
+        # once however often it was edited, and never one that was only read.
+        ledger.record("/tmp/before", WRITTEN)
+        mark = ledger.mark()
+        ledger.record("/tmp/a", WRITTEN)
+        ledger.record("/tmp/a", WRITTEN)
+        ledger.record("/tmp/b", WRITTEN)
+        ledger.record("/tmp/c", READ)
+        assert ledger.changed_since(mark) == 2
+        assert ledger.changed_since(ledger.mark()) == 0
+
+    def test_a_file_changed_before_the_mark_and_read_after_it_is_not_counted(self, ledger):
+        ledger.record("/tmp/a", WRITTEN)
+        mark = ledger.mark()
+        ledger.record("/tmp/a", READ)  # re-reading it is not changing it again
+        assert ledger.changed_since(mark) == 0
 
     def test_reset_forgets_everything(self, ledger):
         ledger.record("/tmp/a", WRITTEN)

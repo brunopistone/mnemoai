@@ -18,6 +18,7 @@ from mnemoai.client import (
     doctor,
     file_ledger,
     hooks,
+    provenance,
     rewind,
     session_artifacts,
     transcript_export,
@@ -37,7 +38,9 @@ from mnemoai.client.managers.agent_conversation_manager import (
 from mnemoai.client.managers.user_profile_manager import UserProfileManager
 from mnemoai.client.mcp_config import load_external_servers
 from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
+from mnemoai.client.memory.episodic_compaction import compact_stores
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
+from mnemoai.client.memory.model_dir_merge import unfork_model_dirs
 from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector, current_turn_messages
 from mnemoai.client.session_log import (
@@ -156,6 +159,16 @@ class LangGraphClient:
             spinner_lock=self.spinner_lock,
         )
 
+        # Both stores below are model-scoped, and the directory key used to be the
+        # model id verbatim — so a Bedrock cross-region routing prefix forked the
+        # memory of one model in two (see utils.paths.normalize_model_key). Fold
+        # any existing fork back together BEFORE either store opens: a merge into
+        # a live store wouldn't be visible until the next restart.
+        if config.get("ENABLE_EPISODIC_MEMORY", False) or config.get(
+            "ENABLE_PLAYBOOK", False
+        ):
+            unfork_model_dirs(config.get("MODEL_ID", {}).get("NAME", "default"))
+
         self.episodic_memory = None
         if config.get("ENABLE_EPISODIC_MEMORY", False):
             self._initialize_episodic_memory()
@@ -210,6 +223,16 @@ class LangGraphClient:
         # Model-scoped so switching models doesn't contaminate the vector store.
         episodic_path = os.path.join(self._model_scoped_dir(), "episodic_memory")
         os.makedirs(episodic_path, exist_ok=True)
+
+        # Reclaim the legacy per-episode tool payload BEFORE any store is opened:
+        # the repair is raw SQL on a closed database (the Chroma API would append
+        # a write-ahead record per update and grow what it shrinks). Every model's
+        # store, not just this session's — those bytes are the same bytes, and a
+        # store nobody opens again would keep them forever. Best-effort.
+        try:
+            compact_stores(Path(self._model_scoped_dir()).parent)
+        except Exception as e:
+            logger.debug(f"Episodic storage compaction skipped: {e}")
 
         store_type = (
             config.get("EPISODIC_MEMORY", {}).get("STORE_TYPE", "chromadb").lower()
@@ -1215,7 +1238,10 @@ class LangGraphClient:
 
         Best-effort and opt-out: ``SESSION_MAX_AGE_DAYS: 0`` disables session
         persistence entirely (nothing is written), matching the way the sweep
-        knob turns the feature off.
+        knob turns the feature off. The ``/why`` change index rides the same knob
+        — it records what the user typed, so switching persistence off must
+        switch it off too — but in its own ``try``, since it is derived from the
+        transcript and must not be able to prevent one.
         """
         if not self.agent or self._session_max_age_days() <= 0:
             return
@@ -1223,6 +1249,10 @@ class LangGraphClient:
             self.agent.session_log = SessionLog(model=self.model_name_for_log())
         except Exception as e:  # noqa: BLE001 — never block startup
             logger.debug(f"Session log unavailable: {e}")
+        try:
+            self.agent.provenance = provenance.ProvenanceLog()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Change index unavailable: {e}")
 
     def model_name_for_log(self) -> str:
         """Best-effort model id, recorded in the session log's meta record."""
@@ -1339,6 +1369,14 @@ class LangGraphClient:
     def diff_report(self, path: str = "") -> str:
         """The ``/diff`` report: uncommitted changes, this session's edits marked."""
         return diff_report.report(self, path)
+
+    def why_report(self, path: str = "") -> str:
+        """The ``/why`` report: which prompt asked for the changes in a file.
+
+        ``/diff`` says what is different and ``/files`` what was touched; this one
+        answers the question those two leave open — why a line of code is there.
+        """
+        return provenance.report(self, path)
 
     def copy_last(self, arg: str = "") -> str:
         """``/copy [code|N]``: put an answer on the clipboard; returns the notice."""

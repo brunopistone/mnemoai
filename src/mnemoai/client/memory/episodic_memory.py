@@ -9,6 +9,7 @@ from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
 from .chroma_store import ChromaEpisodicStore
+from .episode_tools import NO_TOOLS, clip_task, format_tools
 from .faiss_store import FAISSEpisodicStore
 
 
@@ -118,18 +119,23 @@ class EpisodicMemoryManager:
             )
             return
 
+        # Store the tool NAMES, never the live records: `str(tools_used)` is the
+        # repr of every argument and every full result, re-escaped per nesting
+        # level (1.1 MB for one episode), and no reader looks past the names.
+        tool_summary = format_tools(tools_used)
+        task_text = clip_task(task)
         metadata = {
-            "task": task,
-            "tools": str(tools_used),
+            "task": task_text,
+            "tools": tool_summary,
             "outcome": outcome,
             "timestamp": datetime.now().isoformat(),
         }
 
-        # Create compact searchable text - just task and tool names
-        tool_names = [t.get("name", "") for t in tools_used]
-        tool_summary = ", ".join(tool_names) if tool_names else "no tools"
-
-        text = f"Task: {task}\nTools used: {tool_summary}\nOutcome: {outcome}"
+        # Compact searchable text - just task and tool names
+        text = (
+            f"Task: {task_text}\nTools used: {tool_summary or NO_TOOLS}\n"
+            f"Outcome: {outcome}"
+        )
 
         # Truncate to fit embedding model context (configurable)
         token_count = self.count_tokens(text)

@@ -253,6 +253,16 @@ class SessionLog:
         if summary or kept is not None:
             self.log_compaction(summary=summary, kept=kept or [], seeded=True)
 
+    @property
+    def next_turn(self) -> int:
+        """The number the turn now running will be recorded as.
+
+        ``_turn`` only advances when a turn is FLUSHED, so anything written
+        mid-turn that wants to point back at it — the ``/why`` change index — has
+        to ask for the number in advance.
+        """
+        return self._turn + 1
+
     def log_turn(self, messages: List[Any]) -> None:
         """Record the messages this turn added (already-final LangChain messages)."""
         if self.path is None or not messages:

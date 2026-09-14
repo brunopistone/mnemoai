@@ -266,6 +266,20 @@ class TestTurnEnd:
         assert "⊘" in out and "stopped" in out and "12s" in out
         assert "done" not in out
 
+    def test_changed_files_are_counted_and_point_at_why(self):
+        out = render_turn_end(9.0, self._AT, files=3)
+        assert "3 files" in out and "/why" in out
+        assert "1 file" in render_turn_end(9.0, self._AT, files=1)
+
+    def test_a_turn_that_changed_nothing_carries_no_marker(self):
+        # A pointer that is always there points at nothing in particular.
+        out = render_turn_end(9.0, self._AT, files=0)
+        assert "/why" not in out and "file" not in out
+
+    def test_a_cancelled_turn_still_reports_what_it_changed(self):
+        # A cancel doesn't undo the edits already made — that's when it matters.
+        assert "2 files" in render_turn_end(9.0, self._AT, stopped=True, files=2)
+
 
 class TestFileOpRendering:
     """file_edit / fs_write get a structured block (Update/Create header +

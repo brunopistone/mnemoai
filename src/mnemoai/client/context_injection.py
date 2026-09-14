@@ -14,11 +14,11 @@ the ``plan_policy``/``cancellation`` collaborator pattern. No import of the clie
 class (functions receive the instance), so there is no import cycle.
 """
 
-import ast
 import json
 from datetime import date
 
 from mnemoai.client.agent.subagents import available_subagents_block
+from mnemoai.client.memory.episode_tools import describe_tools
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import plans_dir
@@ -323,17 +323,9 @@ def inject_episodic_context(client, prompt: str) -> str:
     context = "[Episodic Memory - Similar Past Tasks]\n"
     for i, ep in enumerate(relevant_episodes, 1):
         task = ep.get("task", "Unknown task")[:70]
-        tools = ep.get("tools", "")
-        tool_names = []
-        if isinstance(tools, str):
-            try:
-                tools_list = ast.literal_eval(tools)
-                tool_names = [
-                    t.get("name", "") for t in tools_list if isinstance(t, dict)
-                ]
-            except:
-                pass
-        tools_str = ", ".join(tool_names) if tool_names else "no tools"
+        # Reads either stored shape (name list, or a pre-1.22 record repr) —
+        # see memory/episode_tools.py, which is also what the writer uses.
+        tools_str = describe_tools(ep.get("tools", ""))
         similarity = ep.get("similarity", 0)
         context += f'{i}. "{task}" → {tools_str} (similarity: {similarity:.2f})\n'
 
