@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from mnemoai.client.memory.episode_tools import compact_tools
+from mnemoai.utils.console import print_notice
 from mnemoai.utils.logger import logger
 
 _DB_NAME = "chroma.sqlite3"
@@ -133,8 +134,10 @@ def compact_stores(models_root) -> list[Compaction]:
 
     total = sum(_size(p / _DB_NAME) for p in pending)
     # Announced BEFORE the work: it is seconds of startup the user did not ask
-    # for, once, and a silent pause reads as a hang.
-    logger.info(
+    # for, once, and a silent pause reads as a hang. On SCREEN as well as in the
+    # log — an INFO record reaches only the file (see console.print_notice), so
+    # logging it alone leaves the pause exactly as unexplained as saying nothing.
+    _announce(
         f"Compacting episodic memory storage ({_mb(total)} across "
         f"{len(pending)} store{'s' if len(pending) != 1 else ''}, one-off)…"
     )
@@ -142,8 +145,17 @@ def compact_stores(models_root) -> list[Compaction]:
     results = [r for r in (compact_store(p) for p in pending) if r]
     if results:
         reclaimed = sum(r.reclaimed for r in results)
-        logger.info(f"Episodic memory storage compacted: {_mb(reclaimed)} reclaimed")
+        _announce(f"Episodic memory storage compacted: {_mb(reclaimed)} reclaimed")
     return results
+
+
+def _announce(message: str) -> None:
+    """Tell the user, and record it. Never raises: this is housekeeping."""
+    logger.info(message)
+    try:
+        print_notice(message)
+    except Exception:
+        logger.debug("Could not print the compaction notice", exc_info=True)
 
 
 def _compact_metadata(con: sqlite3.Connection) -> int:
@@ -190,7 +202,10 @@ def _compact_queue(con: sqlite3.Connection) -> int:
         tools = payload.get("tools")
         if not isinstance(tools, str) or len(tools) <= _OVERSIZED_CHARS:
             continue
-        payload["tools"] = compact_tools(tools)
+        compacted = compact_tools(tools)
+        if compacted == tools:
+            continue  # nothing was read out of it; the row stays as it is
+        payload["tools"] = compacted
         con.execute(
             "UPDATE embeddings_queue SET metadata = ? WHERE seq_id = ?",
             (json.dumps(payload, separators=(",", ":")), seq_id),

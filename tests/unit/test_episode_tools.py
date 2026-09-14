@@ -165,6 +165,31 @@ class TestCompactTools:
         assert compact_tools(once) == once
         assert compact_tools(compact_tools(once)) == once
 
+    def test_a_value_it_cannot_read_is_left_alone_not_emptied(self):
+        # The writer's rule, and the opposite of the reader's: no name came back,
+        # so there is nothing to write — and "" would destroy the field this
+        # whole module exists to preserve.
+        unreadable = "[{'name': <object at 0x1>}]"
+        assert parse_tools(unreadable) == []
+        assert compact_tools(unreadable) == unreadable
+        assert compact_tools("[[[[[[") == "[[[[[["
+
+    def test_a_value_past_the_readers_cap_is_still_rewritten(self):
+        # The reader refuses to parse this per turn; the compaction runs once and
+        # exists for exactly these, so the cap must not exempt them.
+        legacy = "[" + "{'name': 'fs_read'}," * 200_000 + "]"
+        assert len(legacy) > episode_tools._MAX_LEGACY_CHARS
+        assert parse_tools(legacy) == []
+        assert compact_tools(legacy) == "fs_read"
+
+    def test_is_idempotent_on_a_value_it_could_not_read(self):
+        unreadable = "[{'name': <object at 0x1>}]"
+        assert compact_tools(compact_tools(unreadable)) == unreadable
+
+    def test_no_tools_stays_empty(self):
+        # An episode that really used none must not come back as a literal "[]".
+        assert compact_tools(format_tools([])) == ""
+
 
 class TestClipTask:
     def test_short_task_is_untouched(self):
@@ -391,6 +416,42 @@ class TestCompactStore:
         (store / "chroma.sqlite3").write_bytes(b"not a database" * 30_000)
         assert compact_store(store) is None
 
+    def test_a_value_it_cannot_read_is_left_alone_in_both_tables(
+        self, tmp_path, small_gate
+    ):
+        # The rewrite must never trade an oversized field for an empty one: the
+        # names are the only thing an episode records about its tools, and there
+        # is no second copy to recover them from.
+        store = _make_store(tmp_path, episodes=8, payload_chars=40_000)
+        unreadable = "[{'name': <object at 0x1>, 'result': '" + "r" * 40_000 + "'}]"
+        con = sqlite3.connect(store / "chroma.sqlite3")
+        con.execute(
+            "UPDATE embedding_metadata SET string_value = ? WHERE id = 0 AND key = ?",
+            (unreadable, "tools"),
+        )
+        row = con.execute(
+            "SELECT metadata FROM embeddings_queue WHERE seq_id = 1"
+        ).fetchone()
+        payload = json.loads(row[0])
+        payload["tools"] = unreadable
+        con.execute(
+            "UPDATE embeddings_queue SET metadata = ? WHERE seq_id = 1",
+            (json.dumps(payload),),
+        )
+        con.commit()
+        con.close()
+
+        result = compact_store(store)
+
+        # Counted as untouched in both tables, and still there byte for byte.
+        assert result.episodes == 7
+        assert result.queue_rows == 7
+        meta, queue = _rows(store)
+        assert dict(meta)[0] == unreadable
+        assert json.loads(queue[0][2])["tools"] == unreadable
+        # The readable ones were still rewritten.
+        assert {value for _id, value in meta if _id != 0} == {"fs_read, execute_bash"}
+
     def test_foreign_queue_metadata_is_left_exactly_as_is(self, tmp_path, small_gate):
         store = _make_store(tmp_path, episodes=8, payload_chars=40_000)
         alien = "~not json~" * 500
@@ -428,3 +489,42 @@ class TestCompactStores:
 
     def test_missing_root(self, tmp_path):
         assert compact_stores(tmp_path / "nope") == []
+
+    def test_the_work_is_announced_on_SCREEN_before_and_after(
+        self, tmp_path, small_gate, capsys
+    ):
+        # The announcement exists because these are seconds of startup nobody
+        # asked for and a silent pause reads as a hang — so it has to be PRINTED:
+        # the console log handler sits at LOG_LEVEL (WARNING by default), which
+        # keeps a logger.info in the file and off the screen.
+        _make_store(tmp_path, 8, 40_000, name="model-a")
+
+        compact_stores(tmp_path)
+
+        out = capsys.readouterr().out
+        assert "Compacting episodic memory storage" in out
+        assert "1 store," in out  # not "1 stores"
+        assert "reclaimed" in out
+        # Before the work, not only after it.
+        assert out.index("Compacting") < out.index("reclaimed")
+
+    def test_nothing_is_announced_when_there_is_nothing_to_do(
+        self, tmp_path, small_gate, capsys
+    ):
+        _make_store(tmp_path, 1, 5_000, name="model-c")
+        assert compact_stores(tmp_path) == []
+        assert capsys.readouterr().out == ""
+
+    def test_a_broken_notice_does_not_break_the_compaction(
+        self, tmp_path, small_gate, monkeypatch
+    ):
+        def boom(message):
+            raise RuntimeError("no terminal")
+
+        monkeypatch.setattr(episodic_compaction, "print_notice", boom)
+        store = _make_store(tmp_path, 8, 40_000, name="model-a")
+
+        assert len(compact_stores(tmp_path)) == 1
+
+        meta, _queue = _rows(store)
+        assert {value for _id, value in meta} == {"fs_read, execute_bash"}
