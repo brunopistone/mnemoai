@@ -34,6 +34,7 @@ import chromadb
 
 from mnemoai.client.memory.episode_tools import compact_tools
 from mnemoai.utils.atomic_write import atomic_write_json
+from mnemoai.utils.console import print_notice
 from mnemoai.utils.logger import log_file_hint, logger
 from mnemoai.utils.paths import normalize_model_key, profile_dir
 
@@ -103,7 +104,16 @@ def unfork_model_dirs(model_name: str, profile: str = None) -> List[Unfork]:
                 continue
             if record.carried:
                 done.append(record)
-                logger.info(_describe(record))
+                # On screen too: this reorganizes the user's memory directories
+                # and leaves the donor aside under a new name, which they would
+                # otherwise only ever discover by accident (an INFO record goes
+                # to the log file alone — see console.print_notice).
+                notice = _describe(record)
+                logger.info(notice)
+                try:
+                    print_notice(notice)
+                except Exception:
+                    logger.debug("Could not print the fold notice", exc_info=True)
     except Exception:
         logger.debug("Model memory unfork skipped", exc_info=True)
     finally:

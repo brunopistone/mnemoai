@@ -74,8 +74,25 @@ def describe_tools(value) -> str:
 
 def compact_tools(value) -> str:
     """A stored value rewritten to its name list — idempotent, so re-running the
-    on-disk compaction over an already-compacted store changes nothing."""
-    return _join(parse_tools(value))
+    on-disk compaction over an already-compacted store changes nothing.
+
+    Differs from the reader on the two points a WRITER has to get right. A value
+    no name could be read out of is returned UNCHANGED, never emptied: an
+    oversized field is merely large, an emptied one is gone for good. And a
+    legacy repr is parsed at ANY size — this runs once, at startup, and the
+    payloads past the reader's per-turn cap are precisely the ones worth
+    rewriting, so the cap would exempt the biggest offenders from the repair.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    if text[0] in "[{":
+        names = _dedupe(_legacy_names(text, limit=0))
+    else:
+        names = _dedupe(text.split(","))
+    return _join(names) if names else value
 
 
 def clip_task(task) -> str:
@@ -88,9 +105,13 @@ def clip_task(task) -> str:
     return task[:MAX_TASK_CHARS] + "…"
 
 
-def _legacy_names(text: str):
-    """Names out of a ``str(tools_used)`` repr; empty on anything unparseable."""
-    if len(text) > _MAX_LEGACY_CHARS:
+def _legacy_names(text: str, limit: int = _MAX_LEGACY_CHARS):
+    """Names out of a ``str(tools_used)`` repr; empty on anything unparseable.
+
+    ``limit=0`` lifts the size cap for the one-shot compaction (see
+    :func:`compact_tools`); a per-turn reader must keep it.
+    """
+    if limit and len(text) > limit:
         return []
     try:
         records = ast.literal_eval(text)

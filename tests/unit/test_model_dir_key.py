@@ -391,6 +391,32 @@ class TestReporting:
     def test_a_no_op_is_not_reported(self):
         assert Unfork(donor="a", target="b").carried is False
 
+    def test_the_fold_is_announced_on_SCREEN_not_only_in_the_log(
+        self, models_root, capsys
+    ):
+        # The console log handler sits at LOG_LEVEL (WARNING by default), so a
+        # logger.info reaches the file and nothing else — this fold renames the
+        # user's memory directories, so it has to be printed.
+        _episodic_store(models_root, "global.anthropic.claude-opus-5", [("e1", "x")])
+
+        assert unfork_model_dirs("anthropic.claude-opus-5")
+
+        assert "anthropic.claude-opus-5" in capsys.readouterr().out
+
+    def test_a_broken_notice_does_not_break_the_fold(self, models_root, monkeypatch):
+        def boom(message):
+            raise RuntimeError("no terminal")
+
+        monkeypatch.setattr(model_dir_merge, "print_notice", boom)
+        _episodic_store(models_root, "global.anthropic.claude-opus-5", [("e1", "x")])
+
+        records = unfork_model_dirs("anthropic.claude-opus-5")
+
+        assert len(records) == 1
+        assert _read_episodes(
+            models_root / "anthropic.claude-opus-5" / "episodic_memory"
+        ).keys() == {"e1"}
+
     def test_the_line_names_both_sides_and_the_copy(self):
         line = model_dir_merge._describe(
             Unfork(
