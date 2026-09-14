@@ -7,6 +7,85 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.22.0] — 2026-09-14
+
+### Added
+
+- **`/why [path]` — which prompt asked for the code you're looking at.** `/diff`
+  says what is different and `/files` what this session touched; neither answers
+  the question you have when you open a file weeks later and don't recognize a
+  function in it. `/why <path>` lists every change this app made to that file,
+  newest first, grouped by session and each with the turn number, what the call
+  did (`+3 -2`, `wrote 397 lines`) and **the prompt that asked for it**. Bare
+  `/why` lists every file with a recorded change, preferring this session's.
+  Local and read-only like the rest of the reports family: no model call, so it
+  costs no turn, and nothing about the working tree is touched.
+- **A finished turn says how many files it changed.** The end-of-turn line now
+  reads `· done in 1m12s · 3 files · /why · 16:19` when the turn changed
+  something, naming the command that will explain it. Omitted entirely when the
+  turn changed nothing, so the marker means something whenever it is there — and
+  kept on a cancelled turn (`⊘ stopped after 12s · 2 files · /why`), since a
+  cancel doesn't undo the edits already made.
+- The index is written from the one place every tool call passes through, so it
+  accounts for work nobody watched — a background sub-agent, a parallel wave —
+  and is kept per project like sessions, since a file belongs to a project and
+  not to a conversation. It holds no file content: pointers plus a summary short
+  enough to stand alone. It is bounded by **size** rather than age (2 MB, oldest
+  half dropped) because it exists to outlive the transcripts it was derived from,
+  and it is disabled by the same `SESSION_MAX_AGE_DAYS: 0` knob that turns
+  session recording off — it records what you typed, so switching that off
+  switches this off too. A `/rewind` deliberately does not withdraw an entry:
+  rewinding moves the conversation only, so the edit is still in the file and the
+  prompt behind it is still the true answer.
+
+### Fixed
+
+- **Episodic memory was storing every tool argument and every full tool result,
+  three times over.** An episode's `tools` field held the repr of the live tool
+  records — re-escaped once per nesting level — while its only two readers (the
+  recall line injected into a prompt, and the keyword index) want nothing but the
+  tool names. One episode reached **1.1 MB**, kept twice on disk by ChromaDB (the
+  metadata table and its write-ahead log) and indexed a third time. Episodes now
+  store the de-duplicated name list: a task that called `fs_read` forty times
+  says one thing, not forty. The reader accepts both shapes, so episodes already
+  on disk keep working.
+- **And the bytes already written are reclaimed.** A one-shot compaction rewrites
+  the legacy payload in both places ChromaDB keeps a copy, then VACUUMs, at
+  startup and before any store is opened — for every model's store, not just the
+  one this session uses. Nothing is deleted: every episode, id, vector and
+  embedding survives, so the store stays exactly as searchable as it was.
+  Measured on a real store: **272.0 MB → 4.5 MB with all 618 episodes intact**,
+  and about **1.2 GB** reclaimed across one profile's stores. (The write-ahead log
+  is half the problem and could never have been purged on its own: ChromaDB
+  purges its queue below the minimum sequence its segments report, and the local
+  vector segment reports none, so that minimum is always "nothing".)
+- **Switching between a Bedrock regional and global model id no longer starts
+  memory from scratch.** Episodic memory and the playbook are scoped per chat
+  model, and the directory was keyed by the model id verbatim — but a
+  cross-region inference profile only prefixes the base id with its routing scope
+  (`global.anthropic.claude-opus-5` vs `anthropic.claude-opus-5`). Same weights,
+  same answers, and yet each prefix silently grew its own empty store. The key
+  now drops a routing prefix, and any directories already written under the
+  un-normalized key are folded back together at startup, before either store
+  opens. Nothing is deleted: a component the surviving directory doesn't have is
+  moved, one that has to be combined is copied and the donor renamed aside.
+  Episodes are copied with their **stored** vectors, so no embedding model is
+  called and nothing is re-embedded; a store written by a different embedding
+  model is left alone, since its vectors aren't comparable.
+- **A tool's recorded success rate could only ever be 100%.** Tool outcomes are
+  recorded per intent to build the `Tools:` hint the profile injects — but the
+  recording call was only ever reached from the success path, with the success
+  flag hardcoded to `True`. Every sample was a success: one real profile held
+  **39,375 samples at a 100.00% rate with not one recorded failure**, which is a
+  frequency count wearing a success label. A failed turn's tools are now recorded
+  too (the flag is required, so the old defaulting can't come back), attributed to
+  the same intent a success would have been filed under. Two consequences: a
+  profile whose samples contain no failure anywhere cannot be told apart from the
+  poisoned kind, so those samples are cleared once and re-learned; and no `Tools:`
+  hint is emitted for an intent whose outcomes don't discriminate yet, because
+  ranking equal rates returns whichever tool the dictionary happened to yield
+  first — a recommendation chosen by nothing.
+
 ## [1.21.2] — 2026-09-08
 
 ### Fixed
