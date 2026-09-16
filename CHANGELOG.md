@@ -7,6 +7,53 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.23.0] — 2026-09-16
+
+### Added
+
+- **A question the model asks you can now take more than one answer.** When it
+  hands a decision back with `ask_user_question`, a `multiple` flag turns the
+  picker into a pick-any list — for a question whose answer is several of the rows
+  rather than one of them ("which of these should I fix?"), where a pick-one
+  picker made you answer a fraction of the question and wait to be asked the rest.
+  The free-text note and the row for declining every option are unchanged, so
+  there is still always a way out of the choice.
+- **A local MLX server is an option in the first-run configurator.** Choosing it
+  writes a complete config from a template of its own — `HOST`/`PORT`, `TOP_K` /
+  `MIN_P` / `REPETITION_PENALTY`, and `KEEP_ALIVE` for how long the weights stay
+  resident — rather than the local-Ollama template with values transformed onto
+  it, which silently dropped the knobs only this provider carries. The template is
+  also seeded into `~/.mnemoai/config/` as `config.yaml.mlx.example` on the next
+  start, existing installs included.
+
+### Changed
+
+- **External MCP servers now start alongside each other.** Each was initialized
+  and had its tool list fetched in turn, so the wait before the first prompt was
+  the sum of every declared server's startup; it is now the slowest one. A server
+  that fails is still named on screen and skipped, with its traceback in the log.
+- **The model and the tool server come up together.** Provider setup and the MCP
+  subprocess boot ran one after the other although neither needs the other's
+  result. The model is now initialized while the subprocess starts, and waited for
+  at the first point that actually needs it.
+
+### Fixed
+
+- **Page Up / Page Down in a picker no longer opens the row you were on before.**
+  The `--resume` and `/load` pickers, the model's own question dialog and the
+  configurator all confirm the highlighted row with Enter — but paging moved the
+  highlight without moving the selection, so PgDn then Enter opened a different
+  conversation than the one on screen. Paging now selects the row it lands on, and
+  a confirm reads the highlight rather than the last committed value, so what the
+  dialog shows and what it returns cannot disagree.
+- **An unloadable local model says so at once instead of retrying for minutes.** A
+  local server reports "the weights for this model cannot be loaded" — a wrong
+  path, an unsupported format, too little memory — with a `503`, the status a
+  retry usually does recover from, so the request was re-sent on the full backoff
+  budget and the one line naming the cause was buried under the attempts. A
+  failure that names a cause no retry can change is now treated as final; the
+  sibling `503` a server sends while it restarts a handler is still retried.
+
 ## [1.22.1] — 2026-09-14
 
 ### Fixed
