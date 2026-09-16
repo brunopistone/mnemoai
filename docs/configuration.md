@@ -442,7 +442,11 @@ Notes:
   keeps the main model).
 - **`/usage` attributes each call to the model that ran it**, so a smaller router
   shows up as its own row.
-- `/params` re-derives them, so an edit applies without restarting.
+- **Changing one applies without restarting**, from either command: `/params` for
+  its inference knobs, `/model` for the model itself. The conversation continues —
+  unlike `/model` on the chat, vision or embeddings model, which restarts. (The one
+  exception: if that same edit also switches routing or orchestration **on**, the
+  app restarts, because the router and the orchestrator are built at startup.)
 - `LLM.SUMMARIZATION_THINK: true` takes precedence over the `SUMMARY` area: it
   means "summarize with the full model, thinking and all".
 - The **aggregator is deliberately not an area.** Its output is the answer you

@@ -32,6 +32,7 @@ from mnemoai.client.ui.tui import (
     select_from_list,
 )
 from mnemoai.client.user_commands import UserCommandStore
+from mnemoai.models.area_models import AREAS
 from mnemoai.utils.config import config
 from mnemoai.utils.configurator import (
     run_features_override,
@@ -1274,15 +1275,34 @@ class ChatInterface:
             self._handle_branch_command(query[len("/branch"):].strip())
             return None
 
-        # /config, /model, /params rewrite config.yaml then restart in place so
-        # every setting (incl. boot-time MCP toggles) takes effect.
+        # /config rewrites config.yaml wholesale, so it restarts in place — the only
+        # way to apply every setting, incl. the boot-time MCP toggles.
         if query.lower() == "/config":
             if run_reconfigure() is not None:
                 self._restart_in_place()
             return None
 
+        # /model normally restarts for the same reason: the provider, model name and
+        # connection are wired at startup. An AREA_MODELS row is the exception — it
+        # only says which model an internal call runs on (classification,
+        # decomposition, the compaction summary), which is re-pointable in a running
+        # process, so it reloads in place and KEEPS the conversation, exactly as
+        # /params does on those same rows. Enabling the area's own feature is not
+        # that case: the router and the orchestrator are built during startup, so
+        # there is no live holder to re-point.
         if query.lower() == "/model":
-            if run_model_override() is not None:
+            written = run_model_override()
+            if written is None:
+                return None
+            in_place = written.section in AREAS and not written.enabled_feature
+            if in_place and self.client.reload_area_models():
+                print(
+                    f"\n\033[92mNew {written.section.lower()} model applied.\033[0m "
+                    "This conversation continues.\n"
+                )
+            else:
+                # Either a change the running process can't absorb, or a reload that
+                # failed — both leave the restart as the only correct way to apply it.
                 self._restart_in_place()
             return None
 

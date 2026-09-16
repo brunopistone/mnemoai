@@ -1871,6 +1871,84 @@ class TestPerAreaModels:
         assert d["MODEL_ID"]["TEMPERATURE"] == 0.7  # chat model untouched
 
 
+class TestModelOverrideReportsWhatItWrote:
+    """`/model` returns the section it edited, not just the file it wrote to.
+
+    The caller has to choose between replacing the process and re-pointing a model
+    in place, and only the write knows which. A bare Path could say no more than
+    "something changed", which left one apply for every row: the broadest one.
+    """
+
+    CFG = textwrap.dedent(
+        """\
+        MODEL_ID:
+          NAME: llama3.1:8b
+          TYPE: ollama
+          HOST: localhost
+          PORT: 11434
+        ENABLE_ROUTING: false
+        ENABLE_ORCHESTRATION: true
+        """
+    )
+
+    def _run(self, monkeypatch, tmp_path, row, *, gate=True, name="tiny:1b"):
+        """Drive run_model_override() for one picker row against a temp config."""
+        from mnemoai.utils import configurator as C
+
+        dest = tmp_path / "config.yaml"
+        dest.write_text(self.CFG)
+        monkeypatch.setattr(C, "config_path", lambda: dest)
+        monkeypatch.setattr(C, "_is_tty", lambda: True)
+        monkeypatch.setattr(C, "_ask_choice", lambda *a, **k: row)
+
+        # Two different yes/no questions reach the same prompt: the feature gate
+        # ("… Enable it?") and the same-as-chat shortcut. Answering the second yes
+        # would write nothing at all, so it is always declined here.
+        def _bool(prompt, default=True, **k):
+            return gate if "Enable it?" in prompt else False
+
+        monkeypatch.setattr(C, "_ask_bool", _bool)
+        monkeypatch.setattr(C, "_prompt_provider_type", lambda s, cur: "ollama")
+        monkeypatch.setattr(
+            C, "_ask",
+            lambda p, default=None, **k: name if "Model name" in p else (default or ""),
+        )
+        monkeypatch.setattr(C, "_ask_number", lambda *a, **k: None)
+        return C.run_model_override(), dest
+
+    def test_the_chat_model_row_names_its_own_section(self, monkeypatch, tmp_path):
+        written, dest = self._run(monkeypatch, tmp_path, "1")
+        assert written.section == "MODEL_ID"
+        assert written.enabled_feature is False
+        # The old contract survives: a truthy result naming the file it wrote.
+        assert written.path == dest
+
+    def test_an_area_row_names_the_area(self, monkeypatch, tmp_path):
+        # Orchestration is already on, so nothing but the area block changed.
+        written, _ = self._run(monkeypatch, tmp_path, "5")
+        assert written.section == "ORCHESTRATOR"
+        assert written.enabled_feature is False
+
+    def test_enabling_the_areas_feature_is_reported(self, monkeypatch, tmp_path):
+        # Routing is off, so this edit also flips ENABLE_ROUTING — a change the
+        # running process can't absorb, and the caller can't see any other way.
+        written, dest = self._run(monkeypatch, tmp_path, "4")
+        assert written.section == "ROUTER"
+        assert written.enabled_feature is True
+        assert yaml.safe_load(dest.read_text())["ENABLE_ROUTING"] is True
+
+    def test_declining_the_gate_writes_nothing(self, monkeypatch, tmp_path):
+        written, dest = self._run(monkeypatch, tmp_path, "4", gate=False)
+        assert written is None
+        assert dest.read_text() == self.CFG
+
+    def test_an_unchanged_config_reports_nothing(self, monkeypatch, tmp_path):
+        # No model name given: the area keeps the chat model, so the file is
+        # identical and there is nothing to apply.
+        written, _ = self._run(monkeypatch, tmp_path, "6", name="")
+        assert written is None
+
+
 class TestChoiceDialogTracksTheArrowKeys:
     """`/model` + the `/config` wizard route every single-choice prompt through
     `_dialog_radio`, which built its `RadioList` without `select_on_focus`.
