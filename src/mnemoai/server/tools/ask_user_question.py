@@ -6,7 +6,8 @@ request, the code, or a sensible default), the model calls
 wall of alternatives. The call is intercepted client-side (the MCP server is a
 piped subprocess and can't prompt the terminal): the client shows a picker —
 options, a free-text note, and a row for declining every option — and returns
-the answer as the tool result.
+the answer as the tool result. ``multiple`` makes it a pick-any picker, for a
+question whose answer is several of the rows rather than one of them.
 
 Thin server surface, client-side logic — the same split as ``exit_plan_mode``
 (``plan_mode_exit.py``) and ``use_skill`` (``skill_tool.py``). The body here is a
@@ -29,7 +30,9 @@ def register_ask_user_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    def ask_user_question(question: str, options: list[str]) -> str:
+    def ask_user_question(
+        question: str, options: list[str], multiple: bool = False
+    ) -> str:
         """Ask the user to choose between concrete options, and wait for the answer.
 
         Use this ONLY when you are blocked on a decision that is genuinely the
@@ -43,23 +46,28 @@ def register_ask_user_tools(mcp: FastMCP) -> None:
         read, re-asking something already answered, or offering options you could
         rank yourself.
 
-        Ask at most one question at a time, and only when already-running work
-        doesn't answer it. A sub-agent cannot use this tool (it has no direct user)
-        and must decide for itself.
+        Ask one question per call, and only when already-running work doesn't
+        answer it. A sub-agent cannot use this tool (it has no direct user) and
+        must decide for itself.
 
         Args:
             question: The specific question, phrased so the options are the answer.
-            options: 2-8 short, distinct, mutually exclusive choices. Put the one
-                you'd recommend first. Don't add a "something else" or "none of
-                these" entry, and don't ask for a comment: the picker always
-                offers both a free-text note and a "none of these" row, so such an
-                option would only waste a slot.
+            options: 2-8 short, distinct choices. Put the one you'd recommend
+                first. Don't add a "something else" or "none of these" entry, and
+                don't ask for a comment: the picker always offers both a free-text
+                note and a "none of these" row, so such an option would only waste
+                a slot.
+            multiple: True when any number of the options may apply together — a
+                list of independent items to act on ("which of these should I
+                fix?"), where pick-one would make the user answer a fraction of the
+                question. Leave False for a genuine fork between alternatives.
 
         Returns:
-            The option the user chose, plus any note they added — or, if they took
-            the "none of these" row, what they said instead (which you answer in
-            prose rather than by re-asking). Handled client-side; this stub reply
-            only appears when the tool is driven without the client interception.
+            The option the user chose (or every option they chose, with
+            ``multiple``), plus any note they added — or, if they took the "none of
+            these" row, what they said instead (which you answer in prose rather
+            than by re-asking). Handled client-side; this stub reply only appears
+            when the tool is driven without the client interception.
         """
         return (
             "No interactive user is attached, so this question cannot be answered. "

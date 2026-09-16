@@ -2,6 +2,7 @@
 
 import asyncio
 import atexit
+import concurrent.futures
 import contextlib
 import json
 import threading
@@ -603,6 +604,44 @@ class MCPClientWrapper:
             self._session_task = None
 
 
+def _in_parallel(members, work):
+    """Run ``work(wrapper)`` for every member at once; results in MEMBER order.
+
+    Returns one ``(member, value, exception)`` triple per member, ordered as the
+    members were given — so the caller keeps every order-sensitive decision (which
+    name wins a collision, which failure is reported first, which one aborts the
+    boot) on its own thread, where the ordering is the same whichever server
+    answers first.
+
+    A member that raises hands its exception back instead of aborting its
+    siblings, matching what a sequential loop with a per-member ``try`` did.
+    ``BaseException`` still propagates: a ``KeyboardInterrupt`` is not one
+    member's failure.
+    """
+    if len(members) < 2:
+        # The common case is the built-in server alone (no mcp.json): nothing to
+        # overlap, so stay on the caller's thread rather than paying for a pool.
+        out = []
+        for member in members:
+            try:
+                out.append((member, work(member[1]), None))
+            except Exception as e:
+                out.append((member, None, e))
+        return out
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=len(members), thread_name_prefix="mcp-member"
+    ) as pool:
+        futures = [pool.submit(work, wrapper) for _, wrapper in members]
+        results = []
+        for member, future in zip(members, futures):
+            try:
+                results.append((member, future.result(), None))
+            except Exception as e:
+                results.append((member, None, e))
+    return results
+
+
 class MultiMCPClient:
     """Aggregates the built-in MCP server with optional external ones.
 
@@ -645,17 +684,40 @@ class MultiMCPClient:
             wrapper._cancel_probe = probe
 
     def __enter__(self):
-        """Connect every server; skip (with a warning) any that fail."""
-        live = []
-        for name, wrapper in self._members:
-            try:
-                wrapper.__enter__()
-                live.append((name, wrapper))
-            except Exception as e:
-                if name == "builtin":
-                    # The built-in server is essential — re-raise.
-                    raise
-                self._report_member_failure(f"MCP server '{name}' failed to start", e)
+        """Connect every server AT ONCE; skip (with a warning) any that fail.
+
+        Connecting is almost entirely waiting: each server is a subprocess that
+        has to be spawned and then answer ``initialize()``, and an ``npx``-based
+        one may resolve a package first — seconds each, paid one after another
+        before the first prompt appeared. They are independent (every wrapper owns
+        its own loop, thread, subprocess and session), so the wait is shared
+        instead of summed.
+
+        Concurrency is deliberately unbounded: a connected member holds a thread
+        for the whole session anyway, so N at once during boot is the thread count
+        the process is about to have regardless — a cap would only make the boot
+        longer without making it smaller.
+        """
+        results = _in_parallel(self._members, lambda wrapper: wrapper.__enter__())
+
+        # Decided on THIS thread, in member order: which servers stay, what the
+        # user is told and in which order, and whether startup goes on at all.
+        live = [member for member, _value, exc in results if exc is None]
+        builtin_exc = next(
+            (exc for (name, _w), _v, exc in results if name == "builtin" and exc),
+            None,
+        )
+        if builtin_exc is not None:
+            # The built-in server is essential, so nothing will use the externals
+            # that came up beside it — hand their subprocesses back now instead of
+            # leaving them to atexit. (Connecting sequentially, none of them had
+            # started yet when this failed, so there was nothing to release.)
+            self._members = live
+            self.shutdown()
+            raise builtin_exc
+        for (name, _wrapper), _value, exc in results:
+            if exc is not None:
+                self._report_member_failure(f"MCP server '{name}' failed to start", exc)
         self._members = live
         return self
 
@@ -674,14 +736,23 @@ class MultiMCPClient:
         renamed ``servername__tool`` so it stays callable without shadowing a
         core tool. The server-side call still uses the original name (see
         ``MCPToolWrapper._run``).
+
+        The requests go out to every server at once — each is a round trip to a
+        separate subprocess, so waiting for them one after another added the
+        second startup delay after the connects. The MERGE stays sequential here:
+        it decides which name wins a collision, and that must not depend on which
+        server happened to answer first.
         """
+        results = _in_parallel(
+            self._members, lambda wrapper: wrapper.list_tools_sync()
+        )
         merged: List[MCPToolWrapper] = []
         seen = set()
-        for name, wrapper in self._members:
-            try:
-                tools = wrapper.list_tools_sync()
-            except Exception as e:
-                self._report_member_failure(f"MCP server '{name}': could not list tools", e)
+        for (name, _wrapper), tools, exc in results:
+            if exc is not None:
+                self._report_member_failure(
+                    f"MCP server '{name}': could not list tools", exc
+                )
                 continue
             for tool in tools:
                 display = tool.name

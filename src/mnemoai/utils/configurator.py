@@ -36,6 +36,7 @@ from mnemoai.models.provider_params import (
 from mnemoai.utils.config import Config
 from mnemoai.utils.console import print_error
 from mnemoai.utils.paths import config_path
+from mnemoai.utils.radio_select import commit_paging, highlighted_value
 
 # Importing readline (stdlib) is enough to give the built-in input() proper
 # line-editing: arrow keys, history, and backspace work instead of leaking raw
@@ -51,14 +52,17 @@ _PROVIDERS = {
     "1": ("ollama", "config.yaml.example", "Ollama (local models)", "qwen3.5:4b"),
     "2": ("bedrock", "config.yaml.bedrock.example", "AWS Bedrock", "global.anthropic.claude-opus-4-8"),
     "3": ("mantle", "config.yaml.bedrock.mantle.example", "AWS Bedrock Mantle", "qwen.qwen3-32b"),
-    # OpenAI / SageMaker / LiteLLM reuse the base template and transform its
-    # model sections for the chosen provider (set TYPE, prune Ollama-only keys,
-    # prompt provider-specific connection keys).
+    # OpenAI / Anthropic / SageMaker / LiteLLM reuse the base template and
+    # transform its model sections for the chosen provider (set TYPE, prune
+    # Ollama-only keys, prompt provider-specific connection keys). A provider with
+    # a template of its own keeps that template's own values instead — which for
+    # mlx is what carries its sampler knobs, KEEP_ALIVE and the server-side
+    # tool-call-parser note into the generated config.
     "4": ("openai", "config.yaml.example", "OpenAI", "gpt-5-mini"),
     "5": ("anthropic", "config.yaml.example", "Anthropic (Claude API)", "claude-opus-4-8"),
     "6": ("sagemaker", "config.yaml.example", "Amazon SageMaker AI", "your-endpoint-name"),
     "7": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
-    "8": ("mlx", "config.yaml.example", "MLX server (local, Apple Silicon)", "mlx-community/Qwen3-4B-4bit"),
+    "8": ("mlx", "config.yaml.mlx.example", "MLX server (local, Apple Silicon)", "qwen3-4b"),
 }
 
 # Human-facing menu label per provider TYPE (stored value is the canonical key).
@@ -664,12 +668,14 @@ def _dialog_radio(
     binding that reconciles them. Without it the ``(*)`` marker stayed on the row
     it opened at while the arrows moved only the highlight, so a pick had to be
     committed with Space first (which nothing on screen says) and Enter otherwise
-    confirmed a row the user had already moved off.
+    confirmed a row the user had already moved off. It only covers the arrow and
+    number keys, though, so the confirm reads :func:`highlighted_value` and
+    :func:`commit_paging` extends the same reconciliation to PgUp/PgDn.
     """
     radio = RadioList(values=options, default=default, select_on_focus=True)
 
     def _ok() -> None:
-        get_app().exit(result=radio.current_value)
+        get_app().exit(result=highlighted_value(radio))
 
     def _cancel() -> None:
         get_app().exit(result=_DIALOG_CANCEL)
@@ -679,6 +685,7 @@ def _dialog_radio(
 
     # Bind Enter on the control itself (RadioList shadows a global Enter binding).
     radio.control.key_bindings.add("enter")(lambda event: _ok())
+    commit_paging(radio)
 
     body_items = []
     if info:
@@ -1201,7 +1208,8 @@ def _build_config(
 
     Only commonly-changed fields are prompted; the rest keep the template's
     values (each default read from it, so Enter-through works). openai/anthropic/
-    sagemaker/litellm/mlx reuse the Ollama-shaped base and transform their sections.
+    sagemaker/litellm reuse the Ollama-shaped base and transform their sections;
+    a provider shipping its own template is filled in place, with nothing pruned.
     """
     text = template_text
     transform_from_base = (

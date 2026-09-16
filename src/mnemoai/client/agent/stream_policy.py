@@ -99,6 +99,23 @@ TRANSIENT_NETWORK_MARKERS = (
     "504",
     "529",
 )
+# Phrasings that OVERRIDE the tuple above: a deterministic failure a server chose
+# to report with a transient-looking status. The markers there are deliberately
+# loose (a bare "503" catches every provider that only gives a status code), so a
+# 5xx that names its own cause has to be excluded by that name or a request the
+# server will NEVER accept is retried on the full budget — each attempt re-paying
+# the same wait and burying the one line that says what to fix.
+#
+# The bar for adding one: a retry of the IDENTICAL request provably cannot change
+# the answer. Hence the load errors (a local MLX/llama-server answers "the weights
+# for this model cannot be loaded" with 503 + `model_load_error`: wrong path, an
+# unsupported format, not enough memory) and NOT the sibling 503 the same server
+# sends while a handler restarts, which is exactly what a retry recovers.
+DETERMINISTIC_ERROR_MARKERS = (
+    "model_load_error",
+    "failed to load model",
+    "failed to load on-demand model",
+)
 
 # Fraction of the computed delay added at random. An overloaded provider rejects
 # every concurrent caller within milliseconds of the others (orchestrator waves,
@@ -138,6 +155,17 @@ def is_context_overflow_error(exc: Exception) -> bool:
     return any(m in text for m in CONTEXT_OVERFLOW_MARKERS)
 
 
+def is_deterministic_error(exc: Exception) -> bool:
+    """True if ``exc`` NAMES a cause a retry cannot change, whatever status code it
+    arrived with.
+
+    Checked before the transient markers, which classify by status as well as by
+    phrasing and so would otherwise retry a 503 the server sent to say the model
+    itself cannot be loaded."""
+    text = exception_text(exc).lower()
+    return any(m in text for m in DETERMINISTIC_ERROR_MARKERS)
+
+
 def is_transient_network_error(exc: Exception) -> bool:
     """True if ``exc`` looks like a transient connection/network failure worth
     retrying on a fresh connection (dead socket, reset, timeout, 5xx/overload).
@@ -150,6 +178,8 @@ def is_transient_network_error(exc: Exception) -> bool:
     a TaskGroup") matches no phrasing, so a dropped socket that arrived inside one
     was classified deterministic and retried zero times — the same silent gap as a
     provider that words a failure differently, in its most extreme form."""
+    if is_deterministic_error(exc):
+        return False
     text = exception_text(exc).lower()
     return any(m in text for m in TRANSIENT_NETWORK_MARKERS)
 

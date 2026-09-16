@@ -1,0 +1,318 @@
+# A local MLX server on Apple Silicon (OpenAI-compatible surface), e.g.
+#   mlx-openai-server launch --model-path mlx-community/Qwen3-4B-4bit --model-type lm
+# One server can back all three sections below (chat / vision / embeddings) on
+# the same port, provided it has each model loaded. Start it before use.
+#
+# SET A TOOL-CALL PARSER ON THE SERVER — in the server's own config, not here.
+# This app is tool-driven, and a model emits tool calls in its own dialect (Qwen3
+# writes Hermes-style <tool_call>{…}</tool_call>). With no parser configured the
+# server hands that back as ordinary assistant text, so the agent talks ABOUT the
+# tool it meant to call instead of calling it — and nothing in this file looks
+# wrong. For mlx-openai-server that is `tool_call_parser` per model entry
+# (`hermes` for Qwen3 Instruct, `qwen3_coder` for the Coder line), plus
+# `reasoning_parser` for a thinking model, which is also what turns its thinking
+# into a collapsed "Thought for Ns…" block here instead of answer prose.
+MODEL_ID:
+  NAME: qwen3-4b # the name the server serves it under
+  TYPE: mlx
+  HOST: 127.0.0.1 # default
+  PORT: 8000 # default
+  # A local server needs no key, and none is read from the environment:
+  # API_KEY: only-if-you-put-an-auth-layer-in-front
+  # A server behind a reverse proxy or a path prefix instead of HOST/PORT
+  # (wins over both; ENDPOINT_URL is accepted as an alias):
+  # API_BASE: https://mac.internal/mlx/v1
+  # Reasoning and answer share this output budget.
+  MAX_TOKENS: 16384
+  STREAM: true # stream tokens as they generate (default true)
+  TEMPERATURE: 0.6
+  TOP_P: 0.95
+  # MLX's own sampling knobs, sent as extra request fields:
+  TOP_K: 20
+  MIN_P: 0.05 # drop tokens under this share of the top token's probability
+  REPETITION_PENALTY: 1.15
+  # Keep penalties low for reasoning models. High presence/frequency penalties
+  # push the model away from the structured tokens needed to commit to a tool
+  # call or a concise answer, causing it to ramble in <think> and end the turn
+  # with no visible output.
+  FREQUENCY_PENALTY: 0.0
+  PRESENCE_PENALTY: 0.0
+  # How long the server keeps the model loaded after a request: 30m, 1h30m, 600
+  # (bare seconds), 0 to unload immediately, -1 to pin it. Omit to leave the
+  # server's own default in charge. It earns its keep when one server hosts
+  # several models — pin the chat model, let a rare vision model fall out of RAM.
+  KEEP_ALIVE: 30m
+  STOP:
+    - "<|im_start|>"
+    - "<|im_end|>"
+    - "<|endoftext|>"
+# Optional: give a specific INTERNAL call its own model. Each turn makes short,
+# invisible calls beside the answer — classifying the query, splitting a complex
+# task, summarizing history when it gets long — and none of them has to run on the
+# model that writes the answer. An area listed here uses that model; an area left
+# out (or the whole section, which is the default) uses MODEL_ID.
+# A value is either a bare model name, or a partial MODEL_ID block when more than
+# the name differs (TYPE included, so an area may use a different provider).
+# The server must already serve every model named here.
+# AREA_MODELS:
+#   ROUTER: qwen3-1.7b              # query classification (one label per turn)
+#   ORCHESTRATOR: qwen3-4b          # task decomposition into subtasks
+#   SUMMARY:                        # conversation compaction
+#     NAME: qwen3-1.7b
+#     TEMPERATURE: 0.3
+VISION_MODEL_ID:
+  NAME: qwen3-vl-4bit # must be loaded as `multimodal` on the server
+  TYPE: mlx
+  HOST: 127.0.0.1
+  PORT: 8000
+  TEMPERATURE: 0.3
+  KEEP_ALIVE: 5m # a vision model is called rarely; don't hold RAM for long
+  # TOP_K is deliberately not offered here: the multimodal path never passes it
+  # to the sampler, so it would be config that silently does nothing.
+# Model parameters
+# The window a local server can actually hold is fixed when you launch it (the
+# model's own context, bounded by any KV-cache limit you pass), so keep this at
+# or below that — it is what compaction is measured against.
+MAX_CONVERSATION_TOKENS: 65536
+DOC_MAX_TOKENS: 16384
+# Days a recorded session is kept for `mnemoai --resume` (0 disables recording
+# entirely). Saved conversations (/save) live elsewhere and never expire.
+SESSION_MAX_AGE_DAYS: 30
+# Days a log file under ~/.mnemoai/logs/ is kept (0 disables the sweep). The app
+# log holds the tracebacks the terminal deliberately doesn't show.
+LOG_MAX_AGE_DAYS: 7
+
+# Ask for confirmation before every execute_bash shell command.
+# Set to false to run shell commands without prompting (trusted/automation setups).
+REQUIRE_BASH_CONFIRMATION: true
+# Ask for confirmation before every fs_write / file_edit file modification.
+# Set to false to write files without prompting (trusted/automation setups).
+REQUIRE_WRITE_CONFIRMATION: true
+# Ask for confirmation before each persistent-memory write (default off:
+# the agent curates MEMORY.md automatically, Hermes-style). Set true to gate.
+REQUIRE_MEMORY_CONFIRMATION: false
+# Ask for confirmation when a tool refuses a risky git operation and the call
+# asks to override it (unsafe amend, force push, hard reset). Set to false to
+# let the override through unprompted (trusted/automation setups).
+REQUIRE_GIT_CONFIRMATION: true
+# RAG Configuration
+ENABLE_RAG: true
+RAG:
+  MAX_TOKENS: 8192
+  EMBED_MODEL_ID:
+    NAME: qwen3-embedding-0.6b # served over the same port, /v1/embeddings
+    TYPE: mlx
+    HOST: 127.0.0.1
+    PORT: 8000
+    KEEP_ALIVE: 10m # embedding runs come in bursts; keep it warm between them
+    # DIMENSION: 1024          # optional: only shapes the offline fallback vector
+    # MAX_INPUT_TOKENS: 8192   # cap embed input to the embedder's real limit;
+    #                          # omit for a conservative default that lowers
+    #                          # itself the first time the server rejects an input
+  CHUNK_TOKENS: 1024
+  SEARCH:
+    SEMANTIC_WEIGHT: 0.5 # Semantic similarity weight (0-1)
+    KEYWORD_WEIGHT: 0.5 # BM25 keyword weight (0-1)
+  VECTOR_STORE:
+    TYPE: chromadb # or faiss
+  EMBEDDINGS:
+    FALLBACK_ENABLED: true
+    FALLBACK_TYPE: "sha256" # or "random", "zeros"
+    CACHE_ENABLED: true
+    CACHE_SIZE: 1000 # LRU cache size for embeddings
+# Episodic Memory Configuration (Enhanced)
+ENABLE_EPISODIC_MEMORY: true
+EPISODIC_MEMORY:
+  STORE_TYPE: chromadb # or faiss
+  # Similarity Thresholds
+  DUPLICATE_THRESHOLD: 0.95 # Higher = stricter duplicate detection
+  RETRIEVAL_THRESHOLD: 0.7 # Higher = more strict retrieval
+  # Hybrid Search Weights
+  SEMANTIC_WEIGHT: 0.7 # Semantic similarity weight (0-1)
+  KEYWORD_WEIGHT: 0.3 # Keyword matching weight (0-1)
+  # Token and Size Limits
+  MAX_TOKENS_PER_EPISODE: 400 # Max tokens for episode text
+  MAX_EPISODES: 1000 # Maximum stored episodes
+  MAX_AGE_DAYS: 90 # Maximum episode age
+  # Success Detection (configurable markers)
+  SUCCESS_MARKERS:
+    - thanks
+    - thank you
+    - perfect
+    - great
+    - worked
+    - good
+    - excellent
+    - awesome
+  CORRECTION_MARKERS:
+    - wrong
+    - error
+    - fix
+    - actually
+    - instead
+    - incorrect
+    - "no" # quoted: bare `no` parses as YAML boolean false
+    - not right
+  ERROR_PATTERNS:
+    - "error:"
+    - "failed:"
+    - "exception:"
+    - "could not"
+    - "unable to"
+    - "error occurred"
+    - "failed to"
+    - "an error"
+    - "the error"
+  # Storage Behavior
+  IMMEDIATE_STORAGE: true # Store episodes immediately (not delayed)
+  MIN_TOOLS_OR_LENGTH: 300 # Minimum response length if no tools used
+  # Query Enhancement
+  ENABLE_QUERY_EXPANSION: true # Expand queries with synonyms
+  QUERY_EXPANSION_TERMS: 3 # Max terms to add per query
+# Persistent curated memory (MEMORY.md): a small, bounded markdown file the
+# agent maintains itself and that is injected whole into the system prompt at
+# session start. Complements episodic memory (which is similarity-retrieved).
+ENABLE_MEMORY: true
+MEMORY:
+  MAX_CHARS: 2200   # hard cap; agent must consolidate when full
+# Auto-extraction: after each turn, a background pass distills durable facts from
+# the exchange and writes them to MEMORY.md — the auto-learning counterpart to the
+# model calling the `memory` tool itself. OFF by default: unlike the tool, it
+# writes WITHOUT a confirmation prompt (confined to MEMORY.md). Costs one extra
+# background model call per turn when on.
+ENABLE_MEMORY_AUTO_EXTRACTION: false
+# Always-on user instructions (STEERING.md, or CLAUDE.md where that is the file a
+# project already has): read from the app home and from every directory between the
+# CWD and the repo root, and prepended to EVERY turn. There is no enable toggle —
+# the file's presence is the switch. Because the block is re-sent each turn and is
+# deliberately never summarized by compaction, a very large file is a permanent
+# per-turn cost, so each file's contribution is capped:
+STEERING:
+  MAX_CHARS: 45000  # per file; content past this is dropped with a visible note (0 = no cap)
+# `@path` mentions: a file named with @ in your prompt is read and attached to it.
+# The content rides in your own message, so compaction can summarize it but the
+# cheaper tool-result eviction can never shrink it — hence a per-file cap (a line
+# is additionally limited to 10 files and 60000 characters in total):
+MENTIONS:
+  MAX_FILE_CHARS: 20000  # per mentioned file; a cut file says so in the prompt (0 = no cap)
+# Telling you the terminal wants you back: a bell (every terminal has one, and
+# tmux/screen turn it into a window-activity flag) plus an OSC 9 desktop
+# notification for the terminals that raise one (iTerm2, WezTerm, kitty, Windows
+# Terminal; others ignore it). Sent when a long turn finishes, when a
+# confirmation prompt is waiting on you, and when a background sub-agent's report
+# arrives while you are idle — never off a TTY, and never for a turn you
+# cancelled yourself (your hand is already on the keyboard):
+NOTIFY:
+  AFTER_SECONDS: 30 # a turn must run this long for its end to notify (0 = never)
+  BELL: true # the terminal bell
+  DESKTOP: true # the OSC 9 desktop notification
+# Agent Skills: authored SKILL.md instruction packs under ~/.mnemoai/skills/
+# (one <name>/SKILL.md per skill). Only each skill's name+description is injected
+# into the system prompt; the model loads a full skill body on demand via the
+# use_skill tool. A bundled example skill is seeded on first run.
+ENABLE_SKILLS: true
+# ACE Playbook Configuration (Agentic Context Engineering)
+ENABLE_PLAYBOOK: true
+PLAYBOOK:
+  MAX_ENTRIES: 500 # Maximum playbook entries before refinement
+  SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
+  MAX_INJECT: 10 # Maximum entries to inject per query
+# Query Routing Configuration
+# When enabled, queries are classified and routed to specialized tool subsets
+# Categories: simple_qa (no tools), code, research, knowledge, full (all tools)
+ENABLE_ROUTING: true
+ENABLE_ORCHESTRATION: true
+LLM:
+  # Thinking/Reasoning
+  ENABLE_THINKING: true # Enable thinking tags (verbose mode)
+  # Retry Logic
+  RETRY_ENABLED: true
+  MAX_RETRIES: 5 # Also caps retries of a transient *empty* model response
+  RETRY_DELAY: 1.0 # Seconds between retries
+  RETRY_BACKOFF: 2.0 # Exponential backoff multiplier
+  # When a turn is cut off by MODEL_ID.MAX_TOKENS mid-response (reasoning + answer
+  # exceeded the output budget), auto-continue: feed the partial back and resume,
+  # so you never have to type "continue". This many continuation attempts (0
+  # disables — then a cut-off turn surfaces an "increase MAX_TOKENS" message).
+  MAX_OUTPUT_CONTINUE_RETRIES: 3
+  # Per-chunk idle timeout on a streaming response (seconds; 0 disables). A
+  # stream that goes silent this long — e.g. the socket died when the laptop
+  # slept — is abandoned so it can't hang the app; the turn then re-runs on a
+  # fresh connection with backoff (the provider's request timeout only covers
+  # getting response headers, not a stalled streaming body).
+  # It does NOT bound the wait for the FIRST token: a local server accepts the
+  # request instantly and then spends minutes on prefill for a large prompt, so
+  # that window is derived from REQUEST_TIMEOUT instead.
+  STREAM_IDLE_TIMEOUT: 120
+  # What the wait for that first token is derived from (+30s). Prefill on Apple
+  # Silicon is the slow part of a long prompt — minutes, not seconds — so keep
+  # this above the longest time-to-first-token you actually see, or a healthy
+  # turn is abandoned and every retry re-pays the same prefill.
+  REQUEST_TIMEOUT: 600
+  # Token Counting (Model-specific)
+  TOKEN_COUNTING:
+    OLLAMA_APPROXIMATION: 1.3 # Multiplier for Ollama (chars to tokens)
+    # The pre-flight estimate for a prompt not yet sent (once a turn completes,
+    # the size comes from the server's own reported usage). One MLX server can
+    # serve any tokenizer family, so the count is tiktoken scaled by a
+    # deliberately conservative 1.35 — overcounting compacts a little early,
+    # undercounting overflows the window. Tighten it for the model you run:
+    # MLX_MULTIPLIER: 1.2
+  # Context Management
+  SUMMARIZATION_THINK: false
+  # Compaction: when the conversation exceeds MAX_CONVERSATION_TOKENS it is
+  # auto-compacted — older messages are summarized into the system prompt while
+  # the most recent messages are kept verbatim.
+  KEEP_RECENT_MESSAGES: 6
+  # The manual /compact command keeps a smaller window (so it still shrinks a
+  # short conversation on demand).
+  MANUAL_COMPACT_KEEP_RECENT: 2
+  # The kept-verbatim window is ALSO bounded by tokens, walking newest->oldest.
+  # This ensures a single oversized recent message (e.g. a pasted document that
+  # alone fills the context window) is summarized rather than kept verbatim.
+  # Defaults to 25% of MAX_CONVERSATION_TOKENS when unset.
+  KEEP_RECENT_TOKEN_BUDGET: 16384
+  # Proactive pre-turn compaction and the per-tool-result cap both auto-derive
+  # from MAX_CONVERSATION_TOKENS (the model's context window) when left unset, so
+  # they scale with the model rather than a fixed number:
+  #   COMPACT_HIGH_WATER_TOKENS -> 80% of the window (compact before a turn when
+  #                                history exceeds it; 0 disables the check)
+  #   MAX_TOOL_RESULT_CHARS     -> 10% of the window in chars (~4 chars/token);
+  #                                caps one tool result (head+tail kept with a
+  #                                truncation note) so a runaway result can't
+  #                                alone overflow the window; 0 disables
+  # Uncomment to override:
+  # COMPACT_HIGH_WATER_TOKENS: 52000
+  # MAX_TOOL_RESULT_CHARS: 26000
+  # Cheapest compaction layer, tried BEFORE any summary when over the high-water
+  # mark: old tool-result bodies (grep/read/web dumps outside the recent window)
+  # are shrunk in place to a short head + a marker, with no model call. If that
+  # alone gets back under budget the summary is skipped. Recent turns stay
+  # verbatim; no message is dropped (tool-call/result pairing is preserved).
+  #   TOOL_EVICTION_KEEP_RECENT -> messages kept fully verbatim (default 8)
+  #   EVICTED_TOOL_RESULT_CHARS -> char cap an evicted result is shrunk to
+  #                                (default 500; 0 disables the layer)
+  # TOOL_EVICTION_KEEP_RECENT: 8
+  # EVICTED_TOOL_RESULT_CHARS: 500
+  # Max model<->tools steps per query before the agent loop is cut short and a
+  # partial result is returned (LangGraph recursion_limit). Set high so
+  # legitimate long tasks aren't capped — context compaction is the real
+  # limiter; this is just a runaway guard.
+  RECURSION_LIMIT: 200
+  # Max sub-agents (spawn_agent) run in parallel from one turn's tool calls; the
+  # rest queue. 1 forces sequential. A single spawn always runs inline.
+  # One local server answers requests one at a time, so several sub-agents at
+  # once only queue on the same GPU — keep this low.
+  SUBAGENT_MAX_CONCURRENCY: 2
+  # Upper bound (seconds) for a single MCP tool call at the transport layer.
+  # Must exceed the longest tool-level timeout (execute_bash allows up to 120s).
+  MCP_CALL_TIMEOUT: 300
+# Web search Configuration
+ENABLE_WEB_SEARCH: true
+BRAVE_API_KEY: your_brave_api_key
+# Web crawl Configuration
+ENABLE_WEB_CRAWL: true
+# File system paths
+PROFILE:
+  NAME: bpistone
+  USE_PROFILING: true

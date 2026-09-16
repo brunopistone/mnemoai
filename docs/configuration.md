@@ -9,6 +9,7 @@ The fragments below show one section at a time. For a full, coherent file you ca
 - **[`config.yaml.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.example)** — local Ollama setup (chat + vision + embeddings + RAG + memory), the default the wizard is modeled on.
 - **[`config.yaml.bedrock.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.bedrock.example)** — Amazon Bedrock setup.
 - **[`config.yaml.bedrock.mantle.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.bedrock.mantle.example)** — Bedrock Mantle setup.
+- **[`config.yaml.mlx.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.mlx.example)** — a local MLX server on Apple Silicon (one server backing chat + vision + embeddings), with the sampler knobs, `KEEP_ALIVE` and the timeouts a local server needs.
 
 Copy one and edit it:
 
@@ -427,6 +428,15 @@ Notes:
 - **A misconfigured area falls back to the main model.** An unreachable endpoint
   or a bad model name is logged once at startup and that area keeps using
   `MODEL_ID` — a side model must not break your turns.
+- **On one local server, an area model has to be served too.** Ollama loads a
+  model on demand, so naming a second one just works. A single-process server
+  (MLX, `llama-server`, vLLM) only answers for the models it was launched with, so
+  an unserved name is the fallback case above — the area silently keeps using
+  `MODEL_ID`, and the only sign is the one startup line. Launch the server with
+  every model you name (`--config <file>` for `mlx-openai-server`), and keep in
+  mind that two resident models share the machine's RAM and that requests to one
+  server queue behind each other, so a "cheaper" router can cost wall-clock time
+  rather than save it.
 - **`/doctor` lists what's active**, one row per configured area, and warns about
   an area name it doesn't recognize (a typo is otherwise silent — the area simply
   keeps the main model).

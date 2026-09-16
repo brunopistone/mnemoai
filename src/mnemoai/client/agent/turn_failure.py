@@ -53,6 +53,7 @@ _REJECTED_MARKERS = (
 # What each class is called; the wording for each lives in `recovery_advice`.
 OVERSIZED = "oversized"
 REJECTED = "rejected"
+UNSERVED = "unserved"
 CONNECTION = "connection"
 UNKNOWN = "unknown"
 
@@ -90,6 +91,10 @@ def classify(exc: Exception) -> str:
     text = exception_signature(exc).lower()
     if any(m in text for m in _REJECTED_MARKERS):
         return REJECTED
+    # The provider couldn't serve this MODEL at all (it arrives as a 5xx, so this
+    # has to be tested before the connection reading it otherwise falls into).
+    if stream_policy.is_deterministic_error(exc):
+        return UNSERVED
     if stream_policy.is_transient_network_error(exc):
         return CONNECTION
     return UNKNOWN
@@ -120,6 +125,12 @@ def recovery_advice(exc: Exception) -> str:
             "/rewind takes back the last exchange, /compact drops older messages "
             "from the prompt if one of those is the cause, and /model switches to "
             "a different model."
+        )
+    if kind == UNSERVED:
+        return (
+            "The server could not load this model, so the conversation is fine and "
+            "another attempt would fail the same way: /model picks a model it can "
+            "serve, and /doctor reports which provider and endpoint are in use."
         )
     if kind == CONNECTION:
         return ""

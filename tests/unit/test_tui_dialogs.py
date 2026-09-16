@@ -322,13 +322,44 @@ class TestQuestionUi:
     def test_the_question_and_options_reach_the_dialog(self, monkeypatch):
         seen = {}
 
-        def _dialog(question, options):
+        def _dialog(question, options, multiple):
             seen["question"], seen["options"] = question, options
+            seen["multiple"] = multiple
             return None
 
         monkeypatch.setattr(tui, "question_dialog", _dialog)
         self._reader(lambda func: func()).question_ui("Q", ["a", "b"])
-        assert seen == {"question": "Q", "options": ["a", "b"]}
+        assert seen == {"question": "Q", "options": ["a", "b"], "multiple": False}
+
+    def test_the_pick_any_flag_reaches_the_dialog(self, monkeypatch):
+        seen = {}
+
+        def _dialog(question, options, multiple):
+            seen["multiple"] = multiple
+            return None
+
+        monkeypatch.setattr(tui, "question_dialog", _dialog)
+        self._reader(lambda func: func()).question_ui("Q", ["a", "b"], True)
+        assert seen["multiple"] is True
+
+    def test_every_pick_is_echoed_on_its_own_line(self, capsys, monkeypatch):
+        # A list literal in the scrollback record would be the one thing the user
+        # is most likely to read back.
+        monkeypatch.setattr(
+            tui, "question_dialog", lambda *a, **k: (["SQLite", "Postgres"], "")
+        )
+        self._reader(lambda func: func()).question_ui("Which?", ["x", "y"], True)
+        out = capsys.readouterr().out
+        assert "['" not in out and "', '" not in out
+        assert "SQLite" in out and "Postgres" in out
+
+    def test_an_empty_multi_selection_is_echoed_as_declining_them_all(
+        self, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(tui, "question_dialog", lambda *a, **k: ([], "hmm"))
+        self._reader(lambda func: func()).question_ui("Which?", ["x", "y"], True)
+        out = capsys.readouterr().out
+        assert "none of these" in out and "dismissed" not in out
 
 
 class TestQuestionDialog:
@@ -390,6 +421,56 @@ class TestQuestionDialog:
         )
         monkeypatch.setattr(builtins, "input", self._input("1", ""))
         tui.question_dialog("Q", ["a", "b"])
+
+
+class TestQuestionDialogPickAny:
+    """``multiple`` off-TTY: a comma-separated list, since a pipe has no
+    checkboxes. Same three outcomes as the pick-one fallback beside it."""
+
+    def _input(self, *lines):
+        it = iter(lines)
+
+        def _stub(*_):
+            try:
+                return next(it)
+            except StopIteration:
+                raise EOFError
+        return _stub
+
+    def test_several_indices_are_all_returned(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input("1,3", ""))
+        assert tui.question_dialog("Q", ["a", "b", "c"], True) == (["a", "c"], "")
+
+    def test_spaces_and_repeats_are_tolerated(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input(" 2 , 1 , 2 ", ""))
+        assert tui.question_dialog("Q", ["a", "b"], True) == (["b", "a"], "")
+
+    def test_one_index_still_works(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input("2", "later"))
+        assert tui.question_dialog("Q", ["a", "b"], True) == (["b"], "later")
+
+    def test_junk_and_out_of_range_entries_are_dropped_not_fatal(
+        self, not_a_tty, monkeypatch
+    ):
+        monkeypatch.setattr(builtins, "input", self._input("1,zz,99", ""))
+        assert tui.question_dialog("Q", ["a", "b"], True) == (["a"], "")
+
+    def test_nothing_parseable_is_a_dismissal(self, not_a_tty, monkeypatch):
+        monkeypatch.setattr(builtins, "input", self._input("zz,99"))
+        assert tui.question_dialog("Q", ["a", "b"], True) is None
+
+    def test_the_escape_row_wins_over_an_option_beside_it(self, not_a_tty, monkeypatch):
+        # Row 3 of a 2-option question is the escape row.
+        monkeypatch.setattr(builtins, "input", self._input("1,3", "neither, really"))
+        assert tui.question_dialog("Q", ["a", "b"], True) == (None, "neither, really")
+
+    def test_the_prompt_says_more_than_one_is_accepted(
+        self, not_a_tty, monkeypatch, capsys
+    ):
+        seen = []
+        monkeypatch.setattr(builtins, "input", lambda p="": seen.append(p) or "")
+        tui.question_dialog("Q", ["a", "b"], True)
+        assert "1,2" in seen[0]
 
 
 class TestQuestionPickKeys:
@@ -457,6 +538,82 @@ class TestQuestionPickKeys:
 
     def test_escape_dismisses(self):
         assert self._drive("\x1b") is None
+
+
+class TestMultiPickKeys:
+    """The pick-any dialog driven with REAL keys. Its widget keeps the answer in
+    ``current_values``, so the highlight/commit reconciliation the radio list
+    needs is not just unnecessary here but actively wrong: ``select_on_focus``
+    would tick every row the highlight passes over."""
+
+    OPTIONS = ["Postgres", "SQLite", "DuckDB"]
+    DOWN = "\x1b[B"
+
+    def _drive(self, keys: str, options=None):
+        import asyncio
+        import unittest.mock as m
+
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+
+        holder = {}
+        real_init = Application.__init__
+
+        def cap_init(self, *a, **k):
+            k = dict(k)
+            k["input"] = holder["pipe"]
+            k["output"] = DummyOutput()
+            real_init(self, *a, **k)
+
+        def fake_run(self):
+            return asyncio.run(asyncio.wait_for(self.run_async(), timeout=10))
+
+        with create_pipe_input() as pipe:
+            holder["pipe"] = pipe
+            pipe.send_text(keys)
+            with m.patch.object(tui, "_dialog_is_tty", lambda: True), m.patch.object(
+                Application, "__init__", cap_init
+            ), m.patch.object(Application, "run", fake_run):
+                return tui.question_dialog(
+                    "Which?", options or self.OPTIONS, True
+                )
+
+    def test_space_ticks_the_highlighted_row(self):
+        assert self._drive(" \r") == (["Postgres"], "")
+
+    def test_several_rows_can_be_ticked(self):
+        assert self._drive(f" {self.DOWN}{self.DOWN} \r") == (
+            ["Postgres", "DuckDB"],
+            "",
+        )
+
+    def test_moving_over_a_row_does_not_tick_it(self):
+        # select_on_focus on a checkbox list would tick everything the highlight
+        # crossed, so the answer would be every row above the last one.
+        assert self._drive(f"{self.DOWN}{self.DOWN} \r") == (["DuckDB"], "")
+
+    def test_space_again_unticks(self):
+        # Tick the first row, change your mind, tick the second.
+        assert self._drive(f"  {self.DOWN} \r") == (["SQLite"], "")
+
+    def test_enter_with_nothing_ticked_hands_the_decision_back(self):
+        assert self._drive("\r") == (None, "")
+
+    def test_tab_reaches_the_note_and_enter_submits_from_there(self):
+        assert self._drive(" \tall of them\r") == (["Postgres"], "all of them")
+
+    def test_the_escape_row_is_a_row_here_too(self):
+        assert self._drive(f"{self.DOWN}{self.DOWN}{self.DOWN} \r") == (None, "")
+
+    def test_escape_dismisses(self):
+        assert self._drive("\x1b") is None
+
+    def test_the_hint_names_the_key_that_ticks(self):
+        # Nothing else on screen says a row has to be ticked before Enter.
+        import inspect
+
+        assert "Space to tick" in inspect.getsource(tui._multi_pick)
 
 
 class TestAgentsPanelVisibility:

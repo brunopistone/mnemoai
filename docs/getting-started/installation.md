@@ -148,6 +148,7 @@ On first run, Mnemo AI also seeds examples you can copy or inspect:
 ~/.mnemoai/config/config.yaml.example
 ~/.mnemoai/config/config.yaml.bedrock.example
 ~/.mnemoai/config/config.yaml.bedrock.mantle.example
+~/.mnemoai/config/config.yaml.mlx.example
 ~/.mnemoai/mcp/mcp.json.example
 ```
 

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -328,75 +329,96 @@ class LangGraphClient:
                 orchestration=config.get("ENABLE_ORCHESTRATION", False),
             )
 
-            with self.mcp_client:
-                self.tools = self.mcp_client.list_tools_sync()
-                logger.info(f"Loaded {len(self.tools)} tools from MCP server")
-
-                if config.get("ENABLE_RAG", False):
-                    self._initialize_rag_session()
-                self._initialize_chunk_cache()
-
-                self.llm_controller.initialize_model(callbacks=[self.callback_handler])
-                self.model = self.llm_controller.get_model()
-
-                # Append playbook context to the system prompt.
-                system_prompt_with_context = self._system_prompt_with_playbook()
-
-                router = None
-                tool_routes = None
-                if config.get("ENABLE_ROUTING", False):
-                    # Classification is one label per turn, so it may run on its own
-                    # (typically smaller) model; None falls back to the main one.
-                    router = QueryRouter(self._area_model("ROUTER") or self.model)
-                    tool_routes = ROUTE_TOOLS
-                    logger.info("Query routing enabled")
-
-                # Orchestration requires routing.
-                orchestrator_enabled = (
-                    config.get("ENABLE_ORCHESTRATION", False) and router is not None
-                )
-                if orchestrator_enabled:
-                    logger.info("Orchestrator enabled for complex tasks")
-
-                self.agent = LangGraphAgent(
-                    model=self.model,
-                    tools=self.tools,
-                    system_prompt=system_prompt_with_context,
-                    verbose=self.verbose_mode,
+            # The model and the MCP servers have nothing to say to each other, so
+            # they are built at the same time. Both are mostly WAITING — the
+            # servers on subprocesses that have to spawn and answer
+            # `initialize()`, the model on the provider SDK's import plus
+            # credential and endpoint resolution — and in line the user paid the
+            # sum of the two before the first prompt appeared.
+            starting = ThreadPoolExecutor(max_workers=1, thread_name_prefix="model")
+            try:
+                model_ready = starting.submit(
+                    self.llm_controller.initialize_model,
                     callbacks=[self.callback_handler],
-                    router=router,
-                    tool_routes=tool_routes,
-                    orchestrator_enabled=orchestrator_enabled,
-                    plan_mode_provider=lambda: self.plan_mode_active,
-                    auto_approve_provider=lambda: self.auto_approve_mode,
                 )
-                # Mid-loop compaction hook: the agent calls this (sync) before a
-                # model call when history exceeds its high-water mark, reusing the
-                # same manager as the post-turn /compact path.
-                self.agent._compact_provider = self._compact_now
-                # Attribute usage to the configured model, and let the router
-                # (a model call the user never sees) count toward the same totals.
-                self.agent.usage_model_name = self.model_name_for_log() or "model"
-                if router is not None:
-                    router.usage = self.agent.usage
-                    # Under its own model the router's tokens are attributed to THAT
-                    # model, so /usage shows what each area actually cost.
-                    router.usage_model_name = self._area_usage_name("ROUTER")
-                # Own model for task decomposition, when configured (None = main).
-                self.agent.orchestrator_model = self._area_model("ORCHESTRATOR")
-                # Per-agent model override (custom sub-agent frontmatter 'model'):
-                # build a same-provider model with the NAME swapped, on demand.
-                self.agent._subagent_model_factory = self._subagent_model_factory
-                # Append-only session transcript for `--resume`, scoped to the
-                # launch directory. Independent of /save (user-curated, never
-                # swept); this one expires on age.
-                self._attach_session_log()
-                # Let a blocking MCP tool call notice Esc. The worker parks in an
-                # uninterruptible wait, so without this probe a cancel can't land
-                # until the call's deadline — up to ten minutes on a long tool.
-                probe = getattr(self.mcp_client, "set_cancel_probe", None)
-                if probe is not None:
-                    probe(lambda: self.agent is not None and self.agent._cancelled())
+                with self.mcp_client:
+                    self.tools = self.mcp_client.list_tools_sync()
+                    logger.info(f"Loaded {len(self.tools)} tools from MCP server")
+
+                    if config.get("ENABLE_RAG", False):
+                        self._initialize_rag_session()
+                    self._initialize_chunk_cache()
+
+                    # Joined here, at the first line that needs the model: a
+                    # provider that can't be reached still fails startup, with the
+                    # same exception and from the same place as before.
+                    model_ready.result()
+                    self.model = self.llm_controller.get_model()
+
+                    # Append playbook context to the system prompt.
+                    system_prompt_with_context = self._system_prompt_with_playbook()
+
+                    router = None
+                    tool_routes = None
+                    if config.get("ENABLE_ROUTING", False):
+                        # Classification is one label per turn, so it may run on its own
+                        # (typically smaller) model; None falls back to the main one.
+                        router = QueryRouter(self._area_model("ROUTER") or self.model)
+                        tool_routes = ROUTE_TOOLS
+                        logger.info("Query routing enabled")
+
+                    # Orchestration requires routing.
+                    orchestrator_enabled = (
+                        config.get("ENABLE_ORCHESTRATION", False) and router is not None
+                    )
+                    if orchestrator_enabled:
+                        logger.info("Orchestrator enabled for complex tasks")
+
+                    self.agent = LangGraphAgent(
+                        model=self.model,
+                        tools=self.tools,
+                        system_prompt=system_prompt_with_context,
+                        verbose=self.verbose_mode,
+                        callbacks=[self.callback_handler],
+                        router=router,
+                        tool_routes=tool_routes,
+                        orchestrator_enabled=orchestrator_enabled,
+                        plan_mode_provider=lambda: self.plan_mode_active,
+                        auto_approve_provider=lambda: self.auto_approve_mode,
+                    )
+                    # Mid-loop compaction hook: the agent calls this (sync) before a
+                    # model call when history exceeds its high-water mark, reusing the
+                    # same manager as the post-turn /compact path.
+                    self.agent._compact_provider = self._compact_now
+                    # Attribute usage to the configured model, and let the router
+                    # (a model call the user never sees) count toward the same totals.
+                    self.agent.usage_model_name = self.model_name_for_log() or "model"
+                    if router is not None:
+                        router.usage = self.agent.usage
+                        # Under its own model the router's tokens are attributed to THAT
+                        # model, so /usage shows what each area actually cost.
+                        router.usage_model_name = self._area_usage_name("ROUTER")
+                    # Own model for task decomposition, when configured (None = main).
+                    self.agent.orchestrator_model = self._area_model("ORCHESTRATOR")
+                    # Per-agent model override (custom sub-agent frontmatter 'model'):
+                    # build a same-provider model with the NAME swapped, on demand.
+                    self.agent._subagent_model_factory = self._subagent_model_factory
+                    # Append-only session transcript for `--resume`, scoped to the
+                    # launch directory. Independent of /save (user-curated, never
+                    # swept); this one expires on age.
+                    self._attach_session_log()
+                    # Let a blocking MCP tool call notice Esc. The worker parks in an
+                    # uninterruptible wait, so without this probe a cancel can't land
+                    # until the call's deadline — up to ten minutes on a long tool.
+                    probe = getattr(self.mcp_client, "set_cancel_probe", None)
+                    if probe is not None:
+                        probe(lambda: self.agent is not None and self.agent._cancelled())
+
+            finally:
+                # Nothing left to join: the result was either collected above
+                # or startup is already failing. Don't hold the boot for a
+                # thread whose work nobody is waiting on any more.
+                starting.shutdown(wait=False)
 
         except Exception as e:
             # exc_info, not format_exc(): the traceback belongs in the log file,
