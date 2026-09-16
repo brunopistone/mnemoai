@@ -147,6 +147,7 @@ class LangGraphAgent:
     # single source in stream_policy (the plan_policy alias pattern).
     _CONTEXT_OVERFLOW_MARKERS = stream_policy.CONTEXT_OVERFLOW_MARKERS
     _TRANSIENT_NETWORK_MARKERS = stream_policy.TRANSIENT_NETWORK_MARKERS
+    _DETERMINISTIC_ERROR_MARKERS = stream_policy.DETERMINISTIC_ERROR_MARKERS
     # Sentinel the stream reader thread enqueues to signal a clean end of stream.
     _STREAM_DONE = object()
     # How often the idle-timeout stream wait re-checks the cancel event (seconds),
@@ -2653,9 +2654,9 @@ class LangGraphAgent:
             "The approved plan:\n\n" + plan + note
         )
 
-    def _handle_ask_user_question(self, question, options) -> str:
+    def _handle_ask_user_question(self, question, options, multiple=False) -> str:
         """Delegates to :func:`ask_user.ask`."""
-        return ask_user.ask(self, question, options)
+        return ask_user.ask(self, question, options, multiple)
 
     def _subagent_tools(self, agent) -> List[BaseTool]:
         """Delegates to :func:`subagent_runner.subagent_tools` (``agent`` here is
@@ -2840,7 +2841,9 @@ class LangGraphAgent:
         """
         if tool_name == "ask_user_question":
             content = self._handle_ask_user_question(
-                tool_args.get("question"), tool_args.get("options")
+                tool_args.get("question"),
+                tool_args.get("options"),
+                tool_args.get("multiple"),
             )
         elif tool_name == "exit_plan_mode":
             content = self._handle_exit_plan_mode(

@@ -22,9 +22,18 @@ answer is "neither, because…" — so every question also carries a free-text
 that hands the decision back as a conversation instead of a choice. Those are
 three distinct outcomes, not two: a chosen option, a refusal to choose (talk
 about it), and a dismissal (decide for me) — see :func:`normalize_reply`.
+
+**And not every question has ONE answer.** "Which of these should I fix?" over a
+list of independent items is the ordinary shape of the work here, and offering it
+as pick-one made the user answer a fraction of the question with nothing on
+screen saying so — they'd pick the first, the model would act on it alone, and
+the rest silently didn't happen. ``multiple`` asks for any-that-apply instead
+(:func:`picker_reply_many`, a checkbox picker in the UI). It changes only how many
+rows come back: the note, the escape row and the three outcomes are the same, and
+a pick of one is reported exactly as a single-choice question would report it.
 """
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Sequence, Tuple, Union
 
 # Keep the picker usable and the option labels renderable on one row.
 MAX_OPTIONS = 8
@@ -102,6 +111,23 @@ def validate(question: Any, options: Any) -> Tuple[str, List[str], Optional[str]
     return text, opts, None
 
 
+def normalize_multiple(value: Any) -> bool:
+    """Read the model's ``multiple`` flag; anything unrecognized means pick-one.
+
+    Tolerant for the same reason :func:`normalize_options` is: a small model sends
+    ``"true"`` or ``1`` as readily as a JSON boolean, and reading one of those as
+    False turns a pick-any question into a pick-one — the user then answers part of
+    it and nothing on screen says the rest was never asked.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "y", "1", "multi", "multiple")
+    return False
+
+
 def normalize_note(note: Any) -> str:
     """Coerce the free-text note into one bounded line of model-facing prose."""
     if note is None:
@@ -139,20 +165,59 @@ def picker_reply(value: Any, note: Any) -> Optional[Tuple[Optional[str], str]]:
     return str(value), text
 
 
-def normalize_reply(reply: Any) -> Tuple[Optional[str], str, bool]:
+def picker_reply_many(
+    values: Any, note: Any
+) -> Optional[Tuple[Optional[List[str]], str]]:
+    """The :func:`picker_reply` twin for a checkbox picker: the CHECKED rows + note.
+
+    ``None`` is a dismissal, exactly as there. Two selections collapse to the
+    escape row: ticking it beside real options contradicts itself, and ticking
+    NOTHING says the same thing in a different way — in both the reading that
+    doesn't act on any option is the safe one, so both hand the decision back as a
+    conversation rather than guessing which half the user meant.
+    """
+    if values is None:
+        return None
+    text = normalize_note(note)
+    picks = _clean_labels(values)
+    if DISCUSS in picks or not [p for p in picks if p != DISCUSS]:
+        return None, text
+    return [p for p in picks if p != DISCUSS], text
+
+
+def _clean_labels(values: Any) -> List[str]:
+    """One-line-each, deduped, order-preserving labels out of a checked-row list."""
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        values = [values]
+    out: List[str] = []
+    for raw in values:
+        if raw is None:
+            continue
+        label = " ".join(str(raw).split())
+        if label and label not in out:
+            out.append(label)
+    return out
+
+
+def normalize_reply(reply: Any) -> Tuple[Union[str, List[str], None], str, bool]:
     """Read the UI's answer as ``(choice, note, answered)``.
 
-    Three accepted shapes, so the picker could grow a note without breaking the
-    old contract: ``None`` is a dismissal, a bare string is that option chosen
-    (what the picker returned before the note existed), and a ``(choice, note)``
-    pair is a submitted answer — with ``choice is None`` meaning the user took
-    the escape row rather than any option.
+    Four accepted shapes, so the picker could grow a note and then a multi-select
+    without breaking the old contract: ``None`` is a dismissal, a bare string is
+    that option chosen (what the picker returned before the note existed), a
+    ``(choice, note)`` pair is a submitted answer — with ``choice is None`` meaning
+    the user took the escape row rather than any option — and ``choice`` may itself
+    be a LIST when the question accepted more than one row.
     """
     if reply is None:
         return None, "", False
     if isinstance(reply, (list, tuple)):
         raw = reply[0] if reply else None
         note = normalize_note(reply[1] if len(reply) > 1 else "")
+        if isinstance(raw, (list, tuple, set, frozenset)):
+            # An empty checked list is answered-but-unchosen, like the escape row.
+            picks = _clean_labels(raw)
+            return (picks or None), note, True
         choice = " ".join(str(raw).split()) if raw is not None else ""
         return (choice or None), note, True
     choice = " ".join(str(reply).split())
@@ -160,11 +225,23 @@ def normalize_reply(reply: Any) -> Tuple[Optional[str], str, bool]:
     return (choice or None), "", bool(choice)
 
 
-def format_answer(choice: str, note: str = "") -> str:
-    """The ToolMessage content for an answered question."""
+def format_answer(choice: Union[str, Sequence[str]], note: str = "") -> str:
+    """The ToolMessage content for an answered question.
+
+    ``choice`` is the chosen option, or every chosen option when the question
+    accepted more than one. Several are stated as ALL of them: listed beside the
+    single-choice wording they would read as a ranking, and the model would act on
+    the first and drop the rest — the very failure the multi-select removes.
+    """
+    picks = [choice] if isinstance(choice, str) else _clean_labels(choice)
     said = f"\nThey added: {note}" if note else ""
+    if len(picks) == 1:
+        chose = f'The user chose: "{picks[0]}"'
+    else:
+        listed = ", ".join(f'"{p}"' for p in picks)
+        chose = f"The user chose all {len(picks)} of these, not one of them: {listed}"
     return (
-        f'The user chose: "{choice}"{said}\n\n'
+        f"{chose}{said}\n\n"
         "Proceed on that basis. Don't re-ask or second-guess the choice."
     )
 
@@ -208,8 +285,13 @@ def format_unavailable(reason: str) -> str:
     )
 
 
-def ask(agent, question: Any, options: Any) -> str:
+def ask(agent, question: Any, options: Any, multiple: Any = False) -> str:
     """Put a multiple-choice question to the user; return the model-facing result.
+
+    ``multiple`` asks for any-that-apply instead of exactly one. It is passed
+    POSITIONALLY to the UI hook, and a hook that predates the flag raises
+    ``TypeError`` — caught below like any other dialog failure, so the question
+    degrades to a dismissal instead of killing the turn.
 
     Blocks the calling (worker) thread while the picker is up, then hands the
     spinner back exactly as it was — the tool loop doesn't restart it on this
@@ -237,7 +319,7 @@ def ask(agent, question: Any, options: Any) -> str:
     was_active, prev_label = agent._spinner_snapshot()
     agent._stop_spinner()
     try:
-        reply = ui(text, opts)
+        reply = ui(text, opts, normalize_multiple(multiple))
     except Exception:
         # A dialog failure must not kill the turn — the model can carry on.
         reply = None

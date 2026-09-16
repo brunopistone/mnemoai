@@ -90,6 +90,26 @@ class TestSubdirs:
         paths.seed_example_files()
         assert (tmp_home / "hooks" / "hooks.json.example").is_file()
 
+    def test_every_bundled_config_template_reaches_a_populated_home(self, tmp_home):
+        # A provider template is only useful if the user can read it, and the
+        # people who most need a new one are already installed. Asserted over the
+        # whole glob rather than by name, so the next template is covered too.
+        (tmp_home / "config").mkdir(parents=True)
+        (tmp_home / "config" / "config.yaml").write_text("MY LIVE CONFIG")
+        bundled = {
+            p.name
+            for p in (Path(paths.__file__).resolve().parent).glob(
+                "config.yaml*.example"
+            )
+        }
+        assert "config.yaml.mlx.example" in bundled  # the local-MLX template
+
+        paths.seed_example_files()
+
+        seeded = {p.name for p in (tmp_home / "config").glob("config.yaml*.example")}
+        assert seeded == bundled
+        assert (tmp_home / "config" / "config.yaml").read_text() == "MY LIVE CONFIG"
+
     def test_hooks_config_is_app_home_only(self, tmp_home):
         # Hooks are arbitrary code: the path must be under the app home, so a
         # hooks.json arriving with a git clone can never be picked up.

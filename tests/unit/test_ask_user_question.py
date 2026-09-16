@@ -99,7 +99,7 @@ class TestAMalformedCallNeverReachesTheUser:
 
     def test_the_ui_is_not_invoked_for_a_malformed_call(self):
         called = []
-        stub = _Stub(ui=lambda q, o: called.append(q) or "a")
+        stub = _Stub(ui=lambda q, o, m: called.append(q) or "a")
         ask_user.ask(stub, "Which?", ["only"])
         assert called == []
 
@@ -108,12 +108,12 @@ class TestAQuestionNobodyCanSeeIsRefused:
     """Each of these would otherwise park a thread on an unanswerable prompt."""
 
     def test_a_subagent_cannot_ask(self):
-        stub = _Stub(ui=lambda q, o: "a", depth=1)
+        stub = _Stub(ui=lambda q, o, m: "a", depth=1)
         out = ask_user.ask(stub, "Which?", ["a", "b"])
         assert "cannot ask" in out and "sub-agent" in out
 
     def test_a_headless_agent_cannot_ask(self):
-        stub = _Stub(ui=lambda q, o: "a", headless=True)
+        stub = _Stub(ui=lambda q, o, m: "a", headless=True)
         out = ask_user.ask(stub, "Which?", ["a", "b"])
         assert "cannot ask" in out
 
@@ -121,7 +121,7 @@ class TestAQuestionNobodyCanSeeIsRefused:
         # The hook is inherited from the parent agent object, so presence alone
         # must not be read as "there is someone to ask".
         called = []
-        stub = _Stub(ui=lambda q, o: called.append(q) or "a", depth=1)
+        stub = _Stub(ui=lambda q, o, m: called.append(q) or "a", depth=1)
         ask_user.ask(stub, "Which?", ["a", "b"])
         assert called == []
 
@@ -130,13 +130,13 @@ class TestAQuestionNobodyCanSeeIsRefused:
         assert "not interactive" in out
 
     def test_every_refusal_tells_the_model_to_decide_itself(self):
-        for stub in (_Stub(ui=None), _Stub(ui=lambda q, o: "a", depth=1)):
+        for stub in (_Stub(ui=None), _Stub(ui=lambda q, o, m: "a", depth=1)):
             assert "best judgment" in ask_user.ask(stub, "Which?", ["a", "b"])
 
 
 class TestTheAnswerReachesTheModel:
     def test_the_chosen_option_is_reported(self):
-        stub = _Stub(ui=lambda q, o: "Postgres")
+        stub = _Stub(ui=lambda q, o, m: "Postgres")
         out = ask_user.ask(stub, "Which db?", ["Postgres", "SQLite"])
         assert "Postgres" in out
         assert "re-ask" in out or "second-guess" in out
@@ -144,27 +144,27 @@ class TestTheAnswerReachesTheModel:
     def test_the_ui_receives_the_normalized_question_and_options(self):
         seen = {}
 
-        def _ui(q, opts):
-            seen["q"], seen["opts"] = q, opts
+        def _ui(q, opts, multi):
+            seen["q"], seen["opts"], seen["multi"] = q, opts, multi
             return opts[0]
 
         ask_user.ask(_Stub(ui=_ui), "  Which\n db? ", ["a", "a", "b"])
-        assert seen == {"q": "Which db?", "opts": ["a", "b"]}
+        assert seen == {"q": "Which db?", "opts": ["a", "b"], "multi": False}
 
     def test_a_dismissal_tells_the_model_to_proceed_not_re_ask(self):
-        stub = _Stub(ui=lambda q, o: None)
+        stub = _Stub(ui=lambda q, o, m: None)
         out = ask_user.ask(stub, "Which?", ["a", "b"])
         assert "Do NOT ask again" in out
 
     def test_a_failing_dialog_does_not_kill_the_turn(self):
-        def _boom(q, o):
+        def _boom(q, o, m):
             raise RuntimeError("dialog exploded")
 
         out = ask_user.ask(_Stub(ui=_boom), "Which?", ["a", "b"])
         assert "Do NOT ask again" in out  # degrades to the dismissed path
 
     def test_a_non_string_choice_is_still_reported(self):
-        out = ask_user.ask(_Stub(ui=lambda q, o: 3), "Which?", ["a", "b"])
+        out = ask_user.ask(_Stub(ui=lambda q, o, m: 3), "Which?", ["a", "b"])
         assert "3" in out
 
 
@@ -198,7 +198,7 @@ class TestTheNoteRidesAlongWithTheChoice:
         assert ask_user.format_answer("SQLite") == ask_user.format_answer("SQLite", "")
 
     def test_ask_reports_a_choice_with_its_note(self):
-        stub = _Stub(ui=lambda q, o: ("Postgres", "as long as it's managed"))
+        stub = _Stub(ui=lambda q, o, m: ("Postgres", "as long as it's managed"))
         out = ask_user.ask(stub, "Which db?", ["Postgres", "SQLite"])
         assert "Postgres" in out and "as long as it's managed" in out
         assert "re-ask" in out or "second-guess" in out
@@ -256,14 +256,14 @@ class TestDecliningEveryOptionIsItsOwnAnswer:
         assert "best judgment" in ask_user.format_dismissed()
 
     def test_ask_routes_the_escape_row_to_the_discussion_wording(self):
-        stub = _Stub(ui=lambda q, o: (None, "neither, they'd both leak"))
+        stub = _Stub(ui=lambda q, o, m: (None, "neither, they'd both leak"))
         out = ask_user.ask(stub, "Which db?", ["Postgres", "SQLite"])
         assert "neither, they'd both leak" in out
         assert "Do NOT ask again" not in out  # not the dismissed path
 
     def test_ask_still_distinguishes_a_real_dismissal(self):
         assert "Do NOT ask again" in ask_user.ask(
-            _Stub(ui=lambda q, o: None), "Q", ["a", "b"]
+            _Stub(ui=lambda q, o, m: None), "Q", ["a", "b"]
         )
 
 
@@ -303,17 +303,101 @@ class TestTheUiReplyShapesAreTolerated:
         assert ask_user.normalize_reply((3, "")) == ("3", "", True)
 
 
+class TestAQuestionCanHaveMoreThanOneAnswer:
+    """Pick-one over a list of independent items makes the user answer a fraction
+    of the question with nothing on screen saying so: they tick the first, the
+    model acts on it alone, and the rest silently didn't happen."""
+
+    def test_the_flag_is_read_tolerantly(self):
+        for truthy in (True, 1, "true", "TRUE", " yes ", "1", "multi"):
+            assert ask_user.normalize_multiple(truthy) is True
+        for falsy in (False, 0, "", "false", "no", None, [], object()):
+            assert ask_user.normalize_multiple(falsy) is False
+
+    def test_it_reaches_the_ui_as_a_bool(self):
+        seen = {}
+        stub = _Stub(ui=lambda q, o, m: seen.setdefault("m", m) or o[0])
+        ask_user.ask(stub, "Which?", ["a", "b"], "yes")
+        assert seen["m"] is True
+
+    def test_every_ticked_row_comes_back(self):
+        assert ask_user.picker_reply_many(["a", "c"], "") == (["a", "c"], "")
+
+    def test_the_note_rides_along_with_the_whole_selection(self):
+        assert ask_user.picker_reply_many(["a"], " but  later ") == (["a"], "but later")
+
+    def test_cancelling_is_still_a_dismissal(self):
+        assert ask_user.picker_reply_many(None, "typed then escaped") is None
+
+    def test_ticking_nothing_hands_the_decision_back(self):
+        # Submitting an empty selection says the same thing as the escape row, so
+        # it takes the reading that doesn't act on any option.
+        assert ask_user.picker_reply_many([], "hmm") == (None, "hmm")
+
+    def test_ticking_the_escape_row_beats_any_option_beside_it(self):
+        # "None of these" AND "this one" contradict each other; only one of the
+        # two readings is safe to act on.
+        assert ask_user.picker_reply_many(["a", ask_user.DISCUSS], "") == (None, "")
+
+    def test_duplicate_ticks_collapse(self):
+        assert ask_user.picker_reply_many(["a", "a", "b"], "")[0] == ["a", "b"]
+
+    def test_a_list_reply_is_read_as_a_multi_choice(self):
+        assert ask_user.normalize_reply((["a", "b"], "note")) == (
+            ["a", "b"],
+            "note",
+            True,
+        )
+
+    def test_an_empty_list_reply_is_answered_but_unchosen(self):
+        assert ask_user.normalize_reply(([], "")) == (None, "", True)
+
+    def test_all_the_picks_reach_the_model(self):
+        out = ask_user.format_answer(["a", "b", "c"])
+        assert '"a"' in out and '"b"' in out and '"c"' in out
+
+    def test_several_picks_are_not_reported_as_a_preference_order(self):
+        # Listed with the single-choice wording they read as a ranking, and the
+        # model would act on the first and drop the rest.
+        out = ask_user.format_answer(["a", "b"])
+        assert "The user chose:" not in out
+        assert "all 2" in out
+
+    def test_one_pick_is_reported_exactly_as_a_single_choice_question_would(self):
+        assert ask_user.format_answer(["SQLite"], "note") == ask_user.format_answer(
+            "SQLite", "note"
+        )
+
+    def test_ask_reports_the_whole_selection(self):
+        stub = _Stub(ui=lambda q, o, m: (["a", "c"], "both, in that order"))
+        out = ask_user.ask(stub, "Which?", ["a", "b", "c"], True)
+        assert '"a"' in out and '"c"' in out and '"b"' not in out
+        assert "both, in that order" in out
+
+    def test_ask_still_routes_an_empty_multi_selection_to_the_discussion(self):
+        stub = _Stub(ui=lambda q, o, m: ([], "none of them, actually"))
+        out = ask_user.ask(stub, "Which?", ["a", "b"], True)
+        assert "none of them, actually" in out
+        assert "Do NOT ask again" not in out
+
+    def test_a_hook_that_predates_the_flag_degrades_to_a_dismissal(self):
+        # The flag is passed positionally, so an old two-arg hook raises — which
+        # must cost the question, not the turn.
+        stub = _Stub(ui=lambda q, o: "a")
+        assert "Do NOT ask again" in ask_user.ask(stub, "Which?", ["a", "b"])
+
+
 class TestTheSpinnerIsHandedBack:
     """Nothing else restarts the spinner on this client-side path, so a lost
     restore leaves the terminal at a dead `>` for the rest of the turn."""
 
     def test_the_spinner_is_stopped_then_restored(self):
-        stub = _Stub(ui=lambda q, o: "a")
+        stub = _Stub(ui=lambda q, o, m: "a")
         ask_user.ask(stub, "Which?", ["a", "b"])
         assert stub.spinner_calls == ["stop", "start:Thinking"]
 
     def test_the_spinner_is_restored_even_when_the_dialog_raises(self):
-        def _boom(q, o):
+        def _boom(q, o, m):
             raise RuntimeError("boom")
 
         stub = _Stub(ui=_boom)
@@ -321,7 +405,7 @@ class TestTheSpinnerIsHandedBack:
         assert stub.spinner_calls == ["stop", "start:Thinking"]
 
     def test_an_idle_spinner_is_not_started(self):
-        stub = _Stub(ui=lambda q, o: "a")
+        stub = _Stub(ui=lambda q, o, m: "a")
         stub._spinner_snapshot = lambda: (False, "Thinking")
         ask_user.ask(stub, "Which?", ["a", "b"])
         assert stub.spinner_calls == ["stop"]
@@ -334,7 +418,7 @@ class TestTheToolIsWiredIn:
 
     def test_the_intercept_returns_a_tool_message(self):
         agent = LangGraphAgent.__new__(LangGraphAgent)
-        agent._question_ui = lambda q, o: "SQLite"
+        agent._question_ui = lambda q, o, m: "SQLite"
         agent._headless_tl = None
         agent._spawn_depth_plain = 0
         agent._spawn_depth_tl = None
@@ -387,7 +471,26 @@ class TestTheServerStubIsSafeIfDrivenDirectly:
         register_ask_user_tools(mcp)
         tools = asyncio.run(mcp.list_tools())
         tool = next(t for t in tools if t.name == "ask_user_question")
-        assert set(tool.inputSchema["properties"]) == {"question", "options"}
+        assert set(tool.inputSchema["properties"]) == {
+            "question",
+            "options",
+            "multiple",
+        }
+
+    def test_pick_one_stays_the_default_so_an_old_call_is_unchanged(self):
+        pytest.importorskip("mcp.server.fastmcp")
+        import asyncio
+
+        from mcp.server.fastmcp import FastMCP
+
+        from mnemoai.server.tools.ask_user_question import register_ask_user_tools
+
+        mcp = FastMCP("test")
+        register_ask_user_tools(mcp)
+        tools = asyncio.run(mcp.list_tools())
+        tool = next(t for t in tools if t.name == "ask_user_question")
+        assert "multiple" not in (tool.inputSchema.get("required") or [])
+        assert tool.inputSchema["properties"]["multiple"]["default"] is False
 
     def test_driven_without_the_client_it_tells_the_model_to_decide(self):
         # The stub body is what a directly-driven server returns; it must not

@@ -43,6 +43,11 @@ AREA_MODELS:
   ROUTER: qwen3.5:1.7b
 ```
 
+On a local server the small model has to be **served** as well: Ollama loads it on
+demand, but a single-process server (MLX, `llama-server`, vLLM) only answers for
+the models it was launched with, and a name it doesn't serve falls back to the chat
+model instead of failing.
+
 `/model` sets it without editing YAML (it lists a **Router model** row, which
 starts by asking whether to keep using the chat model). See
 [per-area models](../configuration.md#per-area-models-area_models) for the full

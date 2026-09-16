@@ -128,6 +128,32 @@ class TestTransientNetworkClassifier:
         ]:
             assert not LangGraphAgent._is_transient_network_error(Exception(msg)), msg
 
+    def test_a_5xx_that_names_its_own_cause_is_not_retried(self):
+        # A local MLX/llama-server reports "these weights cannot be loaded" as a
+        # 503, which the status markers alone would retry on the full budget while
+        # every attempt re-pays the same failure.
+        for msg in [
+            "Error code: 503 - {'error': {'message': \"Failed to load on-demand "
+            "model 'qwen3-30b': No such file or directory\", "
+            "'type': 'model_load_error', 'code': 503}}",
+            "503 Service Unavailable: model_load_error",
+            "Failed to load model: unsupported quantization",
+        ]:
+            assert stream_policy.is_deterministic_error(Exception(msg)), msg
+            assert not LangGraphAgent._is_transient_network_error(Exception(msg)), msg
+
+    def test_the_transient_5xx_from_the_same_server_still_retries(self):
+        # The override must not swallow the sibling 503 a retry does recover.
+        exc = Exception("503: Handler process crashed; restarting")
+        assert not stream_policy.is_deterministic_error(exc)
+        assert LangGraphAgent._is_transient_network_error(exc)
+
+    def test_a_deterministic_cause_wins_inside_a_task_group(self):
+        # Classification reads through a wrapper, so the override has to as well.
+        inner = Exception("503 model_load_error: out of memory")
+        group = ExceptionGroup("unhandled errors in a TaskGroup", [inner])
+        assert not LangGraphAgent._is_transient_network_error(group)
+
 
 class _FakeModel:
     """A model whose .stream() yields queued chunks, optionally stalling."""

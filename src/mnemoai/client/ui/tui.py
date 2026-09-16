@@ -37,11 +37,19 @@ from prompt_toolkit.layout.processors import BeforeInput
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.styles import Style
-from prompt_toolkit.widgets import Button, Dialog, Label, RadioList, TextArea
+from prompt_toolkit.widgets import (
+    Button,
+    CheckboxList,
+    Dialog,
+    Label,
+    RadioList,
+    TextArea,
+)
 
 from mnemoai.client import file_mentions
 from mnemoai.client.agent import ask_user
 from mnemoai.client.ui import notify, turn_view
+from mnemoai.utils.radio_select import commit_paging, highlighted_value
 
 # Override the default reverse-video bottom-toolbar so the pinned status/queue
 # lines read as dim console text, not a highlighted bar.
@@ -1114,12 +1122,15 @@ class PinnedPromptReader:
             decision = "keep_planning" if verdict in ("keep_planning", "no") else "approve"
             return (decision, plan)
 
-    def question_ui(self, question: str, options: List[str]) -> Optional[tuple]:
+    def question_ui(
+        self, question: str, options: List[str], multiple: bool = False
+    ) -> Optional[tuple]:
         """Put a question to the user (worker thread) and return their answer.
 
         ``None`` is a dismissal; otherwise ``(choice, note)`` — with ``choice``
         None when the user took the "none of these" row, i.e. wants to settle it
-        in conversation rather than by picking (see :func:`question_dialog`).
+        in conversation rather than by picking (see :func:`question_dialog`), and
+        a LIST of every ticked row when ``multiple``.
 
         Runs through :meth:`run_dialog` because a full-screen picker can't be
         nested inside the running pinned app — the same exit → run → relaunch
@@ -1139,16 +1150,20 @@ class PinnedPromptReader:
         notify.notify_waiting("mnemoai · a question is waiting")
 
         def _pick() -> Optional[tuple]:
-            reply = question_dialog(question, options)
+            reply = question_dialog(question, options, multiple)
             print(f"\n\033[93m? {question}\033[0m")
             if reply is None:
                 print("  \033[90m(dismissed)\033[0m")
                 return reply
             choice, note = reply
-            print(
-                f"  \033[1m{choice}\033[0m" if choice
-                else "  \033[90m(none of these — talking it through)\033[0m"
-            )
+            if not choice:
+                print("  \033[90m(none of these — talking it through)\033[0m")
+            else:
+                # A pick-any answer is several rows: one line each, or the
+                # scrollback record would show a list literal for the one thing
+                # the user is most likely to read back.
+                for pick in [choice] if isinstance(choice, str) else choice:
+                    print(f"  \033[1m{pick}\033[0m")
             if note:
                 print(f"  \033[90m↳ {note}\033[0m")
             return reply
@@ -1485,7 +1500,9 @@ def select_from_list(
     return options[idx - 1][0]
 
 
-def question_dialog(question: str, options: List[str]) -> Optional[tuple]:
+def question_dialog(
+    question: str, options: List[str], multiple: bool = False
+) -> Optional[tuple]:
     """Ask the user a question: pick one of ``options``, add a free-text note, or
     decline every option and say so instead.
 
@@ -1497,12 +1514,21 @@ def question_dialog(question: str, options: List[str]) -> Optional[tuple]:
     model guessed the alternatives, and forcing the closest wrong one is the
     failure mode this dialog exists to remove.
 
+    With ``multiple`` the rows are checkboxes and ``choice`` comes back as a LIST
+    of every ticked row (:func:`ask_user.picker_reply_many`) — the same three
+    outcomes either way.
+
     Non-TTY it degrades to a numbered ``input()`` prompt (plus one optional note
     line, EOF-tolerant) so pipes and tests never block.
     """
     rows = ask_user.picker_rows(options)
 
     if _dialog_is_tty():
+        if multiple:
+            result = _multi_pick(f"? {question}", rows)
+            if result is _CANCEL:
+                return None
+            return ask_user.picker_reply_many(result[0], result[1])
         result = _question_pick(f"? {question}", rows)
         if result is _CANCEL:
             return None
@@ -1511,23 +1537,36 @@ def question_dialog(question: str, options: List[str]) -> Optional[tuple]:
     print(f"\n? {question}")
     for i, (_, label) in enumerate(rows, 1):
         print(f"  {i}) {label}")
+    prompt = (
+        "  Select [1,2 · or Enter to dismiss]: " if multiple
+        else "  Select [1, or Enter to dismiss]: "
+    )
     try:
-        answer = input("  Select [1, or Enter to dismiss]: ").strip()
+        answer = input(prompt).strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
-    try:
-        idx = int(answer)
-    except ValueError:
-        return None
-    if not (1 <= idx <= len(rows)):
+    # A pick-any question takes a comma-separated list here; an unparseable or
+    # out-of-range entry is dropped rather than failing the whole answer, and an
+    # answer left with nothing is a dismissal exactly as in the pick-one branch.
+    picked = []
+    for part in (answer.split(",") if multiple else [answer]):
+        try:
+            idx = int(part.strip())
+        except ValueError:
+            continue
+        if 1 <= idx <= len(rows) and rows[idx - 1][0] not in picked:
+            picked.append(rows[idx - 1][0])
+    if not picked:
         return None
     try:
         note = input("  Note (optional, Enter to skip): ")
     except (EOFError, KeyboardInterrupt):
         print()
         note = ""
-    return ask_user.picker_reply(rows[idx - 1][0], note)
+    if multiple:
+        return ask_user.picker_reply_many(picked, note)
+    return ask_user.picker_reply(picked[0], note)
 
 
 def _run_detail_app(ansi_text: str) -> None:
@@ -1654,19 +1693,27 @@ def _radio_pick(title: str, options: List[tuple], *, allow_delete: bool = False)
     this every arrow key moved the highlight while ``current_value`` stayed on the
     FIRST row — ↓↓Enter silently returned row 1. That made the ``--resume`` and
     ``/load`` pickers open the wrong conversation, and the Delete button delete
-    the wrong one."""
+    the wrong one.
+
+    It is not sufficient either: ``select_on_focus`` reconciles the two in the
+    arrow/number bindings only, so PgDn (or type-to-find) still left
+    ``current_value`` behind — the same wrong-conversation bug, reachable by one
+    keypress in exactly the long picker paging exists for. Both confirms read
+    :func:`highlighted_value` instead, and :func:`commit_paging` keeps the ``(*)``
+    marker with the highlight so the screen agrees."""
     radio = RadioList(values=options, select_on_focus=True)
 
     def _ok() -> None:
-        get_app().exit(result=radio.current_value)
+        get_app().exit(result=highlighted_value(radio))
 
     def _cancel() -> None:
         get_app().exit(result=_CANCEL)
 
     def _delete() -> None:
-        get_app().exit(result=(_DELETE, radio.current_value))
+        get_app().exit(result=(_DELETE, highlighted_value(radio)))
 
     radio.control.key_bindings.add("enter")(lambda event: _ok())
+    commit_paging(radio)
 
     hint = "↑/↓ to move · Enter to confirm · Esc to cancel"
     buttons = [Button(text="OK", handler=_ok)]
@@ -1705,13 +1752,14 @@ def _question_pick(title: str, rows: List[tuple]):
     A one-line note field sits under the rows. Enter confirms from EITHER side —
     the row list or the note — so writing something down stays optional and
     nobody has to Tab out to submit. ``Dialog`` already binds Tab/Shift-Tab to
-    move focus, and ``select_on_focus`` is required for the same reason as in
-    :func:`_radio_pick` (the highlighted row is not the committed value).
+    move focus, and the highlighted row is read the same way as in
+    :func:`_radio_pick` (``select_on_focus`` plus :func:`highlighted_value`, since
+    the highlight and the committed value are not the same thing).
     """
     radio = RadioList(values=rows, select_on_focus=True)
 
     def _ok() -> None:
-        get_app().exit(result=(radio.current_value, note.text))
+        get_app().exit(result=(highlighted_value(radio), note.text))
 
     def _cancel() -> None:
         get_app().exit(result=_CANCEL)
@@ -1722,6 +1770,7 @@ def _question_pick(title: str, rows: List[tuple]):
         accept_handler=lambda _buf: _ok() or True,
     )
     radio.control.key_bindings.add("enter")(lambda event: _ok())
+    commit_paging(radio)
 
     dialog = Dialog(
         title=title,
@@ -1732,6 +1781,68 @@ def _question_pick(title: str, rows: List[tuple]):
                     "Esc to dismiss"
                 ),
                 radio,
+                note,
+            ],
+            padding=1,
+        ),
+        buttons=[Button(text="OK", handler=_ok), Button(text="Cancel", handler=_cancel)],
+        with_background=True,
+    )
+
+    kb = KeyBindings()
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def _(event) -> None:
+        _cancel()
+
+    app = Application(
+        layout=Layout(dialog),
+        key_bindings=kb,
+        mouse_support=False,
+        full_screen=True,
+    )
+    return app.run()
+
+
+def _multi_pick(title: str, rows: List[tuple]):
+    """Full-screen pick-**any**-plus-a-note dialog; returns ``(values, note)`` or
+    ``_CANCEL``.
+
+    The :func:`_question_pick` twin for a question with more than one answer, and
+    deliberately NOT built on the same widget: a ``CheckboxList`` keeps its answer
+    in ``current_values``, which its own Space binding maintains — so unlike the
+    radio list there is no highlight/commit gap to reconcile, and the two helpers
+    that close it are exactly wrong here. ``select_on_focus`` would tick every row
+    the highlight passes over (the multi-select branch of ``_handle_enter``
+    TOGGLES), and :func:`commit_paging` would move a committed value that doesn't
+    exist. Our Enter override shadows only ``enter``, so the widget's own ``" "``
+    binding still toggles the highlighted row.
+    """
+    check = CheckboxList(values=rows)
+
+    def _ok() -> None:
+        get_app().exit(result=(list(check.current_values), note.text))
+
+    def _cancel() -> None:
+        get_app().exit(result=_CANCEL)
+
+    note = TextArea(
+        multiline=False,
+        prompt="note ▸ ",
+        accept_handler=lambda _buf: _ok() or True,
+    )
+    check.control.key_bindings.add("enter")(lambda event: _ok())
+
+    dialog = Dialog(
+        title=title,
+        body=HSplit(
+            [
+                Label(
+                    text="↑/↓ to move · Space to tick · Tab for a note · "
+                    "Enter to confirm · Esc to dismiss"
+                ),
+                check,
                 note,
             ],
             padding=1,

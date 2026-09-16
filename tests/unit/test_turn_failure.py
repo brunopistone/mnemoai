@@ -114,6 +114,7 @@ class TestClassification:
             ("Connection was closed before we received a valid response",
              turn_failure.CONNECTION),
             ("ThrottlingException", turn_failure.CONNECTION),
+            ("503 model_load_error: no such file", turn_failure.UNSERVED),
             ("something nobody has seen before", turn_failure.UNKNOWN),
         ],
     )
@@ -155,6 +156,16 @@ class TestRecoveryAdvice:
         # a deterministic rejection sends the user around the same loop.
         advice = turn_failure.recovery_advice(Exception("ValidationException")).lower()
         assert "same way" in advice or "fail the same" in advice
+
+    def test_an_unloadable_model_is_not_a_conversation_problem(self):
+        # It arrives as a 503, so the old reading was "connection" (send it again)
+        # and, once that was fixed, "unknown" (/rewind) — both point at the
+        # conversation, which is the one thing that is fine here.
+        advice = turn_failure.recovery_advice(
+            Exception("503 - {'type': 'model_load_error'}")
+        )
+        assert "/model" in advice and "/doctor" in advice
+        assert "/rewind" not in advice
 
     def test_connection_defers_to_the_caller(self):
         # "Just send it again" already IS the recovery there; a list of repair

@@ -819,8 +819,8 @@ def test_prompt_provider_type_embeddings_has_no_mantle(monkeypatch):
 # --- /config can create OpenAI / SageMaker / LiteLLM (base-template transform) ---
 
 
-def _run_build(provider, default_model, answers):
-    """Drive _build_config against the base template with scripted answers.
+def _run_build(provider, default_model, answers, template_file="config.yaml.example"):
+    """Drive _build_config against a shipped template with scripted answers.
 
     Note the two ``AREA_MODELS`` prompts that follow the ROUTING/ORCH toggles when
     those are enabled ("use the same model as Chat?"); answering yes writes
@@ -830,12 +830,10 @@ def _run_build(provider, default_model, answers):
 
     from mnemoai.utils import configurator as C
 
-    text = (C._templates_dir() / "config.yaml.example").read_text()
+    text = (C._templates_dir() / template_file).read_text()
     it = iter(answers)
     builtins.input = lambda *a, **k: next(it)
-    return yaml.safe_load(
-        C._build_config(provider, default_model, text, "config.yaml.example")
-    )
+    return yaml.safe_load(C._build_config(provider, default_model, text, template_file))
 
 
 def test_config_openai_transforms_base_template():
@@ -921,6 +919,66 @@ def test_config_mlx_sets_host_port_and_mirrors_vision():
     v = d["VISION_MODEL_ID"]
     assert v["TYPE"] == "mlx" and v["NAME"] == "qwen-agentcoder"
     assert v["HOST"] == "127.0.0.1" and v["PORT"] == 8000
+
+
+def test_config_mlx_own_template_keeps_the_knobs_only_it_carries():
+    # The mlx row points at config.yaml.mlx.example, and a provider filling its
+    # OWN template skips the base-template transform — which is the whole point:
+    # the sampler knobs, KEEP_ALIVE and the mlx-shaped embed block are values no
+    # transform of the Ollama-shaped base could produce.
+    d = _run_build(
+        "mlx", "qwen3-4b",
+        # Same shape as the base-template run above: chat name, host, port,
+        # [blank base URL, blank key], MAX_TOKENS none, ctx, vision? y,
+        # "same as chat?" y, embeddings? n, profile, brave, then 14 toggles + the
+        # 2 area prompts (see the openai test).
+        ["qwen3-8b-mlx", "192.168.1.9", "8080", "", "", "none", "65536",
+         "y", "y", "n", "frank", "",
+         "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y", "y",
+         "y", "y"],
+        template_file="config.yaml.mlx.example",
+    )
+    m = d["MODEL_ID"]
+    assert m["TYPE"] == "mlx" and m["NAME"] == "qwen3-8b-mlx"
+    assert m["HOST"] == "192.168.1.9" and m["PORT"] == 8080
+    # The knobs the template ships survive verbatim (nothing pruned them).
+    assert m["KEEP_ALIVE"] == "30m"
+    assert m["TOP_K"] == 20 and m["MIN_P"] == 0.05
+    assert m["REPETITION_PENALTY"] == 1.15
+    # Documentation-only STOP sequences are still dropped, as for every provider.
+    assert "STOP" not in m
+    # Vision: "same as chat" carries the connection over but must NOT leak the
+    # chat-only sampler keys — the multimodal path never passes TOP_K on.
+    v = d["VISION_MODEL_ID"]
+    assert v["TYPE"] == "mlx" and v["NAME"] == "qwen3-8b-mlx"
+    assert v["HOST"] == "192.168.1.9" and v["PORT"] == 8080
+    for chat_only in ("TOP_K", "MIN_P", "REPETITION_PENALTY", "STREAM"):
+        assert chat_only not in v
+    # Embeddings declined -> the template's own mlx block stays as shipped
+    # (the base template would have left an ollama one here).
+    embed = d["RAG"]["EMBED_MODEL_ID"]
+    assert embed["TYPE"] == "mlx" and embed["KEEP_ALIVE"] == "10m"
+    # And the LLM values this template tunes for one local server.
+    assert d["LLM"]["REQUEST_TIMEOUT"] == 600
+    assert d["LLM"]["SUBAGENT_MAX_CONCURRENCY"] == 2
+
+
+def test_every_provider_row_points_at_a_template_that_ships():
+    # _run_configurator aborts setup when a row's template is missing, so a
+    # mistyped filename is a provider nobody can choose.
+    from mnemoai.utils.configurator import _PROVIDERS, _templates_dir
+
+    for key, (provider, template_file, _, _) in _PROVIDERS.items():
+        path = _templates_dir() / template_file
+        assert path.is_file(), f"row {key} ({provider}) -> missing {template_file}"
+    # A provider that ships a template must be routed to it — a bundled template
+    # nothing points at is documentation the setup flow ignores.
+    by_provider = {p: t for p, t, _, _ in _PROVIDERS.values()}
+    assert by_provider["mlx"] == "config.yaml.mlx.example"
+    assert by_provider["bedrock"] == "config.yaml.bedrock.example"
+    assert by_provider["mantle"] == "config.yaml.bedrock.mantle.example"
+    bundled = {p.name for p in _templates_dir().glob("config.yaml*.example")}
+    assert bundled == set(by_provider.values())
 
 
 def test_config_anthropic_transforms_base_template():
