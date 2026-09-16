@@ -573,19 +573,53 @@ class LangGraphClient:
         self.llm_controller = controller
         self.model = model
         self.agent.rebind_model(model)
-        # Every cached side model is rebuilt from the (now reloaded) config on next
-        # use; the area caches are cleared BEFORE they're re-read below.
+        # Rebuilt from the (now reloaded) config on next use.
         self._subagent_model_cache.clear()
+        self._rederive_area_models()
+        logger.info("Applied new inference params without restarting")
+        return True
+
+    def reload_area_models(self) -> bool:
+        """Re-read config and re-point the per-area models; True if it took effect.
+
+        Backs ``/model`` on an ``AREA_MODELS`` row. Such an edit says only which
+        model an internal call runs on (classification, decomposition, the
+        compaction summary) — the provider, name and connection of the model that
+        writes the answer are untouched, as is everything the MCP subprocess fixed
+        at boot — so replacing the process, and discarding the conversation with
+        it, costs more than the change is worth.
+
+        Deliberately narrower than :meth:`reload_inference_params`: the main model
+        is NOT rebuilt, because its ``MODEL_ID`` block didn't change and each area
+        variant is built through a peer controller that re-reads the config itself.
+        """
+        if not self.agent:
+            return False
+        try:
+            config.reload()
+            self._rederive_area_models()
+        except Exception as e:
+            logger.error(f"Could not apply the new area model: {e}")
+            return False
+        logger.info("Applied the new area model without restarting")
+        return True
+
+    def _rederive_area_models(self) -> None:
+        """Drop the cached area models and re-point every holder from config.
+
+        Shared by ``/params`` and ``/model``-on-an-area so the two can't drift.
+        Clearing comes FIRST: reading an area before dropping its cache would
+        re-install the pre-reload model. ``SUMMARY`` has no holder to re-point —
+        ``_summary_model()`` rebuilds it lazily off the dropped cache.
+        """
         self._area_model_cache.clear()
         if hasattr(self, "_summary_model_cached"):
             del self._summary_model_cached
         router = getattr(self.agent, "router", None)
         if router is not None:
-            router.model = self._area_model("ROUTER") or model
+            router.model = self._area_model("ROUTER") or self.model
             router.usage_model_name = self._area_usage_name("ROUTER")
         self.agent.orchestrator_model = self._area_model("ORCHESTRATOR")
-        logger.info("Applied new inference params without restarting")
-        return True
 
     def _summary_model(self):
         """The model used for compaction summaries.

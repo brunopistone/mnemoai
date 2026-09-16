@@ -7,6 +7,24 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.23.1] — 2026-09-16
+
+### Fixed
+
+- **Changing the router, orchestrator or summary model no longer throws the
+  conversation away.** `/model` restarted the app whichever row you edited, so
+  pointing an internal call at a smaller model cost you the chat you were having —
+  while changing that same model's temperature through `/params` had always been
+  applied in place. Those three rows only name the model an unseen internal call
+  runs on (classification, decomposition, the compaction summary); they are now
+  applied without restarting and the conversation continues. The chat, vision and
+  embeddings rows still restart, because they can change the provider, the
+  credentials, and the memory a model has built up. One exception keeps the
+  restart: an edit that also switches routing or orchestration **on**, since the
+  router and the orchestrator are built when the app starts. If applying the change
+  in place fails for any reason, the restart still happens rather than leaving a
+  half-applied config running.
+
 ## [1.23.0] — 2026-09-16
 
 ### Added

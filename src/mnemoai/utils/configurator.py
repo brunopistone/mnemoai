@@ -9,7 +9,7 @@ import getpass
 import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
@@ -1455,6 +1455,22 @@ _AREA_FEATURE = {
 }
 
 
+class ModelOverride(NamedTuple):
+    """What ``/model`` wrote: the file, plus what it takes to apply the change.
+
+    A bare Path can only say "something changed", which leaves the caller no
+    option but the broadest apply there is. ``section`` names the block that was
+    edited — one of the registry sections, or an ``AREA_MODELS`` area — and
+    ``enabled_feature`` says whether the area's feature toggle was turned on in
+    the same edit (an area model alone is re-pointable in a running process; the
+    feature behind it is wired at startup).
+    """
+
+    path: Path
+    section: str
+    enabled_feature: bool = False
+
+
 def _area_gate(text: str, section: str) -> Optional[tuple]:
     """``(toggle, name)`` when ``section`` is an area whose feature is currently
     off, else None (not an area, or already enabled)."""
@@ -1903,9 +1919,9 @@ def _prompt_enable_embedding_features(text: str) -> str:
     return text
 
 
-def run_model_override() -> Optional[Path]:
+def run_model_override() -> Optional[ModelOverride]:
     """Override one model section in place (``/model``), preserving the rest;
-    returns the written Path, or None if cancelled or there's no config."""
+    returns what was written, or None if cancelled or there's no config."""
     dest = config_path()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")
@@ -1955,6 +1971,7 @@ def run_model_override() -> Optional[Path]:
         # Threaded through `base` so `text` stays the original — flipping the
         # toggle alone still counts as a change worth saving.
         base = text
+        enabled_feature = False
         gate = _area_gate(text, section)
         if gate:
             toggle, name = gate
@@ -1965,6 +1982,7 @@ def run_model_override() -> Optional[Path]:
                 print(f"  Left unchanged — enable {toggle} (/features) first.")
                 return None
             base = _set_top_level_or_add(base, toggle, "true")
+            enabled_feature = True
         new_text = _prompt_model_section(base, section, is_llm)
         # After configuring embeddings, offer to turn on the features that use
         # them if they're currently off (embeddings alone do nothing otherwise).
@@ -1988,7 +2006,7 @@ def run_model_override() -> Optional[Path]:
         print("  use /params to tune them. For the full per-provider parameter list,")
         print("  see the README's 'Model Parameters' section.")
     print("=" * 64 + "\n")
-    return dest
+    return ModelOverride(dest, section, enabled_feature)
 
 
 # --- /features: enable/disable app subsystems (the ENABLE_* toggles) ---------

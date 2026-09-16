@@ -1,4 +1,4 @@
-"""Unit tests: /params reloads in place instead of restarting the process.
+"""Unit tests: a settings command reloads in place instead of restarting.
 
 /params edits ONLY inference knobs (temperature, top_p, …) — never the provider,
 model name, or connection — so nothing the MCP subprocess fixed at boot can have
@@ -6,13 +6,22 @@ changed and there is no reason to re-exec. Re-exec'ing discarded the conversatio
 which was worst right after a `--resume`: the restored history lived only in the
 new session file, and that file was abandoned turn-less by the restart.
 
+/model is the same question asked per ROW: an AREA_MODELS row names the model an
+internal call runs on and is re-pointable in a running process, while MODEL_ID can
+change the provider, the credentials and the model-scoped memory directories the
+startup opened. So the decision is what was written, not which command wrote it.
+
 Pure logic: a stub client/agent, no LLM, no prompt_toolkit, no TTY.
 """
+
+from pathlib import Path
 
 import pytest
 
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.ui.chat_interface import ChatInterface
+from mnemoai.models.area_models import AREAS
+from mnemoai.utils.configurator import ModelOverride
 
 
 class _Bound:
@@ -55,10 +64,15 @@ class _Client:
         self.session_id = "sess_20260101_000000"
         self.reload_ok = reload_ok
         self.reload_calls = 0
+        self.area_reload_calls = 0
         self.agent = type("A", (), {"session_log": _Log()})()
 
     def reload_inference_params(self):
         self.reload_calls += 1
+        return self.reload_ok
+
+    def reload_area_models(self):
+        self.area_reload_calls += 1
         return self.reload_ok
 
 
@@ -114,6 +128,76 @@ class TestParamsDoesNotRestart:
         ci._dispatch("/features")
         assert ci.restarts == 1
         assert ci.client.reload_calls == 0
+
+
+class TestModelRestartsOnlyWhenItMustNot:
+    """/model decides per ROW: an area model is re-pointable, MODEL_ID is not."""
+
+    def _wrote(self, monkeypatch, section, enabled_feature=False):
+        monkeypatch.setattr(
+            "mnemoai.client.ui.chat_interface.run_model_override",
+            lambda: ModelOverride(Path("/cfg.yaml"), section, enabled_feature),
+        )
+
+    def test_an_area_row_reloads_in_place(self, ci, monkeypatch):
+        # ROUTER only says which model classifies the query — the provider, name
+        # and connection of the model that answers are untouched.
+        self._wrote(monkeypatch, "ROUTER")
+        assert ci._dispatch("/model") is None
+        assert ci.client.area_reload_calls == 1
+        assert ci.restarts == 0
+
+    def test_every_area_reloads_in_place(self, ci, monkeypatch):
+        for area in AREAS:
+            ci.client.area_reload_calls = 0
+            ci.restarts = 0
+            self._wrote(monkeypatch, area)
+            ci._dispatch("/model")
+            assert ci.client.area_reload_calls == 1, area
+            assert ci.restarts == 0, area
+
+    def test_the_main_model_still_restarts(self, ci, monkeypatch):
+        # MODEL_ID can change the provider, the credentials and the model-scoped
+        # memory dirs opened during start() — all wired before the first prompt.
+        self._wrote(monkeypatch, "MODEL_ID")
+        ci._dispatch("/model")
+        assert ci.restarts == 1
+        assert ci.client.area_reload_calls == 0
+
+    def test_the_vision_and_embed_rows_still_restart(self, ci, monkeypatch):
+        for section in ("VISION_MODEL_ID", "EMBED_MODEL_ID"):
+            ci.restarts = 0
+            self._wrote(monkeypatch, section)
+            ci._dispatch("/model")
+            assert ci.restarts == 1, section
+            assert ci.client.area_reload_calls == 0, section
+
+    def test_an_area_that_enabled_its_feature_still_restarts(self, ci, monkeypatch):
+        # ENABLE_ROUTING decides whether a QueryRouter is CONSTRUCTED in start(),
+        # so with the feature off there is no live holder to re-point.
+        self._wrote(monkeypatch, "ROUTER", enabled_feature=True)
+        ci._dispatch("/model")
+        assert ci.restarts == 1
+        assert ci.client.area_reload_calls == 0
+
+    def test_a_failed_reload_falls_back_to_the_restart(self, monkeypatch):
+        # Same rule as /params: never keep running on a half-applied config.
+        c = ChatInterface.__new__(ChatInterface)
+        c.client = _Client(reload_ok=False)
+        c.restarts = 0
+        c._restart_in_place = lambda: setattr(c, "restarts", c.restarts + 1)
+        self._wrote(monkeypatch, "SUMMARY")
+        c._dispatch("/model")
+        assert c.client.area_reload_calls == 1
+        assert c.restarts == 1
+
+    def test_a_cancelled_dialog_changes_nothing(self, ci, monkeypatch):
+        monkeypatch.setattr(
+            "mnemoai.client.ui.chat_interface.run_model_override", lambda: None
+        )
+        assert ci._dispatch("/model") is None
+        assert ci.client.area_reload_calls == 0
+        assert ci.restarts == 0
 
 
 class TestRebindModel:

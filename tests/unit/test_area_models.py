@@ -384,6 +384,96 @@ class TestReloadRederivesThem:
         assert c.agent.router.usage_model_name == "big"
 
 
+class TestReloadingOnlyTheAreaModels:
+    """/model on an AREA_MODELS row re-points the areas and nothing else.
+
+    Such a row names the model an internal call runs on. It cannot change the
+    provider, name or connection of the model that writes the answer, and it
+    cannot touch anything the MCP subprocess fixed at boot — so the process needn't
+    be replaced, and the conversation survives the edit. That makes this the
+    narrow sibling of the /params reload above: same re-derive, no rebuild.
+    """
+
+    def _client(self, monkeypatch, section):
+        c = LangGraphClient.__new__(LangGraphClient)
+        c.model = "MAIN"
+        c.llm_controller = _Ctrl()
+        c._area_model_cache = {}
+        c._subagent_model_cache = {"x": "BUILT"}
+        c.agent = type(
+            "A",
+            (),
+            {
+                # Both are failures, not stubs: MODEL_ID didn't change, so a rebuild
+                # would cost a new provider client for nothing and a rebind would
+                # swap the live conversation's model behind its back.
+                "rebind_model": lambda self, m: pytest.fail("the chat model was rebound"),
+                "router": type("R", (), {"model": "OLD", "usage_model_name": "old"})(),
+                "usage_model_name": "big",
+                "orchestrator_model": None,
+            },
+        )()
+
+        def _get(key, default=None):
+            return section if key == area_models.CONFIG_SECTION else default
+
+        monkeypatch.setattr(area_models.config, "get", _get)
+        monkeypatch.setattr("mnemoai.client.client.config.get", _get)
+        monkeypatch.setattr("mnemoai.client.client.config.reload", lambda: None)
+        monkeypatch.setattr(
+            "mnemoai.client.client.LangChainLLMController",
+            lambda verbose=False: pytest.fail("the chat model was rebuilt"),
+        )
+        return c
+
+    def test_the_area_is_re_pointed_from_the_reloaded_config(self, monkeypatch):
+        c = self._client(monkeypatch, {"ROUTER": "small"})
+        assert c.reload_area_models() is True
+        assert c.agent.router.model == "MODEL:small"
+        # /usage has to follow, or the calls are attributed to the wrong model.
+        assert c.agent.router.usage_model_name == "small"
+
+    def test_a_stale_cache_cannot_survive_the_reload(self, monkeypatch):
+        c = self._client(monkeypatch, {"ORCHESTRATOR": "mid"})
+        c._area_model_cache["ORCHESTRATOR"] = "STALE"
+        c._summary_model_cached = "STALE"
+        assert c.reload_area_models() is True
+        assert c.agent.orchestrator_model == "MODEL:mid"
+        # SUMMARY has no holder to re-point: dropping the cache IS the re-point.
+        assert not hasattr(c, "_summary_model_cached")
+
+    def test_removing_an_override_returns_the_area_to_the_chat_model(self, monkeypatch):
+        c = self._client(monkeypatch, {})
+        c._area_model_cache["ROUTER"] = "STALE"
+        assert c.reload_area_models() is True
+        assert c.agent.router.model == "MAIN"
+        assert c.agent.router.usage_model_name == "big"
+
+    def test_the_conversations_own_model_is_left_alone(self, monkeypatch):
+        c = self._client(monkeypatch, {"ROUTER": "small"})
+        c.reload_area_models()
+        assert c.model == "MAIN"
+        # Sub-agent overrides are built off MODEL_ID as well, so they stay valid —
+        # unlike /params, which changes the params they were snapshotted with.
+        assert c._subagent_model_cache == {"x": "BUILT"}
+
+    def test_a_failed_reload_reports_it_instead_of_half_applying(self, monkeypatch):
+        # The caller falls back to the restart on False, so a config we couldn't
+        # re-read must never look like one that was applied.
+        c = self._client(monkeypatch, {"ROUTER": "small"})
+
+        def _boom():
+            raise RuntimeError("unreadable config")
+
+        monkeypatch.setattr("mnemoai.client.client.config.reload", _boom)
+        assert c.reload_area_models() is False
+
+    def test_without_an_agent_there_is_nothing_to_re_point(self, monkeypatch):
+        c = self._client(monkeypatch, {"ROUTER": "small"})
+        c.agent = None
+        assert c.reload_area_models() is False
+
+
 class _NewCtrl(_Ctrl):
     """The post-reload controller: its variants are visibly not the old ones."""
 
