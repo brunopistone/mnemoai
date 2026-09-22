@@ -61,6 +61,7 @@ _TUI_STYLE = Style(
         ("pinned-confirm", "noreverse bg:default fg:ansiyellow bold"),
         ("pinned-confirm-keys", "noreverse bg:default fg:#888888"),
         ("pinned-queued", "noreverse bg:default fg:#888888"),
+        ("pinned-queued-label", "noreverse bg:default fg:#87afff"),
         ("pinned-panel", "noreverse bg:default fg:#888888"),
         ("pinned-panel-hint", "noreverse bg:default fg:#5f5fff"),
         ("pinned-panel-sel", "noreverse bg:default fg:#ffffff bold"),
@@ -210,8 +211,9 @@ class PinnedPromptReader:
     above it into native scrollback. Submitting enqueues a line; a worker coroutine drains
     the queue one at a time via ``asyncio.to_thread`` — a worker thread is
     required because ``client.query()`` calls ``asyncio.run()``, which raises on a
-    thread already owning a loop. A second Enter queues (FIFO), never running a
-    concurrent query. Default interactive UI on a TTY.
+    thread already owning a loop. A second Enter is offered to the RUNNING turn
+    first (``send_mid_turn``) and queued FIFO only if it isn't taken — never
+    running a concurrent query either way. Default interactive UI on a TTY.
     """
 
     def __init__(
@@ -226,6 +228,8 @@ class PinnedPromptReader:
         steps_text: Optional[Callable[[], str]] = None,
         footer_text: Optional[Callable[[int], Any]] = None,
         on_cancel: Optional[Callable[[], None]] = None,
+        send_mid_turn: Optional[Callable[[str], bool]] = None,
+        reclaim_mid_turn: Optional[Callable[[], list]] = None,
         agents_provider: Optional[Callable[[], list]] = None,
         agents_get: Optional[Callable[[str], Any]] = None,
         agents_stop: Optional[Callable[[str], bool]] = None,
@@ -252,6 +256,12 @@ class PinnedPromptReader:
             on_cancel: Called (UI thread) on Esc/Ctrl+C during a turn — fires the
                 cooperative cancel so blocking stream/backoff waits wake at once
                 (the async KeyboardInterrupt alone can't preempt them).
+            send_mid_turn: ``send(text)`` -> True if the RUNNING turn took a
+                message submitted while it works (it delivers it at its next
+                drain point). False, or absent, queues the line FIFO instead.
+            reclaim_mid_turn: ``reclaim()`` -> the texts the finished turn never
+                delivered, taken back so they run as their own turns — what makes
+                a cancelled turn's mid-turn message survive the cancel.
             agents_provider: Returns the current list of hidden sub-agent activity
                 runs (ActivityRun snapshots) for the live bottom "agents" panel.
             agents_get: ``get(run_id)`` -> one run's frozen copy for the detail view.
@@ -265,6 +275,11 @@ class PinnedPromptReader:
         self._steps_text = steps_text or (lambda: "")
         self._footer_provider = footer_text
         self._on_cancel = on_cancel
+        # Mid-turn delivery: offer a submission to the running turn, and take back
+        # whatever it didn't deliver. Absent (tests, a caller that doesn't wire
+        # them) → every submission is queued FIFO, the pre-existing behavior.
+        self._send_mid_turn = send_mid_turn
+        self._reclaim_mid_turn = reclaim_mid_turn
         # Live sub-agent activity: provider() -> list of ActivityRun snapshots for
         # the bottom "agents" panel; get(run_id) -> one run for the detail view;
         # stop(run_id)/stop_all() -> ask a running agent (or all) to stop.
@@ -278,6 +293,9 @@ class PinnedPromptReader:
         self._busy = False
         self._pending = 0  # queued-but-not-started lines (for the status line)
         self._queued_lines = []  # queued text, shown live in the pinned region
+        # Accepted INTO the running turn (not queued): shown in the same pinned
+        # region under its own header, dropped as each is delivered.
+        self._mid_turn_lines = []
         self._worker_tid = None  # OS thread id of the running dispatch, for Esc
         self._cancelled = False  # guards a double Esc for the same turn
         self._ctrl_c_while_busy = False  # first Ctrl+C armed force-quit this turn
@@ -332,12 +350,45 @@ class PinnedPromptReader:
         return [("class:pinned-status", text)] if text else []
 
     def _queued_text(self):
-        """Dim ``> … (queued)`` lines for submitted-but-not-started messages,
-        acknowledging them live until :meth:`_worker` dequeues and echoes each."""
+        """The pinned block of messages that are waiting, acknowledged live.
+
+        Two groups with a header each, because what happens to them differs and
+        that is the only thing the user can act on: a mid-turn message goes to the
+        RUNNING turn at its next drain point, a queued line runs as a turn of its
+        own once this one ends. Either way Esc ends the wait — it interrupts the
+        turn, which sends the pending text immediately — so the header says so
+        while a turn is running.
+
+        Each message is one ``↳`` row (the window wraps, so a long one stays
+        readable) and leaves the block as soon as it's been handed over.
+        """
         lines = []
-        for i, q in enumerate(self._queued_lines):
-            prefix = "\n" if i else ""
-            lines.append(("class:pinned-queued", f"{prefix}> {q}  (queued)"))
+
+        def group(header: str, rows: list) -> None:
+            if not rows:
+                return
+            if lines:
+                lines.append(("class:pinned-queued", "\n"))
+            lines.append(("class:pinned-queued-label", header))
+            if self._busy:
+                lines.append(
+                    ("class:pinned-queued", "  (esc to interrupt and send now)")
+                )
+            for row in rows:
+                lines.append(("class:pinned-queued", f"\n  ↳ {row}"))
+
+        plural = "s" if len(self._mid_turn_lines) > 1 else ""
+        group(
+            f"Message{plural} to be sent after the current step",
+            self._mid_turn_lines,
+        )
+        plural = "s" if len(self._queued_lines) > 1 else ""
+        group(
+            f"Message{plural} queued to run as their own turn"
+            if plural
+            else "Message queued to run as its own turn",
+            self._queued_lines,
+        )
         return lines
 
     def _footer_text(self):
@@ -557,9 +608,15 @@ class PinnedPromptReader:
             Window(
                 FormattedTextControl(self._queued_text),
                 dont_extend_height=True,
+                # A submitted message is usually a sentence, not a fragment: with
+                # wrapping off the row was silently cut at the terminal edge, so
+                # the user couldn't read back what they had just sent.
+                wrap_lines=True,
                 style="class:pinned-queued",
             ),
-            filter=Condition(lambda: bool(self._queued_lines)),
+            filter=Condition(
+                lambda: bool(self._queued_lines or self._mid_turn_lines)
+            ),
         )
         # Live reasoning (styled block) shown transiently above the status line;
         # the final block commits to scrollback when the answer starts.
@@ -902,29 +959,111 @@ class PinnedPromptReader:
         sys.stdout.flush()
 
     def _on_accept(self, buff: Buffer) -> bool:
-        """Enqueue the submitted line (on the event-loop thread).
+        """Hand the submitted line to the running turn, else queue it (event-loop
+        thread). Returns False so prompt_toolkit clears the input.
 
-        A message submitted WHILE a turn is running is QUEUED (FIFO) and runs as
-        its OWN separate turn after the current one fully ends — matching Claude
-        Code. It shows live as a dim ``> … (queued)`` line via
-        :meth:`_queued_text` and is echoed to scrollback only when :meth:`_worker`
-        dequeues it (so each ``>`` sits above its own answer). Returns False so
-        prompt_toolkit clears the input.
+        A message submitted WHILE a turn runs is usually about that turn ("also
+        check the other file", "in Italian"), so the turn gets first refusal: it
+        delivers it at its next drain point and answers it without ending. What it
+        won't take — because no turn is running, or this one is past its last drain
+        point — is QUEUED FIFO and runs as its own turn, which is also where a
+        slash command always goes (it is a UI command, not model input).
 
-        (Mid-turn *steering* — folding the message into the running turn — was
-        retired as the default and its machinery DELETED in 1.8.0: draining only
-        at tool-round boundaries stranded a message typed during the final,
-        tool-call-free model call into the NEXT turn. Reviving it needs a drain
-        point that also covers turn end; see ``_execute_tools`` in agent.py.)
+        Either way the line shows live in the pinned region (:meth:`_queued_text`)
+        and is echoed to scrollback only when it is actually handed over, so each
+        ``>`` sits above the answer that addresses it.
         """
         text = buff.text
         if not text.strip() or self._queue is None:
             return False
 
+        steerable = self._busy and self._send_mid_turn is not None
+        if steerable and not text.lstrip().startswith("/"):
+            try:
+                if self._send_mid_turn(self._expand_pastes(text)):
+                    self._mid_turn_lines.append(text)
+                    if self._app is not None:
+                        self._app.invalidate()
+                    return False
+            except Exception:
+                pass  # any hook failure falls through to FIFO queuing
+
         self._pending += 1
         self._queued_lines.append(text)
         self._queue.put_nowait(text)
         return False
+
+    def notify_mid_turn_delivered(self, texts: list) -> None:
+        """The running turn took the pending mid-turn message(s) (worker thread).
+
+        Drops them from the pinned block and echoes each to scrollback, where the
+        ``>`` line lands above the model's response to it — the same placement a
+        dequeued line gets, so a mid-turn message reads like the message it is
+        rather than appearing out of nowhere in the answer.
+
+        Marshalled onto the event loop: the pinned state and ``run_in_terminal``
+        both belong to it (the :meth:`notify_background_complete` pattern). Only
+        the FIRST ``len(texts)`` rows leave the block — a message accepted between
+        the drain and this callback is still pending and must stay visible.
+        """
+        loop = self._loop
+        if loop is None:
+            return
+
+        async def _echo(rows: list) -> None:
+            for row in rows:
+                echoed = self._expand_pastes(row, echo=True)
+                try:
+                    await run_in_terminal(
+                        lambda t=echoed: self._print_echo_block(
+                            f"\033[36m>\033[0m {t}"
+                        )
+                    )
+                except Exception:
+                    pass
+
+        def _delivered() -> None:
+            n = max(1, len(texts or []))
+            rows = self._mid_turn_lines[:n]
+            del self._mid_turn_lines[:n]
+            if not rows:
+                # Raced (a reclaim already took the rows): echo the delivered text
+                # itself rather than let the answer stand over nothing.
+                rows = list(texts or [])
+            if rows:
+                loop.create_task(_echo(rows))
+            if self._app is not None:
+                self._app.invalidate()
+
+        loop.call_soon_threadsafe(_delivered)
+
+    def _requeue_undelivered(self) -> None:
+        """Take back what the finished turn never delivered (event-loop thread).
+
+        The turn either folds a mid-turn message in or hands it back — a turn
+        cancelled with Esc, or one that died, leaves its pending message here and
+        the user's words must not vanish with it. Re-queued FIFO, so it runs as
+        its own turn immediately: that is what makes "esc to interrupt and send
+        now" true, and it is also what keeps an undelivered message out of an
+        UNRELATED later turn.
+        """
+        if self._reclaim_mid_turn is None:
+            self._mid_turn_lines.clear()
+            return
+        try:
+            texts = list(self._reclaim_mid_turn() or [])
+        except Exception:
+            texts = []
+        shown = self._mid_turn_lines[:]
+        self._mid_turn_lines.clear()
+        for i, text in enumerate(texts):
+            # Prefer the row as typed (pastes still collapsed) — the reclaimed
+            # text is the expanded form the turn was offered.
+            line = shown[i] if i < len(shown) else text
+            self._pending += 1
+            self._queued_lines.append(line)
+            if self._queue is not None:
+                self._queue.put_nowait(line)
 
     def run(self) -> None:
         """Run the pinned REPL (sync entry) under ``patch_stdout`` until dispatch
@@ -1296,6 +1435,11 @@ class PinnedPromptReader:
             finally:
                 self._busy = False
                 self._worker_tid = None
+                # Whatever this turn accepted mid-turn and never delivered (it was
+                # cancelled, it failed, or it had no drain point left) comes back
+                # here and is re-queued as its own turn — nothing the user typed is
+                # dropped, and nothing rides into an unrelated turn.
+                self._requeue_undelivered()
                 if self._app is not None:
                     self._app.invalidate()
             self._queue.task_done()

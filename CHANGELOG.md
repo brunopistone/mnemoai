@@ -7,6 +7,40 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.23.2] — 2026-09-22
+
+### Changed
+
+- **A message you send while a turn is running now reaches that turn.** It was
+  queued and ran as its own turn once the first one had finished — correct, and
+  the wrong shape for what those messages usually are: a correction of the work
+  in flight ("also check the other file", "no, in Italian", "stop looking at
+  tests"). The turn spent minutes finishing the thing you had just redirected,
+  and the correction then arrived with the wrong work already done. The running
+  turn now gets first refusal and picks the message up at its next step — after
+  the tool calls it is in the middle of, or at the end of its last one — and
+  answers it without ending. Whatever it can't take is still queued and runs as
+  its own turn: no turn running, a turn already past its last hand-over point,
+  or a slash command, which is an app command rather than something to say to
+  the model. Nothing you type is lost either way — a turn you interrupt with Esc
+  hands its pending message back, and it runs immediately.
+- **The waiting block now says what will happen to each message in it.** A
+  message on its way into the running turn and one queued to run on its own sat
+  in the same dim `> … (queued)` list, which named the wrong thing for one of
+  them and nothing you could act on for either. Each group now has a heading of
+  its own — with the reminder that Esc sends now — and its messages under it. A
+  long message wraps instead of being cut off at the edge of the terminal, and
+  each one is echoed into the transcript at the moment it actually reaches the
+  model, so it reads above the part of the answer that addresses it.
+
+### Added
+
+- **The status line shows how long the turn has been running** (`46s · esc to
+  cancel`). The spinner said that a turn was working but not for how long, which
+  is the fact the decision to interrupt rests on — a turn five seconds in and one
+  eight minutes in looked identical. It times the whole turn rather than the step
+  in front of it, so it keeps counting across every tool call.
+
 ## [1.23.1] — 2026-09-16
 
 ### Fixed

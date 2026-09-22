@@ -180,11 +180,12 @@ def test_queued_line_shown_while_pending_then_cleared_on_dispatch():
     # All drained → nothing left pending.
     assert reader._queued_lines == []
 
-    # The queued-text renderer produces a dim "> … (queued)" line per entry.
+    # The renderer labels the group with what will happen to those lines, then
+    # lists each one — a bare marker per line said only "something is pending".
     reader._queued_lines = ["a", "b"]
-    frags = reader._queued_text()
-    rendered = "".join(t for _, t in frags)
-    assert "> a  (queued)" in rendered and "> b  (queued)" in rendered
+    rendered = "".join(t for _, t in reader._queued_text())
+    assert "queued to run as their own turn" in rendered
+    assert "↳ a" in rendered and "↳ b" in rendered
 
 
 def test_accept_handler_ignores_blank_lines():
@@ -203,12 +204,9 @@ def test_accept_handler_ignores_blank_lines():
     asyncio.run(main())
 
 
-def test_mid_turn_message_is_queued_not_folded_into_running_turn():
-    # A message submitted WHILE a turn runs must be QUEUED to run as its own turn
-    # after, never folded into the running turn. Mid-turn steering (which did the
-    # folding) was removed in 1.8.0 because draining only at tool-round boundaries
-    # stranded a message typed during the final tool-call-free model call into the
-    # next turn; this test pins the queuing behavior that replaced it.
+def test_mid_turn_message_is_queued_when_no_running_turn_can_take_it():
+    # With no hook (off-TTY, or a turn that has no drain point left) a submission
+    # falls back to FIFO: it runs as its own turn after the current one.
     reader = _reader(lambda line: None)
 
     async def main():
@@ -220,9 +218,263 @@ def test_mid_turn_message_is_queued_not_folded_into_running_turn():
 
         assert reader._on_accept(_Buff()) is False
         assert reader._queued_lines == ["look at file X too"]
+        assert reader._mid_turn_lines == []
         assert reader._queue.get_nowait() == "look at file X too"
 
     asyncio.run(main())
+
+
+class _Turn:
+    """Stand-in for the agent's mid-turn queue: accepts while its window is open."""
+
+    def __init__(self, open_window=True):
+        self.open = open_window
+        self.pending = []
+
+    def accept(self, text):
+        if not self.open:
+            return False
+        self.pending.append(text)
+        return True
+
+    def reclaim(self):
+        self.open = False
+        texts, self.pending = self.pending, []
+        return texts
+
+
+def _steerable_reader(turn, dispatch=lambda line: None):
+    """A reader wired to `turn`, already marked busy (a turn is running)."""
+    r = PinnedPromptReader(
+        prompt_text=lambda: "> ",
+        commands=[],
+        dispatch=dispatch,
+        toolbar_text=lambda: "",
+        send_mid_turn=turn.accept,
+        reclaim_mid_turn=turn.reclaim,
+    )
+    r._app = _FakeApp()
+    r._busy = True
+    return r
+
+
+class TestMidTurnDelivery:
+    """A message typed mid-turn is offered to the RUNNING turn before the queue."""
+
+    def test_running_turn_takes_it_instead_of_the_queue(self):
+        turn = _Turn()
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+
+            class _Buff:
+                text = "also check the other file"
+
+            assert reader._on_accept(_Buff()) is False
+            # The turn owns it: nothing queued, nothing pending, and it shows in
+            # the mid-turn group of the pinned block.
+            assert turn.pending == ["also check the other file"]
+            assert reader._mid_turn_lines == ["also check the other file"]
+            assert reader._queued_lines == []
+            assert reader.pending == 0
+            assert reader._queue.empty()
+
+        asyncio.run(main())
+
+    def test_a_slash_command_is_never_folded_into_a_turn(self):
+        # A slash command is a UI command, not model input — handing "/copy" to
+        # the model mid-turn would make it read as a request.
+        turn = _Turn()
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+
+            class _Buff:
+                text = "/copy"
+
+            reader._on_accept(_Buff())
+            assert turn.pending == []
+            assert reader._queued_lines == ["/copy"]
+
+        asyncio.run(main())
+
+    def test_a_refused_offer_falls_back_to_the_queue(self):
+        # The window closes at the turn's last drain point, so a late message has
+        # nothing left to ride on and must run as its own turn.
+        turn = _Turn(open_window=False)
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+
+            class _Buff:
+                text = "too late"
+
+            reader._on_accept(_Buff())
+            assert reader._mid_turn_lines == []
+            assert reader._queued_lines == ["too late"]
+            assert reader._queue.get_nowait() == "too late"
+
+        asyncio.run(main())
+
+    def test_a_raising_hook_falls_back_to_the_queue(self):
+        # Never lose the line to a broken hook: queuing is always available.
+        turn = _Turn()
+        turn.accept = lambda text: (_ for _ in ()).throw(RuntimeError("boom"))
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+
+            class _Buff:
+                text = "still mine"
+
+            reader._on_accept(_Buff())
+            assert reader._queued_lines == ["still mine"]
+
+        asyncio.run(main())
+
+    def test_an_idle_prompt_is_never_offered_to_a_turn(self):
+        # Nothing is running, so there is no turn to fold it into: this is an
+        # ordinary prompt and must start its own turn.
+        turn = _Turn()
+        reader = _steerable_reader(turn)
+        reader._busy = False
+
+        async def main():
+            reader._queue = asyncio.Queue()
+
+            class _Buff:
+                text = "hello"
+
+            reader._on_accept(_Buff())
+            assert turn.pending == []
+            assert reader._queued_lines == ["hello"]
+
+        asyncio.run(main())
+
+    def test_delivery_moves_the_row_out_and_echoes_it(self, capsys):
+        # The `>` echo is printed at DELIVERY (not at submit) so it lands directly
+        # above the part of the answer that addresses it.
+        turn = _Turn()
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+            reader._loop = asyncio.get_running_loop()
+
+            class _Buff:
+                text = "in Italian please"
+
+            reader._on_accept(_Buff())
+            reader.notify_mid_turn_delivered(["in Italian please"])
+            await asyncio.sleep(0)  # let the marshalled callback + echo task run
+            await asyncio.sleep(0)
+            assert reader._mid_turn_lines == []
+
+        asyncio.run(main())
+        assert "in Italian please" in capsys.readouterr().out
+
+    def test_only_the_delivered_rows_leave_the_block(self):
+        # A message accepted between the drain and this callback is still pending
+        # and must stay visible.
+        turn = _Turn()
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+            reader._loop = asyncio.get_running_loop()
+            reader._mid_turn_lines = ["first", "second"]
+            reader.notify_mid_turn_delivered(["first"])
+            await asyncio.sleep(0)
+            assert reader._mid_turn_lines == ["second"]
+
+        asyncio.run(main())
+
+    def test_an_undelivered_message_is_requeued_not_lost(self):
+        # A cancelled (or failed) turn hands its pending text back; the reader
+        # re-queues it so it runs immediately as its own turn.
+        turn = _Turn()
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+
+            class _Buff:
+                text = "and in Italian"
+
+            reader._on_accept(_Buff())
+            reader._requeue_undelivered()
+            assert reader._mid_turn_lines == []
+            assert reader._queued_lines == ["and in Italian"]
+            assert reader.pending == 1
+            assert reader._queue.get_nowait() == "and in Italian"
+
+        asyncio.run(main())
+
+    def test_a_delivered_message_is_not_requeued(self):
+        # It was answered inside the turn; re-queuing would ask it twice.
+        turn = _Turn()
+        reader = _steerable_reader(turn)
+
+        async def main():
+            reader._queue = asyncio.Queue()
+            reader._loop = asyncio.get_running_loop()
+
+            class _Buff:
+                text = "one more thing"
+
+            reader._on_accept(_Buff())
+            turn.pending.clear()  # the turn drained it
+            reader.notify_mid_turn_delivered(["one more thing"])
+            await asyncio.sleep(0)
+            reader._requeue_undelivered()
+            assert reader._queued_lines == []
+            assert reader.pending == 0
+
+        asyncio.run(main())
+
+    def test_a_cancelled_turn_requeues_through_the_worker(self):
+        # The reclaim runs in _worker's finally, so it covers every way a turn
+        # can end — this drives the real path rather than calling it directly.
+        turn = _Turn()
+        seen = []
+
+        def dispatch(line):
+            seen.append(line)
+            if line == "run":
+                # Typed mid-turn, then the turn ends without draining (a cancel).
+                class _Buff:
+                    text = "wait, also this"
+
+                reader._on_accept(_Buff())
+            return _ExitRepl if line == "wait, also this" else None
+
+        reader = _steerable_reader(turn, dispatch)
+        reader._busy = False
+        _drive(reader, ["run"])
+        assert seen == ["run", "wait, also this"]
+
+    def test_the_two_groups_are_labelled_by_what_happens_next(self):
+        reader = _steerable_reader(_Turn())
+        reader._mid_turn_lines = ["to the running turn"]
+        reader._queued_lines = ["its own turn"]
+        rendered = "".join(t for _, t in reader._queued_text())
+        assert "after the current step" in rendered
+        assert "run as its own turn" in rendered
+        assert "↳ to the running turn" in rendered and "↳ its own turn" in rendered
+        # While a turn runs, Esc is the way to stop waiting for the drain point.
+        assert "esc to interrupt and send now" in rendered
+
+    def test_the_esc_hint_is_dropped_once_no_turn_is_running(self):
+        # Nothing to interrupt: the queued line is about to run on its own.
+        reader = _steerable_reader(_Turn())
+        reader._busy = False
+        reader._queued_lines = ["next"]
+        rendered = "".join(t for _, t in reader._queued_text())
+        assert "esc to interrupt" not in rendered
 
 
 def test_request_cancel_interrupts_blocking_dispatch(monkeypatch):
@@ -382,6 +634,49 @@ class TestSinkSpinner:
             dots = text.split("Thinking", 1)[1].split(" (esc")[0]
             seen.add(dots)
         assert {"", ".", "..", "..."} <= seen
+
+    def test_toolbar_shows_the_elapsed_turn_time(self, monkeypatch):
+        # A moving glyph can't distinguish a turn that started five seconds ago
+        # from one that has run for eight minutes — only the second is worth
+        # interrupting, so the toolbar carries the elapsed time.
+        import mnemoai.client.ui.spinner as spinner_mod
+
+        status = SpinnerStatus()
+        status.set(True, "Thinking")
+        clock = {"t": 100.0}
+        monkeypatch.setattr(spinner_mod.time, "monotonic", lambda: clock["t"])
+        status.begin_turn()
+        clock["t"] = 146.0
+        assert "46s · esc to cancel" in spinner_toolbar_text(status)
+        clock["t"] = 190.0
+        assert "1m30s · esc to cancel" in spinner_toolbar_text(status)
+
+    def test_the_clock_is_turn_scoped_not_spinner_scoped(self, monkeypatch):
+        # The spinner stops and starts again around every tool call, so a stamp
+        # taken from set(True) would restart the clock each round and time only
+        # the current step.
+        import mnemoai.client.ui.spinner as spinner_mod
+
+        status = SpinnerStatus()
+        clock = {"t": 0.0}
+        monkeypatch.setattr(spinner_mod.time, "monotonic", lambda: clock["t"])
+        status.begin_turn()
+        clock["t"] = 70.0
+        status.set(False)  # tool call starts
+        status.set(True, "Thinking")  # and the model resumes
+        assert "1m10s" in spinner_toolbar_text(status)
+        # Only the end of the turn drops it.
+        status.end_turn()
+        assert "esc to cancel" in spinner_toolbar_text(status)
+        assert "1m10s" not in spinner_toolbar_text(status)
+
+    def test_snapshot_stays_active_and_label(self):
+        # The timer is read separately: snapshot() is unpacked as a 2-tuple by
+        # every renderer, and widening it would break them all at once.
+        status = SpinnerStatus()
+        status.begin_turn()
+        status.set(True, "Running command")
+        assert status.snapshot() == (True, "Running command")
 
     def test_default_spinner_unaffected(self):
         # Without a sink, the spinner keeps its stdout-animation API (thread-based).

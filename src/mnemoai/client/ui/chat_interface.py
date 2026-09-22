@@ -966,10 +966,19 @@ class ChatInterface:
 
         def _dispatch(line: str):
             first = line.strip().split(maxsplit=1)[0].lower() if line.strip() else ""
-            if first in dialog_cmds:
-                result = self._pinned_reader.run_dialog(lambda: self._dispatch(line))
-            else:
-                result = self._dispatch(line)
+            # Stamp the TURN here, the one boundary that is per submitted line: the
+            # spinner itself stops and restarts around every tool call, so it can
+            # only time the current step.
+            status.begin_turn()
+            try:
+                if first in dialog_cmds:
+                    result = self._pinned_reader.run_dialog(
+                        lambda: self._dispatch(line)
+                    )
+                else:
+                    result = self._dispatch(line)
+            finally:
+                status.end_turn()
             return _ExitRepl if result is self._EXIT else None
 
         def _on_cancel() -> None:
@@ -981,6 +990,24 @@ class ChatInterface:
             req = getattr(agent, "request_cancel", None) if agent else None
             if req is not None:
                 req()
+
+        def _send_mid_turn(text: str) -> bool:
+            """Offer a line typed mid-turn to the RUNNING turn; True if it took it.
+
+            False means no turn is running or it has no drain point left, and the
+            reader queues the line as a turn of its own. Deliberately NOT
+            `@`-mention-expanded: `_expand_mentions` prints a notice per mention,
+            which would land far above the echo printed at delivery.
+            """
+            agent = getattr(self.client, "agent", None)
+            accept = getattr(agent, "accept_mid_turn", None) if agent else None
+            return bool(accept(text)) if accept is not None else False
+
+        def _reclaim_mid_turn():
+            """Take back text a turn accepted and never delivered (cancel/failure)."""
+            agent = getattr(self.client, "agent", None)
+            reclaim = getattr(agent, "reclaim_mid_turn", None) if agent else None
+            return reclaim() if reclaim is not None else []
 
         def _agents_snapshot():
             agent = getattr(self.client, "agent", None)
@@ -1056,6 +1083,8 @@ class ChatInterface:
             steps_text=steps.render,
             footer_text=_footer,
             on_cancel=_on_cancel,
+            send_mid_turn=_send_mid_turn,
+            reclaim_mid_turn=_reclaim_mid_turn,
             agents_provider=_agents_snapshot,
             agents_get=_agents_get,
             agents_stop=_agents_stop,
@@ -1079,6 +1108,10 @@ class ChatInterface:
             self.client.agent._on_background_complete = (
                 lambda agent_id: reader.notify_background_complete()
             )
+            # A mid-turn message reaching the model: the reader moves its row out
+            # of the pinned block and echoes it to scrollback, so the transcript
+            # shows it where the turn actually read it.
+            self.client.agent._on_mid_turn_delivered = reader.notify_mid_turn_delivered
             # Repaint the live agents panel immediately when a sub-agent records
             # activity (else it only updates on the 10Hz tick). TTY-only.
             self.client.agent._activity.on_change = reader.request_repaint
