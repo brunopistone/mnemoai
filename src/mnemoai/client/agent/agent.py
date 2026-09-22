@@ -27,6 +27,7 @@ from mnemoai.client.agent import (
     cancellation,
     confirmation_gate,
     message_sanitizer,
+    mid_turn,
     plan_policy,
     response_parsing,
     stream_policy,
@@ -240,6 +241,16 @@ class LangGraphAgent:
         # abort IMMEDIATELY, instead of waiting on an async KeyboardInterrupt that
         # can't preempt a thread parked in a C-level socket read / time.sleep.
         self._cancel_event = threading.Event()
+        # A message the user submits while a turn is RUNNING: the turn takes it at
+        # its next drain point instead of making it wait for a turn of its own
+        # (see mid_turn.py). Written from the UI thread, read from the worker.
+        self._mid_turn_queue: List[str] = []
+        self._mid_turn_lock = threading.Lock()
+        self._mid_turn_open = False
+        # Set by the UI: called (on the worker thread) with the texts a drain point
+        # just delivered, so the pinned block can drop them and echo them above
+        # the answer that addresses them.
+        self._on_mid_turn_delivered: Optional[Callable[[List[str]], None]] = None
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
@@ -468,6 +479,32 @@ class LangGraphAgent:
         """Delegates to :func:`cancellation.is_cancelled`."""
         return cancellation.is_cancelled(self)
 
+    def accept_mid_turn(self, text: str) -> bool:
+        """Offer a message the user submitted mid-turn to the RUNNING turn.
+
+        True once this turn owns it (it will be delivered at the next drain
+        point); False means the caller keeps it and runs it as its own turn — no
+        turn is running, or this one is past its last drain point. Delegates to
+        :func:`mid_turn.accept`."""
+        return mid_turn.accept(self, text)
+
+    def reclaim_mid_turn(self) -> List[str]:
+        """Take back any mid-turn message this turn never delivered.
+
+        The other half of what ``accept_mid_turn`` promises: a cancelled or failed
+        turn hands the text back instead of the user's words vanishing with it.
+        Delegates to :func:`mid_turn.reclaim`."""
+        return mid_turn.reclaim(self)
+
+    def _deliver_mid_turn(self, state: AgentState) -> Dict[str, Any]:
+        """Graph node: hand the model what the user sent as the turn was ending.
+
+        The turn-end drain point. A message that arrived during the final,
+        tool-call-free model call has no tool round left to ride on, so it gets
+        one more pass through the model rather than leaking into the next turn —
+        the structural hole that retired the first version of this feature."""
+        return {"messages": mid_turn.drain(self)}
+
     def _is_headless(self) -> bool:
         """True on a background sub-agent's thread (no TTY → can't prompt)."""
         tl = getattr(self, "_headless_tl", None)
@@ -539,12 +576,18 @@ class LangGraphAgent:
 
         workflow.add_node("agent", self._call_model)
         workflow.add_node("tools", self._execute_tools)
+        # Turn end is a drain point too, not just a tool-round boundary: a message
+        # the user sent during the final, tool-call-free model call has no tool
+        # results to ride along with, so it gets a node of its own and one more
+        # pass through the model (see mid_turn.py).
+        workflow.add_node("deliver", self._deliver_mid_turn)
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
-            {"continue": "tools", "end": END},
+            {"continue": "tools", "deliver": "deliver", "end": END},
         )
         workflow.add_edge("tools", "agent")
+        workflow.add_edge("deliver", "agent")
         return workflow.compile()
 
     @classmethod
@@ -676,6 +719,12 @@ class LangGraphAgent:
 
     def _orchestrate(self, state: AgentState) -> Dict[str, Any]:
         """Decompose the task into subtasks, run a worker per subtask, aggregate."""
+        # An orchestrated turn has no drain point — each subtask worker runs on its
+        # own isolated context and the aggregator answers a fixed prompt — so stop
+        # accepting mid-turn messages here. The UI then queues one as its own turn,
+        # which is what would happen to it anyway, instead of promising this turn
+        # will pick it up (anything already accepted is reclaimed at turn end).
+        mid_turn.close(self)
         messages = state["messages"]
         # Extract user query (skip system prompt).
         query = self._last_human_query(messages)
@@ -2903,33 +2952,38 @@ class LangGraphAgent:
 
         self._start_spinner()
 
-        # (Mid-turn steering was REMOVED here in 1.8.0. The UI enqueued a message
-        # typed during a running turn and this point drained it into the tool
-        # results, so the model addressed it without the turn ending. It was
-        # retired because draining at tool-round boundaries is structurally
-        # incomplete: a message typed during the FINAL, tool-call-free model call
-        # is never drained at all and leaked into the next turn. Re-enabling it
-        # needs a drain point that covers turn end -- not just this one -- so the
-        # queue, the agent API and its tests were deleted rather than left green
-        # over a path the UI could not reach. A mid-turn submission is QUEUED FIFO
-        # and runs as its own turn; see PinnedPromptReader._on_accept in ui/tui.py.
-        # The old code is at the pre-1.8.0 path:
-        # `git log -- src/mnemoai/client/agent/steering.py` (now cancellation.py).)
+        # Fold in anything the user sent while these tools ran, so the model
+        # addresses it on the next call instead of when the whole turn is over.
+        # AFTER every ToolMessage, deliberately: an unanswered tool_call_id makes
+        # the provider reject the next call. The other drain point is turn end
+        # (the `deliver` node) — one without the other is what retired the first
+        # version of this in 1.8.0. See mid_turn.py.
+        tool_results.extend(mid_turn.drain(self))
         return {"messages": tool_results}
 
     def _should_continue(self, state: AgentState) -> str:
-        """"continue" if the last AI message has tool calls, else "end".
+        """"continue" if the last AI message has tool calls, "deliver" if the turn
+        still owes the user a mid-turn message, else "end".
 
         A cancelled turn ends immediately even with pending tool calls — else the
         graph loops back into another model call after the tools (or a stopped
         spawn batch) return, so "stop all" wouldn't actually stop the turn. The
-        worker/stream loops already honor the cancel; this closes the graph loop."""
+        worker/stream loops already honor the cancel; this closes the graph loop.
+
+        No tool calls means this was the turn's LAST model call, so it is also the
+        last chance to deliver a mid-turn message. Closing the acceptance window
+        and testing the queue in ONE critical section (`close_if_empty`) is what
+        makes that true: a message accepted after this point would have no drain
+        point left, which is exactly how the first version of the feature leaked
+        one into the next turn."""
         if self._cancelled():
             return "end"
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             return "continue"
-        return "end"
+        if mid_turn.close_if_empty(self):
+            return "end"
+        return "deliver"
 
     def __call__(self, prompt: str) -> str:
         """Invoke the agent with a prompt."""
@@ -2953,6 +3007,12 @@ class LangGraphAgent:
         cancel_ev = getattr(self, "_cancel_event", None)
         if cancel_ev is not None:
             cancel_ev.clear()
+
+        # Start accepting messages the user submits WHILE this turn runs; the
+        # graph delivers them at its drain points (see mid_turn.py). Also discards
+        # anything a previous turn left undelivered — the UI reclaims those and
+        # runs them itself, so they must not be answered inside this turn.
+        mid_turn.open_window(self)
 
         # Reset the "answer shown" flag: streaming sets it True as it prints; the
         # safety net at the end of this method emits the answer if it's still False.
@@ -3133,6 +3193,13 @@ class LangGraphAgent:
             self._last_input_tokens = None
             raise
 
+        finally:
+            # Stop accepting mid-turn messages: every drain point is inside the
+            # graph, so one accepted from here on would sit unanswered. Whatever
+            # slipped in — or was pending when a cancel/failure ended the turn —
+            # the UI takes back (reclaim_mid_turn) and runs as its own turn.
+            mid_turn.close(self)
+
         final_messages = result["messages"]
         self._thinking = result.get("thinking")
         self._commit_turn(result, turn_log)
@@ -3180,7 +3247,13 @@ class LangGraphAgent:
 
         Skips System/Human: the user turn was already stored as the clean prompt,
         so the reminder-bearing ``HumanMessage`` the model ran on must not be
-        re-added.
+        re-added. A **mid-turn message** is the one exception — it was produced
+        INSIDE the turn and exists nowhere else, so dropping it would leave live
+        history and the transcript holding an answer to a question neither of them
+        contains; it is stored in the position it was delivered, as the user's own
+        text (``mid_turn.stored_text`` strips the framing the model needed), which
+        is the same ``stored_prompt`` vs ``prompt`` asymmetry ``invoke`` applies to
+        the turn's own prompt.
 
         Sliced at the turn's seed boundary because the append-only graph state
         still carries the history the turn started from, and the ``not in
@@ -3201,12 +3274,17 @@ class LangGraphAgent:
         produced = list((result or {}).get("messages", []))[
             getattr(self, "_turn_seed_len", 0) :
         ]
-        new_messages = [
-            m
-            for m in produced
-            if not isinstance(m, (SystemMessage, HumanMessage))
-            and m not in self._messages
-        ]
+        new_messages: List[BaseMessage] = []
+        for m in produced:
+            if isinstance(m, (SystemMessage, HumanMessage)):
+                typed = mid_turn.stored_text(m)
+                if typed:
+                    # Deliberately NOT dedup'd: the same words sent twice in one
+                    # turn are two real messages.
+                    new_messages.append(HumanMessage(content=typed))
+                continue
+            if m not in self._messages:
+                new_messages.append(m)
         self._messages.extend(new_messages)
         turn_log.extend(new_messages)
         if log:

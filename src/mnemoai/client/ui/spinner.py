@@ -2,6 +2,8 @@ import sys
 import threading
 import time
 
+from mnemoai.client.ui.turn_view import format_duration
+
 # Braille frames shared by the stdout animation (Spinner._spin) and the
 # pinned-toolbar renderer (spinner_toolbar_text).
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -15,12 +17,35 @@ class SpinnerStatus:
         self._lock = threading.Lock()
         self.active = False
         self.label = "Thinking"
+        self._turn_start = None
 
     def set(self, active: bool, label: str = None) -> None:
         with self._lock:
             self.active = active
             if label is not None:
                 self.label = label
+
+    def begin_turn(self) -> None:
+        """Stamp the start of a turn, for the elapsed time the toolbar shows.
+
+        Deliberately NOT derived from ``set(True)``: the spinner stops and starts
+        again around every tool call, so a stamp taken there would restart the
+        clock each round and answer "how long has this step run" — while the
+        question the user is asking a slow turn is how long the whole thing has.
+        """
+        with self._lock:
+            self._turn_start = time.monotonic()
+
+    def end_turn(self) -> None:
+        """Drop the stamp; the toolbar shows no time until the next turn."""
+        with self._lock:
+            self._turn_start = None
+
+    def elapsed(self) -> float:
+        """Seconds since this turn began (0 when no turn has been stamped)."""
+        with self._lock:
+            start = self._turn_start
+        return 0.0 if start is None else max(0.0, time.monotonic() - start)
 
     def snapshot(self) -> tuple:
         """Return (active, label) atomically for rendering."""
@@ -92,6 +117,10 @@ def spinner_toolbar_text(status: SpinnerStatus) -> str:
 
     Time-based (advances with the app's ``refresh_interval``, no own thread):
     the glyph rotates and the dots cycle 0→3. Empty string when idle.
+
+    The elapsed time answers the question a moving glyph can't — a turn that has
+    run for eight minutes and one that started five seconds ago look identical
+    otherwise, and only the first is worth interrupting.
     """
     active, label = status.snapshot()
     if not active:
@@ -99,4 +128,6 @@ def spinner_toolbar_text(status: SpinnerStatus) -> str:
     tick = int(time.time() * 10)
     frame = _SPINNER_FRAMES[tick % len(_SPINNER_FRAMES)]
     dots = "." * ((tick // 3) % 4)
-    return f"{frame} {label}{dots} (esc to cancel)"
+    elapsed = status.elapsed()
+    hint = f"{format_duration(elapsed)} · esc to cancel" if elapsed else "esc to cancel"
+    return f"{frame} {label}{dots} ({hint})"

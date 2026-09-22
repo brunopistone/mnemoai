@@ -9,14 +9,17 @@ Functions take the agent as the first arg and read those fields ON the agent (so
 still work via the getattr fallbacks). The agent keeps thin delegating methods —
 the ``plan_policy``/``tool_formatting`` collaborator pattern.
 
-This module was named ``steering.py`` until 1.8.0, when it also held the
-**mid-turn steering queue** (``enqueue``/``drain``/``has_pending``/``clear``).
-That queue was removed because the UI never fed it: a message submitted mid-turn
-is queued FIFO and run as its own turn instead. Draining only at tool-round
-boundaries could never be correct — a message typed during the final,
-tool-call-free model call was never drained and leaked into the following turn —
-so re-enabling it requires a different drain point, not a re-wire. See
-``_execute_tools`` in agent.py for the full rationale.
+This module was named ``steering.py`` until 1.8.0, when it also held the queue for
+messages the user sends mid-turn. Cancelling and redirecting are two different
+things, so they are two modules now: that queue lives in ``mid_turn.py``, which
+drains at tool-round boundaries **and** at turn end — the missing second drain
+point being why the first version was removed rather than re-wired.
+
+The two still meet at one point: a cancel must not leave a mid-turn message
+half-owned. ``is_cancelled`` ends the graph immediately, so the turn stops before
+its next drain point and the UI reclaims the undelivered text
+(``agent.reclaim_mid_turn``) as its own turn — a message the user steered into a
+cancelled turn must neither vanish nor surface inside an unrelated later one.
 """
 
 
