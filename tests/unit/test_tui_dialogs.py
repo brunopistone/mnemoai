@@ -788,6 +788,150 @@ class TestAgentsPanelScrolling:
         assert r._nav_mode is False
 
 
+class TestAgentsPanelTurnScoping:
+    """The LIVE panel glances at THIS turn's agents; earlier turns are counted,
+    not listed.
+
+    Every run of the session stays in the store so a finished agent's report can
+    still be opened, which is what made the panel grow: after three turns its six
+    rows were previous turns' ✓ entries and the agents actually running had
+    scrolled off. Scoping the glance must not cost any of that reach — nav mode
+    still walks, views and stops every retained run.
+    """
+
+    def _reader(self, store):
+        return tui.PinnedPromptReader(
+            prompt_text=lambda: ">",
+            commands=[],
+            dispatch=lambda q: None,
+            agents_provider=store.snapshot,
+            agents_get=store.get,
+            agents_stop=store.request_stop,
+            agents_stop_all=store.request_stop_all,
+            agents_turn=lambda: store.current_turn,
+        )
+
+    def _store(self, old=3, new=2, old_running=()):
+        """`old` runs from a previous turn (finished unless their index is in
+        `old_running`), then `new` running ones from this turn.
+        Returns (store, old_sinks, new_sinks)."""
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        store = AgentActivityStore()
+        store.begin_turn()
+        olds = [store.open_run("research", f"old{i}", "spawn") for i in range(old)]
+        for i, s in enumerate(olds):
+            if i not in old_running:
+                s.finish("done")
+        store.begin_turn()
+        news = [store.open_run("code", f"new{i}", "spawn") for i in range(new)]
+        return store, olds, news
+
+    def _body(self, reader):
+        return "".join(txt for _cls, txt in reader._agents_text()[1:])
+
+    def test_only_this_turns_agents_are_listed(self):
+        store, _, _ = self._store()
+        r = self._reader(store)
+        body = self._body(r)
+        assert "new0" in body and "new1" in body
+        assert "old0" not in body and "old2" not in body
+
+    def test_the_hint_counts_what_it_scoped_out(self):
+        # Silently dropping rows would read as the panel losing the reports; the
+        # count is how the user knows Ctrl+A still reaches them.
+        store, _, _ = self._store()
+        assert "+3 earlier" in self._reader(store)._agents_text()[0][1]
+
+    def test_no_earlier_count_when_there_is_nothing_earlier(self):
+        store, _, _ = self._store(old=0, new=2)
+        assert self._reader(store)._agents_text()[0][1].strip() == "Ctrl+A: agents"
+
+    def test_an_earlier_agent_still_running_is_listed(self):
+        # A background sub-agent outlives its turn, and one still working is
+        # exactly what the panel is for.
+        store, _, _ = self._store(old=2, new=1, old_running={0})
+        body = self._body(self._reader(store))
+        assert "old0" in body and "new0" in body  # the runner and this turn's
+        assert "old1" not in body  # the finished one is counted, not listed
+        assert "+1 earlier" in self._reader(store)._agents_text()[0][1]
+
+    def test_nav_mode_shows_every_retained_run(self):
+        store, _, _ = self._store()
+        r = self._reader(store)
+        r._nav_mode = True
+        body = self._body(r)
+        assert "old0" in body and "new1" in body
+        assert "earlier" not in r._agents_text()[0][1]  # nav lists them, not counts
+
+    def test_a_scoped_out_agents_report_is_still_reachable(self):
+        store, olds, _ = self._store(old=1, new=1, old_running={0})
+        olds[0].finish_ok("what the research found")  # the real success path
+        r = self._reader(store)
+        assert "old0" not in self._body(r)  # not in the glance…
+        assert len(r._agent_rows()) == 2  # …but the nav list still has it
+        r._nav_mode = True
+        r._nav_index = 0
+        row = r._agent_rows()[r._nav_index]
+        assert row.description == "old0"
+        # And the detail view's source still resolves it (the point of retaining).
+        run = r._agents_get(row.run_id)
+        assert any(e.kind == "final" for e in run.events)
+
+    def test_a_scoped_out_agent_can_still_be_stopped(self):
+        # `x` must reach a run the glance isn't showing — a stale stamp must not
+        # become a way to lose control of a worker.
+        store, olds, _ = self._store(old=2, new=1, old_running={1})
+        r = self._reader(store)
+        r._nav_mode = True
+        r._nav_index = 1  # the earlier turn's runner
+        r._stop_selected_agent()
+        assert olds[1].is_cancelled() is True
+
+    def test_a_turn_that_spawned_nothing_lists_nothing(self):
+        # The accumulation case at its plainest: a new prompt with no agents of
+        # its own must not inherit the last turn's ✓ rows.
+        store, _, news = self._store()
+        for s in news:
+            s.finish("done")
+        store.begin_turn()
+        r = self._reader(store)
+        assert r._agents_text() == []
+        assert r._panel_showable() is False
+        assert r._agents_navigable() is True  # Ctrl+A brings the reports back
+        _drive_keys(r, "\x01")
+        assert r._nav_mode is True and "old0" in self._body(r)
+
+    def test_a_reader_with_no_turn_provider_scopes_nothing(self):
+        # The default (no agents_turn wired: off-TTY callers, the existing tests)
+        # must keep showing everything.
+        store, _, _ = self._store()
+        r = tui.PinnedPromptReader(
+            prompt_text=lambda: ">",
+            commands=[],
+            dispatch=lambda q: None,
+            agents_provider=store.snapshot,
+            agents_get=store.get,
+        )
+        assert "old0" in self._body(r)
+
+    def test_a_raising_turn_provider_does_not_blank_the_panel(self):
+        store, _, _ = self._store()
+
+        def _boom():
+            raise RuntimeError("no turn for you")
+
+        r = tui.PinnedPromptReader(
+            prompt_text=lambda: ">",
+            commands=[],
+            dispatch=lambda q: None,
+            agents_provider=store.snapshot,
+            agents_get=store.get,
+            agents_turn=_boom,
+        )
+        assert "new0" in self._body(r)
+
+
 class TestStopAgentBindings:
     """x stops the selected agent (nav-mode); Ctrl+X Ctrl+K stops ALL — the
     latter is GLOBAL (armed whenever any agent runs, no nav-mode needed) to match

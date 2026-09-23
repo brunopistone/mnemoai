@@ -58,6 +58,9 @@ class ActivityRun:
     start: float
     status: str = "running"  # running | done | failed | stopped
     end: Optional[float] = None
+    # Which conversation turn spawned this run (see `glance_runs`): the live panel
+    # shows the CURRENT turn's agents, while every retained run stays browsable.
+    turn: int = 0
     events: Deque[ActivityEvent] = field(default_factory=lambda: deque(maxlen=EVENTS_PER_RUN))
     # Per-run cooperative stop: set by the UI (x / stop-all), polled by the
     # worker loop so ANY agent — foreground or background — can be stopped
@@ -164,10 +167,28 @@ class AgentActivityStore:
         self._lock = threading.Lock()
         self._runs: "OrderedDict[str, ActivityRun]" = OrderedDict()
         self._counter = 0
+        self._turn = 0
         self._max_runs = max_runs
         # Wired by the UI (TTY only) to force an immediate repaint on change;
         # invoked OUTSIDE the lock. None off-TTY / in tests.
         self.on_change: Optional[Callable[[], None]] = None
+
+    def begin_turn(self) -> int:
+        """Start a new conversation turn: runs opened from here on are stamped
+        with it, so the live panel can show THIS turn's agents while the older
+        ones stay in the store (browsable via Ctrl+A). Called by
+        ``LangGraphAgent.invoke``; never called = every run is turn 0 = nothing
+        is ever scoped out, which is what keeps the plain/off-TTY loop as-is."""
+        with self._lock:
+            self._turn += 1
+            turn = self._turn
+        self._fire_change()
+        return turn
+
+    @property
+    def current_turn(self) -> int:
+        with self._lock:
+            return self._turn
 
     def open_run(self, agent_type: str, description: str, origin: str) -> ActivitySink:
         """Register a new running hidden agent and return its write sink."""
@@ -180,6 +201,7 @@ class AgentActivityStore:
                 description=description,
                 origin=origin,
                 start=time.monotonic(),
+                turn=self._turn,
             )
             self._evict_locked()
         self._fire_change()
@@ -251,6 +273,7 @@ class AgentActivityStore:
             start=r.start,
             status=r.status,
             end=r.end,
+            turn=r.turn,
             events=deque(r.events, maxlen=r.events.maxlen),
             cancel=r.cancel,  # SAME object — a snapshot can request the stop
         )
@@ -292,6 +315,7 @@ class AgentActivityStore:
         """Drop all runs (used on /clear for a fresh context)."""
         with self._lock:
             self._runs.clear()
+            self._turn = 0
         self._fire_change()
 
     def _fire_change(self) -> None:
@@ -301,3 +325,22 @@ class AgentActivityStore:
                 cb()
             except Exception:
                 pass  # a repaint hook must never break a worker thread
+
+
+def glance_runs(runs: List[ActivityRun], turn: int) -> List[ActivityRun]:
+    """The subset a LIVE panel should show: this turn's runs, plus any older one
+    still working.
+
+    The store keeps every run of the session on purpose (a finished agent's
+    report must stay readable), but a glance is about what is happening NOW — so
+    without this the panel filled up with earlier turns' ``✓`` rows and the
+    agents of the turn actually running scrolled out of the viewport. A still-
+    ``running`` run from three turns ago is exactly what the panel is for, hence
+    it is kept regardless of its turn (a background sub-agent outlives the turn
+    that spawned it). Pure and tolerant (``getattr`` defaults) so a run predating
+    turn stamping, or any object shaped like one, is simply shown."""
+    return [
+        r
+        for r in runs
+        if getattr(r, "turn", 0) >= turn or getattr(r, "status", "") == "running"
+    ]

@@ -1029,6 +1029,12 @@ class ChatInterface:
             store = getattr(agent, "_activity", None) if agent else None
             return store.request_stop_all() if store is not None else 0
 
+        def _agents_turn():
+            """Current turn, so the live panel glances at THIS turn's agents."""
+            agent = getattr(self.client, "agent", None)
+            store = getattr(agent, "_activity", None) if agent else None
+            return int(getattr(store, "current_turn", 0) or 0) if store is not None else 0
+
         # Persistent footer: model · provider, launch dir, context meter. Model and
         # directory are read once — /model and /config re-exec the process, so they
         # can't change under a live footer.
@@ -1089,6 +1095,7 @@ class ChatInterface:
             agents_get=_agents_get,
             agents_stop=_agents_stop,
             agents_stop_all=_agents_stop_all,
+            agents_turn=_agents_turn,
         )
 
         # Route the worker-thread confirmation gate through the app (a plain

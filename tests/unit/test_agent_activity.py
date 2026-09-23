@@ -1,9 +1,13 @@
 """Unit tests for the hidden-agent live activity store (client/agent/agent_activity.py).
 
-Pure state + threading — no LLM/agent. Covers: sink events land on the right run,
+Pure state + threading — no LLM. Covers: sink events land on the right run,
 snapshots are immutable copies (writers keep appending safely), the events ring is
-bounded, finished-run eviction never drops a running run, and concurrent writers
-from many threads don't corrupt the store.
+bounded, finished-run eviction never drops a running run, concurrent writers from
+many threads don't corrupt the store, and runs are stamped with the turn that
+spawned them so a LIVE panel can show this turn's agents while every retained run
+stays browsable. The last class drives the real ``invoke`` on a ``__new__`` agent
+stub — without it the turn stamp could be wired nowhere and every other test here
+would still pass.
 """
 
 import threading
@@ -12,6 +16,7 @@ from mnemoai.client.agent.agent_activity import (
     EVENTS_PER_RUN,
     ActivitySink,
     AgentActivityStore,
+    glance_runs,
 )
 
 
@@ -229,6 +234,133 @@ class TestImmutabilityAndBounds:
         store.open_run("a", "0", "spawn")
         store.clear()
         assert store.snapshot() == []
+
+
+class TestTurnScoping:
+    """The store keeps the whole session (a finished agent's report must stay
+    readable), so a LIVE panel needs to know which runs belong to the turn that is
+    running now — otherwise three turns of ✓ rows push the agents actually working
+    out of the viewport, which is the one thing a glance is for."""
+
+    def test_runs_are_stamped_with_the_current_turn(self):
+        store = AgentActivityStore()
+        store.open_run("explore", "before", "spawn")
+        assert store.begin_turn() == 1
+        store.open_run("explore", "first", "spawn")
+        store.begin_turn()
+        store.open_run("explore", "second", "spawn")
+        assert [(r.description, r.turn) for r in store.snapshot()] == [
+            ("before", 0),
+            ("first", 1),
+            ("second", 2),
+        ]
+        assert store.current_turn == 2
+
+    def test_an_earlier_turns_finished_run_leaves_the_glance(self):
+        store = AgentActivityStore()
+        store.begin_turn()
+        store.open_run("explore", "old", "spawn").finish("done")
+        store.begin_turn()
+        store.open_run("code", "new", "spawn")
+        glance = glance_runs(store.snapshot(), store.current_turn)
+        assert [r.description for r in glance] == ["new"]
+        # …but nothing was dropped: the report is still reachable via Ctrl+A.
+        assert [r.description for r in store.snapshot()] == ["old", "new"]
+
+    def test_an_earlier_turns_running_run_stays(self):
+        # A background sub-agent outlives the turn that spawned it, and one still
+        # working is exactly what the panel is for.
+        store = AgentActivityStore()
+        store.begin_turn()
+        store.open_run("explore", "background", "background")
+        store.begin_turn()
+        store.open_run("code", "current", "spawn")
+        glance = glance_runs(store.snapshot(), store.current_turn)
+        assert [r.description for r in glance] == ["background", "current"]
+
+    def test_this_turns_finished_run_stays(self):
+        # Within a turn the finished ones must stay listed, so a fan-out reads as
+        # "2 done, 1 still going".
+        store = AgentActivityStore()
+        store.begin_turn()
+        store.open_run("explore", "done-now", "spawn").finish("done")
+        store.open_run("code", "going", "spawn")
+        glance = glance_runs(store.snapshot(), store.current_turn)
+        assert [r.description for r in glance] == ["done-now", "going"]
+
+    def test_without_begin_turn_nothing_is_scoped_out(self):
+        # The plain off-TTY loop and every caller that doesn't count turns keep
+        # today's behavior: turn 0 everywhere, so the glance is the whole store.
+        store = AgentActivityStore()
+        store.open_run("a", "0", "spawn").finish("done")
+        store.open_run("a", "1", "spawn").finish("done")
+        assert len(glance_runs(store.snapshot(), store.current_turn)) == 2
+
+    def test_clear_resets_the_turn(self):
+        store = AgentActivityStore()
+        store.begin_turn()
+        store.clear()
+        assert store.current_turn == 0
+
+    def test_glance_tolerates_a_run_without_a_turn(self):
+        # Pure and tolerant: anything shaped like a run is simply shown, so an
+        # older/foreign object can't blank the panel.
+        class _Bare:
+            pass
+
+        assert glance_runs([_Bare()], 3) == []  # no turn, not running → earlier
+        running = _Bare()
+        running.status = "running"
+        assert glance_runs([running], 3) == [running]
+
+
+class TestInvokeStampsTheTurn:
+    """The wiring: ``LangGraphAgent.invoke`` begins a turn, so the panel scopes
+    itself without every spawn site having to pass a turn number."""
+
+    def _agent(self, store):
+        from langchain_core.messages import AIMessage
+
+        from mnemoai.client.agent.agent import LangGraphAgent
+
+        class _Graph:
+            def invoke(self, state, config=None):
+                return {
+                    "messages": list(state["messages"]) + [AIMessage(content="done")],
+                    "thinking": None,
+                }
+
+        a = LangGraphAgent.__new__(LangGraphAgent)
+        a._messages = []
+        a.system_prompt = ""
+        a.recursion_limit = 50
+        a._thinking = None
+        a._last_input_tokens = None
+        a.graph = _Graph()
+        a.session_log = None
+        a._stop_spinner = lambda: None
+        a._emit_answer = lambda m: None
+        a._extract_visible = lambda c: c if isinstance(c, str) else ""
+        a._activity = store
+        return a
+
+    def test_each_turn_advances_the_stamp(self):
+        store = AgentActivityStore()
+        a = self._agent(store)
+        a.invoke("first question")
+        store.open_run("explore", "turn-1 agent", "spawn").finish("done")
+        a.invoke("second question")
+        store.open_run("code", "turn-2 agent", "spawn")
+        assert store.current_turn == 2
+        glance = glance_runs(store.snapshot(), store.current_turn)
+        assert [r.description for r in glance] == ["turn-2 agent"]
+
+    def test_a_turn_runs_with_no_store_at_all(self):
+        # The bump is tolerant on purpose: an agent built without an activity
+        # store (off-TTY paths, test stubs) must still take a turn.
+        a = self._agent(None)
+        del a._activity
+        assert a.invoke("hello") == "done"
 
 
 class TestConcurrency:
