@@ -48,6 +48,7 @@ from prompt_toolkit.widgets import (
 
 from mnemoai.client import file_mentions
 from mnemoai.client.agent import ask_user
+from mnemoai.client.agent.agent_activity import glance_runs
 from mnemoai.client.ui import notify, turn_view
 from mnemoai.utils.radio_select import commit_paging, highlighted_value
 
@@ -234,6 +235,7 @@ class PinnedPromptReader:
         agents_get: Optional[Callable[[str], Any]] = None,
         agents_stop: Optional[Callable[[str], bool]] = None,
         agents_stop_all: Optional[Callable[[], int]] = None,
+        agents_turn: Optional[Callable[[], int]] = None,
     ) -> None:
         """Build the pinned app.
 
@@ -267,6 +269,9 @@ class PinnedPromptReader:
             agents_get: ``get(run_id)`` -> one run's frozen copy for the detail view.
             agents_stop: ``stop(run_id)`` -> ask that agent to stop (x); True if it
                 was running. agents_stop_all: stop every running agent (ctrl+x ctrl+k).
+            agents_turn: Returns the current conversation turn number, so the live
+                panel shows this turn's agents instead of every earlier turn's
+                (Ctrl+A still reaches all of them). Absent → 0, i.e. no scoping.
         """
         self._prompt_text = prompt_text
         self._dispatch = dispatch
@@ -287,6 +292,8 @@ class PinnedPromptReader:
         self._agents_get = agents_get or (lambda rid: None)
         self._agents_stop = agents_stop or (lambda rid: False)
         self._agents_stop_all = agents_stop_all or (lambda: 0)
+        # Current turn number, for scoping the live glance (see _glance_rows).
+        self._agents_turn = agents_turn or (lambda: 0)
         self._nav_mode = False  # Ctrl+A: navigate the agents panel
         self._nav_index = 0     # highlighted row, in FULL-list coordinates
         self._panel_offset = 0  # first row the (scrolling) panel viewport shows
@@ -479,6 +486,21 @@ class PinnedPromptReader:
         except Exception:
             return []
 
+    def _glance_rows(self, rows: list) -> list:
+        """The rows a LIVE glance shows: this turn's runs plus anything still
+        working (``agent_activity.glance_runs``).
+
+        The store keeps the whole session so a finished agent's report stays
+        readable, but that made the panel grow with every turn — three turns of
+        ``✓`` rows pushed the agents of the turn actually running out of the
+        viewport, which is the one thing a glance must show. Only the glance is
+        narrowed: nav mode (:meth:`_agent_rows`) still walks every retained run.
+        Non-raising — a panel must never take the pinned input down."""
+        try:
+            return glance_runs(rows, int(self._agents_turn() or 0))
+        except Exception:
+            return rows
+
     def _panel_window(self, rows: list) -> int:
         """Index of the first row the viewport shows, remembered in
         ``_panel_offset``.
@@ -504,41 +526,57 @@ class PinnedPromptReader:
         self._panel_offset = max(0, min(start, max(0, total - max_rows)))
         return self._panel_offset
 
-    def _panel_hint(self, rows: list, start: int, shown: int) -> str:
-        """The panel's header line: the key hints plus what the viewport is
-        cutting off — ``+N more`` with a running count, because an unlisted agent
-        that is still working is the one the user needs to know about."""
+    def _panel_hint(self, rows: list, start: int, shown: int, earlier: int = 0) -> str:
+        """The panel's header line: the key hints plus what the panel is leaving
+        out — ``+N more`` for what the viewport cuts off (with a running count,
+        because an unlisted agent that is still working is the one the user needs
+        to know about) and ``+N earlier`` for the previous turns' runs the glance
+        scoped out, which is how the user knows Ctrl+A still reaches them."""
         if self._nav_mode:
             hint = "↑↓ select · Enter view · x stop · Ctrl+X Ctrl+K stop all · Esc exit"
         else:
             hint = "Ctrl+A: agents"
         hidden = rows[:start] + rows[start + shown:]
-        if not hidden:
-            return hint
-        if self._nav_mode:  # the cursor position already implies the rest
-            return f"{hint} · {self._nav_index + 1}/{len(rows)}"
-        running = sum(1 for r in hidden if getattr(r, "status", "") == "running")
-        more = f" · +{len(hidden)} more"
-        return hint + more + (f" ({running} running)" if running else "")
+        if hidden:
+            if self._nav_mode:  # the cursor position already implies the rest
+                return f"{hint} · {self._nav_index + 1}/{len(rows)}"
+            running = sum(1 for r in hidden if getattr(r, "status", "") == "running")
+            hint += f" · +{len(hidden)} more" + (f" ({running} running)" if running else "")
+        return hint + (f" · +{earlier} earlier" if earlier else "")
 
     def _agents_text(self):
         """FormattedText for the bottom agents panel: a header hint + one row per
         hidden sub-agent (dot + type + description + tool-count + elapsed),
         highlighting the nav cursor. Painted at 10 Hz, so elapsed advances live.
-        Only the `_PANEL_MAX_ROWS` viewport is drawn; ↑/↓ scrolls the rest."""
+        Only the `_PANEL_MAX_ROWS` viewport is drawn; ↑/↓ scrolls the rest.
+
+        ONE snapshot feeds both modes: a live glance over this turn's runs
+        (:meth:`_glance_rows`, the rest counted as ``+N earlier``), or — in nav
+        mode — every retained run, since that is the list the cursor indexes."""
         import time
 
-        rows = self._agent_rows()
-        if not rows and not self._nav_mode:
+        all_rows = self._agent_rows()
+        if not all_rows and not self._nav_mode:
             return []
-        # Clamp the nav cursor to the current row set.
-        if self._nav_index >= len(rows):
-            self._nav_index = max(0, len(rows) - 1)
+        if self._nav_mode:
+            # Nav mode browses everything; the cursor indexes THAT list, so it is
+            # the only mode whose clamp is meaningful.
+            rows, earlier = all_rows, 0
+            if self._nav_index >= len(rows):
+                self._nav_index = max(0, len(rows) - 1)
+        else:
+            rows = self._glance_rows(all_rows)
+            earlier = max(0, len(all_rows) - len(rows))
+            if not rows:  # only earlier turns left → nothing to glance at
+                return []
         start = self._panel_window(rows)
         view = rows[start:start + self._PANEL_MAX_ROWS]
         now = time.monotonic()
         out = [
-            ("class:pinned-panel-hint", f"{self._panel_hint(rows, start, len(view))}\n")
+            (
+                "class:pinned-panel-hint",
+                f"{self._panel_hint(rows, start, len(view), earlier)}\n",
+            )
         ]
         dot = {"running": "●", "done": "✓", "failed": "✗", "stopped": "✗"}
         # Animated dots for a stop-in-progress row (matches the spinner cadence:

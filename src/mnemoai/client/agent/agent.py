@@ -3014,6 +3014,13 @@ class LangGraphAgent:
         # runs them itself, so they must not be answered inside this turn.
         mid_turn.open_window(self)
 
+        # Stamp hidden runs spawned from here on with a new turn number, so the
+        # live agents panel shows THIS turn's agents instead of accumulating every
+        # earlier turn's finished ones (all of which stay browsable via Ctrl+A).
+        activity = getattr(self, "_activity", None)
+        if activity is not None:
+            activity.begin_turn()
+
         # Reset the "answer shown" flag: streaming sets it True as it prints; the
         # safety net at the end of this method emits the answer if it's still False.
         self._answer_displayed = False

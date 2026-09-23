@@ -7,6 +7,22 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.23.3] — 2026-09-23
+
+### Changed
+
+- **The agents list at the bottom of the screen now shows the current turn's
+  agents, not every agent of the conversation.** Each agent stayed in the list
+  once it had finished, so after a few turns all of its rows were earlier turns'
+  finished entries and the agents actually working had been pushed off the
+  bottom — the one thing that list is there to show, and it got worse the longer
+  the conversation ran. It now lists the agents of the turn you are in, plus any
+  older one still working (a background agent outlives the turn that started it),
+  and the panel shrinks back to the rows it needs. Nothing is thrown away:
+  earlier turns are counted at the end of the header line (`+3 earlier`) and
+  `Ctrl+A` still walks, opens and stops every agent of the session, so a finished
+  agent's report stays one keystroke away.
+
 ## [1.23.2] — 2026-09-22
 
 ### Changed
