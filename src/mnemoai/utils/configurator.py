@@ -34,7 +34,8 @@ from mnemoai.models.provider_params import (
     tunable_params,
 )
 from mnemoai.utils.config import Config
-from mnemoai.utils.console import print_error
+from mnemoai.utils.console import print_error, print_notice
+from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import config_path
 from mnemoai.utils.radio_select import commit_paging, highlighted_value
 
@@ -1393,7 +1394,7 @@ def run_reconfigure() -> Optional[Path]:
 # /model-overridable sections: key -> (config section, label, is_chat_llm — the
 # LLM also gets the context-window prompt).
 _MODEL_SECTIONS = {
-    "1": ("MODEL_ID", "Chat model (LLM)", True),
+    "1": ("MODEL_ID", "Chat model", True),
     "2": ("VISION_MODEL_ID", "Vision model", False),
     "3": ("EMBED_MODEL_ID", "Embeddings model", False),
     # The internal calls that may run on their own model (AREA_MODELS). Each is a
@@ -1428,6 +1429,26 @@ class ModelOverride(NamedTuple):
     path: Path
     section: str
     enabled_feature: bool = False
+    # Presentation metadata only. The caller still chooses the same reload or
+    # restart path using section/enabled_feature.
+    label: str = "Model"
+    model_name: str = ""
+    model_type: str = ""
+    parameters_reset: bool = False
+    follows_chat: bool = False
+
+
+def _parameters_were_reset(before: str, after: str, section: str) -> bool:
+    """True only for cleared inference keys that remain absent after the edit.
+
+    The vision shortcut can copy Chat's values back in after clearing its old
+    parameters; those copied values are not a reset to provider defaults.
+    """
+    cleared = _clear_inference_params(before, section, keep={"MAX_TOKENS"})
+    removed = set(_list_section_keys(before, section)) - set(
+        _list_section_keys(cleared, section)
+    )
+    return bool(removed - set(_list_section_keys(after, section)))
 
 
 def _area_gate(text: str, section: str) -> Optional[tuple]:
@@ -1541,7 +1562,9 @@ def _copy_chat_to_vision(text: str) -> str:
     return text
 
 
-def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
+def _prompt_model_section(
+    text: str, section: str, is_llm: bool, *, show_credential_note: bool = True
+) -> str:
     """Prompt for one model section (provider type included, so it can switch
     providers) and patch ``text``; context window only for the chat LLM.
 
@@ -1615,7 +1638,8 @@ def _prompt_model_section(text: str, section: str, is_llm: bool) -> str:
         # override the area doesn't have).
         print(f"  No model name given — {section.capitalize()} keeps the chat model.")
         return _clear_area_override(text, section)
-    _print_credential_note(new_type)
+    if show_credential_note:
+        _print_credential_note(new_type)
     return text
 
 
@@ -1942,30 +1966,39 @@ def run_model_override() -> Optional[ModelOverride]:
                 return None
             base = _set_top_level_or_add(base, toggle, "true")
             enabled_feature = True
-        new_text = _prompt_model_section(base, section, is_llm)
+        new_text = _prompt_model_section(
+            base, section, is_llm, show_credential_note=False
+        )
         # After configuring embeddings, offer to turn on the features that use
         # them if they're currently off (embeddings alone do nothing otherwise).
         if section == "EMBED_MODEL_ID":
             new_text = _prompt_enable_embedding_features(new_text)
     except (KeyboardInterrupt, _Cancelled):
-        print("\n  Cancelled. Config left untouched.")
+        print_notice("Model change cancelled; configuration unchanged.")
         return None
 
     if new_text == text:
-        print("  No changes made.")
+        print_notice("Model unchanged.")
         return None
 
     dest.write_text(new_text)
-    print(f"\n  Updated {label.split(' — ')[0]} in:\n    {dest}")
-    if section in AREAS and not _area_configured(new_text, section):
-        print(f"  {section.capitalize()} now runs on the chat model, and follows it")
-        print("  whenever you change it.")
-    else:
-        print("  Inference parameters were reset to model defaults for this change;")
-        print("  use /params to tune them. For the full per-provider parameter list,")
-        print("  see the README's 'Model Parameters' section.")
-    print("=" * 64 + "\n")
-    return ModelOverride(dest, section, enabled_feature)
+    follows_chat = section in AREAS and not _area_configured(new_text, section)
+    effective_section = "MODEL_ID" if follows_chat else section
+    changed = ModelOverride(
+        dest, section, enabled_feature,
+        label=label.split(" — ")[0],
+        model_name=_get_field(new_text, effective_section, "NAME") or "",
+        model_type=_effective_type(new_text, effective_section),
+        parameters_reset=(
+            not follows_chat
+            and _parameters_were_reset(text, new_text, section)
+        ),
+        follows_chat=follows_chat,
+    )
+    logger.info("Updated %s configuration in %s", changed.label, dest)
+    # The command handler reports the outcome once it knows whether the runtime
+    # applied the change in place or must restart.
+    return changed
 
 
 # --- /features: enable/disable app subsystems (the ENABLE_* toggles) ---------

@@ -45,3 +45,21 @@ Behavior:
   `full` category (which binds every tool). So external tools stay reachable
   whether routing/orchestration is on or off.
 - Run **`/mcp`** in the chat to see configured servers, status, and tool counts.
+  Counts belong to each server, whether or not its tools needed renaming.
+- Use **`/mcp verbose`** for the tool list, collision renames, config path, and
+  setup format. Both views use already-loaded data; displaying status does not
+  reconnect servers or run a tool.
+
+The default view stays compact:
+
+```text
+MCP Tools
+
+  • playwright: connected (25 tools)
+
+  25 tools available.
+  Use /mcp verbose for tools and setup details.
+```
+
+The example shows one server; the built-in server and any other connected
+servers each get their own row.

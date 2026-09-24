@@ -4,6 +4,7 @@ import contextlib
 import datetime as _dt
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
 from mnemoai.client.ui import notify, screen, status_bar, turn_view
+from mnemoai.client.ui.command_feedback import render_mcp_status, render_model_update
 from mnemoai.client.ui.spinner import WRAP_UP_LABEL
 from mnemoai.client.ui.tui import (
     _DELETE,
@@ -154,7 +156,7 @@ class ChatInterface:
         ("Assistant", [
             ("/memory [clear]", "View (or clear) persistent memory"),
             ("/skills [name]", "List installed skills (or preview one)"),
-            ("/mcp", "List configured MCP servers & tools"),
+            ("/mcp [verbose]", "MCP status (verbose for tools & setup)"),
             ("/hooks", "List the tool hooks this session runs"),
         ]),
         ("Configure", [
@@ -179,7 +181,7 @@ class ChatInterface:
         ("/model", "Override one model (LLM, vision, embeddings, router, …)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/features", "Enable/disable features (RAG, memory, web search, …)"),
-        ("/mcp", "List configured MCP servers & their tools"),
+        ("/mcp", "MCP status (/mcp verbose for tools & setup)"),
         ("/hooks", "List the tool hooks this session runs"),
         ("/skills", "List installed skills (/skills <name> to preview)"),
         ("/clear", "Clear conversation context"),
@@ -542,30 +544,15 @@ class ChatInterface:
             # was missing.
             self._record_tool_outcome(query, tools_used, False)
 
-    def _print_mcp_status(self) -> None:
-        """Show configured MCP servers (built-in + external) and tool counts.
-
-        Collided external tools appear namespaced as ``server__tool``.
-        """
-        members = getattr(self.client.mcp_client, "_members", [])
-        tools = self.client.tools or []
-        print("\nMCP servers:")
-        if members:
-            for name, _ in members:
-                prefix = f"{name}__"
-                count = sum(
-                    1 for t in tools if t.name.startswith(prefix)
-                ) if name != "builtin" else None
-                label = "built-in" if name == "builtin" else "external"
-                if count is None:
-                    print(f"  • {name} ({label}, connected)")
-                else:
-                    print(f"  • {name} ({label}, connected) — {count} namespaced tool(s)")
-        else:
-            print("  (none connected)")
-        print(f"\n  Total tools available: {len(tools)}")
-        print(f"\n  Declare more servers in:\n    {mcp_config_path()}")
-        print('  Format: {"mcpServers": {"name": {"command": ..., "args": [...], "env": {...}}}}\n')
+    def _print_mcp_status(self, verbose: bool = False) -> None:
+        """Show compact cached status, with tools and setup details on request."""
+        members = getattr(getattr(self.client, "mcp_client", None), "_members", [])
+        tools = getattr(self.client, "tools", None) or []
+        print("\n" + render_mcp_status(
+            members, tools, verbose=verbose,
+            config_path=mcp_config_path() if verbose else None,
+            width=shutil.get_terminal_size((88, 24)).columns,
+        ) + "\n")
 
     def _select_saved_conversation(self):
         """List saved conversations (newest first) and let the user pick one via
@@ -846,7 +833,7 @@ class ChatInterface:
                 print(f"  ✗ {issue.name} — {issue.reason}")
         print()
 
-    def _restart_in_place(self) -> None:
+    def _restart_in_place(self, notice: str = None) -> None:
         """Re-exec the process (``os.execv``) so reloaded config takes full effect.
 
         The only way to apply *every* setting — the MCP subprocess fixes its tool
@@ -854,7 +841,7 @@ class ChatInterface:
         is intentionally dropped. The MCP subprocess is shut down first since
         ``os.execv`` doesn't reap children.
         """
-        print("\nRestarting to apply the new configuration...\n")
+        print("\n" + (notice or "Restarting to apply the new configuration...") + "\n")
         # os.execv REPLACES this process: no atexit, no finally, so main()'s
         # end-of-run cleanup never runs and a turn-less session file (always the
         # case when the restart follows a `--resume` the user hadn't typed into
@@ -1362,14 +1349,11 @@ class ChatInterface:
                 return None
             in_place = written.section in AREAS and not written.enabled_feature
             if in_place and self.client.reload_area_models():
-                print(
-                    f"\n\033[92mNew {written.section.lower()} model applied.\033[0m "
-                    "This conversation continues.\n"
-                )
+                print("\n" + render_model_update(written, applied=True) + "\n")
             else:
                 # Either a change the running process can't absorb, or a reload that
                 # failed — both leave the restart as the only correct way to apply it.
-                self._restart_in_place()
+                self._restart_in_place(notice=render_model_update(written, applied=False))
             return None
 
         # /params only edits inference knobs (temperature, top_p, …) — nothing the
@@ -1395,8 +1379,12 @@ class ChatInterface:
                 self._restart_in_place()
             return None
 
-        if query.lower() == "/mcp":
-            self._print_mcp_status()
+        if query.lower() == "/mcp" or query.lower().startswith("/mcp "):
+            option = query[len("/mcp"):].strip().lower()
+            if option not in ("", "verbose"):
+                print_error("Usage: /mcp [verbose]")
+                return None
+            self._print_mcp_status(verbose=option == "verbose")
             return None
 
         if query.lower() == "/hooks":
