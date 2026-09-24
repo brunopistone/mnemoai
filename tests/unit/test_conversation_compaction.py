@@ -8,6 +8,7 @@ Covers the pure-logic pieces that don't need a live model:
 
 import asyncio
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from mnemoai.client.managers.agent_conversation_manager import (
@@ -426,7 +427,7 @@ class TestBatchedSummarization:
         assert "BATCH SUMMARY" in out           # succeeded via batching
         assert "multiple topics" not in out     # NOT the content-free placeholder
 
-    def test_total_failure_keeps_excerpt_not_placeholder(self, monkeypatch):
+    def test_total_failure_refuses_to_replace_history(self, monkeypatch):
         import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(mod.config, "get", _llm_config())
@@ -437,9 +438,8 @@ class TestBatchedSummarization:
 
         mgr = AgentConversationManager(max_tokens=4000)
         msgs = [{"role": "user", "content": [{"text": "distinctive content here"}]}]
-        out = _run(mgr.generate_summary(msgs, _AlwaysFail()))
-        # Falls back to a bounded EXCERPT carrying real content, not a placeholder.
-        assert "distinctive content here" in out
+        with pytest.raises(RuntimeError, match="conversation has been kept"):
+            _run(mgr.generate_summary(msgs, _AlwaysFail()))
 
     def test_large_window_batches_stay_a_safe_fraction(self):
         # Regression (the real bug): on a large window (1M), a near-full history
@@ -582,6 +582,39 @@ class _ConcurrencyModel:
 class TestParallelMapReduce:
     """generate_summary maps batches concurrently, then reduces once."""
 
+    def test_failed_reduce_still_carries_the_previous_summary(self, monkeypatch):
+        mgr = AgentConversationManager(4000)
+        mgr.previous_summary = "Earlier decisions"
+        calls = []
+
+        async def summarize(*args, **kwargs):
+            calls.append(True)
+            if len(calls) > 1:
+                raise ValueError("reduce unavailable")
+            return "New decisions"
+
+        monkeypatch.setattr(mgr, "_summarize_batch", summarize)
+        text = _run(mgr.generate_summary([{"content": "recent"}], object()))
+        assert "Earlier decisions" in text and "New decisions" in text
+
+    def test_failed_compaction_restores_evicted_tool_results(self, monkeypatch):
+        from mnemoai.client.managers.agent_conversation_manager import CompactionError
+
+        mgr = AgentConversationManager(4000)
+        original = [
+            HumanMessage("question"),
+            *[ToolMessage("x" * 4000, tool_call_id=str(i)) for i in range(12)],
+        ]
+        agent = _FakeAgent(list(original))
+
+        async def fail(*args, **kwargs):
+            raise CompactionError("batch failed")
+
+        monkeypatch.setattr(mgr, "generate_summary", fail)
+        with pytest.raises(CompactionError):
+            _run(mgr._compact(_FakeClient(), object(), agent, keep_recent=0))
+        assert agent.messages == original
+
     def test_map_runs_concurrently(self, monkeypatch):
         import mnemoai.client.managers.agent_conversation_manager as mod
 
@@ -627,7 +660,7 @@ class TestParallelMapReduce:
         assert len(model.calls) >= 3
         assert out.strip()
 
-    def test_partial_map_failure_still_summarizes(self, monkeypatch):
+    def test_partial_map_failure_cannot_drop_the_failed_batch(self, monkeypatch):
         import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(mod.config, "get", _llm_config())
@@ -644,11 +677,10 @@ class TestParallelMapReduce:
 
         mgr = AgentConversationManager(max_tokens=400)
         msgs = [{"role": "user", "content": [{"text": "word " * 60}]} for _ in range(9)]
-        out = _run(mgr.generate_summary(msgs, _FlakyModel()))
-        assert out.strip()  # surviving partials still produce a summary
-        assert "multiple topics" not in out  # not the content-free placeholder
+        with pytest.raises(RuntimeError, match="conversation has been kept"):
+            _run(mgr.generate_summary(msgs, _FlakyModel()))
 
-    def test_all_map_failure_keeps_excerpt(self, monkeypatch):
+    def test_all_map_failure_keeps_history(self, monkeypatch):
         import mnemoai.client.managers.agent_conversation_manager as mod
 
         monkeypatch.setattr(mod.config, "get", _llm_config())
@@ -659,8 +691,8 @@ class TestParallelMapReduce:
 
         mgr = AgentConversationManager(max_tokens=4000)
         msgs = [{"role": "user", "content": [{"text": "distinctive excerpt text"}]}]
-        out = _run(mgr.generate_summary(msgs, _AlwaysFail()))
-        assert "distinctive excerpt text" in out  # bounded excerpt, never empty
+        with pytest.raises(RuntimeError, match="conversation has been kept"):
+            _run(mgr.generate_summary(msgs, _AlwaysFail()))
 
 
 class TestCompactEvictsFirst:

@@ -205,6 +205,16 @@ class TestARestoredSummaryIsReApplied:
         assert client.system_prompt == "stale"
         assert mgr.previous_summary is None
 
+    def test_loading_uncompacted_history_drops_the_previous_conversations_summary(self, wired):
+        client, agent = self._client_and_agent(wired)
+        mgr = AgentConversationManager(max_tokens=1000)
+        mgr.apply_restored_summary(client, agent, "Earlier private conversation")
+        assert mgr.apply_restored_summary(client, agent, "") is True
+        assert "Earlier private conversation" not in agent.system_prompt
+        assert "<conversation_summary>" not in agent.system_prompt
+        assert mgr.previous_summary is None
+        assert mgr.summary_text == ""
+
     def test_a_missing_agent_still_updates_the_client(self, wired):
         client, _ = self._client_and_agent(wired)
         mgr = AgentConversationManager(max_tokens=1000)

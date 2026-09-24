@@ -29,8 +29,8 @@ _MIN_EMBED_TOKEN_LIMIT = 256
 # runner-agnostic: besides the explicit "context/too long" phrasings, an Ollama/
 # llama.cpp embedding runner rejects an over-length batch by dropping the socket
 # — surfacing as a bare "EOF" / "status code: 400" / connection error with no
-# helpful text — so those count as probable-overflow too (the alternative, a
-# blind 3x resend then permanent sha256 fallback, is exactly the bug this fixes).
+# helpful text — so those count as probable-overflow too. Shrinking can recover
+# an oversized input; retries of the identical input cannot.
 _OVERFLOW_ERROR_MARKERS = (
     "context length",
     "context window",
@@ -79,13 +79,13 @@ class EmbeddingsController(BaseModelController):
         ) or self.embed_model_config.get("ENDPOINT_URL")
         self.api_key = self.embed_model_config.get("API_KEY")
 
-        # ``DIMENSION`` has two roles: (1) the fallback-vector / empty-result shape
+        # ``DIMENSION`` has two roles: (1) the empty-result shape
         # (always), and (2) the REQUESTED output size for providers that support a
         # configurable embedding dimension (Cohere v4 → ``output_dimension``,
         # Titan v2 → ``dimensions``). ``_configured_dim`` is the user's explicit
         # value (or None); we only send it to the provider when explicitly set, so
         # a model without a resize knob isn't forced to one. ``self.dim`` always
-        # has a concrete value for the fallback shape (explicit → known-model
+        # has a concrete value for the empty shape (explicit → known-model
         # lookup → 1024).
         model_dims = {
             "mxbai-embed-large": 1024,
@@ -102,6 +102,8 @@ class EmbeddingsController(BaseModelController):
             self.dim = model_dims.get(self.embed_model_name, 1024)
 
         embeddings_config = config.get("RAG", {}).get("EMBEDDINGS", {})
+        # Legacy FALLBACK_ENABLED / FALLBACK_TYPE remain accepted config keys,
+        # but are deliberately inert: provider failures must never invent data.
         self.cache_enabled = embeddings_config.get("CACHE_ENABLED", True)
         self.cache_size = embeddings_config.get("CACHE_SIZE", 1000)
         # Cap per-text input as defensive hygiene against a genuinely huge text
@@ -121,7 +123,7 @@ class EmbeddingsController(BaseModelController):
             int(cfg_tokens) if cfg_tokens is not None else None
         )
         self._token_limit_resolved = self._max_input_tokens is not None
-        # Retry a transient embed-runner failure before degrading to fallback.
+        # Retry a transient embed-runner failure before raising.
         self._embed_retries = int(embeddings_config.get("RETRIES", 3))
         self._embed_retry_delay = float(embeddings_config.get("RETRY_DELAY", 0.5))
         self._embedding_cache = {}  # {cache_key: embedding_vector}
@@ -138,21 +140,17 @@ class EmbeddingsController(BaseModelController):
         When ``DIMENSION`` is configured we trust it (no call). Otherwise we make
         ONE real embed call and measure the vector length — the only reliable way,
         since a model's advertised size can differ from what it returns (and some
-        providers resize). Falls back to the declared ``self.dim`` if the probe
-        fails (e.g. provider unreachable), so callers always get something."""
+        providers resize). A failed probe raises; an unverified dimension must
+        never be stamped into a persisted model fingerprint."""
         if self._runtime_dim is not None:
             return self._runtime_dim
         if self._configured_dim is not None:
             self._runtime_dim = self._configured_dim
             return self._runtime_dim
-        try:
-            vec = self.embed(["dimension probe"])
-            if getattr(vec, "shape", None) is not None and vec.shape[0] > 0:
-                self._runtime_dim = int(vec.shape[1])
-                return self._runtime_dim
-        except Exception as e:
-            logger.debug(f"Embedding dimension probe failed ({e}); using declared")
-        self._runtime_dim = self.dim
+        vec = self.embed(["dimension probe"])
+        if vec.ndim != 2 or not vec.shape[0] or not vec.shape[1]:
+            raise ValueError("Embedding dimension probe returned no vector")
+        self._runtime_dim = int(vec.shape[1])
         return self._runtime_dim
 
     def fingerprint(self) -> str:
@@ -336,7 +334,7 @@ class EmbeddingsController(BaseModelController):
         return np.vstack(results)
 
     def _embed_uncached(self, texts: List[str]) -> np.ndarray:
-        """Embed ``texts`` with a provider-agnostic retry / shrink / fallback loop.
+        """Embed ``texts`` with a provider-agnostic retry / shrink loop.
 
         This is the single place ALL providers go through, so the recovery
         behavior is identical for every model:
@@ -352,11 +350,10 @@ class EmbeddingsController(BaseModelController):
         4. On a **transient** failure (a genuine hiccup — first call after a
            (re)load, momentary socket error on normal-size input): brief backoff
            and retry the same input.
-        5. Only after exhausting the budget do we degrade to deterministic
-           (sha256) embeddings.
+        5. After exhausting the budget, raise without returning or caching data.
 
-        All logging here is DEBUG (expected, self-healing) except the final
-        give-up, which is a single ERROR — so a normal recovery is silent.
+        Retry logging is DEBUG (expected, self-healing). The caller reports the
+        final failure or a read-only degradation, so a normal recovery is silent.
         """
         attempts = max(1, self._embed_retries)
         last_exc = None
@@ -398,15 +395,14 @@ class EmbeddingsController(BaseModelController):
                         type(e).__name__,
                     )
                     time.sleep(self._embed_retry_delay * (attempt + 1))
-        logger.error(
-            "Embedding failed after %d attempts, using deterministic fallback: %s",
-            attempts,
-            last_exc,
-        )
-        return self._embed_fallback(texts)
+        # Synthetic vectors are not in the provider's embedding space. Never
+        # cache or persist them under the real model's fingerprint.
+        raise RuntimeError(
+            f"Embedding failed after {attempts} attempts; no vectors were stored."
+        ) from last_exc
 
     def _embed_raw(self, texts: List[str]) -> np.ndarray:
-        """One provider embed attempt with NO retry/fallback — raises on failure.
+        """One provider embed attempt with NO retry — raises on failure.
 
         The generic loop in :meth:`_embed_uncached` owns recovery, so each
         provider method just makes the call and lets exceptions propagate."""
@@ -415,7 +411,7 @@ class EmbeddingsController(BaseModelController):
     def _embed_ollama(self, texts: List[str]) -> np.ndarray:
         """One Ollama embed call at the configured HOST/PORT; raises on failure.
 
-        Recovery (retry/shrink/fallback) is handled generically by the caller."""
+        Recovery (retry/shrink) is handled generically by the caller."""
         # Honor HOST/PORT instead of letting bare ollama.embed() fall back to
         # $OLLAMA_HOST (which could hijack the call to a different server).
         host = "http://{}:{}".format(
@@ -589,34 +585,6 @@ class EmbeddingsController(BaseModelController):
         items = sorted(response.data, key=lambda d: d.get("index", 0))
         embeddings = [item["embedding"] for item in items]
         return np.array(embeddings, dtype=np.float32)
-
-    def _embed_fallback(self, texts: List[str]) -> np.ndarray:
-        """Deterministic SHA256-based embeddings (degraded; logs an error).
-
-        Logged at ERROR (not WARNING): reaching the fallback means semantic
-        search is genuinely degraded — that's an error the user should see even at
-        the default log level. The expected, self-healing retry/shrink steps that
-        precede it log at DEBUG, so a normal recovery stays silent."""
-        fallback_config = config.get("RAG", {}).get("EMBEDDINGS", {})
-        fallback_type = fallback_config.get("FALLBACK_TYPE", "sha256")
-
-        logger.error(
-            f"⚠️  Using fallback embeddings ({fallback_type}) - semantic search will be DEGRADED. "
-            f"Embeddings will not capture semantic meaning. "
-            f"Please check embedding model availability (Ollama/OpenAI/Bedrock)."
-        )
-
-        out = []
-        for t in texts:
-            h = hashlib.sha256(t.encode("utf-8")).digest()
-            v = np.frombuffer(h, dtype=np.uint8).astype(np.float32)
-            if self.dim and len(v) < self.dim:
-                v = np.resize(v, self.dim)
-            elif self.dim:
-                v = v[: self.dim]
-            v = v / (np.linalg.norm(v) + 1e-12)
-            out.append(v)
-        return np.vstack(out)
 
     def _extract_embeddings_from_response(self, resp: Any) -> List[List[float]]:
         """Extract embedding vectors from an Ollama response (dict or object)."""

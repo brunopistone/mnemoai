@@ -78,12 +78,18 @@ def parse_subtasks(
 
     # Validate and normalize
     validated = []
-    for st in subtasks:
-        if not isinstance(st, dict) or "description" not in st:
+    original_to_valid = {}
+    for original_index, st in enumerate(subtasks):
+        if (
+            not isinstance(st, dict)
+            or not isinstance(st.get("description"), str)
+            or not st["description"].strip()
+        ):
             continue
         category = st.get("category", "full")
-        if category not in valid_categories:
+        if not isinstance(category, str) or category not in valid_categories:
             category = "full"
+        original_to_valid[original_index] = len(validated)
         validated.append(
             {
                 "description": st["description"],
@@ -107,8 +113,9 @@ def parse_subtasks(
             for d in raw:
                 if isinstance(d, bool):
                     continue  # bool is an int subclass — reject explicitly
-                if isinstance(d, int) and 0 <= d < i:
-                    deps.append(d)
+                mapped = original_to_valid.get(d) if isinstance(d, int) else None
+                if mapped is not None and mapped < i:
+                    deps.append(mapped)
         st["depends_on"] = sorted(set(deps))
 
     return validated

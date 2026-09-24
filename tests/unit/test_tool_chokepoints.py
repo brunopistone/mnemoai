@@ -18,6 +18,7 @@ these tests are also what would catch it being re-forked.
 import logging
 from contextlib import contextmanager
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from mnemoai.client import hooks
@@ -254,12 +255,35 @@ class TestWorkerLoopChokepoint:
     the main-loop cases above rather than trusting the shared helper names.
     """
 
+    def test_a_worker_cannot_resolve_a_tool_outside_its_allowlist(self):
+        ran = []
+        a = _worker_agent(
+            [_Tool("fs_write", lambda args: ran.append(args) or "ok")],
+            [_tool_turn("fs_write"), AIMessage(content="done")],
+        )
+        _, messages = a._run_worker_loop(object(), [], "restricted task", quiet=True)
+        assert ran == []
+        assert "not allowed" in next(m.content for m in messages if isinstance(m, ToolMessage))
+
+    @pytest.mark.parametrize("result", [
+        '{"error":true}', '{"success":false}', '{"exit_status":2}',
+        '{"blocked":true}', "User declined to run this command.",
+    ])
+    def test_failed_results_record_no_edit_and_fire_failure_hooks(self, result):
+        a = _agent([_Tool("fs_write", lambda args: result)])
+        recorded, events = [], []
+        a._record_file_activity = lambda *args: recorded.append(args)
+        a._run_hooks = lambda event, *args, **kwargs: events.append(event) or hooks.Outcome()
+        _run(a, name="fs_write")
+        assert recorded == []
+        assert events == [hooks.PRE_TOOL_USE, hooks.POST_TOOL_USE_FAILURE]
+
     def test_a_successful_call_feeds_the_result_back(self):
         a = _worker_agent(
             [_Tool("grep_search")],
             [_tool_turn("grep_search"), AIMessage(content="done")],
         )
-        text, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+        text, saveable = a._run_worker_loop(object(), a.tools, "task", quiet=True)
         assert text == "done"
         results = [m for m in saveable if isinstance(m, ToolMessage)]
         assert [(m.name, m.content) for m in results] == [
@@ -276,7 +300,7 @@ class TestWorkerLoopChokepoint:
             ],
         )
         a._confirm_tool = lambda *x: False
-        text, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+        text, saveable = a._run_worker_loop(object(), a.tools, "task", quiet=True)
         assert text == "stopped"
         declined = [m for m in saveable if isinstance(m, ToolMessage)]
         assert [m.content for m in declined] == ["User declined to run this command."]
@@ -291,7 +315,7 @@ class TestWorkerLoopChokepoint:
         a._confirm_tool = lambda *x: (_ for _ in ()).throw(
             AssertionError("blocked tool must not reach the confirm gate")
         )
-        _, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+        _, saveable = a._run_worker_loop(object(), a.tools, "task", quiet=True)
         blocked = [m for m in saveable if isinstance(m, ToolMessage)]
         assert "plan mode is active" in blocked[0].content
 
@@ -303,7 +327,7 @@ class TestWorkerLoopChokepoint:
         a._invoke_tool = (
             lambda tool, name, args, quiet=False: seen.append(name) or "gated"
         )
-        _, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+        _, saveable = a._run_worker_loop(object(), a.tools, "task", quiet=True)
         assert seen == ["git_safe"]
         gated = [m for m in saveable if isinstance(m, ToolMessage)]
         assert [m.content for m in gated] == ["gated"]
@@ -314,10 +338,25 @@ class TestWorkerLoopChokepoint:
         # wasn't given left no trace in the log at all.
         a = _worker_agent([], [_tool_turn("nope"), AIMessage(content="done")])
         with capture_logs(logging.WARNING) as lines:
-            _, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+            _, saveable = a._run_worker_loop(object(), a.tools, "task", quiet=True)
         missing = [m for m in saveable if isinstance(m, ToolMessage)]
-        assert [m.content for m in missing] == ["Tool not found: nope"]
+        assert "Tool not found: nope" in missing[0].content
         assert any("Tool not found: nope" in line for line in lines), lines
+
+    @pytest.mark.parametrize("name,phrase", [
+        ("exit_plan_mode", "only the main assistant"),
+        ("ask_user_question", "no direct user"),
+    ])
+    def test_forbidden_interactive_tools_get_precise_refusals_without_dispatch(self, name, phrase):
+        a = _agent([_Tool(name)])
+        a._spawn_depth = 1
+        a._client_side_tool_message = lambda *args: pytest.fail("must not dispatch")
+        messages = []
+        a._run_tool_calls(
+            [{"name": name, "args": {}, "id": "denied"}],
+            [], messages, strict_tools=True,
+        )
+        assert len(messages) == 1 and phrase in messages[0].content
 
     def test_an_empty_str_exception_still_yields_a_message(self):
         # Same empty-str() TimeoutError case as the main loop. This one is why
@@ -332,7 +371,7 @@ class TestWorkerLoopChokepoint:
             [_tool_turn("execute_bash"), AIMessage(content="done")],
         )
         with capture_logs(logging.ERROR) as lines:
-            _, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+            _, saveable = a._run_worker_loop(object(), a.tools, "task", quiet=True)
         errs = [m for m in saveable if isinstance(m, ToolMessage)]
         assert errs[0].content.strip()
         assert "Timeout" in errs[0].content
@@ -366,7 +405,7 @@ class TestTheTwoPathsCannotDivergeAgain:
             [_Tool("grep_search")],
             [_tool_turn("grep_search"), AIMessage(content="done")],
         )
-        w._run_worker_loop(object(), [], "task", quiet=True)
+        w._run_worker_loop(object(), w.tools, "task", quiet=True)
 
         assert [names for _, names in callers] == [["grep_search"], ["grep_search"]]
         # Distinct labels: with sub-agents running concurrently, an operator can't
@@ -388,7 +427,7 @@ class TestTheTwoPathsCannotDivergeAgain:
             return "ok"
 
         w._invoke_tool = _invoke_tool
-        w._run_worker_loop(object(), [], "task", quiet=True)
+        w._run_worker_loop(object(), w.tools, "task", quiet=True)
         assert seen == [True]
 
 
@@ -491,7 +530,7 @@ class TestHooksAtTheChokepoint:
              AIMessage(content="stopped")],
         )
         _hooked(a, hooks.Outcome(decision="deny", reason="no network"))
-        _, saveable = a._run_worker_loop(object(), [], "task", quiet=True)
+        _, saveable = a._run_worker_loop(object(), a.tools, "task", quiet=True)
         blocked = [m for m in saveable if isinstance(m, ToolMessage)]
         assert "no network" in blocked[0].content
         assert ran == []

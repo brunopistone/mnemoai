@@ -36,6 +36,7 @@ def change(**kw) -> Change:
 @pytest.fixture
 def log(tmp_path, monkeypatch):
     """A log writing into a tmp index (never the developer's app home)."""
+    monkeypatch.chdir(tmp_path)
     index = tmp_path / "prov.jsonl"
     monkeypatch.setattr(provenance, "provenance_path", lambda *a, **k: index)
     return ProvenanceLog()
@@ -446,3 +447,13 @@ class TestWiring:
             for _, items in ChatInterface._COMMAND_GROUPS
             for cmd, _ in items
         )
+def test_colliding_directory_slugs_keep_new_provenance_scoped(tmp_path, monkeypatch):
+    from mnemoai.client import provenance
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    first = provenance.ProvenanceLog(cwd="/proj/a-b")
+    second = provenance.ProvenanceLog(cwd="/proj/a/b")
+    first.record("fs_write", {"path": "/tmp/shared.txt"}, prompt="first")
+    second.record("fs_write", {"path": "/tmp/shared.txt"}, prompt="second")
+    assert [r.prompt for r in provenance.changes(cwd="/proj/a-b")] == ["first"]
+    assert [r.prompt for r in provenance.changes(cwd="/proj/a/b")] == ["second"]

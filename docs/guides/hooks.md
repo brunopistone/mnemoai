@@ -203,7 +203,7 @@ Stop confirming read-only git commands:
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import json,sys; c=json.load(sys.stdin).get('tool_input',{}).get('command','').strip(); print(json.dumps({'decision':'allow'}) if c.startswith(('git status','git log','git diff')) else '')\"",
+            "command": "python -c \"import json,sys; c=json.load(sys.stdin).get('tool_input',{}).get('command','').strip(); print(json.dumps({'decision':'allow'}) if c in ('git status','git log','git diff') else '')\"",
             "timeout": 10
           }
         ]

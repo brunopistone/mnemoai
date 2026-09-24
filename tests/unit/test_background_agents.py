@@ -22,7 +22,7 @@ class TestRegistry:
         reg = BackgroundAgentRegistry()
         rec = reg.register("explore", "map routing", "investigate routing")
         assert rec.status == "running"
-        assert rec.agent_id == "explore-1"
+        assert rec.agent_id.startswith("explore-1-")
         assert reg.any_running()
 
     def test_complete_marks_done(self, tmp_path, monkeypatch):
@@ -68,7 +68,19 @@ class TestRegistry:
         reg = BackgroundAgentRegistry()
         a = reg.register("explore", "d", "p")
         b = reg.register("plan", "d", "p")
-        assert a.agent_id == "explore-1" and b.agent_id == "plan-2"
+        assert a.agent_id.startswith("explore-1-") and b.agent_id.startswith("plan-2-")
+        assert a.agent_id != b.agent_id
+
+    def test_persisted_report_survives_a_new_registry(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "mnemoai.client.agent.background_agents.tasks_dir", lambda: tmp_path
+        )
+        first, second = BackgroundAgentRegistry(), BackgroundAgentRegistry()
+        a = first.register("explore", "first", "task one")
+        first.complete(a.agent_id, "report one")
+        b = second.register("explore", "second", "task two")
+        assert a.agent_id != b.agent_id
+        assert second.load_from_disk(a.agent_id).result == "report one"
 
     def test_any_undelivered_tracks_finished_unnotified(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -107,14 +119,41 @@ class TestHeadlessConfirm:
         a._preapproved_bash = []
         return a
 
-    def test_headless_auto_denies_untrusted_destructive(self, monkeypatch):
+    def test_headless_denies_unapproved_mutations_without_prompting(self, monkeypatch):
         from mnemoai.client.agent import agent as agent_mod
 
         monkeypatch.setattr(agent_mod.config, "get", lambda k, d=None: True)
         a = self._agent()
         a._set_headless(True)
-        # execute_bash is destructive + untrusted + headless → auto-deny.
-        assert a._confirm_tool("execute_bash", {"command": "rm -rf x"}) is False
+        a._prompt_confirm = lambda *args: (_ for _ in ()).throw(
+            AssertionError("delegated tools must not prompt")
+        )
+        a._auto_approve_provider = lambda: "off"
+        assert a._confirm_tool("execute_bash", {"command": "make test"}) is False
+        assert a._confirm_tool("fs_write", {"path": "output.txt"}) is False
+        assert a._confirm_tool("start_background_task", {"command": "make test"}) is False
+
+    def test_headless_inherits_the_explicit_auto_tier(self, monkeypatch, tmp_path):
+        from mnemoai.client.agent import agent as agent_mod
+
+        monkeypatch.setattr(agent_mod.config, "get", lambda key, default=None: True)
+        monkeypatch.chdir(tmp_path)
+        a = self._agent()
+        a._set_headless(True)
+        a._auto_approve_provider = lambda: "edits"
+        assert a._confirm_tool("fs_write", {"path": str(tmp_path / "output.txt")})
+        assert not a._confirm_tool("execute_bash", {"command": "make test"})
+        a._auto_approve_provider = lambda: "all"
+        assert a._confirm_tool("start_background_task", {"command": "make test"})
+
+    def test_foreground_subagent_also_denies_unapproved_mutations(self, monkeypatch):
+        from mnemoai.client.agent import agent as agent_mod
+
+        monkeypatch.setattr(agent_mod.config, "get", lambda key, default=None: True)
+        a = self._agent()
+        a._spawn_depth = 1
+        a._prompt_confirm = lambda *args: (_ for _ in ()).throw(AssertionError("no prompt"))
+        assert not a._confirm_tool("fs_write", {"path": "output.txt"})
 
     def test_headless_allows_pretrusted_category(self, monkeypatch):
         from mnemoai.client.agent import agent as agent_mod
@@ -169,7 +208,7 @@ class TestBackgroundLaunchAndDrain:
         assert "explore-1" in ack
         done.wait(timeout=5)
         # After the daemon completes, the registry has the result.
-        rec = a._bg_agents.get("explore-1")
+        rec = a._bg_agents.list_all()[0]
         assert rec is not None and rec.result == "BG REPORT"
 
     def test_drain_completions_returns_wrapped_messages(self, tmp_path, monkeypatch):
@@ -401,7 +440,7 @@ class TestToolInterceptionCoverage:
         a._calls = calls
         return a
 
-    def test_worker_loop_intercepts_resume_agent(self):
+    def test_worker_cannot_intercept_resume_outside_its_tool_scope(self):
         a = self._agent_stub_worker_loop()
         turns = [
             AIMessage(
@@ -427,7 +466,7 @@ class TestToolInterceptionCoverage:
         text, _ = a._run_worker_loop(object(), [], "resume it", quiet=True)
         assert text == "final"
         # resume_agent was handled client-side (not "tool not found").
-        assert a._calls.get("resume") == ("explore-1", "keep going")
+        assert "resume" not in a._calls
 
     def test_resume_agent_in_always_available_tools(self):
         assert "resume_agent" in LangGraphAgent._ALWAYS_AVAILABLE_TOOLS

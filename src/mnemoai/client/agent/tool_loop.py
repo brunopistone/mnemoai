@@ -1,7 +1,7 @@
 """The shared model↔tool execution loop (agent-arg helper).
 
-One tool call, start to finish: normalize the args, short-circuit the client-side
-stubs, resolve the tool, then the gates in their required order — plan mode blocks
+One tool call, start to finish: normalize args, enforce worker tool scope, answer
+client-side stubs, resolve the tool, then the gates in their required order — plan mode blocks
 BEFORE anything else (a blocked tool must never even ask), then the user's
 ``PreToolUse`` hooks, then the confirmation prompt — and finally ``_invoke_tool``,
 where the post-call gate lives. A hook's ``deny`` ends the call; its ``allow``
@@ -42,8 +42,10 @@ from typing import Any, Dict, List, Optional, Sequence
 from langchain_core.messages import BaseMessage, ToolMessage
 
 from mnemoai.client import hooks
+from mnemoai.client.agent import ask_user, confirmation_gate
 from mnemoai.client.agent.agent_activity import ActivitySink
 from mnemoai.utils.logger import logger
+from mnemoai.utils.tool_results import is_error_result
 
 
 def run_tool_calls(
@@ -55,12 +57,28 @@ def run_tool_calls(
     activity: Optional[ActivitySink] = None,
     spawn_results: Optional[Dict[str, str]] = None,
     log_label: str = "Tool execution",
+    strict_tools: bool = False,
 ) -> None:
     """Run ``tool_calls``, appending one ToolMessage each to ``messages``."""
     for call in tool_calls:
         name = call["name"]
         tool_id = call["id"]
         args = agent._normalize_tool_args(call["args"])
+
+        if strict_tools and not any(t.name == name for t in tools):
+            # Give interactive tools their precise refusal without dispatching
+            # ANY executable handler ahead of the worker's allowlist.
+            if name == "exit_plan_mode" and confirmation_gate.is_unattended(agent):
+                notice = confirmation_gate.PLAN_APPROVAL_UNAVAILABLE
+            elif name == "ask_user_question" and confirmation_gate.is_unattended(agent):
+                notice = ask_user.format_unavailable(ask_user.WORKER_UNAVAILABLE_REASON)
+            elif any(t.name == name for t in agent.tools):
+                notice = f"Blocked: tool '{name}' is not allowed for this worker."
+            else:
+                notice = f"Tool not found: {name}"
+            logger.warning(notice)
+            _reply(messages, tool_id, name, notice)
+            continue
 
         # exit_plan_mode / spawn_agent / resume_agent / ask_user_question are
         # handled client-side, not via MCP, so they're never looked up below.
@@ -74,7 +92,7 @@ def run_tool_calls(
 
         # The caller's subset first, then every tool (a worker's subset is narrow).
         tool = next((t for t in tools if t.name == name), None)
-        if not tool:
+        if not tool and not strict_tools:
             tool = next((t for t in agent.tools if t.name == name), None)
 
         if not tool:
@@ -97,7 +115,17 @@ def run_tool_calls(
 
         # Hard gate: confirm destructive tools before running.
         if not (pre.allowed or agent._confirm_tool(name, args)):
-            _reply(messages, tool_id, name, "User declined to run this command.")
+            unattended = (
+                getattr(agent, "_spawn_depth", 0) > 0
+                or getattr(agent, "_is_headless", lambda: False)()
+            )
+            notice = (
+                "Blocked: this unattended action was not pre-approved. No human "
+                "confirmation was requested. Use an approved plan, session trust, "
+                "or an applicable /auto tier."
+                if unattended else "User declined to run this command."
+            )
+            _reply(messages, tool_id, name, notice)
             continue
 
         try:
@@ -105,12 +133,18 @@ def run_tool_calls(
             result = agent._invoke_tool(tool, name, args, quiet=quiet)
             # Note the file this call touched, for /files and /diff. AFTER the
             # call, so a refused or failed one leaves no trace.
-            agent._record_file_activity(name, args)
+            failed_result = is_error_result(result)
+            if not failed_result:
+                agent._record_file_activity(name, args)
             content = agent._truncate_tool_result(str(result))
-            post = agent._run_hooks(hooks.POST_TOOL_USE, name, args, str(result), quiet=quiet)
+            event = hooks.POST_TOOL_USE_FAILURE if failed_result else hooks.POST_TOOL_USE
+            post = agent._run_hooks(event, name, args, str(result), quiet=quiet)
             _reply(messages, tool_id, name, _with_context(content, post))
             if activity is not None:
-                activity.tool_result(name, str(result))
+                if failed_result:
+                    activity.tool_error(name, str(result))
+                else:
+                    activity.tool_result(name, str(result))
         except Exception as e:
             # `str(e) or repr(e)` — a bare TimeoutError has an empty str(), so this
             # logged the label and nothing else. (`e or …` would NOT work: an

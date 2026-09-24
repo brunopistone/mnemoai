@@ -53,10 +53,9 @@ def tool_error_handler(func: Callable) -> Callable:
 def _error_response(exc: Exception, func_name: str) -> str:
     """Map an exception to the standardized JSON payload.
 
-    Re-raises into the original except-chain rather than an isinstance ladder:
-    the clause ORDER is load-bearing (FileNotFoundError/PermissionError/
-    IsADirectoryError are all OSError subclasses, and JSONDecodeError is a
-    ValueError), so preserving the chain verbatim keeps the exact same mapping.
+    Re-raises into an except-chain. Specific subclasses must precede their
+    parents: JSONDecodeError is a ValueError, and TimeoutError, FileNotFoundError,
+    PermissionError and IsADirectoryError are OSError subclasses.
     """
     try:
         raise exc
@@ -137,6 +136,14 @@ def _error_response(exc: Exception, func_name: str) -> str:
             indent=2,
         )
 
+    except json.JSONDecodeError as e:
+        return create_error_response(
+            "JSONDecodeError", f"Invalid JSON format: {e}",
+            ["Check JSON syntax, quoting, and trailing commas."],
+            original_error=str(e),
+            error_location=f"Line {e.lineno}, Column {e.colno}",
+        )
+
     except ValueError as e:
         return json.dumps(
             {
@@ -173,6 +180,13 @@ def _error_response(exc: Exception, func_name: str) -> str:
             indent=2,
         )
 
+    except TimeoutError as e:
+        return create_error_response(
+            "TimeoutError", f"Operation timed out: {e}",
+            ["Check connectivity or increase the operation timeout if appropriate."],
+            original_error=str(e),
+        )
+
     except OSError as e:
         # Catch-all for OS-related errors (disk full, broken pipe, etc.)
         return json.dumps(
@@ -190,48 +204,6 @@ def _error_response(exc: Exception, func_name: str) -> str:
                 ],
                 "original_error": str(e),
                 "error_code": getattr(e, "errno", None),
-            },
-            indent=2,
-        )
-
-    except json.JSONDecodeError as e:
-        return json.dumps(
-            {
-                "error": True,
-                "error_type": "JSONDecodeError",
-                "message": f"Invalid JSON format: {str(e)}",
-                "next_steps": [
-                    "Check for missing quotes, commas, or brackets",
-                    "Verify JSON structure is well-formed",
-                    "Use a JSON validator to identify syntax errors",
-                    "Check for trailing commas (not allowed in JSON)",
-                    "Ensure all strings use double quotes, not single quotes",
-                    "Validate JSON at: https://jsonlint.com",
-                ],
-                "original_error": str(e),
-                "error_location": (
-                    f"Line {e.lineno}, Column {e.colno}"
-                    if hasattr(e, "lineno")
-                    else "Unknown"
-                ),
-            },
-            indent=2,
-        )
-
-    except TimeoutError as e:
-        return json.dumps(
-            {
-                "error": True,
-                "error_type": "TimeoutError",
-                "message": f"Operation timed out: {str(e)}",
-                "next_steps": [
-                    "The operation took too long to complete",
-                    "Try breaking the operation into smaller parts",
-                    "Check network connectivity if accessing remote resources",
-                    "Increase timeout if the operation legitimately needs more time",
-                    "Look for infinite loops or blocking operations",
-                ],
-                "original_error": str(e),
             },
             indent=2,
         )

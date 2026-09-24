@@ -53,6 +53,13 @@ class TestScanStringMatchesWhatGitSees:
 
 
 class TestBlockedCommands:
+    def test_refspec_cannot_bypass_protected_branch(self):
+        for command in (
+            "push --force origin HEAD:main",
+            "push origin +HEAD:refs/heads/main",
+        ):
+            assert check_dangerous_command(command)["blocked"], command
+
     def test_force_push_to_main_is_blocked(self):
         result = check_dangerous_command("push -f origin main")
         assert result["blocked"] is True
@@ -67,6 +74,9 @@ class TestBlockedCommands:
 
 
 class TestDangerousCommands:
+    def test_hard_reset_flag_after_revision_is_dangerous(self):
+        assert check_dangerous_command("reset HEAD --hard")["dangerous"]
+
     def test_hard_reset_is_dangerous_not_blocked(self):
         result = check_dangerous_command("reset --hard HEAD~1")
         assert result["blocked"] is False

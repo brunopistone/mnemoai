@@ -708,7 +708,7 @@ class TestOrchestratorScheduling:
         assert a._is_headless() is False
 
     def test_lone_wave_worker_is_not_headless(self):
-        # A single-ready wave runs inline on the main thread and CAN prompt.
+        # A single-ready wave keeps the foreground approval channel.
         import threading
 
         a = self._agent()
@@ -726,7 +726,66 @@ class TestOrchestratorScheduling:
             {"description": "s1", "category": "full", "depends_on": [0]},
         ]
         a._run_subtasks_scheduled(subtasks)
-        assert headless_seen == [False, False]  # neither ran headless
+        assert headless_seen == [False, False]
+        assert a._is_headless() is False
+
+    @pytest.mark.parametrize("workers,chain,headless,depth,can_prompt", [
+        (4, True, False, 0, True),    # dependent tasks run inline, one per wave
+        (1, False, False, 0, True),   # concurrency=1 runs independent tasks inline
+        (4, False, False, 0, False), # parallel workers cannot prompt
+        (4, True, True, 0, False),   # inline work must not clear inherited headless
+        (4, True, False, 1, False),  # inline work must not escape a spawned context
+    ])
+    @pytest.mark.parametrize("answer", [False, True])
+    def test_worker_execution_context_controls_real_confirmation(
+        self, monkeypatch, tmp_path, workers, chain, headless, depth, can_prompt, answer
+    ):
+        from mnemoai.client.agent import confirmation_gate
+
+        a = self._agent()
+        a._headless_tl = threading.local()
+        a._spawn_depth_tl = threading.local()
+        a._max_subagent_concurrency = workers
+        a._set_headless(headless)
+        a._spawn_depth = depth
+        a._trusted_confirm_categories = set()
+        a._auto_approve_provider = lambda: "off"
+        monkeypatch.setattr(confirmation_gate.sys.stdin, "isatty", lambda: True)
+        monkeypatch.setattr(
+            confirmation_gate.config, "get",
+            lambda key, default=None: True if key == "REQUIRE_WRITE_CONFIRMATION" else default,
+        )
+        prompts, decisions = [], []
+        a._prompt_confirm = lambda *args: prompts.append(args) or answer
+
+        def loop(model, tools, prompt, **kwargs):
+            decisions.append(a._confirm_tool("fs_write", {"path": str(tmp_path / "file")}))
+            return "done", []
+
+        a._run_worker_loop = loop
+        a._run_subtasks_scheduled([
+            {"description": "first", "category": "full", "depends_on": []},
+            {"description": "second", "category": "full", "depends_on": [0] if chain else []},
+        ])
+        assert decisions == [answer if can_prompt else False] * 2
+        assert len(prompts) == (2 if can_prompt else 0)
+        assert a._is_headless() is headless
+        assert a._spawn_depth == depth
+
+    def test_simple_qa_worker_keeps_the_routes_meta_and_external_tools(self):
+        a = self._agent()
+        a.model = _FakeModel()
+        a.tools = [_Tool("fs_read"), _Tool("external_lookup"), _Tool("fs_write")]
+        route_tools = a.tools[:2]
+        a.tools_by_route = {"simple_qa": route_tools}
+        seen = []
+        a._run_worker_loop = lambda model, tools, prompt, **kwargs: (
+            seen.append(tools) or "answer", []
+        )
+        a._run_subtask(0, [{
+            "description": "lookup a fact", "category": "simple_qa", "depends_on": [],
+        }], {})
+        assert seen == [route_tools]
 
     def test_dependency_threads_result_into_dependent(self):
         a = self._agent()

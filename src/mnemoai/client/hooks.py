@@ -339,7 +339,11 @@ def _run_one(
     Every failure path here is non-blocking by design: the worst a broken hook
     can do is add a line to the scrollback and a warning to the log.
     """
-    env = dict(os.environ, MNEMOAI_HOOK_EVENT=hook.event, MNEMOAI_TOOL_NAME=hook.matcher)
+    env = dict(
+        os.environ,
+        MNEMOAI_HOOK_EVENT=hook.event,
+        MNEMOAI_TOOL_NAME=json.loads(payload).get("tool_name", hook.matcher),
+    )
     try:
         proc = subprocess.run(
             hook.command,

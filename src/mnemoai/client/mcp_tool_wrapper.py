@@ -4,17 +4,17 @@ import asyncio
 import atexit
 import concurrent.futures
 import contextlib
+import copy
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional
 
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.tools import BaseTool, ToolException
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool as MCPTool
-from pydantic import BaseModel, Field, create_model
 
 from mnemoai.utils.config import config
 from mnemoai.utils.console import print_error
@@ -98,7 +98,7 @@ class MCPToolWrapper(BaseTool):
     description: str = ""
     mcp_tool: Any = None
     mcp_client: Any = None
-    args_schema: Optional[Type[BaseModel]] = None
+    args_schema: Optional[dict] = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -121,44 +121,9 @@ class MCPToolWrapper(BaseTool):
             **kwargs,
         )
 
-    def _build_args_schema(self, mcp_tool: MCPTool) -> Type[BaseModel]:
-        """Build a Pydantic model from MCP tool input schema.
-
-        Args:
-            mcp_tool: The MCP tool definition
-
-        Returns:
-            Pydantic model class for the tool arguments
-        """
-        input_schema = mcp_tool.inputSchema or {}
-        properties = input_schema.get("properties", {})
-        required = input_schema.get("required", [])
-
-        type_mapping = {
-            "string": str,
-            "integer": int,
-            "number": float,
-            "boolean": bool,
-            "array": list,
-            "object": dict,
-        }
-
-        fields = {}
-        for prop_name, prop_def in properties.items():
-            python_type = type_mapping.get(prop_def.get("type", "string"), str)
-            prop_desc = prop_def.get("description", "")
-
-            if prop_name in required:
-                fields[prop_name] = (python_type, Field(description=prop_desc))
-            else:
-                default_value = prop_def.get("default")
-                fields[prop_name] = (
-                    Optional[python_type],
-                    Field(default=default_value, description=prop_desc),
-                )
-
-        model_name = f"{mcp_tool.name.replace('-', '_').replace(' ', '_').title()}Args"
-        return create_model(model_name, **fields)
+    def _build_args_schema(self, mcp_tool: MCPTool) -> dict:
+        """Preserve the complete JSON Schema; the MCP server validates arguments."""
+        return copy.deepcopy(mcp_tool.inputSchema or {"type": "object", "properties": {}})
 
     def _run(
         self,
@@ -302,6 +267,10 @@ class MCPClientWrapper:
                 try:
                     return future.result(timeout=min(_CANCEL_POLL_INTERVAL, remaining))
                 except TimeoutError:
+                    if future.done():
+                        # A completed coroutine's TimeoutError is not a polling
+                        # timeout. Surface it immediately rather than busy-looping.
+                        raise MCPCallTimeout("The MCP request reported a timeout") from future.exception()
                     # This slice expired, not the call. Check for a cancel, then
                     # keep waiting — the loop's own deadline check ends it.
                     if cancellable and self._cancel_requested():
@@ -518,6 +487,15 @@ class MCPClientWrapper:
         await self._list_tools()
         logger.info("MCP session reconnected")
 
+    async def _reconnect_current(self, previous) -> None:
+        """Only the first failing caller replaces a shared connection."""
+        lock = getattr(self, "_reconnect_lock", None)
+        if lock is None:
+            self._reconnect_lock = lock = asyncio.Lock()
+        async with lock:
+            if self._session is previous or self._session is None:
+                await self._reconnect()
+
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
         """Call an MCP tool, reconnecting once if the session has died.
 
@@ -529,18 +507,25 @@ class MCPClientWrapper:
             Tool execution result as string
         """
         if not self._session:
-            raise RuntimeError("Not connected to MCP server")
+            await self._reconnect_current(None)
 
         logger.debug(f"Executing MCP tool: {name} with args: {arguments}")
+        session = self._session
         try:
-            result = await self._session.call_tool(name, arguments)
+            result = await session.call_tool(name, arguments)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as e:
-            # Transport/connection failure: try one reconnect, then retry once.
-            logger.warning(f"MCP tool call failed ({type(e).__name__}: {e}); retrying")
-            await self._reconnect()
-            result = await self._session.call_tool(name, arguments)
+            # The operation may have committed before its response was lost.
+            # Repair the connection for later calls, but never replay this one.
+            try:
+                await self._reconnect_current(session)
+            except Exception:
+                logger.debug("MCP reconnect failed", exc_info=True)
+            raise ToolException(
+                f"'{name}' failed ({str(e) or type(e).__name__}). It was not retried: "
+                "the operation may already have run; check its effects before repeating it."
+            ) from e
 
         return self._parse_tool_result(result)
 
@@ -554,6 +539,13 @@ class MCPClientWrapper:
         Returns:
             Result content as string
         """
+        if getattr(result, "isError", False):
+            details = "\n".join(
+                str(getattr(block, "text", block)) for block in getattr(result, "content", [])
+            )
+            raise ToolException(details or "MCP tool reported an error")
+        if getattr(result, "structuredContent", None) is not None and not getattr(result, "content", None):
+            return json.dumps(result.structuredContent, default=str)
         if hasattr(result, "content"):
             content = result.content
             if isinstance(content, list):

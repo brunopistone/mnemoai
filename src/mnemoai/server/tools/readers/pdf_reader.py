@@ -80,7 +80,7 @@ def read_pdf(file_path: str) -> str:
                             )
                         else:
                             num_chunks = rag.ingest(
-                                os.path.basename(normalized_path),
+                                os.path.realpath(normalized_path),
                                 full_text,
                                 chunk_size_tokens=int(
                                     config.get("RAG", {}).get("CHUNK_TOKENS", 1024)

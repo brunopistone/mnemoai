@@ -3,9 +3,8 @@ Description=Ollama VRAM Cleaner
 After=ollama.service
 
 [Service]
-Type=simple
-ExecStart=<PATH_TO_FOLDER>/ai-assistant/bash/ollama-freeup-vram/ollama_free_vram.sh
-Restart=always
+Type=oneshot
+ExecStart=/PATH_TO_REPOSITORY/bash/ollama-freeup-vram/ollama_free_vram.sh
 
 [Install]
 WantedBy=multi-user.target

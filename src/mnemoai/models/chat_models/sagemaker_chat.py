@@ -1,5 +1,6 @@
 """LangChain ChatModel wrapper for SageMaker endpoints."""
 
+import codecs
 import json
 import re
 from typing import Any, Dict, Iterator, List, Optional
@@ -21,6 +22,43 @@ from mnemoai.utils.logger import logger
 
 # Emit the "tools are not bound" warning once per process, not once per bind.
 _TOOL_SUPPORT_WARNED = False
+
+
+def _stream_payloads(events):
+    """Decode SSE or JSON lines across arbitrary UTF-8 transport boundaries."""
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    buffer = ""
+    for event in events:
+        if "PayloadPart" not in event:
+            if "ModelStreamError" in event or "InternalStreamFailure" in event:
+                raise RuntimeError(f"SageMaker stream failed: {event}")
+            continue
+        buffer += decoder.decode(event["PayloadPart"]["Bytes"])
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            line = line.strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if line == "[DONE]":
+                return
+            if not line or line.startswith((":", "event:", "id:", "retry:")):
+                continue
+            yield json.loads(line)
+        # Some containers emit complete JSON objects without newline separators.
+        candidate = buffer.strip()
+        if candidate.startswith(("{", "[")):
+            try:
+                payload = json.loads(candidate)
+            except ValueError:
+                continue
+            buffer = ""
+            yield payload
+    buffer += decoder.decode(b"", final=True)
+    tail = buffer.strip()
+    if tail.startswith("data:"):
+        tail = tail[5:].strip()
+    if tail and tail != "[DONE]":
+        yield json.loads(tail)
 
 
 class ChatSageMaker(BaseChatModel):
@@ -247,74 +285,25 @@ class ChatSageMaker(BaseChatModel):
                 Body=json.dumps(payload),
             )
 
-            buffer = ""
-            in_thinking = False  # Only true after we detect thinking content
-
-            for event in response["Body"]:
-                if "PayloadPart" not in event:
+            for data in _stream_payloads(response["Body"]):
+                if not isinstance(data, dict):
                     continue
-
-                chunk_data = event["PayloadPart"]["Bytes"].decode("utf-8")
-
-                for line in chunk_data.split("\n"):
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        buffer += line
-                        try:
-                            data = json.loads(buffer)
-                            buffer = ""
-                        except json.JSONDecodeError:
-                            continue
-
-                    choices = data.get("choices", [])
-                    if not choices:
-                        continue
-
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content", "")
-                    reasoning = delta.get("reasoning_content", "")
-
-                    additional_kwargs = {}
-                    if reasoning:
-                        additional_kwargs["reasoning_content"] = reasoning
-
-                    if content or reasoning:
-                        # Inline </think> tag in content.
-                        if content and "</think>" in content:
-                            parts = content.split("</think>", 1)
-                            in_thinking = False
-                            if parts[0]:
-                                yield ChatGenerationChunk(
-                                    message=AIMessageChunk(
-                                        content="",
-                                        additional_kwargs={
-                                            "reasoning_content": parts[0]
-                                        },
-                                    )
-                                )
-                            if len(parts) > 1 and parts[1]:
-                                yield ChatGenerationChunk(
-                                    message=AIMessageChunk(content=parts[1])
-                                )
-                        elif content and in_thinking:
-                            yield ChatGenerationChunk(
-                                message=AIMessageChunk(
-                                    content="",
-                                    additional_kwargs={"reasoning_content": content},
-                                )
-                            )
-                        else:
-                            yield ChatGenerationChunk(
-                                message=AIMessageChunk(
-                                    content=content,
-                                    additional_kwargs=additional_kwargs,
-                                )
-                            )
+                choices = data.get("choices", [])
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                content = delta.get("content") or ""
+                reasoning = delta.get("reasoning_content") or ""
+                if "</think>" in content:
+                    prefix, content = content.split("</think>", 1)
+                    reasoning += prefix.removeprefix("<think>")
+                if content or reasoning:
+                    yield ChatGenerationChunk(
+                        message=AIMessageChunk(
+                            content=content,
+                            additional_kwargs={"reasoning_content": reasoning} if reasoning else {},
+                        )
+                    )
 
         except Exception as e:
             logger.error(f"SageMaker streaming error: {e}")

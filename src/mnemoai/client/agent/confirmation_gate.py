@@ -1,11 +1,11 @@
 """Client-side destructive-tool confirmation gate (agent-arg helpers).
 
 The hard client-side gate that asks the user before running a destructive tool —
-shell (``execute_bash``), file writes (``fs_write``/``file_edit``), and memory
+shell (``execute_bash`` / ``start_background_task``), file writes, and memory
 writes — each behind its ``REQUIRE_*`` toggle. It must live client-side: the MCP
 server is a piped subprocess and can't prompt the terminal. Handles session-trust
-("a" = allow this category), the session's :mod:`auto_approve` mode, headless
-auto-deny (a background sub-agent has no TTY), non-TTY auto-proceed, cross-thread
+("a" = allow this category), the session's :mod:`auto_approve` mode, unattended
+auto-deny without prior approval, non-TTY foreground auto-proceed, cross-thread
 prompt serialization, and the pre-approved-bash bypass (a plan's ``allowed_bash``).
 
 Pure of the prompt mechanics: the functions take the agent as the first arg and
@@ -22,9 +22,10 @@ import sys
 
 from mnemoai.client.agent import auto_approve, plan_policy
 from mnemoai.utils.config import config
+from mnemoai.utils.shell_syntax import simple_command_tokens
 
 # Destructive-tool confirmation categories (each gated behind a REQUIRE_* toggle).
-CONFIRM_BASH_TOOLS = {"execute_bash"}
+CONFIRM_BASH_TOOLS = {"execute_bash", "start_background_task"}
 CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
 CONFIRM_MEMORY_TOOLS = {"memory"}
 
@@ -39,6 +40,13 @@ CONFIRM_RESULT_CATEGORY = "git"
 _RESULT_APPROVAL_REASON = "User approved this operation at the confirmation prompt."
 _RESULT_TOGGLE = "REQUIRE_GIT_CONFIRMATION"
 
+PLAN_APPROVAL_UNAVAILABLE = "Blocked: only the main assistant can request approval of a plan."
+
+
+def is_unattended(agent) -> bool:
+    """The caller has no interactive user; a foreground launch is not a worker."""
+    return agent._is_headless() or getattr(agent, "_spawn_depth", 0) > 0
+
 
 def is_preapproved_bash(agent, command: str) -> bool:
     """True if ``command`` was pre-approved via a plan's ``allowed_bash``.
@@ -50,19 +58,23 @@ def is_preapproved_bash(agent, command: str) -> bool:
     approved = getattr(agent, "_preapproved_bash", None)
     if not approved:
         return False
-    cmd = (command or "").strip()
-    if not cmd:
+    tokens = simple_command_tokens(command)
+    if not tokens:
         return False
-    return any(cmd == a or cmd.startswith(a + " ") for a in approved)
+    return any(
+        prefix and tokens[:len(prefix)] == prefix
+        for entry in approved
+        if (prefix := simple_command_tokens(entry))
+    )
 
 
 def confirm(agent, tool_name: str, tool_args: dict) -> bool:
     """Ask the user to approve a destructive tool before it runs.
 
-    Returns True to proceed. Gates shell (``execute_bash``), file writes
+    Returns True to proceed. Gates shell commands and background launches, file writes
     (``fs_write``/``file_edit``), and memory writes, each behind its
     ``REQUIRE_*`` toggle; every other tool proceeds. Enforced client-side (the
-    MCP subprocess can't prompt); non-TTY runs auto-proceed.
+    MCP subprocess can't prompt); only foreground non-TTY runs auto-proceed.
     """
     # Arg-driven and tool-agnostic, so it comes first: ``allow_dangerous=True``
     # IS the request to override a server-side safety refusal. The MCP server
@@ -121,7 +133,7 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
         return True
 
     return _gated_prompt(
-        agent, category, toggle, toggle_default, header, detail, target=target
+        agent, category, toggle, toggle_default, header, detail, target=target,
     )
 
 
@@ -153,7 +165,7 @@ def _gated_prompt(
     detail: str,
     target=None,
 ) -> bool:
-    """Run the toggle → trust → auto → headless → TTY ladder, then prompt.
+    """Run toggle → trust → auto → headless/spawn-depth → TTY, then prompt.
 
     True to proceed. Shared by the pre-call gate (:func:`confirm`) and the
     post-call one (:func:`confirm_result`) so the two can't drift apart on who
@@ -176,25 +188,22 @@ def _gated_prompt(
     # category (``git``) asking in every mode.
     if _auto_approved(agent, category, target):
         return True
-    # Background sub-agent (no TTY of its own): it CANNOT prompt, so an
-    # untrusted destructive tool auto-DENIES (the safe direction — never
-    # silently run something unattended). It proceeds only via a pre-trusted
-    # category above. Keyed thread-local so only the background daemon thread
-    # is headless; the foreground turn still prompts normally.
-    if agent._is_headless():
+    # No terminal is not permission. A delegated/background operation must have
+    # passed an existing trust, toggle, or auto-approve rule above.
+    if is_unattended(agent):
         return False
     if not sys.stdin.isatty():
         return True  # non-interactive: can't prompt, don't block
 
-    # Serialize the actual prompt across threads: with concurrent sub-agents
-    # two tool calls could otherwise fight for the terminal at once. The lock
+    # Serialize interactive approvals across threads. Unattended workers have
+    # already returned above and cannot reach the terminal. The lock
     # is absent on bare test objects (built via __new__) — degrade to no lock.
     lock = getattr(agent, "_confirm_lock", None)
     if lock is None:
         return agent._prompt_confirm(header, detail, category)
     with lock:
-        # Re-check trust inside the lock: while we waited, a concurrent
-        # sub-agent's "a" may have trusted this category — don't re-prompt.
+        # Re-check trust inside the lock: another interactive caller may have
+        # trusted this category while we waited — don't re-prompt.
         if category in getattr(agent, "_trusted_confirm_categories", set()):
             return True
         return agent._prompt_confirm(header, detail, category)
@@ -230,7 +239,10 @@ def _request_detail(payload: dict) -> str:
 
 def _tool_accepts(tool, field: str) -> bool:
     """True when ``tool``'s arg schema exposes ``field``, so a retry can set it."""
-    fields = getattr(getattr(tool, "args_schema", None), "model_fields", None)
+    schema = getattr(tool, "args_schema", None)
+    if isinstance(schema, dict):
+        return field in schema.get("properties", {})
+    fields = getattr(schema, "model_fields", None)
     return bool(fields) and field in fields
 
 
@@ -250,6 +262,7 @@ def confirm_result(agent, tool, tool_name: str, tool_args: dict, result):
     if tool_args.get("allow_dangerous") or not _tool_accepts(tool, "allow_dangerous"):
         return result
 
+    unattended = is_unattended(agent)
     if not _gated_prompt(
         agent,
         CONFIRM_RESULT_CATEGORY,
@@ -261,8 +274,12 @@ def confirm_result(agent, tool, tool_name: str, tool_args: dict, result):
         return json.dumps(
             {
                 "error": True,
-                "declined_by_user": True,
+                "declined_by_user": not unattended,
                 "message": (
+                    "Blocked: this unattended safety override was not pre-approved. "
+                    "No human confirmation was requested. Do NOT retry with "
+                    "allow_dangerous=True."
+                    if unattended else
                     "The user was shown the risks of this operation and declined "
                     "it. Do NOT retry with allow_dangerous=True — ask them how "
                     "they want to proceed instead."
@@ -285,11 +302,8 @@ def prompt_confirm(agent, header: str, detail: str, category: str) -> bool:
     confirm lock (serializing concurrent sub-agent prompts)."""
     # We borrow the terminal for the prompt, so stop the spinner — but
     # remember whether it was running (and its label) so we can put it back
-    # afterward. This matters for a QUIET worker that can prompt (a sequential
-    # orchestrator step / a foreground sub-agent): nothing else restarts the
-    # spinner in that path, so without restoring it here it would stay dead
-    # for the rest of the subtask after the first confirmation (the terminal
-    # then looks frozen at a bare `>` while work continues). In the foreground
+    # afterward. Unattended workers never enter this prompt; interactive callers
+    # still need the same spinner restoration on approval and refusal. In the foreground
     # `_execute_tools` path the spinner is already stopped before the tool
     # loop, so `was_active` is False and `_invoke_tool` restarts it as before.
     was_active, prev_label = agent._spinner_snapshot()

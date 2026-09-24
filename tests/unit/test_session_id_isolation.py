@@ -31,6 +31,10 @@ def _client(iid):
 
 
 class TestSessionIdUniqueness:
+    def test_successive_sessions_in_one_instance_have_distinct_ids(self, tmp_home):
+        client = _client("tabA")
+        assert client._new_session_id() != client._new_session_id()
+
     def test_session_id_embeds_instance_id(self, tmp_home):
         c = _client("iid_9")
         sid = c._new_session_id()
@@ -105,9 +109,12 @@ class TestRestartOrphanCleanup:
         # Simulate the FAISS store the prior session would have created.
         old_store = prof / "rag_store_p_20260101_100000_tabA.faiss"
         old_store.write_text("x")
+        old_metadata = prof / "rag_store_p_20260101_100000_tabA.faiss.meta.json"
+        old_metadata.write_text('[{"text":"old document"}]')
 
         c2 = _client("tabA")
         c2.session_id = "p_20260101_100500_tabA"
         c2._initialize_rag_session()
 
         assert not old_store.exists()  # this instance's own prior store cleaned
+        assert not old_metadata.exists()

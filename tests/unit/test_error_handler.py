@@ -1,8 +1,12 @@
-"""Unit tests for the tool error handler decorator (server/tools/error_handler.py)."""
+"""Unit tests for the tool error handler decorator (server/error_handler.py)."""
 
+import ast
 import asyncio
+import builtins
+import inspect
 import json
 
+from mnemoai.server import error_handler
 from mnemoai.server.error_handler import create_error_response, tool_error_handler
 
 
@@ -17,6 +21,34 @@ def run(result):
 
 
 class TestToolErrorHandler:
+    def test_exception_handlers_are_not_shadowed_by_an_earlier_parent(self):
+        tree = ast.parse(inspect.getsource(error_handler._error_response))
+        chain = next(node for node in ast.walk(tree) if isinstance(node, ast.Try))
+        earlier = []
+        for handler in chain.handlers:
+            names = ast.unparse(handler.type).split(".")
+            exception = vars(error_handler).get(
+                names[0], getattr(builtins, names[0], None)
+            )
+            for name in names[1:]:
+                exception = getattr(exception, name)
+            assert isinstance(exception, type)
+            assert not any(issubclass(exception, parent) for parent in earlier), (
+                f"{exception.__name__} is shadowed by an earlier exception handler"
+            )
+            earlier.append(exception)
+
+    def test_specific_errors_are_not_hidden_by_parent_exception_classes(self):
+        for error, expected in (
+            (json.JSONDecodeError("bad", "x", 0), "JSONDecodeError"),
+            (TimeoutError("deadline"), "TimeoutError"),
+        ):
+            @tool_error_handler
+            def fail():
+                raise error
+
+            assert json.loads(fail())["error_type"] == expected
+
     def test_passes_through_successful_result(self):
         @tool_error_handler
         async def ok_tool(x):

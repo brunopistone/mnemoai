@@ -112,6 +112,10 @@ _EVICTION_MARKER = (
 )
 
 
+class CompactionError(RuntimeError):
+    """A summary could not safely replace the current conversation."""
+
+
 class AgentConversationManager:
     def __init__(self, max_tokens: int = 5000) -> None:
         """Initialize conversation manager.
@@ -234,7 +238,7 @@ class AgentConversationManager:
             focus_instructions: Optional user guidance on what to emphasize.
 
         Returns:
-            Summary text (never empty; falls back to a bounded excerpt on error).
+            Summary text. A failed batch raises before history can be replaced.
         """
         # Budget per summary call: a small fraction of the window so the CALL
         # (batch + prompt + reasoning output) fits with wide margin. Relative to
@@ -270,13 +274,13 @@ class AgentConversationManager:
             *(_map_one(i, b) for i, b in enumerate(batches))
         )
         # Keep partials in original batch order (chronological coherence).
+        failed = [i + 1 for i, summary in mapped if not summary]
+        if failed:
+            raise CompactionError(
+                f"Compaction incomplete: summary batches {failed} failed. "
+                "The conversation has been kept."
+            )
         partials = [s for _, s in sorted(mapped, key=lambda t: t[0]) if s]
-
-        if not partials:
-            # Every batch failed: keep a bounded excerpt of the raw history rather
-            # than a content-free placeholder, so nothing is silently lost.
-            log_green("Failed to generate model summary for every batch", "error")
-            return self._excerpt_fallback(messages, budget)
 
         # A single batch (the common case after tool-result eviction) needs no
         # reduce — its map result IS the summary. Only fold when >1 partial, or
@@ -297,7 +301,8 @@ class AgentConversationManager:
         except Exception as e:
             logger.warning("Summary reduce step failed (%s); using joined partials", e)
 
-        joined = "\n\n".join(self._strip_analysis(p).strip() for p in partials)
+        carried = ([self.previous_summary] if self.previous_summary else []) + partials
+        joined = "\n\n".join(self._strip_analysis(p).strip() for p in carried)
         return joined or self._excerpt_fallback(messages, budget)
 
     async def _with_transient_retry(self, call, label: str):
@@ -525,10 +530,18 @@ class AgentConversationManager:
         without which the NEXT compaction would silently drop this one's history
         from its reduce step.
         """
-        if not summary or client is None:
+        if client is None:
+            return False
+        if not summary and not self.previous_summary:
             return False
         try:
-            rebuilt = self._build_system_with_summary(str(summary), client=client)
+            if summary:
+                rebuilt = self._build_system_with_summary(str(summary), client=client)
+            else:
+                base = config.system_prompt.format(current_date=date.today().isoformat())
+                rebuilt = "\n\n".join([base, *self._session_blocks(client)])
+                self.previous_summary = None
+                self.summary_text = ""
             client.system_prompt = rebuilt
             if agent is not None:
                 agent.system_prompt = rebuilt
@@ -804,6 +817,8 @@ class AgentConversationManager:
         # summary that follows has far less bulk to read. In tool-heavy sessions
         # most of the context is old grep/read/web dumps; evicting them first is
         # near-free and cuts the summary's input dramatically.
+        original_messages = list(getattr(agent, "messages", []))
+        original_tokens = getattr(agent, "_last_input_tokens", None)
         self.evict_old_tool_results(agent)
 
         raw_messages = agent.messages.copy() if hasattr(agent, "messages") else []
@@ -825,7 +840,7 @@ class AgentConversationManager:
                 messages_to_dict_list(older), model, focus_instructions
             )
             client.spinner.set_label("Applying summary")
-            clean_summary = "".join(c for c in summary if c.isprintable())
+            clean_summary = "".join(c for c in summary if c.isprintable() or c in "\n\t")
 
             new_system_content = self._build_system_with_summary(
                 clean_summary, client=client
@@ -864,5 +879,10 @@ class AgentConversationManager:
                 f"kept {len(recent)} recent."
             )
             return True
+        except BaseException:
+            agent.messages = original_messages
+            if hasattr(agent, "_last_input_tokens"):
+                agent._last_input_tokens = original_tokens
+            raise
         finally:
             client.spinner.stop()

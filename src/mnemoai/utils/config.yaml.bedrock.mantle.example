@@ -137,8 +137,9 @@ RAG:
   VECTOR_STORE:
     TYPE: chromadb # or faiss
   EMBEDDINGS:
-    FALLBACK_ENABLED: true
-    FALLBACK_TYPE: "sha256" # or "random", "zeros"
+    # Legacy compatibility keys: accepted but ignored. No synthetic vectors.
+    FALLBACK_ENABLED: false
+    FALLBACK_TYPE: sha256
     CACHE_ENABLED: true
     CACHE_SIZE: 1000 # LRU cache size for embeddings
 # Episodic Memory Configuration (Enhanced)

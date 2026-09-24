@@ -6,8 +6,8 @@ properties of the persistence layer:
 * metadata is JSON, so loading a store can never execute code,
 * the store never lands in a world-writable shared directory.
 
-Plus the correctness property that made the pickle swap safe: a stale or
-mismatched pair on disk rebuilds instead of returning wrong chunks.
+An invalid pair disables vector operations without wiping readable metadata;
+SessionRAG can still rank that text with BM25.
 """
 
 import json
@@ -98,7 +98,7 @@ class TestRoundTripAndRecovery:
         scores, metas = reopened.search(v[0], top_k=1)
         assert metas == [{"text": "persisted"}]
 
-    def test_length_mismatch_rebuilds(self, tmp_path):
+    def test_length_mismatch_preserves_metadata_and_blocks_vector_operations(self, tmp_path):
         """A desynced index/metadata pair would return the wrong chunk."""
         store = FaissStore(4, session_id="s4", rag_dir=str(tmp_path))
         store.add(_vec(4), [{"text": "one"}])
@@ -108,10 +108,15 @@ class TestRoundTripAndRecovery:
             json.dump([{"text": "one"}, {"text": "phantom"}], f)
 
         reopened = FaissStore(4, session_id="s4", rag_dir=str(tmp_path))
-        assert reopened.metadatas == []
-        assert reopened.index.ntotal == 0
+        assert reopened.metadatas == [{"text": "one"}, {"text": "phantom"}]
+        assert reopened.index.ntotal == 1
+        assert reopened.integrity_error
+        with pytest.raises(RuntimeError, match="needs repair"):
+            reopened.search(_vec(4)[0])
+        with pytest.raises(RuntimeError, match="needs repair"):
+            reopened.add(_vec(4), [{"text": "new"}])
 
-    def test_corrupt_json_rebuilds(self, tmp_path):
+    def test_corrupt_json_disables_vector_writes_without_overwriting_metadata(self, tmp_path):
         store = FaissStore(4, session_id="s5", rag_dir=str(tmp_path))
         store.add(_vec(4), [{"text": "one"}])
 
@@ -120,8 +125,12 @@ class TestRoundTripAndRecovery:
 
         reopened = FaissStore(4, session_id="s5", rag_dir=str(tmp_path))
         assert reopened.metadatas == []
+        assert reopened.integrity_error
+        with pytest.raises(RuntimeError, match="needs repair"):
+            reopened.add(_vec(4), [{"text": "new"}])
+        assert open(store.metadata_path, encoding="utf-8").read() == "{not json"
 
-    def test_non_list_metadata_rebuilds(self, tmp_path):
+    def test_non_list_metadata_disables_vector_writes(self, tmp_path):
         store = FaissStore(4, session_id="s6", rag_dir=str(tmp_path))
         store.add(_vec(4), [{"text": "one"}])
 
@@ -130,6 +139,9 @@ class TestRoundTripAndRecovery:
 
         reopened = FaissStore(4, session_id="s6", rag_dir=str(tmp_path))
         assert reopened.metadatas == []
+        assert reopened.integrity_error
+        with pytest.raises(RuntimeError, match="needs repair"):
+            reopened.add(_vec(4), [{"text": "new"}])
 
     def test_clear_empties_and_persists(self, tmp_path):
         store = FaissStore(4, session_id="s7", rag_dir=str(tmp_path))

@@ -7,6 +7,84 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.24.0] — 2026-09-24
+
+### Added
+
+- Live integration coverage for real document/episode embeddings on both storage
+  backends, legacy-vector repair, controlled outages and recovery, and
+  foreground/background delegated permissions. Shell timeout and file-write
+  tests now assert actual tool outcomes instead of only checking for a reply.
+
+### Changed (runtime behavior; existing configurations still load)
+
+- Embedding outages no longer fabricate SHA256, random, or zero vectors.
+  Ingestion and episode writes fail without inserting synthetic data; recall and
+  document search degrade to labeled BM25-only results over previously stored
+  text. `RAG.EMBEDDINGS.FALLBACK_ENABLED` and `FALLBACK_TYPE` remain accepted but
+  inert, including in existing configs. This corrects a data-corruption path
+  without removing configuration-load compatibility.
+- Plan mode requires an explicit MCP `annotations.readOnlyHint: true` for
+  external tools. Unannotated external tools are refused while planning, with
+  an explanation; outside plan mode they remain available as before.
+- Spawned agents and parallel/background orchestrator workers never
+  request interactive approval. Unapproved destructive actions are denied;
+  delegation itself grants no permission. Existing confirmation toggles,
+  session trust, approved-plan commands, `/auto` tiers, and hooks still apply.
+  The foreground assistant can request approval before launching
+  `start_background_task`; the running task remains unattended.
+  Inline foreground orchestrator steps retain their existing approval prompts,
+  including sequential dependency chains and concurrency set to one.
+
+### Fixed
+
+- Preserve the approval capability of inline foreground orchestrator workers;
+  only unattended execution is forced to refuse unapproved actions. Tests cover
+  approval/refusal, parallel execution, and inherited headless/spawn restrictions.
+- Skip repeated vector-repair scans using completion markers refreshed by normal
+  writes. Failed repairs and misaligned FAISS pairs preserve readable metadata
+  for BM25 while disabling unsafe vector operations and automatic cleanup.
+- Keep meta/external tools on orchestrator `simple_qa` workers. Distinguish an
+  unknown tool from a disallowed tool, and give worker-only interactive-tool
+  refusals without bypassing the execution allowlist.
+- Remove unreachable exception handlers, the obsolete dictionary-backed RAG
+  branch, unused locals and shell-policy data, unused configurator helpers, and
+  private forwarding methods with no source or test callers.
+  Configurator tests now exercise the field editor and step runner used in
+  production.
+- Configuration commands edit the runtime-selected file, including
+  `MNEMOAI_CONFIG` overrides and legacy config locations.
+- Enforce sub-agent tool allowlists at execution, including client-side tools.
+- Reject mutating shell forms in plan mode and prevent command chaining from
+  inheriting a plan's shell pre-approval. Pin the built-in policy against the
+  actual tool registry; allow cancellation but block document/task-history clears.
+- Never replay a potentially completed MCP operation after a transport failure.
+  Preserve complete MCP input schemas and propagate native tool errors.
+- Keep background-agent records distinct across sessions and write them atomically.
+- Exclude failed tool results from file-change reports and successful episodes;
+  route them to failure hooks. Export the actual tool name to hooks and prevent
+  the bundled auto-approval example from accepting chained commands.
+- Preserve subtask dependency indices after filtering invalid tasks.
+- Keep conversation history when any summary batch fails and preserve summary
+  line breaks. Loading an uncompacted conversation clears a prior conversation's
+  summary.
+- Repair identifiable legacy SHA256 vectors when existing stores open, preserving
+  removed metadata in backup files before deletion. FAISS repair uses a
+  recoverable journal so interruption cannot misalign its index and metadata.
+- Replace a document's previous RAG chunks, preserve documents with matching
+  filenames in different directories, and refresh the server's cached RAG
+  session after the session pointer changes.
+- Correct CSV truncation counts and apply token limits to non-UTF-8 CSV files.
+  Support text reads from a minimal configuration and native LangChain messages
+  in deferred episode storage.
+- Decode SageMaker SSE responses across transport boundaries.
+- Avoid changing process-wide stdout during web crawls and move blocking
+  crawler DNS and RAG work off the event loop.
+- Recognize reordered hard-reset flags and protected-branch force-push refspecs.
+  Preserve specific JSON and timeout error classifications.
+- Repair the optional macOS VRAM-cleaner plist, use a timer for the Linux
+  one-shot cleaner, and synchronize the lockfile's project version.
+
 ## [1.23.3] — 2026-09-23
 
 ### Changed

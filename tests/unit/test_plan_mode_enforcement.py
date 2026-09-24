@@ -19,8 +19,10 @@ BLOCKED = [
     "git_safe",
     "git_commit_safe",
     "start_background_task",
+    "clear_completed_tasks",
+    "clear_documents",
 ]
-ALLOWED = ["fs_read", "glob_search", "grep_search", "memory", "web_search", "read_pdf"]
+ALLOWED = ["fs_read", "glob_search", "grep_search", "memory", "web_search", "cancel_background_task"]
 
 
 def _agent(plan_active):
@@ -76,6 +78,14 @@ READONLY_CMDS = [
     "find . -name '*.py' -type f",  # find without -delete/-exec is read-only
 ]
 MUTATING_CMDS = [
+    "env touch example",
+    "ls\ntouch example",
+    'awk \'BEGIN {system("touch example")}\'',
+    "git diff --output=example",
+    "sed -n 'w example' input",
+    "rg --pre=script pattern",
+    "hostname changed",
+    "file -C -m magic",
     "rm -rf /tmp/x",
     "echo hi > out.txt",
     "cat a.txt >> b.txt",
@@ -112,6 +122,52 @@ def test_mutating_bash_blocked_in_plan_mode(cmd):
 def test_empty_bash_blocked_in_plan_mode():
     a = _agent(True)
     assert a._is_blocked_by_plan_mode("execute_bash", {"command": ""}) is True
+
+
+def test_mutating_flag_rules_only_target_allowlisted_commands():
+    assert set(plan_policy.BASH_MUTATING_FLAGS) <= plan_policy.READONLY_BASH_CMDS
+
+
+def test_external_tools_need_a_readonly_declaration_in_plan_mode():
+    assert plan_policy.is_blocked_by_plan_mode("external_delete", {}, plan_active=True)
+    assert not plan_policy.is_blocked_by_plan_mode(
+        "external_read", {}, plan_active=True, readonly_hint=True
+    )
+
+
+def test_every_registered_builtin_has_exactly_one_plan_policy():
+    import ast
+    from pathlib import Path
+
+    import mnemoai
+
+    registered = set()
+    for path in (Path(mnemoai.__file__).parent / "server" / "tools").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                and d.func.attr == "tool" for d in node.decorator_list
+            ):
+                registered.add(node.name)
+    assert registered == plan_policy.PLAN_ALLOWED_TOOLS | plan_policy.PLAN_BLOCKED_TOOLS
+    assert not plan_policy.PLAN_ALLOWED_TOOLS & plan_policy.PLAN_BLOCKED_TOOLS
+
+
+def test_external_mcp_annotation_reaches_the_actual_agent_policy():
+    from types import SimpleNamespace
+
+    from mcp.types import Tool, ToolAnnotations
+
+    agent = _agent(True)
+    agent.tools = [SimpleNamespace(
+        name="external_read",
+        mcp_tool=Tool(
+            name="external_read", inputSchema={"type": "object"},
+            annotations=ToolAnnotations(readOnlyHint=True),
+        ),
+    )]
+    assert not agent._is_blocked_by_plan_mode("external_read")
+    assert agent._is_blocked_by_plan_mode("external_unknown")
 
 
 @pytest.mark.parametrize("tool", ["fs_write", "file_edit"])

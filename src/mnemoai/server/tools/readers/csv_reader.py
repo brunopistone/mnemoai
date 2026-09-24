@@ -9,7 +9,7 @@ from mnemoai.utils.logger import logger
 from .. import count_tokens, validate_file_path
 
 
-def read_csv(path: str) -> str:
+def read_csv(path: str, *, _encoding: str = "utf-8-sig") -> str:
     """Read and parse CSV file with token-based truncation.
 
     Args:
@@ -23,7 +23,7 @@ def read_csv(path: str) -> str:
         return json.dumps(error_dict)
 
     try:
-        with open(normalized_path, "r", encoding="utf-8") as file:
+        with open(normalized_path, "r", encoding=_encoding, newline="") as file:
             sample = file.read(1024)
             file.seek(0)
 
@@ -48,15 +48,20 @@ def read_csv(path: str) -> str:
             rows = []
             current_tokens = count_tokens(f"Columns: {', '.join(columns)}\n")
 
+            total_rows = 0
+            truncated = False
             for row in reader:
+                total_rows += 1
+                if truncated:
+                    continue
                 row_tokens = count_tokens(json.dumps(row))
                 if current_tokens + row_tokens > max_tokens:
-                    break
+                    truncated = True
+                    continue
                 rows.append(row)
                 current_tokens += row_tokens
 
             # Count total rows
-            total_rows = len(rows) + sum(1 for _ in reader)
             was_truncated = total_rows > len(rows)
 
             return json.dumps(
@@ -65,6 +70,7 @@ def read_csv(path: str) -> str:
                     "type": "csv",
                     "columns": columns,
                     "delimiter": delimiter,
+                    "encoding": _encoding,
                     "total_rows": total_rows,
                     "rows_returned": len(rows),
                     "rows": rows,
@@ -76,52 +82,8 @@ def read_csv(path: str) -> str:
             )
 
     except UnicodeDecodeError:
-        # Try alternative encodings
-        for encoding in ["latin-1", "cp1252", "iso-8859-1"]:
-            try:
-                with open(normalized_path, "r", encoding=encoding) as file:
-                    sample = file.read(1024)
-                    file.seek(0)
-
-                    delimiter = ","
-                    if "," not in sample:
-                        for test_delim in [";", "\t", "|"]:
-                            if test_delim in sample:
-                                delimiter = test_delim
-                                break
-
-                    file.seek(0)
-                    reader = csv.DictReader(file, delimiter=delimiter)
-                    columns = reader.fieldnames or []
-                    rows = list(reader)
-
-                    return json.dumps(
-                        {
-                            "path": normalized_path,
-                            "type": "csv",
-                            "columns": columns,
-                            "rows": rows,
-                            "total_rows": len(rows),
-                            "rows_returned": len(rows),
-                            "delimiter": delimiter,
-                            "encoding": encoding,
-                        }
-                    )
-            except (UnicodeDecodeError, csv.Error):
-                continue
-
-        # All fallback encodings failed. (No exception is bound in this
-        # UnicodeDecodeError handler — don't reference one here.)
-        logger.error(
-            "Error during read csv: could not decode with any supported encoding"
-        )
-
-        return json.dumps(
-            {
-                "error": True,
-                "message": "Could not decode file with any supported encoding",
-            }
-        )
+        # The fallback goes through the same bounded reader and row accounting.
+        return read_csv(normalized_path, _encoding="latin-1")
     except csv.Error as e:
         logger.error(f"Error during read csv: {str(e)}", exc_info=True)
 

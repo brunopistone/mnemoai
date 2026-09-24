@@ -506,13 +506,13 @@ class LangGraphAgent:
         return {"messages": mid_turn.drain(self)}
 
     def _is_headless(self) -> bool:
-        """True on a background sub-agent's thread (no TTY → can't prompt)."""
+        """True in an unattended execution context (parallel/background work)."""
         tl = getattr(self, "_headless_tl", None)
         return bool(getattr(tl, "value", False)) if tl is not None else False
 
     def _set_headless(self, value: bool) -> None:
-        """Mark the CURRENT thread headless (or not). Thread-local so it only
-        affects the background daemon thread, never the foreground turn."""
+        """Mark the CURRENT thread headless (or not). Thread-local so a pool or
+        daemon worker cannot change the foreground turn's approval context."""
         tl = getattr(self, "_headless_tl", None)
         if tl is not None:
             tl.value = value
@@ -845,9 +845,9 @@ class LangGraphAgent:
                 tick = steps is None and len(ready) > 1
 
                 if len(ready) == 1 or max_workers <= 1:
-                    # A lone/sequential worker runs on THIS thread and CAN prompt for
-                    # destructive-tool confirmation (only one prompt at a time). Keep a
-                    # spinner up while it works — the worker runs quiet (no trace), so
+                    # Inline workers keep the caller's approval channel and any
+                    # inherited headless/spawn restrictions. Foreground workers
+                    # can prompt. Keep a spinner up while the quiet worker runs,
                     # without this the UI looks finished while the step is still going.
                     for i in ready:
                         desc = subtasks[i].get("description", "")
@@ -986,8 +986,6 @@ class LangGraphAgent:
         base = self._callback_free_model()
         if category == "full" or not self.tools_by_route:
             worker_tools = self.tools
-        elif category == "simple_qa":
-            worker_tools = []
         else:
             worker_tools = self.tools_by_route.get(category, self.tools)
         worker_model = self._bind_tools(base, worker_tools)
@@ -1281,6 +1279,7 @@ class LangGraphAgent:
                 quiet=quiet,
                 activity=activity,
                 log_label="Worker tool",
+                strict_tools=True,
             )
 
         if not quiet:
@@ -1614,8 +1613,6 @@ class LangGraphAgent:
                     ],
                     "thinking": None,
                 }
-        except _ContextOverflow:
-            raise  # handled by the dedicated branch above; never reach here as a generic error
         except KeyboardInterrupt:
             raise  # user cancel — propagate so the turn rolls back cleanly
         except Exception as e:
@@ -2528,16 +2525,6 @@ class LangGraphAgent:
         # must not be the one that approves it.
         return self._confirm_tool_result(tool, tool_name, tool_args, result)
 
-    @staticmethod
-    def _reasoning_content_text(block: dict) -> str:
-        """Delegates to :func:`response_parsing.reasoning_content_text`."""
-        return response_parsing.reasoning_content_text(block)
-
-    @staticmethod
-    def _reasoning_summary_text(block: dict) -> str:
-        """Delegates to :func:`response_parsing.reasoning_summary_text`."""
-        return response_parsing.reasoning_summary_text(block)
-
     def _extract_thinking(self, response) -> Optional[str]:
         """Delegates to :func:`response_parsing.extract_thinking`."""
         return response_parsing.extract_thinking(response)
@@ -2631,18 +2618,16 @@ class LangGraphAgent:
         chokepoints).
         """
         return plan_policy.is_blocked_by_plan_mode(
-            tool_name, tool_args, plan_active=self._plan_mode_provider()
+            tool_name,
+            tool_args,
+            plan_active=self._plan_mode_provider(),
+            readonly_hint=any(
+                t.name == tool_name
+                and getattr(getattr(getattr(t, "mcp_tool", None), "annotations", None),
+                            "readOnlyHint", False) is True
+                for t in getattr(self, "tools", [])
+            ),
         )
-
-    @staticmethod
-    def _is_readonly_bash(command: str) -> bool:
-        """Delegates to :func:`plan_policy.is_readonly_bash`."""
-        return plan_policy.is_readonly_bash(command)
-
-    @staticmethod
-    def _is_plan_file(path: str) -> bool:
-        """Delegates to :func:`plan_policy.is_plan_file`."""
-        return plan_policy.is_plan_file(path)
 
     @staticmethod
     def _plan_mode_block_message(tool_name: str) -> str:
@@ -2663,6 +2648,8 @@ class LangGraphAgent:
         ``allowed_bash`` (from the tool call) is the list of commands the plan
         pre-declared; on approval they are registered so they auto-confirm during
         execution instead of re-prompting per command."""
+        if self._is_headless() or self._spawn_depth > 0:
+            return confirmation_gate.PLAN_APPROVAL_UNAVAILABLE
         plan = (plan or "").strip()
         allowed_bash = [str(c).strip() for c in (allowed_bash or []) if str(c).strip()]
         ui = getattr(self, "_plan_approval_ui", None)
@@ -2787,6 +2774,7 @@ class LangGraphAgent:
         activity: Optional[ActivitySink] = None,
         spawn_results: Optional[Dict[str, str]] = None,
         log_label: str = "Tool execution",
+        strict_tools: bool = False,
     ) -> None:
         """Delegates to :func:`tool_loop.run_tool_calls` (appends in place)."""
         tool_loop.run_tool_calls(
@@ -2798,6 +2786,7 @@ class LangGraphAgent:
             activity=activity,
             spawn_results=spawn_results,
             log_label=log_label,
+            strict_tools=strict_tools,
         )
 
     def _run_hooks(
@@ -3345,4 +3334,3 @@ class LangGraphAgent:
         self._preapproved_bash = []  # plan-scoped approvals don't outlive a clear
         self._execute_plan_route = False  # plan-execution route pin is plan-scoped
         self._activity.clear()  # drop the agents-panel feed for a fresh context
-

@@ -27,6 +27,7 @@ class VectorStoreController:
         self.store_type = store_config.get("TYPE", "faiss")
 
         self.store = self._initialize_store()
+        self.dim = self.store.dim
 
     @staticmethod
     def detect_existing_store(session_id: str, rag_dir: str) -> Optional[int]:
@@ -47,7 +48,7 @@ class VectorStoreController:
 
         if store_type == "faiss":
             faiss_path = os.path.join(rag_dir, f"rag_store_{session_id}.faiss")
-            if os.path.exists(faiss_path):
+            if os.path.exists(faiss_path) or os.path.exists(faiss_path + ".meta.json"):
                 try:
                     import faiss
 
@@ -56,7 +57,13 @@ class VectorStoreController:
                     return index.d
                 except Exception as e:
                     logger.warning(f"Failed to read FAISS store: {e}")
-                    return None
+                    # Still open it so readable metadata remains available to
+                    # BM25. The backend disables vector access and writes.
+                    return int(
+                        (config.get("RAG", {}).get("EMBED_MODEL_ID", {}) or {}).get(
+                            "DIMENSION", 1024
+                        ) or 1024
+                    )
 
         elif store_type == "chromadb":
             chroma_path = os.path.join(rag_dir, f"rag_store_{session_id}")
@@ -121,9 +128,23 @@ class VectorStoreController:
         """
         return self.store.search(q, top_k)
 
-    def clear(self) -> None:
-        """Clear all data from the store."""
-        return self.store.clear()
+    def clear(self, dim: int = None) -> None:
+        """Clear data; an empty store may adopt a new embedding dimension."""
+        if dim is not None:
+            if self.metadatas:
+                raise ValueError("Cannot resize a nonempty document index")
+            self.store.clear(dim=dim)
+            self.dim = dim
+        else:
+            self.store.clear()
+
+    def replace_document(self, doc_id: str, vectors: np.ndarray, metadatas: List[Dict]) -> None:
+        """Replace a document's chunks without changing other documents."""
+        self.store.replace_document(doc_id, vectors, metadatas)
+
+    @property
+    def integrity_error(self):
+        return getattr(self.store, "integrity_error", None)
 
     @property
     def index(self) -> Any:

@@ -104,7 +104,7 @@ def read_lines(path: str, start_line: int, end_line: int) -> str:
         # a big file cost minutes of CPU. Per-line counts sum slightly HIGH (the
         # merges a tokenizer would make across a line boundary are lost), which
         # is the safe direction for a limit.
-        max_tokens = config.get("DOC_MAX_TOKENS")
+        max_tokens = config.get("DOC_MAX_TOKENS", 8192)
         pieces = []
         used_tokens = 0
         lines_processed = 0

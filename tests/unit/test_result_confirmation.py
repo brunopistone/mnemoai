@@ -106,7 +106,8 @@ class TestRefusalIsResolvedWithTheUser:
     def test_headless_subagent_cannot_approve(self, monkeypatch):
         a, tool = _agent(monkeypatch, True, headless=True), FakeTool()
         out = a._confirm_tool_result(tool, "git_safe", ARGS, tool.invoke(ARGS))
-        assert json.loads(out)["declined_by_user"] is True
+        assert json.loads(out)["declined_by_user"] is False
+        assert "No human confirmation was requested" in json.loads(out)["message"]
         assert a.prompts == []  # never prompted: no TTY of its own
 
     def test_trusted_category_skips_the_prompt(self, monkeypatch):
@@ -283,7 +284,7 @@ class TestTheGateIsActuallyReachable:
                 a._worker_messages_seen = lambda: None
                 turns = iter([ai, AIMessage(content="done")])
                 a._stream_response = lambda *x, **k: (next(turns), False)
-                out = a._run_worker_loop(object(), [], "task", quiet=True)[1]
+                out = a._run_worker_loop(object(), a.tools, "task", quiet=True)[1]
 
             results = [m for m in out if isinstance(m, ToolMessage)]
             assert [m.content for m in results] == ["gated"], path

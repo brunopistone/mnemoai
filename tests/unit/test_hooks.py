@@ -215,7 +215,7 @@ class TestRunEvent:
         assert out.denied
 
     def test_event_env_vars_are_exported(self, _isolated_home):
-        cmd = 'test "$MNEMOAI_HOOK_EVENT" = PreToolUse && exit 2'
+        cmd = 'test "$MNEMOAI_HOOK_EVENT" = PreToolUse && test "$MNEMOAI_TOOL_NAME" = fs_write && exit 2'
         reg = hooks.load(_write(_isolated_home, _one("PreToolUse", "*", cmd)))
         assert hooks.run_event("PreToolUse", "fs_write", {}, registry=reg).denied
 

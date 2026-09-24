@@ -63,6 +63,21 @@ class TestSanitizeCwd:
 
 
 class TestWriteAndRead:
+    def test_colliding_directory_slugs_do_not_mix_session_lists(self, home):
+        a = slog.SessionLog(cwd="/proj/a-b")
+        b = slog.SessionLog(cwd="/proj/a/b")
+        a.log_turn(_turn("first", "answer"))
+        b.log_turn(_turn("second", "answer"))
+        assert [s["session_id"] for s in slog.list_sessions(cwd="/proj/a-b")] == [a.session_id]
+        assert [s["session_id"] for s in slog.list_sessions(cwd="/proj/a/b")] == [b.session_id]
+
+    def test_non_object_json_records_are_ignored(self, home):
+        log = slog.SessionLog(cwd="/proj")
+        log.log_turn(_turn("question", "answer"))
+        with log.path.open("a") as stream:
+            stream.write("[]\nnull\n17\n")
+        assert slog.read_session(log.path)["turns"] == 1
+
     def test_round_trip(self, home):
         log = slog.SessionLog(cwd="/proj/a")
         log.log_turn(_turn("q1", "a1"))

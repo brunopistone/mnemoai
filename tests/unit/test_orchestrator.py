@@ -75,6 +75,13 @@ class TestParseSubtasks:
 
 
 class TestParseSubtasksDependsOn:
+    def test_filtering_a_task_does_not_shift_dependency_indices(self):
+        result = parse_subtasks(
+            '[null, {"description":"A"}, {"description":"B","depends_on":[1]}]',
+            FALLBACK, VALID,
+        )
+        assert result[1]["depends_on"] == [0]
+
     def test_valid_backward_dependency_kept(self):
         content = (
             '[{"description": "a", "category": "code"}, '

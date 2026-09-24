@@ -47,6 +47,7 @@ MAX_NOTE_CHARS = 2000
 # colliding option), so identifying it can't depend on the wording below.
 DISCUSS = "__mnemoai_discuss__"
 DISCUSS_LABEL = "None of these — let's talk about it"
+WORKER_UNAVAILABLE_REASON = "you are a sub-agent with no direct user"
 
 
 def normalize_options(options: Any) -> List[str]:
@@ -310,7 +311,7 @@ def ask(agent, question: Any, options: Any, multiple: Any = False) -> str:
         return error
 
     if getattr(agent, "_spawn_depth", 0) > 0 or agent._is_headless():
-        return format_unavailable("you are a sub-agent with no direct user")
+        return format_unavailable(WORKER_UNAVAILABLE_REASON)
 
     ui = getattr(agent, "_question_ui", None)
     if ui is None:

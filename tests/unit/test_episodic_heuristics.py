@@ -11,6 +11,14 @@ from mnemoai.client.memory.episodic_memory import (
 
 
 class TestIsTaskSuccessful:
+    def test_native_tool_failures_are_not_successful_episodes(self):
+        from langchain_core.messages import ToolMessage
+
+        for content in ('{"error":true}', '{"exit_status":1}', '{"success":false}'):
+            assert not is_task_successful(
+                "Done.", [ToolMessage(content=content, tool_call_id="t")]
+            )
+
     def test_success_marker_in_next_message(self):
         assert is_task_successful("here you go", [], "thanks that worked") is True
 

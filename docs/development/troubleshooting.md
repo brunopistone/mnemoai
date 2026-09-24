@@ -15,7 +15,7 @@ it already performed for you ([details](../guides/usage.md#checking-your-install
 | `grep_search` returns `ripgrep (rg) not installed`          | [Content search doesn't work](#content-search-doesnt-work)                        |
 | A model error on the first prompt                           | [The model fails to load](#the-model-fails-to-load)                               |
 | Searches find nothing in indexed documents                  | [RAG or episodic memory returns nothing](#rag-or-episodic-memory-returns-nothing) |
-| `fallback embeddings` in the logs                           | [Semantic search quality is degraded](#semantic-search-quality-is-degraded)       |
+| `Embedding failed` in the logs                              | [Semantic search quality is degraded](#semantic-search-quality-is-degraded)       |
 | `Connection was closed before we received a valid response` | [A turn dies on a dropped connection](#a-turn-dies-on-a-dropped-connection)       |
 | `No first token for Ns` on a long conversation              | [A turn dies on a dropped connection](#a-turn-dies-on-a-dropped-connection)       |
 | A write or edit is refused                                  | [A file write is refused](#a-file-write-is-refused)                               |
@@ -92,13 +92,16 @@ Both are off unless enabled, and both need a working embedding model.
 ## Semantic search quality is degraded
 
 ```
-Using fallback embeddings
+Embedding failed after 3 attempts; no vectors were stored.
 ```
 
-The configured embedding model was unreachable, so deterministic SHA256 vectors
-were used instead. They keep the app running but carry no semantic meaning —
-retrieval will look random. Fix the embedding model rather than tuning
-thresholds: for Ollama, `ollama pull qwen3-embedding:0.6b`.
+The configured embedding model could not produce vectors. The operation fails
+without caching or storing synthetic embeddings, so a later retry can recover
+after the provider becomes available. Check the embedding model first; for
+Ollama, run `ollama pull qwen3-embedding:0.6b`.
+
+Older releases could store SHA256 fallback vectors. If an index was populated
+during such an outage, re-index the affected documents with a working embedder.
 
 ## A tool times out after 300 seconds
 

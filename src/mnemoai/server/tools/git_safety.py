@@ -253,6 +253,26 @@ def check_dangerous_command(command: str) -> dict:
     # IGNORECASE so keywords are case-insensitive, while patterns can still opt
     # into case-sensitivity for flags like -D vs -d via an inline (?-i:...) scope.
     command_stripped = build_scan_string(command)
+    try:
+        tokens = shlex.split(command_stripped)
+    except ValueError:
+        tokens = []
+    if tokens and tokens[0].lower() == "push":
+        forced = any(
+            token in ("-f", "--force") or token.startswith("--force-with-lease")
+            for token in tokens[1:]
+        )
+        for token in tokens[1:]:
+            if token.startswith("-"):
+                continue
+            destination = token.lstrip("+").rsplit(":", 1)[-1]
+            destination = destination.removeprefix("refs/heads/")
+            if destination in ("main", "master") and (forced or token.startswith("+")):
+                return {
+                    "blocked": True,
+                    "reason": "Force push to main/master is blocked.",
+                    "command": command,
+                }
 
     # Check for completely blocked commands
     for pattern, message in BLOCKED_COMMANDS:
@@ -261,9 +281,15 @@ def check_dangerous_command(command: str) -> dict:
 
     # Check for dangerous patterns that need warnings
     warnings = []
+    if tokens and tokens[0].lower() == "reset" and "--hard" in tokens[1:]:
+        warnings.append({
+            "type": "hard_reset",
+            "message": "Hard reset will discard all uncommitted changes permanently.",
+        })
     for pattern, danger_type, message in DANGEROUS_PATTERNS:
         if re.search(pattern, command_stripped, re.IGNORECASE):
-            warnings.append({"type": danger_type, "message": message})
+            if not any(w["type"] == danger_type for w in warnings):
+                warnings.append({"type": danger_type, "message": message})
 
     if warnings:
         return {

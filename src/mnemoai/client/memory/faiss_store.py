@@ -12,6 +12,12 @@ from mnemoai.client.memory.similarity import (
 )
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
+from mnemoai.utils.embedding_integrity import (
+    discard_faiss_repair_state,
+    load_faiss_pair,
+    mark_faiss_clean,
+    require_clean_vectors,
+)
 from mnemoai.utils.hybrid_search import (
     candidate_count,
     normalized_bm25_candidates,
@@ -42,21 +48,9 @@ class FAISSEpisodicStore:
         self.semantic_weight = episodic_config.get("SEMANTIC_WEIGHT", 0.7)
         self.keyword_weight = episodic_config.get("KEYWORD_WEIGHT", 0.3)
 
-        # Load or create index
-        if os.path.exists(self.index_path):
-            self.index = faiss.read_index(self.index_path)
-            logger.info(f"Loaded existing FAISS episodic index from {self.index_path}")
-        else:
-            # Will be initialized on first add
-            self.index = None
-            logger.info("FAISS episodic index will be created on first add")
-
-        # Load metadata
-        if os.path.exists(self.metadata_path):
-            with open(self.metadata_path, "r") as f:
-                self.metadata = json.load(f)
-        else:
-            self.metadata = []
+        self.index, self.metadata, self.integrity_error = load_faiss_pair(
+            self.index_path, self.metadata_path
+        )
 
         # The index is only comparable to vectors from the SAME embedding model:
         # a different model — even at the same dimension (e.g. qwen3-embedding@1024
@@ -66,10 +60,28 @@ class FAISSEpisodicStore:
         # model's fingerprint differs — episodic memory is model-scoped,
         # re-learnable scratch, so a reset is the safe migration, not a crash.
         self.fingerprint_path = os.path.join(persist_path, "episodic_fingerprint.txt")
-        self._migrate_if_model_changed()
+        self._identity_pending = False
+        try:
+            require_clean_vectors(self)
+            self._migrate_if_model_changed()
+        except Exception as e:
+            if not self.metadata and not self.integrity_error:
+                raise
+            self._identity_pending = True
+            if not self.integrity_error:
+                logger.warning("Embedding identity unavailable; keeping stored memory for BM25: %s", e)
 
         self.bm25: Optional[BM25] = None
         self._rebuild_bm25()
+
+    def _ensure_identity(self) -> None:
+        """Retry a deferred provider check before using or writing vectors."""
+        require_clean_vectors(self)
+        if getattr(self, "_identity_pending", False):
+            self._migrate_if_model_changed()
+            self._identity_pending = False
+            self.bm25 = None
+            self._rebuild_bm25()
 
     def _embed_fingerprint(self) -> str:
         """Current embedding model's fingerprint (falls back to a dim string).
@@ -174,6 +186,7 @@ class FAISSEpisodicStore:
             metadata: Episode metadata
             episode_id: Optional unique ID
         """
+        self._ensure_identity()
         if not episode_id:
             episode_id = f"episode_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
@@ -212,9 +225,11 @@ class FAISSEpisodicStore:
             faiss.write_index(self.index, self.index_path)
             with open(self.metadata_path, "w") as f:
                 json.dump(self.metadata, f, indent=2)
+            mark_faiss_clean(self.index_path, self.metadata_path)
             # Stamp the model fingerprint alongside so a later model change is
             # detected and migrated (see _migrate_if_model_changed).
-            self._write_fingerprint(self._embed_fingerprint())
+            if not getattr(self, "_identity_pending", False):
+                self._write_fingerprint(self._embed_fingerprint())
 
         try:
             _write()
@@ -240,39 +255,43 @@ class FAISSEpisodicStore:
         Returns:
             List of episodes with metadata
         """
-        if self.index is None or len(self.metadata) == 0:
+        if not self.metadata or top_k <= 0:
             return []
 
         candidate_k = candidate_count(top_k, len(self.metadata))
 
         # --- Semantic candidates (backend-specific: inner product -> cosine) ---
-        query_embedding = l2_normalize(self.embeddings.embed([query]))
-        scores, indices = self.index.search(query_embedding, candidate_k)
-
         sem_candidates = {}
-        for i, idx in enumerate(indices[0]):
-            if idx < 0 or idx >= len(self.metadata):
-                continue
-            # Normalized vectors -> the inner product is a cosine; rescale it to
-            # [0,1] so it shares one scale with the Chroma backend and with the
-            # BM25 component below.
-            sem_candidates[int(idx)] = (
-                cosine_to_unit(scores[0][i]),
-                self.metadata[idx],
-            )
+        degraded = False
+        try:
+            self._ensure_identity()
+            query_embedding = l2_normalize(self.embeddings.embed([query]))
+            scores, indices = self.index.search(query_embedding, candidate_k)
+            for i, idx in enumerate(indices[0]):
+                if 0 <= idx < len(self.metadata):
+                    sem_candidates[int(idx)] = (
+                        cosine_to_unit(scores[0][i]), self.metadata[idx],
+                    )
+        except Exception as e:
+            degraded = True
+            logger.warning("Semantic memory search unavailable; using BM25 only: %s", e)
 
         # --- Keyword candidates + merge (shared with the Chroma/RAG stores).
         # Keyed by corpus index, which is exactly the BM25 helper's default. ---
         bm25_candidates = normalized_bm25_candidates(
             self.bm25, query, candidate_k, self.metadata
         )
-        return rank_with_similarity(
+        ranked = rank_with_similarity(
             sem_candidates,
             bm25_candidates,
-            self.semantic_weight,
-            self.keyword_weight,
+            0.0 if degraded else self.semantic_weight,
+            1.0 if degraded else self.keyword_weight,
             top_k,
         )
+        if degraded:
+            for episode in ranked:
+                episode["retrieval_method"] = "bm25"
+        return ranked
 
     def cleanup(self, max_episodes: int = 1000, max_age_days: int = 90) -> None:
         """Remove old episodes and enforce size limit.
@@ -281,7 +300,7 @@ class FAISSEpisodicStore:
             max_episodes: Maximum number of episodes to keep
             max_age_days: Maximum age in days
         """
-        if len(self.metadata) == 0:
+        if getattr(self, "integrity_error", None) or len(self.metadata) == 0:
             return
 
         cutoff_date = datetime.now() - timedelta(days=max_age_days)
@@ -325,6 +344,7 @@ class FAISSEpisodicStore:
 
     def clear(self) -> None:
         """Clear all episodes."""
+        discard_faiss_repair_state(self.index_path)
         if os.path.exists(self.index_path):
             os.remove(self.index_path)
         if os.path.exists(self.metadata_path):
@@ -332,4 +352,5 @@ class FAISSEpisodicStore:
         self.index = None
         self.metadata = []
         self.bm25 = None
+        self.integrity_error = None
         logger.info("Cleared FAISS episodic memory")

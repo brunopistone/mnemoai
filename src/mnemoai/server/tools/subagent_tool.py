@@ -55,13 +55,12 @@ def register_subagent_tools(mcp: FastMCP) -> None:
             call returns immediately with an agent id, you keep working, and its
             report is delivered when it finishes. This is the right choice for most
             delegation — you stay responsive instead of blocking on the sub-agent.
-            A background sub-agent CANNOT ask for confirmation, so it auto-skips any
-            destructive tool that isn't already approved.
+            Sub-agents never prompt for approval: read-only and pre-approved
+            actions run; unapproved mutations are refused. Delegation grants no
+            extra permission; tool scope, plan mode, hooks, and server floors apply.
           - **Pass ``run_in_background=false`` when you need the report to
             CONTINUE** — i.e. your very next step depends on the answer (so you'd
-            just wait anyway), or the sub-agent is ``general-purpose`` and must
-            edit/run things that aren't pre-approved (a background one would
-            auto-skip them). A foreground call blocks and returns the report.
+            just wait anyway). A foreground call blocks and returns the report.
           - **Run several in parallel.** For independent investigations, emit
             multiple ``spawn_agent`` calls in the SAME turn — they run concurrently.
             Only do this when the tasks don't depend on each other's results.

@@ -50,7 +50,7 @@ def subagent_tools(agent, subagent) -> List[BaseTool]:
     deny_all = "*" in denied  # the deny-everything sentinel
     subset = []
     for t in agent.tools:
-        if t.name in ("spawn_agent", "ask_user_question"):
+        if t.name in ("spawn_agent", "resume_agent", "exit_plan_mode", "ask_user_question"):
             continue  # no nested spawning; no user to ask
         if deny_all or t.name in denied:
             continue  # per-agent denylist, applied AFTER the allowlist
@@ -171,8 +171,8 @@ def wrap_subagent_result(agent_name: str, result: str, resumed: bool = False) ->
 def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
     """Start a sub-agent on a daemon thread and return immediately.
 
-    The thread runs the quiet loop in HEADLESS mode (untrusted destructive
-    tools auto-deny — no TTY to prompt on), records the result in the registry
+    The thread runs the quiet loop in HEADLESS mode (unapproved mutations are
+    refused without prompts), records the result in the registry
     on completion, and never raises into the parent. Returns an ack string
     with the agent id the parent can reference."""
     rec = agent._bg_agents.register(subagent.name, label, prompt)
@@ -218,6 +218,8 @@ def handle_resume_agent(
     **background** (the original background sub-agent's mode): returns
     immediately and delivers the report on completion; ``run_in_background=
     False`` waits for the report inline."""
+    if getattr(agent, "_spawn_depth", 0) > 0:
+        return "Blocked: a sub-agent cannot resume or launch another sub-agent."
     agent_id = (agent_id or "").strip()
     prompt = (prompt or "").strip()
     if not prompt:

@@ -203,7 +203,6 @@ def register_edit_tools(mcp: FastMCP) -> None:
             # Show where the duplicates are (first few)
             lines = content.split("\n")
             occurrences = []
-            current_pos = 0
             for i, line in enumerate(lines, 1):
                 if old_string in line:
                     occurrences.append({"line": i, "preview": line.strip()[:80]})

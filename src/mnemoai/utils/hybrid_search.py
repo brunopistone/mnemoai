@@ -13,8 +13,8 @@ read) so all three call the same code and the tests can exercise the ranking
 directly.
 
 **What stays with the caller:** producing the semantic candidates. That step is
-genuinely backend-specific — Chroma returns squared-L2 distances, FAISS returns
-inner products, the RAG store may fall back to a pure-numpy cosine — and the
+genuinely backend-specific — Chroma returns squared-L2 distances and FAISS returns
+inner products — and the
 per-backend conversion onto the shared [0,1] cosine scale lives in
 ``client/memory/similarity.py``. Likewise the *shape* of the return value
 (annotated copies vs. parallel score/metadata lists) stays with the caller.
