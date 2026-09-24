@@ -11,6 +11,11 @@ from mnemoai.client.memory.similarity import (
 )
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
+from mnemoai.utils.embedding_integrity import (
+    mark_chroma_clean,
+    prepare_chroma,
+    require_clean_vectors,
+)
 from mnemoai.utils.hybrid_search import (
     candidate_count,
     normalized_bm25_candidates,
@@ -53,7 +58,25 @@ class ChromaEpisodicStore:
         # model-scoped, re-learnable scratch (stores live under models/{model}/),
         # so a reset is the safe migration (old vectors can't be reused, and
         # re-embedding the whole history on every switch would be slow).
-        self._open_or_migrate_collection()
+        existing = None
+        try:
+            existing = self.client.get_collection(name="episodic_memory")
+        except Exception:
+            pass
+        self.integrity_error = (
+            prepare_chroma(existing, self.persist_path) if existing is not None else None
+        )
+        self._identity_pending = False
+        try:
+            require_clean_vectors(self)
+            self._open_or_migrate_collection()
+        except Exception as e:
+            if existing is None:
+                raise
+            self.collection = existing
+            self._identity_pending = True
+            if not self.integrity_error:
+                logger.warning("Embedding identity unavailable; keeping stored memory for BM25: %s", e)
 
         # Track metadata separately. `ids` is positionally aligned with
         # `metadatas` (and so with the BM25 corpus) and is what hybrid search
@@ -63,6 +86,16 @@ class ChromaEpisodicStore:
         self.bm25: Optional[BM25] = None
         self._load_metadatas()
         self._rebuild_bm25()
+
+    def _ensure_identity(self) -> None:
+        """Retry a deferred provider check before using or writing vectors."""
+        require_clean_vectors(self)
+        if getattr(self, "_identity_pending", False):
+            self._open_or_migrate_collection()
+            self._identity_pending = False
+            self.metadatas, self.ids, self.bm25 = [], [], None
+            self._load_metadatas()
+            self._rebuild_bm25()
 
     def _embed_fingerprint(self) -> str:
         """Current embedding model's fingerprint (falls back to a dim string).
@@ -81,13 +114,15 @@ class ChromaEpisodicStore:
 
     def _create_collection(self):
         """Create the collection stamped with the current model fingerprint."""
-        return self.client.create_collection(
+        collection = self.client.create_collection(
             name="episodic_memory",
             metadata={
                 "description": "Task solutions with tool usage patterns",
                 "embed_fingerprint": self._embed_fingerprint(),
             },
         )
+        mark_chroma_clean(collection)
+        return collection
 
     def _open_or_migrate_collection(self) -> None:
         """Load the collection, or reset it if the embedding model changed."""
@@ -210,6 +245,7 @@ class ChromaEpisodicStore:
             metadata: Episode metadata (task, solution, tools, outcome, timestamp)
             episode_id: Optional unique ID for episode
         """
+        self._ensure_identity()
         if not episode_id:
             episode_id = f"episode_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
 
@@ -237,6 +273,7 @@ class ChromaEpisodicStore:
         self.metadatas.append(metadata)
         self.ids.append(episode_id)
         self._rebuild_bm25()
+        mark_chroma_clean(self.collection)
 
         logger.debug(f"Stored episode: {episode_id}")
 
@@ -281,16 +318,23 @@ class ChromaEpisodicStore:
         Returns:
             List of episodes with metadata
         """
-        if len(self.metadatas) == 0:
+        if not self.metadatas or top_k <= 0:
             return []
 
         candidate_k = candidate_count(top_k, len(self.metadatas))
 
         # --- Semantic candidates (backend-specific: squared-L2 -> cosine) ---
-        query_embedding = l2_normalize(self.embeddings.embed([query]))
-        results = self.collection.query(
-            query_embeddings=query_embedding.tolist(), n_results=candidate_k
-        )
+        degraded = False
+        try:
+            self._ensure_identity()
+            query_embedding = l2_normalize(self.embeddings.embed([query]))
+            results = self.collection.query(
+                query_embeddings=query_embedding.tolist(), n_results=candidate_k
+            )
+        except Exception as e:
+            degraded = True
+            results = {"metadatas": []}
+            logger.warning("Semantic memory search unavailable; using BM25 only: %s", e)
 
         # Candidates are keyed by the episode's unique id, NOT by its searchable
         # text: that text is `task + solution + tools`, which is NOT unique — two
@@ -323,13 +367,17 @@ class ChromaEpisodicStore:
             self.metadatas,
             key_fn=self._bm25_key,
         )
-        return rank_with_similarity(
+        ranked = rank_with_similarity(
             sem_candidates,
             bm25_candidates,
-            self.semantic_weight,
-            self.keyword_weight,
+            0.0 if degraded else self.semantic_weight,
+            1.0 if degraded else self.keyword_weight,
             top_k,
         )
+        if degraded:
+            for episode in ranked:
+                episode["retrieval_method"] = "bm25"
+        return ranked
 
     def cleanup(self, max_episodes: int = 1000, max_age_days: int = 90) -> None:
         """Remove old episodes and enforce size limit.
@@ -338,7 +386,7 @@ class ChromaEpisodicStore:
             max_episodes: Maximum number of episodes to keep
             max_age_days: Maximum age in days
         """
-        if len(self.metadatas) == 0:
+        if getattr(self, "integrity_error", None) or len(self.metadatas) == 0:
             return
 
         cutoff_date = datetime.now() - timedelta(days=max_age_days)
@@ -383,6 +431,7 @@ class ChromaEpisodicStore:
                 self.metadatas = valid_metadatas
                 self.ids = valid_ids
                 self._rebuild_bm25()
+                mark_chroma_clean(self.collection)
                 logger.info(
                     f"Cleaned up episodic memory: {old_count} → {len(valid_ids)} episodes"
                 )
@@ -393,6 +442,7 @@ class ChromaEpisodicStore:
         # Recreate through _create_collection so the fingerprint stamp is kept
         # (a bare create would leave the collection on the legacy un-stamped path).
         self.collection = self._create_collection()
+        self.integrity_error = None
         self.metadatas = []
         self.ids = []
         self.bm25 = None

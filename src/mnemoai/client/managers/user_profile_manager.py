@@ -509,7 +509,6 @@ class UserProfileManager:
             content: Message content text
         """
         content_lower = content.lower()
-        words = re.findall(r"\b\w+\b", content_lower)
 
         # === VERBOSITY ===
         # Short messages (< 50 chars) = concise, long (> 200) = detailed

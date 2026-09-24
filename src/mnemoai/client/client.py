@@ -34,6 +34,7 @@ from mnemoai.client.agent.message_codec import (
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
 from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
+    CompactionError,
     messages_to_dict_list,
 )
 from mnemoai.client.managers.user_profile_manager import UserProfileManager
@@ -52,7 +53,7 @@ from mnemoai.client.session_log import (
     turn_summaries,
 )
 from mnemoai.client.ui import clipboard, turn_view
-from mnemoai.client.ui.spinner import Spinner
+from mnemoai.client.ui.spinner import WRAP_UP_LABEL, Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models import area_models
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
@@ -172,7 +173,10 @@ class LangGraphClient:
 
         self.episodic_memory = None
         if config.get("ENABLE_EPISODIC_MEMORY", False):
-            self._initialize_episodic_memory()
+            try:
+                self._initialize_episodic_memory()
+            except Exception as e:
+                logger.warning("Episodic memory is unavailable this session: %s", e)
 
         self.reflector = None
         self.playbook = None
@@ -443,7 +447,10 @@ class LangGraphClient:
 
         try:
             if not delivery_only and self.episodic_memory:
-                prompt = self._inject_episodic_context(prompt)
+                try:
+                    prompt = self._inject_episodic_context(prompt)
+                except Exception as e:
+                    logger.warning("Episodic recall unavailable; continuing this request: %s", e)
 
             # Plan mode: remind the model per-turn that it's read-only (the
             # system prompt is frozen at session start).
@@ -464,13 +471,33 @@ class LangGraphClient:
                 if hasattr(self.agent, "_code_formatter"):
                     self.agent._code_formatter.flush()
 
-                asyncio.run(
-                    self.conversation_manager.manage_messages(
-                        self, self._summary_model(), self.agent
-                    )
-                )
+                # The answer has streamed, but the prompt is NOT free yet — and
+                # the stream stopped the spinner at its first token (text was
+                # visible then, so that stop is right). What follows holds the
+                # turn for as long as the conversation is large: building the
+                # summary twin, counting the whole history against the budget,
+                # evicting old tool results, possibly a full LLM summary, then
+                # profile learning. Without a spinner here the app goes silent
+                # with no answer yet marked complete and reads as hung.
+                with self.spinner_lock:
+                    self.spinner.start(WRAP_UP_LABEL)
+                try:
+                    try:
+                        asyncio.run(
+                            self.conversation_manager.manage_messages(
+                                self, self._summary_model(), self.agent
+                            )
+                        )
+                    except CompactionError as e:
+                        logger.warning("Post-answer compaction failed; keeping the answer: %s", e)
 
-                self._profile_turn()
+                    self._profile_turn()
+                finally:
+                    # Stopped HERE, not in the outer finally: the context line
+                    # below prints, and in the stdout spinner mode (the only one
+                    # that prints it) an animating frame would overwrite it.
+                    with self.spinner_lock:
+                        self.spinner.stop()
 
                 self._print_context_size()
 
@@ -946,25 +973,9 @@ class LangGraphClient:
         """Delegates to :func:`context_injection.inject_memory_context`."""
         return context_injection.inject_memory_context(self)
 
-    def _inject_skills_context(self) -> str:
-        """Delegates to :func:`context_injection.inject_skills_context`."""
-        return context_injection.inject_skills_context(self)
-
-    def _inject_subagents_context(self) -> str:
-        """Delegates to :func:`context_injection.inject_subagents_context`."""
-        return context_injection.inject_subagents_context(self)
-
     def _get_playbook_context(self) -> str:
         """Delegates to :func:`context_injection.get_playbook_context`."""
         return context_injection.get_playbook_context(self)
-
-    def _get_conversation_context(self) -> str:
-        """Delegates to :func:`context_injection.get_conversation_context`."""
-        return context_injection.get_conversation_context(self)
-
-    def _compute_similarity(self, text1: str, text2: str) -> float:
-        """Delegates to :func:`context_injection.compute_similarity`."""
-        return context_injection.compute_similarity(self, text1, text2)
 
     def _plan_mode_reminder(self) -> str:
         """Delegates to :func:`context_injection.plan_mode_reminder`."""
@@ -1069,14 +1080,6 @@ class LangGraphClient:
     def _new_session_id(self) -> str:
         """Delegates to :func:`session_artifacts.new_session_id`."""
         return session_artifacts.new_session_id(self)
-
-    def _prev_session_from_pointer(self, pointer_path) -> Optional[str]:
-        """Delegates to :func:`session_artifacts.prev_session_from_pointer`."""
-        return session_artifacts.prev_session_from_pointer(self, pointer_path)
-
-    def _repoint_session(self, pointer_path, flush_fn) -> None:
-        """Delegates to :func:`session_artifacts.repoint_session`."""
-        session_artifacts.repoint_session(self, pointer_path, flush_fn)
 
     def _initialize_rag_session(self) -> None:
         """Delegates to :func:`session_artifacts.initialize_rag_session`."""
@@ -1252,7 +1255,7 @@ class LangGraphClient:
                     # A saved conversation holds the LIVE state, so the seeded
                     # history already IS what a restore wants; the checkpoint
                     # exists only to carry the summary it stands on.
-                    kept=langchain_messages if summary else None,
+                    kept=langchain_messages,
                 )
                 logger.info(
                     f"Loaded {len(langchain_messages)} messages from {normalized_path}"

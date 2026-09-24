@@ -654,7 +654,9 @@ def _iter_records(path: Path):
                 if not line:
                     continue
                 try:
-                    yield json.loads(line)
+                    record = json.loads(line)
+                    if isinstance(record, dict):
+                        yield record
                 except (ValueError, TypeError):
                     continue
     except OSError:
@@ -822,8 +824,12 @@ def list_sessions(
     # whole set, so this can't be decided inside the (limited) emit loop below.
     scanned: List[Dict[str, Any]] = []
     superseded: set = set()
+    expected_cwd = os.path.realpath(str(cwd if cwd is not None else os.getcwd()))
     for f in files:
         data = read_session(f)
+        stored_cwd = data["meta"].get("cwd")
+        if stored_cwd and os.path.realpath(str(stored_cwd)) != expected_cwd:
+            continue
         # Judge emptiness on everything logged: a compaction checkpoint can leave
         # `messages` empty (summary only) in a conversation that is very much real.
         # A file with no turn of its OWN is normally noise — the session it resumed

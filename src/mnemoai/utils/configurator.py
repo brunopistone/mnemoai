@@ -106,7 +106,13 @@ def _templates_dir() -> Path:
 
 def config_exists() -> bool:
     """True if a config is already resolvable (so first-run setup is skipped)."""
-    return Config._resolve_config_path() is not None
+    path = Config._resolve_config_path()
+    return path is not None and path.is_file()
+
+
+def _config_to_edit() -> Path:
+    """Edit the configuration the runtime actually selected."""
+    return Config._resolve_config_path() or config_path()
 
 
 def _set_in_section(text: str, section: str, key: str, value: str) -> str:
@@ -124,31 +130,6 @@ def _set_in_section(text: str, section: str, key: str, value: str) -> str:
                 out.append(f"{m.group(1)}{key}: {value}")
                 done = True
                 continue
-        out.append(line)
-    return "\n".join(out) + ("\n" if text.endswith("\n") else "")
-
-
-def _set_or_add_in_section(text: str, section: str, key: str, value: str) -> str:
-    """Set ``key`` inside ``section``, inserting it after the header if absent."""
-    if _get_in_section(text, section, key) is not None:
-        return _set_in_section(text, section, key, value)
-
-    out = []
-    in_section = False
-    inserted = False
-    child_indent = "  "
-    for line in text.splitlines():
-        is_top = bool(line) and not line[0].isspace()
-        if is_top:
-            in_section = line.split(":", 1)[0].strip() == section
-            out.append(line)
-            if in_section and not inserted:
-                out.append(f"{child_indent}{key}: {value}")
-                inserted = True
-            continue
-        # Track child indentation from the section's first indented line.
-        if in_section and line and line[0].isspace():
-            child_indent = line[: len(line) - len(line.lstrip())]
         out.append(line)
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
@@ -1087,17 +1068,6 @@ def _prompt_mantle_protocol(text: str, section: str, allow_back: bool = False) -
     return text
 
 
-def _conn_from_text(text: str, section: str) -> dict:
-    """HOST/PORT/REGION currently set in ``section`` (values the vision section
-    mirrors); read back from ``text`` so it survives step-based prompting."""
-    conn = {}
-    for k in ("HOST", "PORT", "REGION"):
-        v = _get_field(text, section, k)
-        if v is not None:
-            conn[k] = v
-    return conn
-
-
 def _optional_field_step(section: str, key: str, prompt: str, default: str = ""):
     """A step for an optional connection field: set it only when non-blank
     (blank keeps the current value / the provider's env default). ``default`` is
@@ -1159,22 +1129,11 @@ def _connection_steps(section: str, provider: str) -> list:
         if "API_KEY" in allowed:
             steps.append(_optional_field_step(section, "API_KEY", "API key (optional; a local MLX server needs none)"))
 
-    # Embeddings: optional vector-size override (fallback only).
+    # Embeddings: optional real output dimension; blank uses runtime detection.
     if section == "EMBED_MODEL_ID":
         steps.append(_optional_field_step(section, "DIMENSION", "Embedding dimension (optional; blank = auto-detect)"))
 
     return steps
-
-
-def _prompt_provider_connection(text: str, section: str, provider: str):
-    """Run the connection/auth steps for ``provider`` linearly (no Back) and
-    print the credential note. Returns ``(text, conn)`` where ``conn`` holds the
-    HOST/PORT/REGION the vision section can mirror. Thin wrapper over
-    :func:`_connection_steps` kept for callers that want the one-shot form."""
-    for step in _connection_steps(section, provider):
-        text = step(text, False)
-    _print_credential_note(provider)
-    return text, _conn_from_text(text, section)
 
 
 def _print_credential_note(provider: str) -> None:
@@ -1371,7 +1330,7 @@ def _run_configurator(dest: Path) -> Optional[Path]:
 
 def run_first_run_setup() -> Optional[Path]:
     """Interactively create a first ``config.yaml``; returns the Path or None."""
-    dest = config_path()
+    dest = _config_to_edit()
 
     # On a TTY the confirm dialog carries the framing; only the non-TTY fallback
     # prints the banner (a full-screen dialog would wipe it anyway).
@@ -1397,7 +1356,7 @@ def run_first_run_setup() -> Optional[Path]:
 def run_reconfigure() -> Optional[Path]:
     """Re-run the configurator over an existing config (``/config``), confirming
     the overwrite first; returns the written Path or None."""
-    dest = config_path()
+    dest = _config_to_edit()
 
     # On a TTY the dialogs carry the caveat, so only the non-TTY fallback prints
     # the banner/WARNING here.
@@ -1827,7 +1786,7 @@ def run_params_override() -> Optional[Path]:
     """Tune a configured model's inference parameters (``/params``); edits only
     those keys (use /model for provider/name/connection). Returns the Path, or
     None if cancelled or unchanged."""
-    dest = config_path()
+    dest = _config_to_edit()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")
         return None
@@ -1922,7 +1881,7 @@ def _prompt_enable_embedding_features(text: str) -> str:
 def run_model_override() -> Optional[ModelOverride]:
     """Override one model section in place (``/model``), preserving the rest;
     returns what was written, or None if cancelled or there's no config."""
-    dest = config_path()
+    dest = _config_to_edit()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")
         return None
@@ -2066,7 +2025,7 @@ def run_features_override() -> Optional[Path]:
     toggles, writing just those keys back. Prompts for any info a newly-enabled
     feature needs (Brave key, embeddings model). Returns the written Path, or
     None if cancelled or unchanged."""
-    dest = config_path()
+    dest = _config_to_edit()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")
         return None

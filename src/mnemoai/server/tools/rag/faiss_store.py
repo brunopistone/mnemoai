@@ -14,8 +14,7 @@ import logging
 
 logging.getLogger("faiss").setLevel(logging.WARNING)
 
-import json  # noqa: E402  (see logging.setLevel above: it must precede faiss)
-import os  # noqa: E402
+import os  # noqa: E402  (see logging.setLevel above: it must precede faiss)
 import threading  # noqa: E402
 from typing import Dict, List, Tuple  # noqa: E402
 
@@ -23,6 +22,12 @@ import faiss  # noqa: E402
 import numpy as np  # noqa: E402
 
 from mnemoai.utils.atomic_write import atomic_write_json  # noqa: E402
+from mnemoai.utils.embedding_integrity import (  # noqa: E402
+    discard_faiss_repair_state,
+    load_faiss_pair,
+    mark_faiss_clean,
+    require_clean_vectors,
+)
 from mnemoai.utils.logger import logger  # noqa: E402
 from mnemoai.utils.paths import profile_dir  # noqa: E402
 
@@ -62,34 +67,18 @@ class FaissStore:
             self.persist_path = os.path.join(base_dir, "rag_store.faiss")
 
         # ".meta.json" (not the old ".meta") so a pickle written by a previous
-        # version is simply not found -- the store rebuilds instead of trying to
-        # interpret one format as the other, which would desync index/metadata.
+        # version is never interpreted. An index without readable JSON metadata
+        # stays disabled until explicitly cleared/re-ingested.
         self.metadata_path = self.persist_path + ".meta.json"
         self.lock = threading.Lock()
 
-        # Try to load existing index
-        if os.path.exists(self.persist_path) and os.path.exists(self.metadata_path):
-            try:
-                self.index = faiss.read_index(self.persist_path)
-                with open(self.metadata_path, "r", encoding="utf-8") as f:
-                    self.metadatas = json.load(f)
-                if not isinstance(self.metadatas, list):
-                    raise ValueError("metadata file is not a list")
-                # A truncated write (or a mismatched pair) would silently return
-                # the wrong chunk for a hit; rebuild instead.
-                if self.index.ntotal != len(self.metadatas):
-                    raise ValueError(
-                        f"index/metadata length mismatch: "
-                        f"{self.index.ntotal} vs {len(self.metadatas)}"
-                    )
-            except Exception as e:
-                logger.warning(f"Could not load RAG store, starting fresh: {e}")
-                self.index = faiss.IndexFlatIP(dim)
-                self.metadatas = []
-        else:
+        self.index, self.metadatas, self.integrity_error = load_faiss_pair(
+            self.persist_path, self.metadata_path
+        )
+        if self.index is None:
             self.index = faiss.IndexFlatIP(dim)
-            self.metadatas = []
-
+        else:
+            self.dim = self.index.d
 
     def add(self, vectors: np.ndarray, metadatas: list[dict]) -> None:
         """Add vectors and metadata to FAISS index.
@@ -99,6 +88,7 @@ class FaissStore:
             metadatas: List of metadata dictionaries, one per vector
         """
 
+        require_clean_vectors(self)
         if vectors.dtype != np.float32:
             vectors = vectors.astype(np.float32)
 
@@ -122,6 +112,7 @@ class FaissStore:
         Returns:
             Tuple of (scores, metadatas) where scores are cosine similarity scores
         """
+        require_clean_vectors(self)
         if q.dtype != np.float32:
             q = q.astype(np.float32)
 
@@ -133,6 +124,7 @@ class FaissStore:
 
         with self.lock:
             D, I = self.index.search(np.expand_dims(q, axis=0), top_k)
+            metadata_snapshot = list(self.metadatas)
 
         indices = I[0].tolist()
         scores = D[0].tolist()
@@ -140,18 +132,40 @@ class FaissStore:
         results = []
         metas = []
         for idx, score in zip(indices, scores):
-            if idx < 0 or idx >= len(self.metadatas):
+            if idx < 0 or idx >= len(metadata_snapshot):
                 continue
-            metas.append(self.metadatas[idx])
+            metas.append(metadata_snapshot[idx])
             results.append(score)
 
         return results, metas
 
-    def clear(self) -> None:
+    def replace_document(self, doc_id: str, vectors: np.ndarray, metadatas: list[dict]) -> None:
+        """Build the replacement index before swapping it into the live store."""
+        require_clean_vectors(self)
+        vectors = np.asarray(vectors, dtype=np.float32)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        vectors = vectors / np.where(norms == 0, 1, norms)
+        with self.lock:
+            retained = [i for i, meta in enumerate(self.metadatas) if meta.get("doc_id") != doc_id]
+            index = faiss.IndexFlatIP(self.dim)
+            if retained:
+                index.add(np.vstack([self.index.reconstruct(i) for i in retained]))
+            index.add(vectors)
+            self.index = index
+            self.metadatas = [self.metadatas[i] for i in retained] + list(metadatas)
+            self._persist()
+
+    def clear(self, dim: int = None) -> None:
         """Clear all vectors and metadata from the store."""
         with self.lock:
-            self.index.reset()
+            discard_faiss_repair_state(self.persist_path)
+            if dim is not None:
+                self.dim = dim
+                self.index = faiss.IndexFlatIP(dim)
+            else:
+                self.index.reset()
             self.metadatas = []
+            self.integrity_error = None
             self._persist()
 
     def _persist(self) -> None:
@@ -164,6 +178,7 @@ class FaissStore:
             os.makedirs(os.path.dirname(os.path.abspath(self.persist_path)), exist_ok=True)
             faiss.write_index(self.index, self.persist_path)
             atomic_write_json(self.metadata_path, self.metadatas)
+            mark_faiss_clean(self.persist_path, self.metadata_path)
         except Exception as e:
             # exc_info, not file= : logger.error() takes no `file` kwarg, so the
             # previous version raised TypeError from inside its own handler.

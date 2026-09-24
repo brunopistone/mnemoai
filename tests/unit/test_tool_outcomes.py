@@ -129,6 +129,14 @@ class TestTheCallSitesRecordBothOutcomes:
             "total": 1,
         }
 
+    def test_deferred_storage_accepts_native_langchain_history(self):
+        ci, stored = self._interface()
+        ci.client.previous_query = "fix the parser"
+        ci.client.previous_response = "The parser is fixed."
+        ci.client.previous_messages = self._turn(ci.client.previous_response)
+        ci._ChatInterface__store_episode_in_episodic_memory("thanks")
+        assert stored and stored[0]["task"] == "fix the parser"
+
     def test_the_immediate_path_still_records_a_success(self):
         ci, stored = self._interface()
         answer = "The parser now handles the trailing comma."

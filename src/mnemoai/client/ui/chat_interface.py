@@ -1,5 +1,6 @@
 """Chat interface handling for the application."""
 
+import contextlib
 import datetime as _dt
 import os
 import re
@@ -22,6 +23,7 @@ from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
 from mnemoai.client.ui import notify, screen, status_bar, turn_view
+from mnemoai.client.ui.spinner import WRAP_UP_LABEL
 from mnemoai.client.ui.tui import (
     _DELETE,
     PinnedPromptReader,
@@ -459,7 +461,10 @@ class ChatInterface:
             # could land in different buckets.
             initial_query = self.client.previous_query
             for msg in self.client.previous_messages:
-                if msg.get("role") == "user":
+                if getattr(msg, "type", None) == "human":
+                    initial_query = turn_view.user_prompt_text(str(msg.content))
+                    break
+                if isinstance(msg, dict) and msg.get("role") == "user":
                     content = msg.get("content", [])
                     if isinstance(content, list):
                         for item in content:
@@ -1144,6 +1149,27 @@ class ChatInterface:
         except KeyboardInterrupt:
             pass
 
+    def _wrap_up_spinner(self, on: bool) -> None:
+        """Run the spinner across the learning steps this class calls itself.
+
+        The second half of the turn's wrap-up (``client.query`` carries the
+        first), so it reuses that phase's label instead of naming a new one.
+        Non-raising and guarded: the answer is already on screen, and a missing
+        spinner must never be the thing that fails a turn.
+        """
+        spinner = getattr(self.client, "spinner", None)
+        if spinner is None:
+            return
+        lock = getattr(self.client, "spinner_lock", None)
+        try:
+            with lock if lock is not None else contextlib.nullcontext():
+                if on:
+                    spinner.start(WRAP_UP_LABEL)
+                else:
+                    spinner.stop()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Wrap-up spinner failed: {e}")
+
     def _turn_end_line(
         self, started: float, mark: int = 0, stopped: bool = False
     ) -> str:
@@ -1502,27 +1528,36 @@ class ChatInterface:
             # SQLite code 1032 "readonly database moved", a backup/sync racing the
             # store dir) must be logged quietly, NOT surfaced as a turn error.
             # Each is guarded independently so one failing doesn't skip the others.
-            if self.client.episodic_memory and use_immediate_storage:
-                try:
-                    self.__store_current_episode_immediately(query, response)
-                except Exception as e:
-                    logger.warning(f"Episodic storage failed (non-fatal): {e}")
+            # They still hold the prompt though (storing an episode embeds it),
+            # so they carry the spinner too — the same reason the turn is timed to
+            # the marker line below and not to where query() returned.
+            self._wrap_up_spinner(True)
+            try:
+                if self.client.episodic_memory and use_immediate_storage:
+                    try:
+                        self.__store_current_episode_immediately(query, response)
+                    except Exception as e:
+                        logger.warning(f"Episodic storage failed (non-fatal): {e}")
 
-            if self.client.reflector:
-                try:
-                    self.client.reflect_and_learn(query)
-                except Exception as e:
-                    logger.warning(f"Reflection failed (non-fatal): {e}")
+                if self.client.reflector:
+                    try:
+                        self.client.reflect_and_learn(query)
+                    except Exception as e:
+                        logger.warning(f"Reflection failed (non-fatal): {e}")
 
-            # Auto-distill durable facts into MEMORY.md (opt-in; runs in the
-            # background so it never blocks the turn). getattr-guarded so a
-            # minimal/stub client without the method still works.
-            extract = getattr(self.client, "auto_extract_memory", None)
-            if callable(extract):
-                try:
-                    extract(query, response)
-                except Exception as e:
-                    logger.warning(f"Memory auto-extraction failed (non-fatal): {e}")
+                # Auto-distill durable facts into MEMORY.md (opt-in; runs in the
+                # background so it never blocks the turn). getattr-guarded so a
+                # minimal/stub client without the method still works.
+                extract = getattr(self.client, "auto_extract_memory", None)
+                if callable(extract):
+                    try:
+                        extract(query, response)
+                    except Exception as e:
+                        logger.warning(
+                            f"Memory auto-extraction failed (non-fatal): {e}"
+                        )
+            finally:
+                self._wrap_up_spinner(False)
 
             # Close the turn with a marker line: the answer above it is complete.
             # Timed to HERE, not to where query() returned — the learning steps

@@ -110,6 +110,25 @@ class TestTheActiveSummaryIsSavedAndRestored:
     if the conversation had started there.
     """
 
+    def test_loaded_history_replaces_the_transcripts_live_context(self, tmp_path, monkeypatch):
+        from langchain_core.messages import AIMessage, HumanMessage
+
+        from mnemoai.client.session_log import SessionLog, read_session
+
+        monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+        client = _client(tmp_path)
+        log = SessionLog(cwd=str(tmp_path))
+        log.log_turn([HumanMessage("old question"), AIMessage("old answer")])
+        client.agent.session_log = log
+        target = tmp_path / "loaded.json"
+        target.write_text(json.dumps({
+            "messages": [{"role": "user", "content": [{"text": "loaded question"}]}]
+        }))
+        assert client.load_conversation(str(target))
+        restored = read_session(log.path)["messages"]
+        assert len(restored) == 1
+        assert restored[0]["content"] == [{"text": "loaded question"}]
+
     def test_save_records_the_active_summary(self, tmp_path, monkeypatch):
         import mnemoai.client.client as mod
 

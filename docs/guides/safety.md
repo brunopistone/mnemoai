@@ -13,7 +13,8 @@ This page covers:
 
 ## Approve actions as they happen
 
-Destructive tools stop and ask before they run — shell commands (`execute_bash`)
+Destructive tools stop and ask before they run — shell commands and background
+launches (`execute_bash`, `start_background_task`)
 and file modifications (`fs_write`, `file_edit`):
 
 ```
@@ -35,14 +36,14 @@ This is a **hard gate enforced client-side**: the prompt fires regardless of wha
 the model does, because the client owns the terminal. The MCP server is a piped
 subprocess and cannot prompt you.
 
-| Toggle                        | Default | Gates                           |
-| ----------------------------- | ------- | ------------------------------- |
-| `REQUIRE_BASH_CONFIRMATION`   | `true`  | `execute_bash`                  |
-| `REQUIRE_WRITE_CONFIRMATION`  | `true`  | `fs_write`, `file_edit`         |
-| `REQUIRE_MEMORY_CONFIRMATION` | `false` | `memory` writes to `MEMORY.md`  |
-| `REQUIRE_GIT_CONFIRMATION`    | `true`  | Overriding a git safety refusal |
+| Toggle                        | Default | Gates                                   |
+| ----------------------------- | ------- | --------------------------------------- |
+| `REQUIRE_BASH_CONFIRMATION`   | `true`  | `execute_bash`, `start_background_task` |
+| `REQUIRE_WRITE_CONFIRMATION`  | `true`  | `fs_write`, `file_edit`                 |
+| `REQUIRE_MEMORY_CONFIRMATION` | `false` | `memory` writes to `MEMORY.md`          |
+| `REQUIRE_GIT_CONFIRMATION`    | `true`  | Overriding a git safety refusal         |
 
-Set any to `false` for a trusted or automated setup. Non-interactive runs (no TTY
+Set any to `false` for a trusted or automated setup. Foreground runs with no TTY
 — tests, pipes, CI) auto-proceed so they can't hang waiting for a keypress.
 
 **Tired of confirming the same harmless command?** A [tool hook](hooks.md) can
@@ -54,9 +55,23 @@ the safety floor below.
 
 !!! note "Sub-agents can't approve on your behalf"
 
-    A background [sub-agent](orchestration.md) has no terminal, so it cannot
-    prompt. An untrusted destructive tool there **auto-denies** — the safe
-    direction. It proceeds only if you already trusted that category with `a`.
+    [Spawned sub-agents](orchestration.md) and parallel/background orchestrator
+    workers never ask for approval. Read-only and already-approved actions run;
+    unapproved destructive actions are refused immediately. Approval can come
+    from the confirmation toggles, session trust, an approved plan, the current
+    `/auto` tier, or a hook. Delegation itself grants no permission, including at
+    `/auto off`. Tool allowlists, plan mode, hook denials, and server protections
+    still apply. A flagged git override without prior trust is refused.
+
+Lone or sequential orchestrator steps running in the foreground can ask for
+approval, just like the main assistant. This includes a dependency chain and
+`SUBAGENT_MAX_CONCURRENCY: 1`. Running a step inline does not remove restrictions
+inherited from an already-headless or spawned caller.
+
+Starting a background command is a foreground decision: the main assistant can
+ask you to approve `start_background_task` before launching it. The running
+command is unattended. A worker attempting the same launch must already have
+permission; selecting a background tool does not grant it.
 
 ## Stop being asked, for a while
 
@@ -126,6 +141,19 @@ and `grep_search`, read-only shell (`ls`, `cat`, `git status`, `git log`,
 mutating shell, perform git writes, or start a background task is hard-blocked
 client-side — regardless of what the model tries.
 
+Built-in tools are explicitly classified, with tests that fail when the tool
+registry and policy drift. Planning controls and `cancel_background_task` remain
+available so existing work can be stopped; `clear_documents` and
+`clear_completed_tasks` are blocked. Only writes to the designated plan file are
+exempt from the file-write block.
+
+**External MCP tools:** while planning, an external tool must declare
+`annotations.readOnlyHint: true`. Unannotated external tools are refused with an
+explanation, even if their name sounds read-only. This is a compatibility
+tightening for servers that omit annotations; outside plan mode their normal
+availability is unchanged. A declaration is supplied by the external server,
+not inferred from a tool name, and is not an OS sandbox.
+
 When the plan is ready the assistant calls `exit_plan_mode`, which shows it and
 asks how to proceed:
 
@@ -187,13 +215,15 @@ too, so `2>/dev/null` keeps working.
 
 The floor is deliberately **narrow**. Scoped, everyday-destructive commands like
 `rm -rf build/` or `git reset --hard` are _not_ blocked here — they stay gated by
-the confirmation prompt. The goal is to make irreversible system damage
-impossible, not to second-guess normal edits.
+the main assistant's confirmation prompt. These checks block common catastrophic
+command forms. They are not an operating system sandbox: arbitrary scripts can
+have effects a shell-text classifier cannot determine.
 
 **Web requests** go through a URL policy: only `http`/`https`, and every resolved
 address must be public. Loopback, link-local, private ranges, and cloud metadata
-endpoints such as `169.254.169.254` are refused, so a page can't talk the crawler
-into fetching your instance credentials.
+endpoints such as `169.254.169.254` are refused as initial destinations. This is
+a preflight check: browser redirects, subresources, and DNS changes after
+validation require network-level controls for complete isolation.
 
 ## Keep git operations recoverable
 

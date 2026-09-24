@@ -79,7 +79,7 @@ def test_plain_openai_passes_no_base_url(monkeypatch):
 
 class TestEmbeddingDimension:
     """The embedding dimension is configurable via DIMENSION (used for the
-    SHA256/zeros fallback and empty-result shape; real embeddings pass through
+    empty-result shape; real embeddings pass through
     at the provider's native size)."""
 
     def test_explicit_dimension_wins(self):
@@ -94,11 +94,24 @@ class TestEmbeddingDimension:
         c = EmbeddingsController({"NAME": "some-new-embedder", "TYPE": "ollama"})
         assert c.dim == 1024
 
-    def test_fallback_vector_matches_configured_dimension(self):
-        c = EmbeddingsController({"NAME": "x", "TYPE": "openai", "DIMENSION": 512})
-        c.cache_enabled = False
-        out = c._embed_fallback(["hello"])
-        assert out.shape == (1, 512)
+    @pytest.mark.parametrize("enabled", [True, False])
+    @pytest.mark.parametrize("kind", ["sha256", "random", "zeros"])
+    def test_legacy_fallback_options_never_fabricate_vectors(self, monkeypatch, enabled, kind):
+        monkeypatch.setattr(
+            ec.config, "get",
+            lambda key, default=None: {
+                "EMBEDDINGS": {"FALLBACK_ENABLED": enabled, "FALLBACK_TYPE": kind}
+            } if key == "RAG" else default,
+        )
+        c = EmbeddingsController({"NAME": "fake", "TYPE": "openai", "DIMENSION": 512})
+        c._embed_retries = 1
+        monkeypatch.setattr(
+            c, "_embed_raw",
+            lambda texts: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
+        )
+        with pytest.raises(RuntimeError, match="no vectors were stored"):
+            c.embed(["document"])
+        assert c._embedding_cache == {}
 
 
 class TestOllamaHost:
@@ -184,6 +197,25 @@ class TestOllamaRetryAndTruncation:
         monkeypatch.setattr(ec.time, "sleep", lambda *a: None)  # no real delay
         return state
 
+    def test_failure_is_not_cached_and_the_next_call_can_recover(self, monkeypatch):
+        import numpy as np
+
+        c = EmbeddingsController({"NAME": "fake", "TYPE": "openai", "DIMENSION": 3})
+        c._embed_retries = 1
+        calls = []
+
+        def embed(texts):
+            calls.append(texts)
+            if len(calls) == 1:
+                raise ValueError("provider unavailable")
+            return np.ones((len(texts), 3), dtype=np.float32)
+
+        monkeypatch.setattr(c, "_embed_raw", embed)
+        with pytest.raises(RuntimeError, match="no vectors were stored"):
+            c.embed(["document"])
+        assert np.array_equal(c.embed(["document"]), np.ones((1, 3)))
+        assert len(calls) == 2
+
     def test_retry_recovers_transient_eof(self, monkeypatch):
         # EOF now triggers shrink-and-retry via the generic loop; a short input
         # that fails twice then succeeds is recovered with a real embedding.
@@ -195,13 +227,13 @@ class TestOllamaRetryAndTruncation:
         assert state["calls"] == 3          # retried (shrinking) until success
         assert out.shape == (1, 3)          # real embedding, not fallback
 
-    def test_falls_back_after_exhausting_retries(self, monkeypatch):
+    def test_raises_after_exhausting_retries(self, monkeypatch):
         self._patch_client(monkeypatch, fail_times=99)  # always fail
         c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "DIMENSION": 3})
         c.cache_enabled = False
         c._embed_retries = 3
-        out = c.embed(["hello"])            # generic loop owns the fallback now
-        assert out.shape == (1, 3)          # deterministic fallback shape
+        with pytest.raises(RuntimeError, match="no vectors were stored"):
+            c.embed(["hello"])
 
     def _capture_ai_app(self, level):
         # The ai_app logger has propagate=False, so caplog's root handler won't
@@ -239,7 +271,7 @@ class TestOllamaRetryAndTruncation:
             logger.removeHandler(h)
         assert h.records == []  # recovered silently — no WARNING/ERROR noise
 
-    def test_fallback_logs_at_error_not_warning(self, monkeypatch):
+    def test_failure_reaches_the_caller_without_synthetic_vectors(self, monkeypatch):
         import logging
 
         self._patch_client(monkeypatch, fail_times=99)  # never succeeds → fallback
@@ -250,11 +282,12 @@ class TestOllamaRetryAndTruncation:
         c._embed_retries = 3
         logger, h = self._capture_ai_app(logging.DEBUG)
         try:
-            c.embed(["hello"])
+            with pytest.raises(RuntimeError, match="no vectors were stored"):
+                c.embed(["hello"])
         finally:
             logger.removeHandler(h)
         # The give-up + the fallback notice are ERROR; none of it is WARNING.
-        assert any(r.levelno == logging.ERROR for r in h.records)
+        assert c._embedding_cache == {}
         assert not any(r.levelno == logging.WARNING for r in h.records)
 
     def test_oversized_input_truncated(self):
@@ -332,7 +365,7 @@ class TestTokenCapAndOverflow:
             Exception("model 'x' not found")
         ) is False
 
-    def test_overflow_shrinks_limit_then_falls_back(self, monkeypatch):
+    def test_overflow_shrinks_limit_then_raises(self, monkeypatch):
         # An always-overflowing input SHRINKS the token limit each attempt (down
         # toward the floor) and, only after the budget, degrades to fallback.
         state = {"calls": 0}
@@ -351,11 +384,11 @@ class TestTokenCapAndOverflow:
         c.cache_enabled = False
         c._embed_retries = 3
         start = c._resolve_token_limit()
-        out = c.embed(["hello world " * 100])
+        with pytest.raises(RuntimeError, match="no vectors were stored"):
+            c.embed(["hello world " * 100])
         assert state["calls"] == 3            # tried, shrinking, across the budget
         assert c._max_input_tokens < start    # limit was lowered by the shrink
-        assert out.shape == (1, 3)            # then deterministic fallback
-        assert out.shape == (1, 3)       # fell back once
+        assert c._embedding_cache == {}
 
 
 class TestBedrockEmbedSchemaDispatch:

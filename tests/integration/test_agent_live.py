@@ -1,9 +1,11 @@
-"""Integration tests: real agent + Ollama + MCP subprocess.
+"""Integration tests: real agent + configured model + MCP subprocess.
 
-Auto-skipped unless a runtime config.yaml exists and Ollama is reachable
-(see conftest.py). These verify the end-to-end paths that unit tests cannot:
+Auto-skipped without a usable runtime configuration (see conftest.py).
+These verify the end-to-end paths that unit tests cannot:
 routing, tool invocation, and that no query returns a silent empty turn.
 """
+
+import json
 
 import pytest
 
@@ -52,14 +54,29 @@ class TestAgentEndToEnd:
 
 
 class TestBashTimeoutLive:
-    def test_bash_timeout_does_not_hang(self, live_client):
+    def test_bash_timeout_does_not_hang(self, live_client, monkeypatch):
         # The agent should report back rather than hang when a command exceeds
         # its timeout (process-group kill + prompt return).
+        monkeypatch.setattr(live_client, "auto_approve_mode", "all")
+        results = []
+        invoke = live_client.agent._invoke_tool
+
+        def observe(tool, name, args, quiet=False):
+            result = invoke(tool, name, args, quiet=quiet)
+            if name == "execute_bash":
+                results.append(json.loads(result))
+            return result
+
+        monkeypatch.setattr(live_client.agent, "_invoke_tool", observe)
         resp = live_client.query(
             "Run the bash command 'sleep 8' with a 2 second timeout and tell me what happened."
         )
         assert resp is not None
         assert resp.strip() != ""
+        assert any(
+            result.get("error") and "timed out" in result.get("message", "")
+            for result in results
+        ), "the live model must actually exercise the shell timeout"
 
 
 class TestPlanModeEnforcementLive:
@@ -85,16 +102,14 @@ class TestPlanModeEnforcementLive:
         assert not target.exists(), "plan mode failed to block the file write"
         assert resp is not None and resp.strip() != ""
 
-    def test_write_succeeds_when_plan_mode_off(self, live_client, tmp_path):
+    def test_write_succeeds_when_plan_mode_off(self, live_client, tmp_path, monkeypatch):
         target = tmp_path / "plan_mode_probe_off.txt"
-        # Disable the write-confirmation gate for this turn so a non-TTY test
-        # run isn't blocked at the prompt (the gate auto-proceeds with no TTY,
-        # but be explicit).
-        live_client.plan_mode_active = False
+        # Authorize this temporary write explicitly, including if routing sends
+        # it to a noninteractive orchestrator worker.
+        monkeypatch.setattr(live_client, "plan_mode_active", False)
+        monkeypatch.setattr(live_client, "auto_approve_mode", "writes")
         live_client.query(
             f"Create a file at {target} containing the text 'hello'. "
             "Use the file write tool."
         )
-        # We don't hard-assert creation (depends on the model actually calling
-        # the tool), but plan mode must not be what stops it: the flag is off.
-        assert live_client.plan_mode_active is False
+        assert target.read_text().strip() == "hello"

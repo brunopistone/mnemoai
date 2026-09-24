@@ -17,7 +17,7 @@ from mnemoai.client.doctor import FAIL, INFO, OK, WARN, Check
 
 
 class FakeConfig:
-    """Stand-in for the Config singleton: dotted lookups over a plain dict."""
+    """Stand-in for the Config singleton's top-level dictionary lookup."""
 
     def __init__(self, values=None):
         self.values = values or {}
@@ -284,9 +284,9 @@ class TestExternalMcpChecks:
 
 class TestFeatureChecks:
     def test_a_feature_that_is_on_gets_its_dependency_checked(self, cfg):
-        cfg.values.update({"ENABLE_RAG": True, "RAG.VECTOR_STORE": "faiss"})
+        cfg.values.update({"ENABLE_RAG": True, "RAG": {"VECTOR_STORE": {"TYPE": "chromadb"}}})
         names = [c.name for c in doctor._feature_checks()]
-        assert any("faiss" in n for n in names)
+        assert any("chromadb" in n for n in names)
 
     def test_everything_off_checks_nothing(self, cfg):
         assert doctor._feature_checks() == []
@@ -314,22 +314,22 @@ class TestSizeChecks:
 
     def test_a_nearly_full_memory_file_warns(self, cfg, monkeypatch):
         # Silently trimming at the cap is the failure mode; 99% is one fact away.
-        cfg.values["MEMORY.MAX_CHARS"] = 100
+        cfg.values["MEMORY"] = {"MAX_CHARS": 100}
         self._stub_stores(monkeypatch, "x" * 95)
         check = next(c for c in doctor._size_checks() if c.name == "MEMORY.md")
         assert check.status == WARN and "Nearly full" in check.fix
 
     def test_a_small_memory_file_is_ok(self, cfg, monkeypatch):
-        cfg.values["MEMORY.MAX_CHARS"] = 100
+        cfg.values["MEMORY"] = {"MAX_CHARS": 100}
         self._stub_stores(monkeypatch, "x" * 10)
         check = next(c for c in doctor._size_checks() if c.name == "MEMORY.md")
         assert check.status == OK and not check.fix
 
-    def test_over_the_cap_says_it_is_being_trimmed(self, cfg, monkeypatch):
-        cfg.values["MEMORY.MAX_CHARS"] = 100
+    def test_over_the_cap_requests_consolidation(self, cfg, monkeypatch):
+        cfg.values["MEMORY"] = {"MAX_CHARS": 100}
         self._stub_stores(monkeypatch, "x" * 150)
         check = next(c for c in doctor._size_checks() if c.name == "MEMORY.md")
-        assert check.status == WARN and "trims" in check.fix
+        assert check.status == WARN and "Consolidate" in check.fix
 
     def test_steering_files_are_listed_with_their_injected_size(self, cfg, monkeypatch):
         from pathlib import Path

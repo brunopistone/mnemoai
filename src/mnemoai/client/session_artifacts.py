@@ -15,6 +15,7 @@ client class (functions receive the instance), so there is no import cycle.
 import os
 import shutil
 import sqlite3
+import uuid
 from datetime import datetime
 from typing import Optional
 
@@ -42,7 +43,7 @@ def new_session_id(client) -> str:
     (a session id belongs to exactly one instance)."""
     profile_name = config.get("PROFILE", {}).get("NAME", "default")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"{profile_name}_{ts}_{instance_id()}"
+    return f"{profile_name}_{ts}_{uuid.uuid4().hex[:12]}_{instance_id()}"
 
 
 def prev_session_from_pointer(client, pointer_path) -> Optional[str]:
@@ -177,7 +178,13 @@ def flush_rag_store(client, session_id: str = None) -> None:
         rag_dir = str(profile_dir())
         # Both backends key the store by session_id: FAISS → a
         # ``rag_store_<id>.faiss`` file, ChromaDB → a ``rag_store_<id>`` dir.
-        for name in (f"rag_store_{session_id}.faiss", f"rag_store_{session_id}"):
+        for name in (
+            f"rag_store_{session_id}.faiss",
+            f"rag_store_{session_id}.faiss.meta.json",
+            f"rag_store_{session_id}.faiss.synthetic-checked.json",
+            f"rag_store_{session_id}.faiss.synthetic-repair.json",
+            f"rag_store_{session_id}",
+        ):
             path = os.path.join(rag_dir, name)
             if not os.path.exists(path):
                 continue

@@ -83,6 +83,15 @@ class TestPreApprovedBash:
 
 
 class TestIsPreApprovedBash:
+    def test_a_prefix_cannot_authorize_another_shell_operation(self):
+        a = _agent()
+        a._preapproved_bash = ["pytest"]
+        for command in (
+            "pytest && touch example", "pytest ; touch example", "pytest > example",
+            "pytest `touch example`", "pytest $(touch example)", "pytest\n touch example",
+        ):
+            assert not a._is_preapproved_bash(command), command
+
     def test_exact_and_prefix_match(self):
         a = _agent()
         a._preapproved_bash = ["pytest", "npm run build"]

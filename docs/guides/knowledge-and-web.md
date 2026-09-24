@@ -28,11 +28,17 @@ When enabled, the `web_crawler` tool:
 > crawl after a fresh install/upgrade. If that auto-install fails (e.g.
 > offline), run it manually in the same environment:
 > `python -m playwright install chromium` (for an installed CLI:
-> `~/.local/share/uv/tools/mnemoai/bin/python -m playwright install chromium`).
+> `~/.local/share/uv/tools/mnemoai-assistant/bin/python -m playwright install chromium`).
 
 ## RAG (Retrieval-Augmented Generation)
 
 The RAG system automatically indexes documents for semantic search with **hybrid search** (semantic embeddings + BM25 keyword scoring).
+
+During an embedding outage, existing documents remain searchable with
+**BM25-only keyword ranking**, explicitly labeled in results. New ingestion fails
+without adding fabricated vectors. Episodic recall and storage follow the same
+read/write split. The [embedding configuration](../configuration.md#embeddings-configuration)
+describes legacy config compatibility and recovery backups for old synthetic vectors.
 
 **How it works:**
 

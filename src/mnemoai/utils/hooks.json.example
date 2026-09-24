@@ -8,7 +8,7 @@
     "a one-liner needn't parse JSON at all.",
     "",
     "Events (this release): PreToolUse (before the call), PostToolUse (after a",
-    "successful one), PostToolUseFailure (after one that raised).",
+    "successful one), PostToolUseFailure (after an exception or explicit failure).",
     "",
     "'matcher' is a glob over the tool name ('*' matches every tool). Every hook",
     "whose matcher matches runs, in the order written.",
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python -c \"import json,sys; c=json.load(sys.stdin).get('tool_input',{}).get('command','').strip(); print(json.dumps({'decision':'allow'}) if c.startswith(('git status','git log','git diff')) else '')\"",
+            "command": "python -c \"import json,sys; c=json.load(sys.stdin).get('tool_input',{}).get('command','').strip(); print(json.dumps({'decision':'allow'}) if c in ('git status','git log','git diff') else '')\"",
             "timeout": 10
           }
         ]

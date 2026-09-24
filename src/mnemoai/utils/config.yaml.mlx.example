@@ -105,7 +105,7 @@ RAG:
     HOST: 127.0.0.1
     PORT: 8000
     KEEP_ALIVE: 10m # embedding runs come in bursts; keep it warm between them
-    # DIMENSION: 1024          # optional: only shapes the offline fallback vector
+    # DIMENSION: 1024          # optional: expected embedding vector size
     # MAX_INPUT_TOKENS: 8192   # cap embed input to the embedder's real limit;
     #                          # omit for a conservative default that lowers
     #                          # itself the first time the server rejects an input
@@ -116,8 +116,9 @@ RAG:
   VECTOR_STORE:
     TYPE: chromadb # or faiss
   EMBEDDINGS:
-    FALLBACK_ENABLED: true
-    FALLBACK_TYPE: "sha256" # or "random", "zeros"
+    # Legacy compatibility keys: accepted but ignored. No synthetic vectors.
+    FALLBACK_ENABLED: false
+    FALLBACK_TYPE: sha256
     CACHE_ENABLED: true
     CACHE_SIZE: 1000 # LRU cache size for embeddings
 # Episodic Memory Configuration (Enhanced)

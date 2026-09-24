@@ -338,6 +338,13 @@ def _credentials_check(provider: str, section: dict) -> Check:
 
 def _aws_credentials_check(provider: str, section: dict) -> Check:
     """Whether botocore can resolve credentials for the AWS-backed providers."""
+    key = (
+        section.get("API_KEY") or os.environ.get("BEDROCK_API_KEY")
+        if provider == "mantle"
+        else os.environ.get("AWS_BEARER_TOKEN_BEDROCK") if provider == "bedrock" else None
+    )
+    if key:
+        return Check("Provider", "credentials", OK, "an API key is set (not shown)")
     region = str(section.get("REGION", "") or os.environ.get("AWS_REGION", "") or "")
     try:
         import boto3
@@ -475,8 +482,16 @@ def _declared_mcp_servers() -> List[str]:
 def _feature_checks() -> List[Check]:
     """Features that are switched ON but missing what they need."""
     out: List[Check] = []
-    if config.get("ENABLE_RAG", False) or config.get("ENABLE_EPISODIC_MEMORY", False):
-        store = str(config.get("RAG.VECTOR_STORE", "chromadb") or "chromadb").lower()
+    stores = set()
+    if config.get("ENABLE_RAG", False):
+        stores.add(str(
+            ((config.get("RAG", {}) or {}).get("VECTOR_STORE", {}) or {}).get("TYPE", "faiss")
+        ).lower())
+    if config.get("ENABLE_EPISODIC_MEMORY", False):
+        stores.add(str(
+            (config.get("EPISODIC_MEMORY", {}) or {}).get("STORE_TYPE", "chromadb")
+        ).lower())
+    for store in sorted(stores):
         module = "faiss" if "faiss" in store else "chromadb"
         out.append(_import_check("Features", f"{module} ({store})", module))
     if config.get("ENABLE_WEB_SEARCH", False) and not (
@@ -622,16 +637,16 @@ def _size_checks() -> List[Check]:
     out: List[Check] = []
     try:
         text = MemoryStore().read()
-        cap = int(config.get("MEMORY.MAX_CHARS", 2200) or 2200)
+        cap = int((config.get("MEMORY", {}) or {}).get("MAX_CHARS", 2200))
         used = len(text)
         # Near the cap matters as much as over it: the store trims silently, so a
         # file sitting at 99% is one fact away from losing one.
         status = WARN if used >= cap * 0.9 else OK
         fix = ""
         if used > cap:
-            fix = "Over the cap — the store trims it. Consolidate entries."
+            fix = "Over the cap. Consolidate entries before adding more."
         elif status == WARN:
-            fix = "Nearly full; the next entry may push an older one out."
+            fix = "Nearly full; an entry exceeding the cap will be refused."
         out.append(
             Check(
                 "State",

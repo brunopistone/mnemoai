@@ -7,9 +7,11 @@ agent keeps thin delegating methods over them.
 """
 
 import os
+import re
 from pathlib import Path
 
 from mnemoai.utils.paths import plans_dir
+from mnemoai.utils.shell_syntax import simple_command_tokens
 
 # Tools hard-blocked in plan mode. execute_bash/fs_write/file_edit are blocked
 # CONDITIONALLY (see is_blocked_by_plan_mode); the rest unconditionally.
@@ -20,6 +22,8 @@ PLAN_BLOCKED_TOOLS = {
     "git_safe",
     "git_commit_safe",
     "start_background_task",
+    "clear_completed_tasks",
+    "clear_documents",
 }
 
 # fs_write/file_edit are allowed only for the plan file (a .md under plans_dir).
@@ -56,10 +60,10 @@ def write_target(args) -> str:
 
 # Leading programs allowed in plan mode (subject to is_readonly_bash checks).
 READONLY_BASH_CMDS = {
-    "ls", "cat", "head", "tail", "less", "more", "pwd", "echo", "find",
+    "ls", "cat", "head", "tail", "pwd", "echo", "find",
     "grep", "rg", "egrep", "fgrep", "wc", "stat", "file", "tree", "du",
-    "df", "which", "type", "whoami", "hostname", "date", "env", "printenv",
-    "ps", "uname", "id", "diff", "sort", "uniq", "cut", "awk", "sed",
+    "df", "which", "type", "whoami", "printenv",
+    "ps", "uname", "id", "diff", "cut", "sed",
     "realpath", "readlink", "basename", "dirname", "git",
 }
 # Shell operators that could chain/redirect a mutation → treat as non-read-only.
@@ -74,7 +78,18 @@ READONLY_GIT_SUBCMDS = {
 BASH_MUTATING_FLAGS = {
     "sed": ("-i", "--in-place"),  # also matches `-i.bak` (prefix check)
     "find": ("-delete", "-exec", "-execdir", "-fprint", "-fprintf", "-fls"),
-    "awk": ("-i",),  # gawk -i inplace
+    "rg": ("--pre", "--hostname-bin"),
+    "git": ("--output", "--ext-diff", "--textconv"),
+    "file": ("-C", "--compile"),
+}
+
+PLAN_ALLOWED_TOOLS = {
+    "fs_read", "glob_search", "grep_search", "memory", "use_skill",
+    "web_search", "web_crawler", "describe_image", "git_status_safe",
+    "list_documents", "search_in_documents", "get_task_status", "get_task_output",
+    "list_background_tasks", "wait_for_task", "todo_read", "todo_write", "todo_clear",
+    "cancel_background_task",
+    "spawn_agent", "resume_agent", "exit_plan_mode", "ask_user_question",
 }
 
 
@@ -89,7 +104,9 @@ def is_readonly_bash(command: str) -> bool:
         return False
     if any(op in cmd for op in BASH_MUTATION_OPS):
         return False
-    tokens = cmd.split()
+    tokens = simple_command_tokens(cmd)
+    if not tokens:
+        return False
     prog = tokens[0]
     if prog not in READONLY_BASH_CMDS:
         return False
@@ -99,6 +116,14 @@ def is_readonly_bash(command: str) -> bool:
     for tok in tokens[1:]:
         if any(tok == f or tok.startswith(f) for f in bad_flags):
             return False
+    if prog == "sed":
+        # sed programs can execute commands and write files without -i.
+        return (
+            len(tokens) >= 3
+            and tokens[1] == "-n"
+            and re.fullmatch(r"\d+(?:,\d+)?p", tokens[2]) is not None
+            and all(not token.startswith("-") for token in tokens[3:])
+        )
     if prog == "git":
         sub = tokens[1] if len(tokens) > 1 else ""
         return sub in READONLY_GIT_SUBCMDS
@@ -118,7 +143,7 @@ def is_plan_file(path: str) -> bool:
 
 
 def is_blocked_by_plan_mode(
-    tool_name: str, tool_args: dict = None, *, plan_active: bool
+    tool_name: str, tool_args: dict = None, *, plan_active: bool, readonly_hint: bool = False
 ) -> bool:
     """True when plan mode is active and this tool/call would mutate.
 
@@ -130,7 +155,7 @@ def is_blocked_by_plan_mode(
     if not plan_active:
         return False
     if tool_name not in PLAN_BLOCKED_TOOLS:
-        return False
+        return tool_name not in PLAN_ALLOWED_TOOLS and not readonly_hint
 
     args = tool_args or {}
     if tool_name == "execute_bash":
@@ -143,6 +168,12 @@ def is_blocked_by_plan_mode(
 def plan_mode_block_message(tool_name: str) -> str:
     """ToolMessage for a plan-mode block, tailored per tool to point at the
     read-only escape hatch (read-only shell, or writing the plan file)."""
+    if tool_name not in PLAN_ALLOWED_TOOLS | PLAN_BLOCKED_TOOLS:
+        return (
+            f"Blocked: external tool '{tool_name}' has no read-only declaration "
+            "for plan mode. Its MCP server must declare annotations.readOnlyHint=true, "
+            "or the user must leave plan mode before this tool can run."
+        )
     if tool_name == "execute_bash":
         return (
             "Blocked: plan mode is active (read-only). Only read-only shell "

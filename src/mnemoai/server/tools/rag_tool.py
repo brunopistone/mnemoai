@@ -89,7 +89,11 @@ def register_rag_tools(mcp: FastMCP) -> None:
             if not metas:
                 return "No relevant information found in indexed documents."
 
-            result = f"Found {len(metas)} relevant chunks:\n\n"
+            method = (
+                " (BM25 keyword matching only; semantic retrieval unavailable)"
+                if any(meta.get("retrieval_method") == "bm25" for meta in metas) else ""
+            )
+            result = f"Found {len(metas)} relevant chunks{method}:\n\n"
             for i, (score, meta) in enumerate(zip(scores, metas), 1):
                 doc_id = meta.get("doc_id", "unknown")
                 chunk_idx = meta.get("chunk_idx", "?")

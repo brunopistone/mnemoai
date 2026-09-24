@@ -1,9 +1,9 @@
 import json
 import sys
-from io import StringIO
+from functools import partial
 
 import anyio.to_thread
-from crawl4ai import *
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.config import config
@@ -93,7 +93,7 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
         # Scheme + destination check. The fetched page becomes model input, so an
         # internal address (localhost, RFC1918, 169.254.169.254) must not be
         # reachable from a prompt. Resolves DNS before fetching.
-        url_verdict = classify_url(url)
+        url_verdict = await anyio.to_thread.run_sync(classify_url, url)
         if url_verdict.blocked:
             logger.warning("web_crawler blocked url=%s: %s", url, url_verdict.reason)
             return json.dumps(
@@ -112,16 +112,9 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
         run_config = CrawlerRunConfig(page_timeout=page_timeout_ms)
 
         async def _crawl():
-            """Run the crawl with stdout muted; returns the crawl result."""
-            old_stdout = sys.stdout
-            sys.stdout = StringIO()
-            try:
-                async with AsyncWebCrawler(
-                    browser_type="none", verbose=False
-                ) as crawler:
-                    return await crawler.arun(url=url, config=run_config)
-            finally:
-                sys.stdout = old_stdout
+            """Configure quiet logging without changing another task's stdout."""
+            async with AsyncWebCrawler(config=BrowserConfig(verbose=False)) as crawler:
+                return await crawler.arun(url=url, config=run_config)
 
         try:
             global _browser_install_attempted
@@ -164,14 +157,15 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                 tokens = count_tokens(content)
                 if tokens > config.get("RAG", {}).get("MAX_TOKENS", 1024 * 8):
                     try:
-                        rag = get_rag_session()
+                        rag = await anyio.to_thread.run_sync(get_rag_session)
                         if rag is not None:
-                            num_chunks = rag.ingest(
-                                url,
-                                content,
-                                chunk_size_tokens=int(
-                                    config.get("RAG", {}).get("CHUNK_TOKENS", 1024)
-                                ),
+                            num_chunks = await anyio.to_thread.run_sync(
+                                partial(
+                                    rag.ingest, url, content,
+                                    chunk_size_tokens=int(
+                                        config.get("RAG", {}).get("CHUNK_TOKENS", 1024)
+                                    ),
+                                )
                             )
 
                             return json.dumps(

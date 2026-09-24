@@ -14,9 +14,11 @@ completions; the UI surfaces notifications.
 
 import json
 import threading
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import tasks_dir
 
@@ -50,10 +52,12 @@ class BackgroundAgentRegistry:
         self._lock = threading.Lock()
         self._agents: Dict[str, BackgroundAgent] = {}
         self._counter = 0
+        self._namespace = uuid.uuid4().hex[:12]
 
     def _next_id(self, agent_type: str) -> str:
         self._counter += 1
-        return f"{agent_type}-{self._counter}"
+        safe_type = "".join(c if c.isalnum() or c in "-_" else "_" for c in agent_type)
+        return f"{safe_type}-{self._counter}-{self._namespace}"
 
     def register(self, agent_type: str, description: str, prompt: str) -> BackgroundAgent:
         """Create and store a new running background agent; returns it."""
@@ -123,18 +127,16 @@ class BackgroundAgentRegistry:
         (the in-memory registry is gone, but the record on disk survives)."""
         try:
             path = tasks_dir() / f"subagent_{rec.agent_id}.json"
-            path.write_text(
-                json.dumps(
-                    {
+            atomic_write_json(
+                str(path),
+                {
                         "agent_id": rec.agent_id,
                         "agent_type": rec.agent_type,
                         "description": rec.description,
                         "prompt": rec.prompt,
                         "status": rec.status,
                         "result": rec.result,
-                    },
-                    indent=2,
-                )
+                },
             )
         except OSError as e:
             logger.debug(f"Could not persist background agent {rec.agent_id}: {e}")
@@ -146,6 +148,8 @@ class BackgroundAgentRegistry:
         a process that died mid-run can't be trusted to have a result)."""
         agent_id = (agent_id or "").strip()
         if not agent_id:
+            return None
+        if any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in agent_id):
             return None
         try:
             path = tasks_dir() / f"subagent_{agent_id}.json"

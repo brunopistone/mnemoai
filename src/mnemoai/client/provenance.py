@@ -94,6 +94,7 @@ class ProvenanceLog:
     """Append-only per-project index of which prompt changed which file."""
 
     def __init__(self, cwd=None, profile: str = None) -> None:
+        self.cwd = os.path.realpath(str(cwd if cwd is not None else os.getcwd()))
         self.path: Optional[str] = None
         try:
             self.path = str(provenance_path(cwd, profile))
@@ -123,6 +124,7 @@ class ProvenanceLog:
             self._append(
                 {
                     "t": "change",
+                    "cwd": self.cwd,
                     "path": key,
                     "tool": tool,
                     "ts": round(time.time(), 3),
@@ -175,6 +177,12 @@ def changes(target: str = "", cwd=None, profile: str = None) -> List[Change]:
             for line in fh:
                 change = _parse(line)
                 if change is None or (key and change.path != key):
+                    continue
+                record = json.loads(line)
+                recorded_cwd = record.get("cwd")
+                if recorded_cwd and os.path.realpath(str(recorded_cwd)) != os.path.realpath(
+                    str(cwd if cwd is not None else os.getcwd())
+                ):
                     continue
                 found.append(change)
     except OSError:

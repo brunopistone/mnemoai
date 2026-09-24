@@ -84,6 +84,17 @@ def grep_tree(tmp_path):
 
 
 class TestFileEdit:
+    def test_minimal_config_can_read_a_text_file(self, tmp_path, monkeypatch):
+        from mnemoai.server.tools.readers.line_reader import read_lines
+        from mnemoai.utils.config import config
+
+        source = tmp_path / "text.txt"
+        source.write_text("readable")
+        monkeypatch.setattr(config, "get", lambda key, default=None: default)
+        result = json.loads(read_lines(str(source), 1, -1))
+        assert not result.get("error")
+        assert "readable" in result["content"]
+
     def test_simple_replacement(self, file_edit, tmp_path):
         f = tmp_path / "f.txt"
         f.write_text("hello world")

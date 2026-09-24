@@ -21,7 +21,6 @@ from mnemoai.utils.configurator import (
     _set_bool,
     _set_field,
     _set_in_section,
-    _set_or_add_in_section,
     _set_top_level,
     _set_top_level_or_add,
     _truthy,
@@ -129,9 +128,9 @@ def test_truthy_interprets_template_scalars():
     assert _truthy("yes") is True
 
 
-def test_set_or_add_inserts_missing_key_after_header():
+def test_set_field_inserts_missing_key_after_header():
     # MODEL_ID has no API_PROTOCOL in SAMPLE; it should be inserted.
-    out = _set_or_add_in_section(SAMPLE, "MODEL_ID", "API_PROTOCOL", "anthropic")
+    out = _set_field(SAMPLE, "MODEL_ID", "API_PROTOCOL", "anthropic")
     d = yaml.safe_load(out)
     assert d["MODEL_ID"]["API_PROTOCOL"] == "anthropic"
     # Inserted line is indented to match the section's children (2 spaces).
@@ -140,17 +139,17 @@ def test_set_or_add_inserts_missing_key_after_header():
     assert "API_PROTOCOL" not in d["VISION_MODEL_ID"]
 
 
-def test_set_or_add_replaces_existing_key():
-    base = _set_or_add_in_section(SAMPLE, "MODEL_ID", "API_PROTOCOL", "responses")
-    out = _set_or_add_in_section(base, "MODEL_ID", "API_PROTOCOL", "anthropic")
+def test_set_field_replaces_existing_key():
+    base = _set_field(SAMPLE, "MODEL_ID", "API_PROTOCOL", "responses")
+    out = _set_field(base, "MODEL_ID", "API_PROTOCOL", "anthropic")
     d = yaml.safe_load(out)
     assert d["MODEL_ID"]["API_PROTOCOL"] == "anthropic"
     # No duplicate line was added on the second call.
     assert out.count("API_PROTOCOL:") == 1
 
 
-def test_set_or_add_only_touches_named_section():
-    out = _set_or_add_in_section(SAMPLE, "VISION_MODEL_ID", "API_PROTOCOL", "responses")
+def test_set_field_only_touches_named_section():
+    out = _set_field(SAMPLE, "VISION_MODEL_ID", "API_PROTOCOL", "responses")
     d = yaml.safe_load(out)
     assert d["VISION_MODEL_ID"]["API_PROTOCOL"] == "responses"
     assert "API_PROTOCOL" not in d["MODEL_ID"]
@@ -1047,35 +1046,34 @@ def test_config_providers_menu_covers_every_llm_provider():
     assert types <= set(_PROVIDER_LABELS)
 
 
-# --- Shared connection-prompt helper: /config and /model ask the same params ---
+# --- Live connection steps: /config and /model run these with Back support ---
 
 
-def test_prompt_provider_connection_sagemaker_asks_region_and_format(monkeypatch):
+def test_connection_steps_sagemaker_asks_region_and_format(monkeypatch):
     from mnemoai.utils import configurator as C
 
     answers = iter(["eu-west-1", "huggingface"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "MODEL_ID:\n  NAME: ep\n  TYPE: sagemaker\n"
-    out, conn = C._prompt_provider_connection(text, "MODEL_ID", "sagemaker")
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "sagemaker"))
     d = yaml.safe_load(out)
     assert d["MODEL_ID"]["REGION"] == "eu-west-1"
     assert d["MODEL_ID"]["INPUT_FORMAT"] == "huggingface"
-    assert conn["REGION"] == "eu-west-1"
 
 
-def test_prompt_provider_connection_litellm_asks_base_and_key(monkeypatch):
+def test_connection_steps_litellm_asks_base_and_key(monkeypatch):
     from mnemoai.utils import configurator as C
 
     answers = iter(["http://localhost:8000/v1", "sk-abc"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "MODEL_ID:\n  NAME: openai/gpt-4o\n  TYPE: litellm\n"
-    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "litellm")
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "litellm"))
     d = yaml.safe_load(out)
     assert d["MODEL_ID"]["API_BASE"] == "http://localhost:8000/v1"
     assert d["MODEL_ID"]["API_KEY"] == "sk-abc"
 
 
-def test_prompt_provider_connection_mlx_asks_host_port_with_its_own_defaults(
+def test_connection_steps_mlx_asks_host_port_with_its_own_defaults(
     monkeypatch,
 ):
     # The HOST/PORT prompts are shared with the other local runner, so they must
@@ -1091,35 +1089,34 @@ def test_prompt_provider_connection_mlx_asks_host_port_with_its_own_defaults(
 
     monkeypatch.setattr("builtins.input", _fake_input)
     text = "MODEL_ID:\n  NAME: qwen-agentcoder\n  TYPE: mlx\n"
-    out, conn = C._prompt_provider_connection(text, "MODEL_ID", "mlx")
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "mlx"))
     d = yaml.safe_load(out)["MODEL_ID"]
     assert d["HOST"] == "127.0.0.1" and d["PORT"] == 8000
-    assert conn == {"HOST": "127.0.0.1", "PORT": "8000"}
     # Optional keys: blank -> not written, so HOST/PORT stays the live path.
     assert "API_BASE" not in d and "API_KEY" not in d
     assert "11434" not in "".join(prompts)  # no other runner's default offered
     assert any("MLX server host" in p for p in prompts)
 
 
-def test_prompt_provider_connection_mlx_base_url_overrides(monkeypatch):
+def test_connection_steps_mlx_base_url_overrides(monkeypatch):
     from mnemoai.utils import configurator as C
 
     answers = iter(["127.0.0.1", "8000", "https://mac.internal/mlx/v1", "tok"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "MODEL_ID:\n  NAME: qwen-agentcoder\n  TYPE: mlx\n"
-    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "mlx")
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "mlx"))
     d = yaml.safe_load(out)["MODEL_ID"]
     assert d["API_BASE"] == "https://mac.internal/mlx/v1"
     assert d["API_KEY"] == "tok"
 
 
-def test_prompt_provider_connection_ollama_defaults_unchanged(monkeypatch):
+def test_connection_steps_ollama_defaults_unchanged(monkeypatch):
     # The provider-aware prompts must not have moved the other runner's defaults.
     from mnemoai.utils import configurator as C
 
     monkeypatch.setattr("builtins.input", lambda *a, **k: "")
     text = "MODEL_ID:\n  NAME: qwen3.5:4b\n  TYPE: ollama\n"
-    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "ollama")
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "ollama"))
     d = yaml.safe_load(out)["MODEL_ID"]
     assert d["HOST"] == "localhost" and d["PORT"] == 11434
 
@@ -1155,14 +1152,14 @@ def test_host_port_fallback_borrows_no_other_providers_defaults(monkeypatch):
 
     monkeypatch.setattr("builtins.input", _fake_input)
     text = "MODEL_ID:\n  NAME: m\n  TYPE: mlx\n"
-    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "mlx")
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "mlx"))
     d = yaml.safe_load(out)["MODEL_ID"]
     joined = "".join(prompts)
     assert "Ollama" not in joined and "11434" not in joined
     assert "PORT" not in d  # no default to offer -> nothing written
 
 
-def test_prompt_provider_connection_openai_optional_base_url(monkeypatch):
+def test_connection_steps_openai_optional_base_url(monkeypatch):
     # OpenAI prompts for an OPTIONAL base URL + key (to target a local
     # OpenAI-compatible server); blank answers leave the config untouched
     # (defaults to the OpenAI API via OPENAI_API_KEY).
@@ -1171,25 +1168,25 @@ def test_prompt_provider_connection_openai_optional_base_url(monkeypatch):
     answers = iter(["", ""])  # blank base URL, blank key
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "MODEL_ID:\n  NAME: gpt-5-mini\n  TYPE: openai\n"
-    out, conn = C._prompt_provider_connection(text, "MODEL_ID", "openai")
-    assert conn == {}
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "openai"))
+    assert out == text
     d = yaml.safe_load(out)["MODEL_ID"]
     assert "HOST" not in d
     assert "API_BASE" not in d and "API_KEY" not in d  # blank -> not written
 
 
-def test_prompt_provider_connection_openai_sets_base_url(monkeypatch):
+def test_connection_steps_openai_sets_base_url(monkeypatch):
     # A non-blank base URL points OpenAI at a local server.
     from mnemoai.utils import configurator as C
 
     answers = iter(["http://localhost:8080/v1", ""])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "MODEL_ID:\n  NAME: qwen\n  TYPE: openai\n"
-    out, _ = C._prompt_provider_connection(text, "MODEL_ID", "openai")
+    out = C._run_steps(text, C._connection_steps("MODEL_ID", "openai"))
     assert yaml.safe_load(out)["MODEL_ID"]["API_BASE"] == "http://localhost:8080/v1"
 
 
-def test_prompt_provider_connection_embeddings_skips_input_format(monkeypatch):
+def test_connection_steps_embeddings_skips_input_format(monkeypatch):
     # INPUT_FORMAT is a SageMaker *chat* key; embeddings sagemaker only needs REGION.
     from mnemoai.utils import configurator as C
 
@@ -1197,7 +1194,7 @@ def test_prompt_provider_connection_embeddings_skips_input_format(monkeypatch):
     answers = iter(["us-west-2", ""])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     text = "RAG:\n  EMBED_MODEL_ID:\n    NAME: e\n    TYPE: sagemaker\n"
-    out, _ = C._prompt_provider_connection(text, "EMBED_MODEL_ID", "sagemaker")
+    out = C._run_steps(text, C._connection_steps("EMBED_MODEL_ID", "sagemaker"))
     d = yaml.safe_load(out)
     assert d["RAG"]["EMBED_MODEL_ID"]["REGION"] == "us-west-2"
     assert "INPUT_FORMAT" not in d["RAG"]["EMBED_MODEL_ID"]
@@ -1898,6 +1895,7 @@ class TestModelOverrideReportsWhatItWrote:
         dest = tmp_path / "config.yaml"
         dest.write_text(self.CFG)
         monkeypatch.setattr(C, "config_path", lambda: dest)
+        monkeypatch.setattr(C.Config, "_resolve_config_path", lambda: dest)
         monkeypatch.setattr(C, "_is_tty", lambda: True)
         monkeypatch.setattr(C, "_ask_choice", lambda *a, **k: row)
 
@@ -2021,3 +2019,20 @@ class TestChoiceDialogTracksTheArrowKeys:
         from prompt_toolkit.widgets import CheckboxList
 
         assert "select_on_focus" not in inspect.signature(CheckboxList).parameters
+def test_params_edit_the_config_selected_by_environment(tmp_path, monkeypatch):
+    from mnemoai.utils import configurator
+
+    selected = tmp_path / "selected.yaml"
+    selected.write_text("MODEL_ID:\n  NAME: fake\n  TYPE: ollama\n  TEMPERATURE: 0.1\n")
+    default = tmp_path / "unused.yaml"
+    monkeypatch.setenv("MNEMOAI_CONFIG", str(selected))
+    monkeypatch.setattr(configurator, "config_path", lambda: default)
+    monkeypatch.setattr(configurator, "_is_tty", lambda: False)
+    monkeypatch.setattr(configurator, "_ask_choice", lambda *args, **kwargs: "1")
+    monkeypatch.setattr(
+        configurator, "_prompt_inference_params",
+        lambda text, section: text.replace("TEMPERATURE: 0.1", "TEMPERATURE: 0.2"),
+    )
+    assert configurator.run_params_override() == selected
+    assert "TEMPERATURE: 0.2" in selected.read_text()
+    assert not default.exists()

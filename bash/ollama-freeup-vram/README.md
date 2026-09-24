@@ -6,7 +6,7 @@ Script and service to periodically free up VRAM used by Ollama on Linux and macO
 
 ### Step 1:
 
-Edit `<PATH_TO_FOLDER>` and `<PATH_TO_USER_HOME>` from the files
+Replace `/PATH_TO_REPOSITORY` and `/PATH_TO_USER_HOME` with your actual paths.
 
 ### Step 2:
 
@@ -16,9 +16,15 @@ Run `chmod +x ollama_free_vram.sh`
 
 ### Step 3:
 
-Copy `ollama-vram-cleaner.service` under `/etc/systemd/system/`
+Install the service and its timer:
 
-`cp ollama-vram-cleaner.service /etc/systemd/system/`
+```bash
+sudo cp ollama-vram-cleaner.service ollama-vram-cleaner.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ollama-vram-cleaner.timer
+```
+
+The timer runs the one-shot service every minute.
 
 ## Mac
 

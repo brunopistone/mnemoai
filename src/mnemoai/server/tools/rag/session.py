@@ -1,8 +1,6 @@
-"""Session RAG helpers: embed with Ollama when available and store in FAISS (if present).
+"""Session-scoped document ingestion and hybrid semantic/BM25 search."""
 
-This is a compact, defensive implementation to avoid previous merge/indent issues.
-"""
-
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,6 +9,7 @@ import numpy as np
 from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
+from mnemoai.utils.embedding_integrity import require_clean_vectors
 from mnemoai.utils.hybrid_search import (
     candidate_count,
     merge_and_rank,
@@ -30,6 +29,7 @@ def _chunk_key(meta: Dict[str, Any]) -> str:
 
 # Global reference to the RAG session (set by chat_interface)
 _rag_session = None
+_rag_session_lock = threading.RLock()
 
 
 def set_rag_session(session: Optional[Any]) -> None:
@@ -55,7 +55,14 @@ def get_rag_session() -> Optional[Any]:
 
     # If already set (same process), return it
     if _rag_session is not None:
-        return _rag_session
+        pointer = rag_session_pointer_path()
+        try:
+            wanted = pointer.read_text().strip() if pointer.is_file() else ""
+        except OSError:
+            wanted = ""
+        if not wanted or wanted == _rag_session.session_id:
+            return _rag_session
+        _rag_session = None
 
     # MCP subprocess: read session_id from file and create session. The pointer
     # file is per-instance (namespaced by MNEMOAI_INSTANCE_ID, inherited from the
@@ -69,11 +76,13 @@ def get_rag_session() -> Optional[Any]:
             session_id = session_file.read_text().strip()
 
             embed_model_config = config.get("RAG", {}).get("EMBED_MODEL_ID", {})
-            _rag_session = SessionRAG(
-                embed_model_config=embed_model_config,
-                session_id=session_id,
-                rag_dir=rag_dir,
-            )
+            with _rag_session_lock:
+                if _rag_session is None or _rag_session.session_id != session_id:
+                    _rag_session = SessionRAG(
+                        embed_model_config=embed_model_config,
+                        session_id=session_id,
+                        rag_dir=rag_dir,
+                    )
             logger.debug(f"RAG session created in subprocess: {session_id}")
             return _rag_session
     except Exception as e:
@@ -140,6 +149,7 @@ class SessionRAG:
         self.dim = dim  # Will be set from first embedding if None
         self.session_id = session_id or self._generate_session_id()
         self.rag_dir = rag_dir
+        self._ingest_lock = threading.RLock()
 
         # Load hybrid search weights from config
         rag_search_config = config.get("RAG", {}).get("SEARCH", {})
@@ -221,6 +231,11 @@ class SessionRAG:
         return self.embeddings_controller.embed(texts)
 
     def ingest(self, doc_id: str, content: str, chunk_size_tokens: int = 2048) -> int:
+        """Serialize document replacement, including first-store initialization."""
+        with self._ingest_lock:
+            return self._ingest(doc_id, content, chunk_size_tokens)
+
+    def _ingest(self, doc_id: str, content: str, chunk_size_tokens: int = 2048) -> int:
         """Ingest document content into the RAG system.
 
         Args:
@@ -231,6 +246,8 @@ class SessionRAG:
         Returns:
             Number of chunks created and indexed
         """
+        if self.store is not None:
+            require_clean_vectors(self.store)
         logger.debug(
             f"RAG ingest: doc_id={doc_id}, content_len={len(content)}, chunk_size_tokens={chunk_size_tokens}"
         )
@@ -240,7 +257,7 @@ class SessionRAG:
             for i, c in enumerate(chunks[:3]):
                 logger.debug(f"  Chunk {i}: {len(c)} chars")
         except Exception as e:
-            logger.warning(f"Failed to import chunking_helper: {e}, using fallback")
+            logger.warning("Document chunking failed (%s); using paragraph chunking", e)
             chunks = _fallback_chunker(content, chunk_size_tokens)
 
         logger.debug("Ingesting doc %s with %d chunks", doc_id, len(chunks))
@@ -262,7 +279,7 @@ class SessionRAG:
                 )
             vectors.append(vecs)
 
-        if vectors and np is not None:
+        if vectors:
             all_vecs = np.vstack(vectors)
             batch_dim = int(all_vecs.shape[1])
 
@@ -276,27 +293,17 @@ class SessionRAG:
                     f"Created vector store with dim={batch_dim}, session_id={self.session_id}"
                 )
 
-            if hasattr(self.store, "add"):
-                # Check for dimension mismatch
-                store_dim = getattr(self.store, "dim", None)
-
-                if store_dim is not None and store_dim != batch_dim:
-                    logger.warning(
-                        "Dimension mismatch: store dim=%s, batch dim=%s. Recreating store and clearing old data.",
-                        store_dim,
-                        batch_dim,
+            store_dim = self.store.dim
+            if store_dim != batch_dim:
+                if self.store.metadatas:
+                    raise ValueError(
+                        f"Embedding dimension changed from {store_dim} to {batch_dim}. "
+                        "Clear the document index before re-indexing with a different model."
                     )
-                    # Recreate store with correct dim, clearing old data
-                    self.store = VectorStoreController(
-                        batch_dim, session_id=self.session_id, rag_dir=self.rag_dir
-                    )
-                    self.dim = batch_dim
+                self.store.clear(dim=batch_dim)
+                self.dim = batch_dim
 
-                self.store.add(all_vecs, metas)
-            else:
-                for v, m in zip(all_vecs, metas):
-                    self.store["vectors"].append(v)
-                    self.store["metadatas"].append(m)
+            self.store.replace_document(doc_id, all_vecs, metas)
 
             # Rebuild BM25 index with all chunks
             self._rebuild_bm25()
@@ -318,7 +325,7 @@ class SessionRAG:
         Returns:
             Tuple of (scores, metadatas) where scores are hybrid scores and metadatas contain chunk info
         """
-        if self.store is None:
+        if self.store is None or not self.store.metadatas or top_k <= 0:
             return [], []
 
         if not query_text or not query_text.strip():
@@ -326,34 +333,24 @@ class SessionRAG:
             return [], []
 
         logger.debug(f"Querying RAG with text: '{query_text}'")
-        embeddings = self._embed_batch([query_text])
-        if embeddings.shape[0] == 0:
-            logger.error(f"Embedding returned empty array for query: '{query_text}'")
-            return [], []
-
-        vec = embeddings[0]
         candidate_k = candidate_count(top_k)
-
-        # --- Semantic candidates (backend-specific; the dict-store fallback has
-        # no vector index, so it scores every chunk with a numpy cosine) ---
         sem_candidates: Dict[str, Tuple[float, Dict]] = {}
-        if hasattr(self.store, "search"):
+        degraded = False
+        try:
+            if getattr(self.store, "integrity_error", None):
+                raise RuntimeError(self.store.integrity_error)
+            embeddings = self._embed_batch([query_text])
+            if not len(embeddings):
+                raise ValueError("Embedding provider returned no query vector")
+            vec = embeddings[0]
             sem_scores, sem_metas = self.store.search(
                 vec, top_k=min(candidate_k, len(self.store.metadatas))
             )
-        else:
-            scores_metas: List[Tuple[float, Dict]] = []
-            for v, m in zip(self.store["vectors"], self.store["metadatas"]):
-                score = float(
-                    np.dot(vec, v) / (np.linalg.norm(vec) * np.linalg.norm(v) + 1e-12)
-                )
-                scores_metas.append((score, m))
-            scores_metas.sort(key=lambda x: x[0], reverse=True)
-            sem_scores = [s for s, _ in scores_metas[:candidate_k]]
-            sem_metas = [m for _, m in scores_metas[:candidate_k]]
-
-        for score, meta in zip(sem_scores, sem_metas):
-            sem_candidates[_chunk_key(meta)] = (score, meta)
+            for score, meta in zip(sem_scores, sem_metas):
+                sem_candidates[_chunk_key(meta)] = (score, meta)
+        except Exception as e:
+            degraded = True
+            logger.warning("Semantic document search unavailable; using BM25 only: %s", e)
 
         # --- Keyword candidates + merge (shared with the episodic stores) ---
         bm25_candidates = normalized_bm25_candidates(
@@ -366,8 +363,12 @@ class SessionRAG:
         ranked = merge_and_rank(
             sem_candidates,
             bm25_candidates,
-            self.semantic_weight,
-            self.keyword_weight,
+            0.0 if degraded else self.semantic_weight,
+            1.0 if degraded else self.keyword_weight,
             top_k,
         )
-        return [score for score, _ in ranked], [meta for _, meta in ranked]
+        metas = [
+            {**meta, "retrieval_method": "bm25"} if degraded else meta
+            for _, meta in ranked
+        ]
+        return [score for score, _ in ranked], metas

@@ -71,11 +71,12 @@ class TestServerSubprocessIsIsolated:
             {
                 "command": "create",
                 "path": "tier_isolation_probe.txt",
-                "content": "probe\n",
+                "file_text": "probe\n",
             }
         )
         payload = json.loads(result) if isinstance(result, str) else result
         assert payload.get("success"), payload
         written = Path(payload["path"]).resolve()
+        assert written.read_text() == "probe\n"
         assert _REPO_ROOT not in written.parents, f"wrote into the repo: {written}"
         assert not (_REPO_ROOT / "tier_isolation_probe.txt").exists()

@@ -327,7 +327,8 @@ def inject_episodic_context(client, prompt: str) -> str:
         # see memory/episode_tools.py, which is also what the writer uses.
         tools_str = describe_tools(ep.get("tools", ""))
         similarity = ep.get("similarity", 0)
-        context += f'{i}. "{task}" → {tools_str} (similarity: {similarity:.2f})\n'
+        score_label = "BM25 keyword match" if ep.get("retrieval_method") == "bm25" else "similarity"
+        context += f'{i}. "{task}" → {tools_str} ({score_label}: {similarity:.2f})\n'
 
     return f"{context}\n\n{prompt}"
 

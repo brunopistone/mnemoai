@@ -51,10 +51,10 @@ The client manages the conversation flow and user interaction.
 - **`router.py`**: Query classifier and routing
   - Classifies queries into categories (simple_qa, code, research, knowledge, full)
   - Routes each category to a specialized tool subset
-  - Configurable classifier prompt via `ROUTING_PROMPT` in config
+  - Configurable classifier prompt via `ROUTING_PROMPT` in `prompts.yaml`
 - **`orchestrator.py`**: Task decomposition and worker orchestration
   - Decomposes complex tasks into ordered subtasks with category assignments
-  - Configurable orchestrator and aggregator prompts via config
+  - Configurable orchestrator and aggregator prompts in `prompts.yaml`
 - **`reasoning_utils.py`**: Shared reasoning/thinking helpers
   - Temporarily disables reasoning for auxiliary LLM calls (routing, task decomposition) so output lands in the response content
   - Extracts visible text from `<think>` tags and Bedrock thinking blocks
@@ -121,7 +121,7 @@ Model controllers and custom implementations.
   - `embeddings_controller.py`: Embedding model initialization for RAG
 - **`chat_models/`** (concrete LangChain `ChatModel` subclasses):
   - `chat_ollama_wrapper.py`: Extends ChatOllama with `presence_penalty` and `frequency_penalty` support
-  - `sagemaker_chat.py`: Full LangChain `BaseChatModel` for SageMaker endpoints (streaming, tool calling, reasoning)
+  - `sagemaker_chat.py`: LangChain `BaseChatModel` for SageMaker endpoints (streaming chat; tool binding is not supported)
 
 #### 4. **Utils Layer** (`utils/`)
 

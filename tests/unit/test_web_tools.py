@@ -11,6 +11,8 @@ where they're looked up.
 
 import asyncio
 import json
+import sys
+import threading
 
 import pytest
 
@@ -167,6 +169,37 @@ def web_crawler(monkeypatch):
 
 
 class TestWebCrawler:
+    def test_crawler_does_not_replace_process_stdout(self, web_crawler, monkeypatch):
+        original = sys.stdout
+        seen = []
+
+        class Crawler(_FakeCrawler):
+            async def arun(self, url, config=None):
+                seen.append(sys.stdout is original)
+                return _FakeResult("page")
+
+        monkeypatch.setattr(wc, "AsyncWebCrawler", Crawler)
+        run(web_crawler("https://example.com"))
+        assert seen == [True]
+        assert sys.stdout is original
+
+    def test_rag_ingestion_runs_off_the_event_loop(self, web_crawler, monkeypatch):
+        from types import SimpleNamespace
+
+        thread = threading.get_ident()
+        seen = []
+        _FakeCrawler._markdown = "large page " * 20
+        monkeypatch.setattr(
+            wc.config, "get",
+            lambda key, default=None: True if key == "ENABLE_RAG"
+            else {"MAX_TOKENS": 1} if key == "RAG" else default,
+        )
+        rag = SimpleNamespace(ingest=lambda *args, **kwargs: seen.append(threading.get_ident()) or 1)
+        monkeypatch.setattr(wc, "_rag_session", lambda: lambda: rag)
+        result = json.loads(run(web_crawler("https://example.com")))
+        assert result["chunks_indexed"] == 1
+        assert seen and seen[0] != thread
+
     def test_inline_content_truncated_over_cap(self, web_crawler):
         _FakeCrawler._markdown = "x" * (wc._MAX_INLINE_CHARS + 5000)
         out = json.loads(run(web_crawler("https://example.com")))

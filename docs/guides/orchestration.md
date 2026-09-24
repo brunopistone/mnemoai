@@ -139,17 +139,24 @@ reasoning) don't stream to your terminal — you see a compact status line
 (`… N sub-agents running`) while it works, and only its final report comes back.
 For **independent** investigations the assistant can spawn several sub-agents in
 one turn and they run **in parallel** (bounded by `LLM.SUBAGENT_MAX_CONCURRENCY`,
-default 4; set it to 1 to force sequential). A destructive tool used inside a
-sub-agent still asks for confirmation the same way the main assistant does.
+default 4; set it to 1 to force sequential). Spawned sub-agents and
+parallel/background orchestrator workers never open approval prompts:
+unapproved destructive calls are refused. Inline foreground orchestrator steps
+can ask for approval; inherited headless/spawn restrictions are preserved.
+Read-only actions and actions already authorized by session trust, confirmation
+toggles, an approved plan, the current `/auto` tier, or a hook can run. Tool
+scopes, plan mode, hook denials, and server-side safety checks remain enforced.
+Setting `run_in_background=false` changes only when the report returns; it does
+not give a sub-agent a way to ask for permission.
 
 **Background sub-agents.** For a long task you don't want to wait on, the
 assistant can run a sub-agent **in the background**: the call returns right away
 and you keep working. When it finishes, its report **surfaces automatically** —
 if you're idle, the assistant speaks up on its own to deliver it; if you're
 mid-conversation, it's folded into your next turn. Because a background sub-agent
-has no terminal to prompt on, it **automatically skips any destructive tool that
-isn't already approved** — so background work is safe by default; use it for
-read-only investigation or when the needed actions were pre-approved. The
+has no terminal to prompt on, it **refuses unapproved mutations without
+prompting**. `/auto off` does not authorize delegated writes or shell commands.
+A flagged git override without prior trust is refused immediately. The
 assistant can also **resume** a finished sub-agent with a follow-up ("now also
 check the tests"), which continues it with its prior work as context — this
 works even after restarting the app or loading a saved conversation, because

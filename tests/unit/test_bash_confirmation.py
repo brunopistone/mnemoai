@@ -58,6 +58,35 @@ def test_non_interactive_auto_proceeds(agent, monkeypatch):
     assert _run(agent, monkeypatch, "execute_bash", {"command": "x"}, "n", tty=False) is True
 
 
+@pytest.mark.parametrize("tool", ["execute_bash", "start_background_task"])
+@pytest.mark.parametrize("tty", [False, True])
+@pytest.mark.parametrize("answer", [False, True])
+def test_foreground_launch_uses_the_same_shell_approval_gate(
+    agent, monkeypatch, tool, tty, answer
+):
+    monkeypatch.setattr(agent_mod.sys.stdin, "isatty", lambda: tty)
+    monkeypatch.setattr(agent_mod.config, "get", lambda key, default=None: True)
+    asked = []
+    monkeypatch.setattr(agent, "_prompt_confirm", lambda *args: asked.append(args) or answer)
+    assert agent._confirm_tool(tool, {"command": "make test"}) is (answer if tty else True)
+    assert bool(asked) is tty
+
+
+@pytest.mark.parametrize("headless,depth", [(True, 0), (False, 1)])
+@pytest.mark.parametrize("tty", [False, True])
+def test_workers_cannot_approve_background_launches(agent, monkeypatch, headless, depth, tty):
+    monkeypatch.setattr(agent, "_is_headless", lambda: headless)
+    agent._spawn_depth = depth
+    monkeypatch.setattr(agent_mod.sys.stdin, "isatty", lambda: tty)
+    monkeypatch.setattr(agent_mod.config, "get", lambda key, default=None: True)
+    agent._prompt_confirm = lambda *args: pytest.fail("worker must not prompt")
+    assert not agent._confirm_tool("start_background_task", {"command": "make test"})
+    agent._preapproved_bash = ["make test"]
+    assert agent._confirm_tool(
+        "start_background_task", {"command": "make test"}
+    )
+
+
 def test_eof_declines(agent, monkeypatch):
     # Ctrl-D / closed stdin during the prompt is treated as a decline.
     monkeypatch.setattr(

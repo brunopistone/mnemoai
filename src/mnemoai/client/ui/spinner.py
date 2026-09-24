@@ -8,6 +8,13 @@ from mnemoai.client.ui.turn_view import format_duration
 # pinned-toolbar renderer (spinner_toolbar_text).
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# The label for the stretch AFTER the answer has streamed and before the turn
+# ends: the compaction check, the profile update, episode storage, reflection.
+# Shared because that stretch has two owners (client.query runs the first half,
+# chat_interface the learning steps it calls itself), and two spellings of one
+# phase would read as two phases.
+WRAP_UP_LABEL = "Wrapping up"
+
 
 class SpinnerStatus:
     """Thread-safe status shared between the ``Spinner`` (worker thread) and the

@@ -29,6 +29,86 @@ from mnemoai.client.agent import tool_formatting
 from mnemoai.client.mcp_tool_wrapper import MCPCallTimeout, _call_deadline
 
 
+def test_transport_failure_never_replays_a_committed_operation():
+    import asyncio
+
+    calls = []
+
+    class Session:
+        async def call_tool(self, name, arguments):
+            calls.append(name)
+            raise ConnectionError("response lost after commit")
+
+    async def run():
+        wrapper = mod.MCPClientWrapper.__new__(mod.MCPClientWrapper)
+        wrapper._session = Session()
+
+        async def reconnect():
+            wrapper._session = Session()
+
+        wrapper._reconnect = reconnect
+        with pytest.raises(ToolException, match="not retried"):
+            await wrapper.call_tool("commit", {})
+
+    asyncio.run(run())
+    assert calls == ["commit"]
+
+
+def test_native_mcp_error_is_propagated_as_failure():
+    from mcp.types import CallToolResult, TextContent
+
+    result = CallToolResult(content=[TextContent(type="text", text="rejected")], isError=True)
+    with pytest.raises(ToolException, match="rejected"):
+        mod.MCPClientWrapper._parse_tool_result(result)
+
+
+def test_concurrent_failures_reconnect_the_dead_session_only_once():
+    import asyncio
+
+    async def run():
+        both_started = asyncio.Event()
+        requests, reconnects = [], []
+
+        class Session:
+            async def call_tool(self, name, arguments):
+                requests.append(name)
+                if len(requests) == 2:
+                    both_started.set()
+                await both_started.wait()
+                raise ConnectionError("server disconnected")
+
+        wrapper = mod.MCPClientWrapper.__new__(mod.MCPClientWrapper)
+        wrapper._session = Session()
+
+        async def reconnect():
+            reconnects.append(True)
+            await asyncio.sleep(0)
+            wrapper._session = object()
+
+        wrapper._reconnect = reconnect
+        results = await asyncio.gather(
+            wrapper.call_tool("one", {}), wrapper.call_tool("two", {}),
+            return_exceptions=True,
+        )
+        assert all(isinstance(result, ToolException) for result in results)
+        assert reconnects == [True]
+        assert requests == ["one", "two"]
+
+    asyncio.run(run())
+
+
+def test_completed_future_timeout_is_not_polled_until_transport_deadline(monkeypatch):
+    from concurrent.futures import Future
+
+    future = Future()
+    future.set_exception(TimeoutError("server deadline"))
+    wrapper = mod.MCPClientWrapper.__new__(mod.MCPClientWrapper)
+    wrapper._loop = object()
+    monkeypatch.setattr(mod.asyncio, "run_coroutine_threadsafe", lambda *args: future)
+    with pytest.raises(MCPCallTimeout, match="reported a timeout"):
+        wrapper._run_coroutine(object(), timeout=600)
+
+
 class TestDeadlineHonorsTheToolsOwnTimeout:
     def test_long_wait_is_not_capped_at_the_default(self):
         # The exact regression: 1500 > 300 must NOT collapse to 300.

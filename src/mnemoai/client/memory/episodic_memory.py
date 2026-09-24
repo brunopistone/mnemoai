@@ -7,6 +7,7 @@ import tiktoken
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+from mnemoai.utils.tool_results import is_error_result
 
 from .chroma_store import ChromaEpisodicStore
 from .episode_tools import NO_TOOLS, clip_task, format_tools
@@ -112,7 +113,10 @@ class EpisodicMemoryManager:
         """
         # Check for near-duplicate episodes (configurable threshold)
         similar = self.store.search(query=task, top_k=1)
-        if similar and similar[0].get("similarity", 0) > self.duplicate_threshold:
+        if (
+            similar and similar[0].get("retrieval_method") != "bm25"
+            and similar[0].get("similarity", 0) > self.duplicate_threshold
+        ):
             logger.debug(
                 f"Skipping duplicate episode (similarity: {similar[0]['similarity']:.2f}, "
                 f"threshold: {self.duplicate_threshold})"
@@ -241,6 +245,24 @@ def is_task_successful(
         True if task appears successful
     """
     logger.debug("Evaluating task success...")
+
+    for msg in agent_messages:
+        if getattr(msg, "type", None) == "tool" and is_error_result(msg):
+            return False
+        if isinstance(msg, dict):
+            if msg.get("role") == "tool" and is_error_result(msg.get("content")):
+                return False
+            for block in msg.get("content", []) if isinstance(msg.get("content"), list) else []:
+                if not isinstance(block, dict) or not isinstance(block.get("toolResult"), dict):
+                    continue
+                result = block["toolResult"]
+                if is_error_result(result):
+                    return False
+                for content in result.get("content", []):
+                    if isinstance(content, dict) and is_error_result(
+                        content.get("text", content.get("json", {}))
+                    ):
+                        return False
 
     # Load configurable markers
     episodic_config = config.get("EPISODIC_MEMORY", {})

@@ -27,8 +27,8 @@ Automatically unloads idle Ollama models from VRAM to free GPU memory. Useful wh
 **macOS (LaunchAgent, runs every 60 seconds):**
 
 1. Edit `bash/ollama-freeup-vram/com.ollama.vramcleaner.plist`:
-   - Replace `<PATH_TO_FOLDER>` with the actual path to this repository
-   - Replace `<PATH_TO_USER_HOME>` with your home directory
+   - Replace `/PATH_TO_REPOSITORY` with the actual path to this repository
+   - Replace `/PATH_TO_USER_HOME` with your home directory
 2. Install:
 
 ```bash
@@ -39,13 +39,17 @@ launchctl load ~/Library/LaunchAgents/com.ollama.vramcleaner.plist
 **Linux (systemd):**
 
 1. Edit `bash/ollama-freeup-vram/ollama-vram-cleaner.service`:
-   - Replace `<PATH_TO_FOLDER>` with the actual path
+   - Replace `/PATH_TO_REPOSITORY` with the actual repository path
 2. Install:
 
 ```bash
 sudo cp bash/ollama-freeup-vram/ollama-vram-cleaner.service /etc/systemd/system/
-sudo systemctl enable ollama-vram-cleaner
-sudo systemctl start ollama-vram-cleaner
+sudo cp bash/ollama-freeup-vram/ollama-vram-cleaner.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ollama-vram-cleaner.timer
 ```
+
+The timer runs the one-shot service once per minute, avoiding a continuous
+restart loop.
 
 See `bash/ollama-freeup-vram/README.md` and `bash/ollama-env-mac/README.md` for more details.

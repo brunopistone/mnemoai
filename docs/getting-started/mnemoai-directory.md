@@ -78,7 +78,7 @@ because the next turn overwrites it.
 | `config/config.yaml`, `config/prompts.yaml`, `mcp/mcp.json` | You                                  | **Yes** — this is the intended interface    |
 | `hooks/hooks.json`                                          | You                                  | **Yes** — read at startup, so restart after |
 | `STEERING.md` (or `CLAUDE.md`), `skills/`, `agents/`        | You                                  | **Yes**                                     |
-| `commands/<name>.md`                                        | You                                  | **Yes** — an edit applies to the next line   |
+| `commands/<name>.md`                                        | You                                  | **Yes** — an edit applies to the next line  |
 | `<profile>/MEMORY.md`                                       | The assistant, via the `memory` tool | Yes — it's Markdown, and `/memory` shows it |
 | `<profile>/<profile>.json`                                  | The assistant, every turn            | No — EMAs and counters are recomputed       |
 | `models/*/episodic_memory/`, `models/*/playbook/`           | The assistant, every turn            | No — delete the directory to reset instead  |
@@ -87,9 +87,10 @@ because the next turn overwrites it.
 ## Why memory is scoped per model
 
 `episodic_memory/` and `playbook/` sit under `models/<model-name>/` because both
-are keyed to the embedding model that produced their vectors. Switching model
-starts a fresh store rather than searching vectors from a different embedding
-space, which would return nonsense. `MEMORY.md` and `STEERING.md` (or
+are scoped to the chat model that used those episodes and tool strategies.
+Episodic vector stores additionally track the embedding model's fingerprint,
+because vectors from different embedding spaces cannot be compared. The playbook
+stores JSON tool-use notes. `MEMORY.md` and `STEERING.md` (or
 `CLAUDE.md`) are plain text and so are shared across models.
 
 ## What is cleaned up automatically
