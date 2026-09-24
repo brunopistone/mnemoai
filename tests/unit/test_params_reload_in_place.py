@@ -81,7 +81,7 @@ def ci():
     c = ChatInterface.__new__(ChatInterface)
     c.client = _Client()
     c.restarts = 0
-    c._restart_in_place = lambda: setattr(c, "restarts", c.restarts + 1)
+    c._restart_in_place = lambda notice=None: setattr(c, "restarts", c.restarts + 1)
     return c
 
 
@@ -110,7 +110,7 @@ class TestParamsDoesNotRestart:
         c = ChatInterface.__new__(ChatInterface)
         c.client = _Client(reload_ok=False)
         c.restarts = 0
-        c._restart_in_place = lambda: setattr(c, "restarts", c.restarts + 1)
+        c._restart_in_place = lambda notice=None: setattr(c, "restarts", c.restarts + 1)
         monkeypatch.setattr(
             "mnemoai.client.ui.chat_interface.run_params_override", lambda: "/cfg.yaml"
         )
@@ -185,7 +185,7 @@ class TestModelRestartsOnlyWhenItMustNot:
         c = ChatInterface.__new__(ChatInterface)
         c.client = _Client(reload_ok=False)
         c.restarts = 0
-        c._restart_in_place = lambda: setattr(c, "restarts", c.restarts + 1)
+        c._restart_in_place = lambda notice=None: setattr(c, "restarts", c.restarts + 1)
         self._wrote(monkeypatch, "SUMMARY")
         c._dispatch("/model")
         assert c.client.area_reload_calls == 1
@@ -198,6 +198,38 @@ class TestModelRestartsOnlyWhenItMustNot:
         assert ci._dispatch("/model") is None
         assert ci.client.area_reload_calls == 0
         assert ci.restarts == 0
+
+    def test_successful_in_place_change_prints_only_the_applied_model(self, ci, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "mnemoai.client.ui.chat_interface.run_model_override",
+            lambda: ModelOverride(
+                Path("/cfg.yaml"), "ROUTER", label="Router model", model_name="small"
+            ),
+        )
+        ci._dispatch("/model")
+        output = capsys.readouterr().out
+        assert "Router model changed to small" in output
+        assert "/cfg.yaml" not in output
+        assert "Restarting" not in output
+        assert ci.client.area_reload_calls == 1
+        assert ci.restarts == 0
+
+    def test_restart_receives_one_saved_model_notice(self, ci, monkeypatch):
+        monkeypatch.setattr(
+            "mnemoai.client.ui.chat_interface.run_model_override",
+            lambda: ModelOverride(
+                Path("/cfg.yaml"), "MODEL_ID", label="Chat model",
+                model_name="new-model", parameters_reset=True,
+            ),
+        )
+        notices = []
+        ci._restart_in_place = lambda notice=None: notices.append(notice)
+        ci._dispatch("/model")
+        assert len(notices) == 1
+        assert "Chat model saved: new-model" in notices[0]
+        assert "Restarting to apply" in notices[0]
+        assert "Parameters reset" in notices[0]
+        assert "changed to" not in notices[0]
 
 
 class TestRebindModel:

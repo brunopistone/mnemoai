@@ -1920,6 +1920,80 @@ class TestModelOverrideReportsWhatItWrote:
         assert written.enabled_feature is False
         # The old contract survives: a truthy result naming the file it wrote.
         assert written.path == dest
+        assert written.label == "Chat model"
+        assert written.model_name == "tiny:1b"
+        assert written.model_type == "ollama"
+        assert written.parameters_reset is False
+
+    def test_model_selection_leaves_feedback_to_the_command_handler(self, monkeypatch, tmp_path, capsys):
+        written, dest = self._run(monkeypatch, tmp_path, "1")
+        assert written is not None
+        output = capsys.readouterr().out
+        assert str(dest) not in output
+        assert "Updated" not in output
+        assert "=" * 10 not in output
+        assert "Inference parameters were reset" not in output
+
+    def test_reset_notice_is_backed_by_an_actual_parameter_reset(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(self, "CFG", self.CFG.replace(
+            "  TYPE: ollama\n", "  TYPE: ollama\n  TEMPERATURE: 0.3\n", 1
+        ))
+        written, dest = self._run(monkeypatch, tmp_path, "1")
+        assert written.parameters_reset is True
+        assert "TEMPERATURE" not in yaml.safe_load(dest.read_text())["MODEL_ID"]
+
+    def test_model_change_suppresses_the_routine_credential_reminder(self, monkeypatch, tmp_path):
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(
+            C, "_print_credential_note",
+            lambda *args: pytest.fail("/model must not print setup boilerplate"),
+        )
+        written, _ = self._run(monkeypatch, tmp_path, "1")
+        assert written is not None
+
+    def test_follow_chat_metadata_names_the_inherited_model(self, monkeypatch, tmp_path):
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(self, "CFG", self.CFG + (
+            "AREA_MODELS:\n  ORCHESTRATOR:\n"
+            "    NAME: old-model\n    TYPE: ollama\n    TEMPERATURE: 0.2\n"
+        ))
+        monkeypatch.setattr(
+            C, "_prompt_model_section",
+            lambda text, section, is_llm, **kwargs: C._clear_area_override(text, section),
+        )
+        written, _ = self._run(monkeypatch, tmp_path, "5")
+        assert written.follows_chat is True
+        assert written.model_name == "llama3.1:8b"
+        assert written.model_type == "ollama"
+        assert written.parameters_reset is False
+
+    def test_vision_parameters_copied_from_chat_are_not_reported_as_defaults(self, monkeypatch, tmp_path):
+        from mnemoai.utils import configurator as C
+
+        monkeypatch.setattr(self, "CFG", self.CFG.replace(
+            "  TYPE: ollama\n", "  TYPE: ollama\n  TEMPERATURE: 0.3\n", 1
+        ) + "VISION_MODEL_ID:\n  NAME: old-vision\n  TYPE: ollama\n  TEMPERATURE: 0.9\n")
+        monkeypatch.setattr(
+            C, "_prompt_model_section",
+            lambda text, *args, **kwargs: C._copy_chat_to_vision(text),
+        )
+        written, dest = self._run(monkeypatch, tmp_path, "2")
+        assert written.model_name == "llama3.1:8b"
+        assert written.parameters_reset is False
+        assert yaml.safe_load(dest.read_text())["VISION_MODEL_ID"]["TEMPERATURE"] == 0.3
+
+    def test_setup_still_has_credential_guidance(self, monkeypatch):
+        from mnemoai.utils import configurator as C
+
+        notes = []
+        monkeypatch.setattr(C, "_print_credential_note", notes.append)
+        monkeypatch.setattr(C, "_prompt_provider_type", lambda *args: "bedrock")
+        monkeypatch.setattr(C, "_ask", lambda prompt, default=None, **kwargs: default or "")
+        monkeypatch.setattr(C, "_ask_number", lambda *args, **kwargs: None)
+        C._prompt_model_section(self.CFG, "MODEL_ID", is_llm=False)
+        assert notes == ["bedrock"]
 
     def test_an_area_row_names_the_area(self, monkeypatch, tmp_path):
         # Orchestration is already on, so nothing but the area block changed.

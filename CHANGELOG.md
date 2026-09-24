@@ -7,6 +7,19 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [Unreleased]
+
+## [1.25.0] — 2026-09-24
+
+### Changed
+
+- Make `/mcp` a compact server-status view with actual per-server tool counts.
+  `/mcp verbose` retains tool names, collision renames and configuration details.
+- Use concise, consistent model-change confirmations for every model role.
+  Show the selected model, a parameter-reset hint when relevant, and whether a
+  restart is pending. Remove routine credential boilerplate and the orphaned
+  separator from `/model` output. Reload, restart and permission behavior is unchanged.
+
 ## [1.24.0] — 2026-09-24
 
 ### Added
@@ -5165,7 +5178,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.25.0...HEAD
+[1.25.0]: https://github.com/brunopistone/mnemoai/compare/v1.24.0...v1.25.0
 [0.11.1]: https://github.com/brunopistone/mnemoai/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/brunopistone/mnemoai/compare/v0.10.5...v0.11.0
 [0.10.5]: https://github.com/brunopistone/mnemoai/compare/v0.10.4...v0.10.5

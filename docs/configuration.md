@@ -451,6 +451,15 @@ Notes:
 
 ### Model Parameters
 
+After `/model`, the confirmation names the selected model without repeating
+credential instructions or the config-file path. An in-place update reports
+“changed to”; a change requiring the existing restart reports “saved” and
+“Restarting to apply…”. A short `/params` hint appears only when configured
+inference parameters were reset. Switching an area back to the chat model is
+reported as “now follows Chat”. These messages do not change which edits require
+a restart or preserve the current conversation. `/doctor` and the application
+log retain configuration-path diagnostics.
+
 This is the full reference for what you can put under `MODEL_ID`,
 `VISION_MODEL_ID`, and `RAG.EMBED_MODEL_ID`. Only `NAME` and `TYPE` are
 required; everything else is optional and omitted keys fall back to the

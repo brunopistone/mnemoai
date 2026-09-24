@@ -115,6 +115,24 @@ def test_blank_query_is_noop(ci):
     )
 
 
+@pytest.mark.parametrize("command,verbose", [
+    ("/mcp", False), ("/mcp verbose", True), ("/MCP VERBOSE", True),
+])
+def test_mcp_routes_to_the_requested_report(ci, command, verbose):
+    calls = []
+    ci._print_mcp_status = lambda verbose=False: calls.append(verbose)
+    assert ci._dispatch(command) is None
+    assert calls == [verbose]
+    assert ci.client.calls == []
+
+
+def test_invalid_mcp_option_shows_usage_without_calling_the_model(ci, capsys):
+    ci._print_mcp_status = lambda **kwargs: pytest.fail("invalid option must not render")
+    assert ci._dispatch("/mcp unknown") is None
+    assert "Usage: /mcp [verbose]" in capsys.readouterr().out
+    assert ci.client.calls == []
+
+
 def test_cancelled_query_prints_stopped(ci, capsys):
     # A cancelled turn must resolve the transient "(cancelling…)" to a final
     # "stopped" line (not just silently swallow the response).

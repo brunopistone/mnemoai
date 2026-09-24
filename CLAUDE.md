@@ -132,6 +132,15 @@ Two facts every shell tool needs and none should re-derive. **Which shell:** `su
 
 Built-in server always launched; extra stdio servers declared in `~/.mnemoai/mcp/mcp.json` (`load_external_servers()`, tolerant). `MultiMCPClient` merges tools — a colliding external tool is namespaced `servername__tool` (built-in names win). External tools are appended to **every** route (incl. `simple_qa`) so routing never hides them, and injected into the decomposition prompt when orchestration is on. `/mcp` lists status.
 
+### Command feedback
+
+Command presentation lives in `client/ui/command_feedback.py`: `/mcp` shows
+compact cached status and counts tools by their `mcp_client` owner, never by
+namespace prefixes; `/mcp verbose` adds tools and setup details. Model selection
+returns presentation metadata in `ModelOverride`; the command handler emits a
+single summary after choosing the existing reload/restart path. “Saved” is not
+“applied”: pending restarts must not claim the new model is already active.
+
 ### Hybrid search (semantic + BM25)
 
 Used in both episodic memory and RAG. Pattern: get top-N candidates from vector store, get top-N from BM25, merge with configurable weights (`utils/bm25.py`).
