@@ -42,7 +42,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # a built-in without reserving it fails the suite.
 BUILTIN_COMMANDS = (
     "auto", "branch", "clear", "compact", "config", "context", "copy", "diff",
-    "doctor", "exit", "export", "features", "files", "help", "hooks", "load", "mcp",
+    "doctor", "exit", "export", "features", "files", "help", "hooks", "learned", "load", "mcp",
     "memory", "model", "params", "plan", "quit", "rename", "rewind", "save", "skills",
     "usage", "why",
 )

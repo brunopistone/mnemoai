@@ -9,6 +9,37 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.26.0] — 2026-09-25
+
+### Added
+
+- `/config playbook` edits learning limits without restarting or rebuilding the
+  chat model. Full setup and enabling learning through `/features` also offer
+  reflector model selection and the reflection wait limit.
+- `/learned` lists and inspects model-scoped tool-use notes, edits them with
+  revision checks, disables/restores them, and controls injection for the session.
+  Explicit helpful/unhelpful feedback is separate from exposure and tool outcomes.
+- `AREA_MODELS.REFLECTOR` selects the model for bounded, evidence-linked lesson
+  extraction. It is available through `/model`, `/params`, and `/doctor`.
+
+### Changed
+
+- Reflection now makes one tool-free model call after a tool-using turn instead
+  of selecting canned advice. Invalid output, cancellation, or provider failure
+  creates no lesson. `PLAYBOOK.REFLECTION_TIMEOUT` bounds the wait (default 30s).
+- Playbook records gain stable IDs, revisions, source references, scope, status,
+  and edit history. Existing files are backed up before migration; unknown legacy
+  provenance stays unknown. Refinement archives records rather than deleting them.
+  Repeated observations do not raise confidence. Disabled notes stop being
+  injected, including after prompt rebuilds and session resume.
+
+### Fixed
+
+- An inaccessible playbook directory or lock file no longer prevents startup
+  or an ordinary chat request. Learning becomes unavailable without clearing data
+  and lock access is retried on later turns. Lock waits are bounded so another
+  stalled writer cannot block the session indefinitely.
+
 ## [1.25.0] — 2026-09-24
 
 ### Changed
@@ -143,7 +174,7 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 ### Added
 
 - **The status line shows how long the turn has been running** (`46s · esc to
-  cancel`). The spinner said that a turn was working but not for how long, which
+cancel`). The spinner said that a turn was working but not for how long, which
   is the fact the decision to interrupt rests on — a turn five seconds in and one
   eight minutes in looked identical. It times the whole turn rather than the step
   in front of it, so it keeps counting across every tool call.
@@ -5178,7 +5209,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.25.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.26.0...HEAD
+[1.26.0]: https://github.com/brunopistone/mnemoai/compare/v1.25.0...v1.26.0
 [1.25.0]: https://github.com/brunopistone/mnemoai/compare/v1.24.0...v1.25.0
 [0.11.1]: https://github.com/brunopistone/mnemoai/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/brunopistone/mnemoai/compare/v0.10.5...v0.11.0

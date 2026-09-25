@@ -25,6 +25,7 @@ MODEL_ID:
 # AREA_MODELS:
 #   ROUTER: qwen3.5:1.7b            # query classification (one label per turn)
 #   ORCHESTRATOR: qwen3.5:4b        # task decomposition into subtasks
+#   REFLECTOR: qwen3.5:4b           # evidence-linked lessons after tool turns
 #   SUMMARY:                        # conversation compaction
 #     NAME: qwen3.5:1.7b
 #     TEMPERATURE: 0.3
@@ -174,6 +175,7 @@ ENABLE_SKILLS: true
 # ACE Playbook Configuration (Agentic Context Engineering)
 ENABLE_PLAYBOOK: true
 PLAYBOOK:
+  REFLECTION_TIMEOUT: 30 # Seconds to wait for extraction (1–120); timeout stores nothing
   MAX_ENTRIES: 500 # Maximum playbook entries before refinement
   SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
   MAX_INJECT: 10 # Maximum entries to inject per query

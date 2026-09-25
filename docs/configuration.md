@@ -372,6 +372,18 @@ VISION_MODEL_ID:
 
 ### Per-area models (`AREA_MODELS`)
 
+For learning configuration, use `/features` to enable/disable the playbook,
+`/model` and `/params` for its reflector, and `/config playbook` for learning
+limits without a restart. Full `/config` setup also offers reflector selection
+and the wait limit. These controls do not change tool permissions.
+
+`REFLECTOR` selects the model for evidence-linked playbook extraction
+(`ENABLE_PLAYBOOK`). It supports the same partial model configuration as the
+other areas and appears in `/model`, `/params`, and `/doctor`. Without an
+override it uses a separate non-reasoning instance of the chat model. An
+unavailable reflector creates no new lesson and does not fail the conversation.
+See [Inspect and control learning](guides/memory.md#inspect-and-control-learning).
+
 A turn is not one model call. Before the answer is streamed, the query is
 **classified** by the router and — with orchestration on — **split into subtasks**
 by the decomposer; afterwards a **summarizer** may compact the history. Those

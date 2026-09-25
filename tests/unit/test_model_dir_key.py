@@ -138,6 +138,20 @@ def _playbook(models_root, model, strategies):
     return path
 
 
+def test_versioned_playbook_merge_preserves_distinct_identities():
+    target = [{"id": "mem-a", "strategy": "same", "status": "disabled"}]
+    donor = [{"id": "mem-b", "strategy": "same", "status": "active"}]
+    assert merge_playbook_entries(donor, target) == target + donor
+
+
+def test_versioned_playbook_merge_does_not_overwrite_conflicting_state():
+    target = [{"id": "mem-a", "strategy": "same", "status": "disabled"}]
+    donor = [{"id": "mem-a", "strategy": "same", "status": "active"}]
+    with pytest.raises(ValueError, match="Conflicting"):
+        merge_playbook_entries(donor, target)
+    assert merge_playbook_entries(target, target) == target
+
+
 def _entries(path):
     return json.loads((path / "playbook.json").read_text())
 

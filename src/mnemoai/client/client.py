@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from langchain_core.messages import SystemMessage
 from mcp import StdioServerParameters
 
 from mnemoai.client import (
@@ -43,7 +45,11 @@ from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_compaction import compact_stores
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.model_dir_merge import unfork_model_dirs
-from mnemoai.client.memory.playbook_store import PlaybookStore
+from mnemoai.client.memory.playbook_store import (
+    PLAYBOOK_BLOCK_MARKER,
+    PLAYBOOK_END_MARKER,
+    PlaybookStore,
+)
 from mnemoai.client.memory.reflector import Reflector, current_turn_messages
 from mnemoai.client.session_log import (
     SessionLog,
@@ -204,6 +210,32 @@ class LangGraphClient:
             return self.system_prompt
         return f"{self.system_prompt}\n\n{playbook_context}"
 
+    def refresh_playbook_context(self):
+        """Replace only generated notes; preserve the conversation and its summary."""
+        if not getattr(self, "agent", None):
+            return
+        legacy_pattern = (
+            r"(?m)^" + re.escape(PLAYBOOK_BLOCK_MARKER) + r"\n"
+            r"(?:(?:Noted after past (?:errors|successes):|  · [^\n]*)\n?)*"
+        )
+        bounded_pattern = (
+            r"(?ms)^" + re.escape(PLAYBOOK_BLOCK_MARKER) + r"\n.*?^"
+            + re.escape(PLAYBOOK_END_MARKER) + r"(?:\n|$)"
+        )
+
+        def split_prompt(text):
+            prefix, marker, summary = text.partition("<conversation_summary>")
+            prefix = re.sub(bounded_pattern, "", prefix)
+            return re.sub(legacy_pattern, "", prefix).strip(), marker + summary
+
+        self.system_prompt = "\n\n".join(filter(None, split_prompt(self.system_prompt)))
+        base, summary = split_prompt(self.agent.system_prompt)
+        block = self._get_playbook_context()
+        self.agent.system_prompt = "\n\n".join(filter(None, (base, block, summary)))
+        for i, msg in enumerate(self.agent.messages):
+            if isinstance(msg, SystemMessage):
+                self.agent.messages[i] = self.agent._system_message()
+
     @staticmethod
     def _sanitize_for_path(name: str) -> str:
         """Delegate to ``utils.paths.sanitize_model_name`` (kept for callers)."""
@@ -259,6 +291,16 @@ class LangGraphClient:
 
     def _initialize_playbook(self) -> None:
         """Initialize ACE Reflector and Playbook store."""
+        self._playbook_error = None
+        try:
+            self._open_playbook()
+        except Exception as e:
+            self.reflector = self.playbook = None
+            self._playbook_error = str(e)
+            logger.warning("Playbook unavailable; conversation remains available: %s", e)
+
+    def _open_playbook(self) -> None:
+        """Open optional learning stores; the caller owns graceful degradation."""
         logger.debug("Initializing ACE Playbook...")
 
         # Model-scoped so one model's strategies don't leak into another's runs.
@@ -287,8 +329,29 @@ class LangGraphClient:
             ),
         )
 
+        if self.playbook.error:
+            self._playbook_error = self.playbook.error
+            return
         stats = self.playbook.get_stats()
         logger.debug(f"✓ Playbook initialized ({stats['total_entries']} entries)")
+
+    def reload_playbook_settings(self) -> bool:
+        """Apply playbook-only tuning without replacing models or the conversation."""
+        try:
+            config.reload()
+            settings = config.get("PLAYBOOK", {}) or {}
+            limit = int(settings.get("MAX_ENTRIES", 500))
+            threshold = float(settings.get("SIMILARITY_THRESHOLD", 0.85))
+            if limit < 1 or not 0 <= threshold <= 1:
+                raise ValueError("Invalid playbook capacity or similarity threshold")
+            if self.playbook is not None:
+                self.playbook.max_entries = limit
+                self.playbook.similarity_threshold = threshold
+                self.refresh_playbook_context()
+            return True
+        except Exception as e:
+            logger.warning("Could not apply playbook settings: %s", e)
+            return False
 
     def start(self, verbose: bool = False) -> None:
         """Start the client and initialize the agent."""
@@ -446,6 +509,16 @@ class LangGraphClient:
         delivery_only = not (prompt or "").strip()
 
         try:
+            self._reflection_messages = []
+            if getattr(self, "playbook", None):
+                self.refresh_playbook_context()
+                self._playbook_exposed_ids = list(getattr(self, "_playbook_selected_ids", []))
+                log = getattr(self.agent, "session_log", None)
+                self._learning_turn = getattr(self, "_learning_turn", 0) + 1
+                self._reflection_source = {
+                    "session_id": getattr(log, "session_id", None) or self.session_id,
+                    "turn": log.next_turn if log is not None else self._learning_turn,
+                }
             if not delivery_only and self.episodic_memory:
                 try:
                     prompt = self._inject_episodic_context(prompt)
@@ -466,7 +539,17 @@ class LangGraphClient:
                     prompt = steering + prompt
 
             with self.mcp_client:
-                response = self.agent(prompt)
+                before = list(self.agent.messages)
+                if getattr(self, "playbook", None):
+                    try:
+                        self.playbook.record_exposure(self._playbook_exposed_ids)
+                    except Exception:
+                        logger.warning("Could not record playbook exposure", exc_info=True)
+                try:
+                    response = self.agent(prompt)
+                finally:
+                    if getattr(self, "reflector", None) and self.agent.messages != before:
+                        self._reflection_messages = current_turn_messages(self.agent.messages)
 
                 if hasattr(self.agent, "_code_formatter"):
                     self.agent._code_formatter.flush()
@@ -764,18 +847,46 @@ class LangGraphClient:
 
     def reflect_and_learn(self, task: str) -> None:
         """Reflect on the last interaction and update the playbook."""
-        if not self.reflector or not self.playbook:
+        if not self.reflector or not self.playbook or getattr(self.playbook, "error", None):
             return
 
-        if not self.agent or not self.agent.messages:
+        if not self.agent:
             return
 
         try:
+            messages = getattr(self, "_reflection_messages", None)
+            if messages is None:
+                messages = current_turn_messages(self.agent.messages)
+            if not any(self.reflector._extract_tool_calls(msg) for msg in messages):
+                return
+            source = getattr(self, "_reflection_source", {})
+            source_key = (source.get("session_id"), source.get("turn"))
+            if source and source_key == getattr(self, "_last_reflected_source", None):
+                return
+            self._last_reflected_source = source_key
+            model = self._area_model("REFLECTOR")
+            usage_name = self._area_usage_name("REFLECTOR")
+            tracker = getattr(self.agent, "usage", None)
+            if tracker is None:
+                tracker = getattr(self.agent, "usage_tracker", None)
+            failed_before = self.reflector.metrics["failed_calls"]
+            total_before = self.reflector.metrics["total_tool_calls"]
+            cancel_event = getattr(self.agent, "_cancel_event", None)
             entries = self.reflector.reflect_on_trajectory(
-                messages=self.agent.messages,
-                task=task,
+                messages=messages, task=task, model=model, source=source,
+                scope=os.path.realpath(os.getcwd()),
+                timeout=max(1, min(120, float(config.get("PLAYBOOK", {}).get(
+                    "REFLECTION_TIMEOUT", 30
+                )))),
+                cancel=cancel_event.is_set if cancel_event is not None else None,
+                record_usage=(lambda response: tracker.record(response, usage_name))
+                if tracker is not None else None,
             )
-
+            if self.reflector.metrics["total_tool_calls"] > total_before:
+                self.playbook.record_exposure(
+                    getattr(self, "_playbook_exposed_ids", []),
+                    success=self.reflector.metrics["failed_calls"] == failed_before,
+                )
             if entries:
                 self.playbook.append_batch(entries)
                 logger.debug(f"Reflector: learned {len(entries)} strategies")
@@ -889,20 +1000,21 @@ class LangGraphClient:
             return self._area_model_cache[area]
         model = None
         overrides = area_models.overrides_for(area)
-        if overrides:
+        if overrides or area == "REFLECTOR":
             try:
                 # No callbacks: these calls are internal, and the streaming handler
                 # belongs to the visible turn.
-                model = self.llm_controller.build_model_variant(overrides)
+                model = self.llm_controller.build_model_variant(
+                    overrides, callbacks=[], non_reasoning=not bool(overrides),
+                ) if area == "REFLECTOR" else self.llm_controller.build_model_variant(overrides)
                 logger.info(
                     "%s uses %s",
                     area_models.DESCRIPTIONS.get(area, area).capitalize(),
                     area_models.label(overrides, self.llm_controller.model_name),
                 )
             except Exception as e:
-                logger.error(
-                    f"{area} model override failed to build; using the main model: {e}"
-                )
+                fallback = "reflection unavailable" if area == "REFLECTOR" else "using the main model"
+                logger.error(f"{area} model override failed to build; {fallback}: {e}")
         self._area_model_cache[area] = model
         return model
 

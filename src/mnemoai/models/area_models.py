@@ -49,13 +49,14 @@ CONFIG_SECTION = "AREA_MODELS"
 # Deliberately NOT an area: the aggregator. Its output is the user-visible answer,
 # streamed through the same path as an ordinary reply — a different model there
 # would change the voice of the answer, not just the cost of an internal step.
-AREAS: Tuple[str, ...] = ("ROUTER", "ORCHESTRATOR", "SUMMARY")
+AREAS: Tuple[str, ...] = ("ROUTER", "ORCHESTRATOR", "SUMMARY", "REFLECTOR")
 
 # One line each, for `/doctor` and the startup log.
 DESCRIPTIONS = {
     "ROUTER": "query classification",
     "ORCHESTRATOR": "task decomposition",
     "SUMMARY": "conversation compaction",
+    "REFLECTOR": "evidence-linked learning",
 }
 
 

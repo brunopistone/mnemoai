@@ -2,9 +2,12 @@
 
 import json
 import os
+import threading
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
+from mnemoai.client.memory import reflection
+from mnemoai.client.memory.playbook_records import PlaybookEntry as PlaybookEntry
 from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
 
@@ -64,43 +67,12 @@ def _is_prompt_dict(msg: dict) -> bool:
     return False
 
 
-class PlaybookEntry:
-    """A structured strategy entry for the playbook."""
-
-    def __init__(
-        self,
-        context: str,
-        strategy: str,
-        source: str,
-        outcome: str = "success",
-        tools: List[str] = None,
-        confidence: float = 1.0,
-    ):
-        self.context = context  # When to apply this strategy
-        self.strategy = strategy  # What to do
-        self.source = source  # Where this was learned from
-        self.outcome = outcome  # success or failure
-        self.tools = tools or []
-        self.confidence = confidence
-        self.timestamp = datetime.now().isoformat()
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "context": self.context,
-            "strategy": self.strategy,
-            "source": self.source,
-            "outcome": self.outcome,
-            "tools": self.tools,
-            "confidence": self.confidence,
-            "timestamp": self.timestamp,
-        }
-
-
 class Reflector:
     """Analyzes execution trajectories and extracts strategies."""
 
     def __init__(self, persist_path: str = None):
-        self.pending_reflections: List[Dict[str, Any]] = []
+        self.last_error = None
+        self._in_flight = threading.Event()
         self.persist_path = persist_path
         self.metrics_file = (
             os.path.join(persist_path, "metrics.json") if persist_path else None
@@ -199,18 +171,6 @@ class Reflector:
         "unable to",
     ]
 
-    # Strategy templates for common failure patterns
-    FAILURE_STRATEGIES = {
-        "string_not_found": "Read the file first to get the exact string including whitespace before using str_replace",
-        "file_not_found": "Use glob_search or ls to verify file path exists before reading/writing",
-        "permission_denied": "Check file permissions with ls -la before attempting write operations",
-        "syntax_error": "Validate code syntax before writing; consider using a linter",
-        "timeout": "Break long operations into smaller chunks or use background tasks",
-        "api_error": "Check API status and rate limits; implement retry with backoff",
-        "command_failed": "Verify command exists and arguments are correct; check PATH if needed",
-        "json_error": "Validate JSON structure before parsing; check for trailing commas or missing quotes",
-    }
-
     def _is_actual_error(self, result_lower: str, raw_result: str = "") -> bool:
         """True when the TOOL failed — not merely when its output mentions failure.
 
@@ -286,179 +246,9 @@ class Reflector:
 
         self._save_metrics()
 
-    def analyze_tool_execution(
-        self,
-        tool_name: str,
-        tool_args: Dict[str, Any],
-        tool_result: str,
-        task_context: str,
-    ) -> Optional[PlaybookEntry]:
-        """Analyze a single tool execution and extract strategy if notable.
-
-        Args:
-            tool_name: Name of the tool executed
-            tool_args: Arguments passed to the tool
-            tool_result: Result/output from the tool
-            task_context: The user's original task
-
-        Returns:
-            PlaybookEntry if a notable pattern was found, None otherwise
-        """
-        # Skip if no result to analyze
-        if not tool_result:
-            return None
-
-        result_lower = tool_result.lower()
-
-        # Check for failures first (raw result too: JSON parsing needs real case)
-        if self._is_actual_error(result_lower, tool_result):
-            # Check for specific failure patterns
-            for failure_type, patterns in self.FAILURE_PATTERNS.items():
-                if any(p in result_lower for p in patterns):
-                    self._track_metric(success=False, failure_type=failure_type)
-                    entry = self._create_failure_entry(
-                        failure_type, tool_name, tool_args, tool_result, task_context
-                    )
-                    if entry:
-                        self.metrics["strategies_extracted"] += 1
-                        self._save_metrics()
-                    return entry
-
-            # Generic failure (no specific pattern matched)
-            self._track_metric(success=False)
-            return None
-
-        # Success case
-        self._track_metric(success=True)
-
-        # Check for notable successes worth remembering
-        if self._is_notable_success(tool_name, tool_result):
-            entry = self._create_success_entry(
-                tool_name, tool_args, tool_result, task_context
-            )
-            if entry:
-                self.metrics["strategies_extracted"] += 1
-                self._save_metrics()
-            return entry
-
-        return None
-
-    def _create_failure_entry(
-        self,
-        failure_type: str,
-        tool_name: str,
-        tool_args: Dict[str, Any],
-        tool_result: str,
-        task_context: str,
-    ) -> PlaybookEntry:
-        """Create a playbook entry from a failure."""
-        strategy = self.FAILURE_STRATEGIES.get(
-            failure_type, f"Verify preconditions before using {tool_name}"
-        )
-
-        # Add specific context from the failure
-        context = self._extract_context(tool_name, tool_args, task_context)
-
-        source = f"Failed {tool_name} on {datetime.now().strftime('%Y-%m-%d')}: {failure_type}"
-
-        return PlaybookEntry(
-            context=context,
-            strategy=strategy,
-            source=source,
-            outcome="failure",
-            tools=[tool_name],
-            confidence=0.9,
-        )
-
-    def _create_success_entry(
-        self,
-        tool_name: str,
-        tool_args: Dict[str, Any],
-        tool_result: str,
-        task_context: str,
-    ) -> Optional[PlaybookEntry]:
-        """Create a playbook entry from a notable success."""
-        strategy = self._extract_success_strategy(tool_name, tool_args, tool_result)
-
-        # Skip if no specific strategy
-        if not strategy:
-            return None
-
-        context = self._extract_context(tool_name, tool_args, task_context)
-        source = f"Successful {tool_name} on {datetime.now().strftime('%Y-%m-%d')}"
-
-        return PlaybookEntry(
-            context=context,
-            strategy=strategy,
-            source=source,
-            outcome="success",
-            tools=[tool_name],
-            confidence=0.8,
-        )
-
-    def _extract_context(
-        self, tool_name: str, tool_args: Dict[str, Any], task_context: str
-    ) -> str:
-        """Extract the context/situation for when this strategy applies."""
-        # Tool-specific context extraction
-        if tool_name in ["fs_write", "file_edit", "str_replace"]:
-            path = tool_args.get("path", tool_args.get("file_path", ""))
-            ext = path.split(".")[-1] if "." in path else "file"
-            return f"editing {ext} files"
-
-        if tool_name in ["fs_read"]:
-            path = tool_args.get("path", "")
-            ext = path.split(".")[-1] if "." in path else "file"
-            return f"reading {ext} files"
-
-        if tool_name in ["execute_bash"]:
-            cmd = tool_args.get("command", "")[:30]
-            return f"running bash commands ({cmd}...)"
-
-        if tool_name in ["glob_search", "grep_search"]:
-            return "searching files"
-
-        if tool_name in ["web_search", "web_crawler"]:
-            return "web operations"
-
-        # Default: use task context
-        return task_context[:50] if task_context else tool_name
-
-    def _extract_success_strategy(
-        self, tool_name: str, tool_args: Dict[str, Any], tool_result: str
-    ) -> str:
-        """Extract a reusable strategy from a successful execution."""
-        if tool_name == "file_edit":
-            return "Include sufficient context in old_string to ensure uniqueness"
-
-        if tool_name == "execute_bash":
-            cmd = tool_args.get("command", "")
-            if "grep" in cmd:
-                return "Use grep with context (-B/-A flags) for better matches"
-            if "find" in cmd:
-                return "Use glob_search instead of find for better performance"
-            if "curl" in cmd:
-                return "Use -s flag for silent mode, -f to fail on HTTP errors"
-
-        if tool_name == "fs_read" and "pdf" in str(tool_args).lower():
-            return "For large PDFs, read specific page ranges rather than entire file"
-
-        if tool_name == "web_crawler":
-            url = tool_args.get("url", "")
-            if url:
-                return f"web_crawler works for fetching content from URLs"
-
-        # No specific strategy - return None to skip
-        return None
-
-    def _is_notable_success(self, tool_name: str, tool_result: str) -> bool:
-        """Determine if a success is worth remembering."""
-        # Only remember successes for tools with specific strategies
-        notable_tools = ["file_edit", "execute_bash"]
-        return tool_name in notable_tools
-
     def reflect_on_trajectory(
-        self, messages: List[Any], task: str, scope_to_last_turn: bool = True
+        self, messages: List[Any], task: str, scope_to_last_turn: bool = True,
+        *, model=None, source=None, scope="", timeout=30, cancel=None, record_usage=None,
     ) -> List[PlaybookEntry]:
         """Analyze an execution trajectory and extract all strategies.
 
@@ -474,7 +264,8 @@ class Reflector:
         Returns:
             List of PlaybookEntry objects
         """
-        entries = []
+        evidence = []
+        self.last_error = None
 
         if scope_to_last_turn:
             messages = current_turn_messages(messages)
@@ -491,20 +282,36 @@ class Reflector:
                 # Find corresponding result
                 result = self._find_tool_result(tool_call_id, tool_name, messages)
 
-                entry = self.analyze_tool_execution(
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    tool_result=result,
-                    task_context=task,
-                )
-
-                if entry:
-                    entries.append(entry)
-                    logger.debug(
-                        f"Reflector: extracted strategy for {tool_name} ({entry.outcome})"
-                    )
-
-        return entries
+                if not result:
+                    continue
+                result = result if isinstance(result, str) else json.dumps(result)
+                failed = self._is_actual_error(result.lower(), result)
+                failure_type = next((
+                    kind for kind, patterns in self.FAILURE_PATTERNS.items()
+                    if failed and any(p in result.lower() for p in patterns)
+                ), None)
+                self._track_metric(not failed, failure_type)
+                evidence.append(reflection.evidence_item(
+                    tool_name, tool_args, result, tool_call_id,
+                    "failure" if failed else "success", source or {},
+                ))
+        if not evidence:
+            return []
+        if model is None or self._in_flight.is_set():
+            self.last_error = "Reflection model unavailable or a prior request is still running"
+            return []
+        try:
+            entries = reflection.extract(
+                evidence, task, model, scope=scope, timeout=timeout, cancel=cancel,
+                record_usage=record_usage, in_flight=self._in_flight,
+            )
+            self.metrics["strategies_extracted"] += len(entries)
+            self._save_metrics()
+            return entries
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: reflection skipped; no new lessons stored"
+            logger.warning(self.last_error)
+            return []
 
     def _extract_tool_calls(self, msg: Any) -> List[Dict[str, Any]]:
         """Extract tool calls from a message."""

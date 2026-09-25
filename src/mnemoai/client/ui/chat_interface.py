@@ -14,7 +14,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 
 from mnemoai import app_version
-from mnemoai.client import file_ledger, file_mentions
+from mnemoai.client import file_ledger, file_mentions, learned
 from mnemoai.client.agent import auto_approve
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
@@ -30,6 +30,7 @@ from mnemoai.client.ui.tui import (
     _DELETE,
     PinnedPromptReader,
     _dialog_is_tty,
+    _edit_plan_in_editor,
     _ExitRepl,
     confirm_dialog,
     confirm_inline,
@@ -42,6 +43,7 @@ from mnemoai.utils.configurator import (
     run_features_override,
     run_model_override,
     run_params_override,
+    run_playbook_settings,
     run_reconfigure,
 )
 from mnemoai.utils.console import print_error
@@ -155,12 +157,13 @@ class ChatInterface:
         ]),
         ("Assistant", [
             ("/memory [clear]", "View (or clear) persistent memory"),
+            ("/learned [action]", "Inspect, edit or disable tool-use notes"),
             ("/skills [name]", "List installed skills (or preview one)"),
             ("/mcp [verbose]", "MCP status (verbose for tools & setup)"),
             ("/hooks", "List the tool hooks this session runs"),
         ]),
         ("Configure", [
-            ("/config", "Reconfigure config.yaml (overwrites it)"),
+            ("/config", "Full setup; /config playbook for learning"),
             ("/model", "Override one model (LLM/vision/embeds/router…)"),
             ("/params", "Tune inference params (temp, top_p, …)"),
             ("/features", "Enable/disable features (RAG, memory, web, …)"),
@@ -177,7 +180,7 @@ class ChatInterface:
     # Slash commands for autocomplete — the actual insertable tokens (the
     # welcome-box labels carry arg hints / alternates instead).
     _COMMANDS = [
-        ("/config", "Reconfigure config.yaml (overwrites it)"),
+        ("/config", "Full setup (/config playbook for learning settings)"),
         ("/model", "Override one model (LLM, vision, embeddings, router, …)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/features", "Enable/disable features (RAG, memory, web search, …)"),
@@ -188,6 +191,7 @@ class ChatInterface:
         ("/compact", "Summarize & shrink context (optional focus)"),
         ("/rewind", "Take back your last prompt and the turn it ran"),
         ("/memory", "View persistent memory (/memory clear to wipe)"),
+        ("/learned", "Inspect, edit or disable learned tool-use notes"),
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/auto", "Skip confirmations (/auto off|edits|writes|all)"),
         ("/save", "Save conversation (/save [path])"),
@@ -954,6 +958,7 @@ class ChatInterface:
         # `/branch 3` still routes through the same handler, which skips the dialog.
         dialog_cmds = (
             "/load", "/config", "/model", "/params", "/features", "/memory", "/branch",
+            "/learned",
         )
 
         def _dispatch(line: str):
@@ -1290,6 +1295,13 @@ class ChatInterface:
             print("\n" + self.client.usage_report() + "\n")
             return None
 
+        if query.lower() == "/learned" or query.lower().startswith("/learned "):
+            print("\n" + learned.run(
+                self.client, query[len("/learned"):].strip(),
+                confirm=confirm_inline, edit=_edit_plan_in_editor,
+            ) + "\n")
+            return None
+
         if query.lower() == "/context":
             print("\n" + self.client.context_report() + "\n")
             return None
@@ -1333,6 +1345,16 @@ class ChatInterface:
         if query.lower() == "/config":
             if run_reconfigure() is not None:
                 self._restart_in_place()
+            return None
+
+        if query.lower().startswith("/config "):
+            if query[len("/config"):].strip().lower() != "playbook":
+                print_error("Usage: /config [playbook]")
+            elif run_playbook_settings() is not None:
+                if self.client.reload_playbook_settings():
+                    print("\nPlaybook settings applied. This conversation continues.\n")
+                else:
+                    print_error("Settings saved, but could not be applied; restart to retry.")
             return None
 
         # /model normally restarts for the same reason: the provider, model name and
