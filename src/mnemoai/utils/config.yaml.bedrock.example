@@ -25,6 +25,7 @@ MODEL_ID:
 #   ROUTER: global.anthropic.claude-haiku-4-5   # classification (one label/turn)
 #   ORCHESTRATOR: global.anthropic.claude-opus-4-8  # task decomposition
 #   SUMMARY: global.anthropic.claude-haiku-4-5  # conversation compaction
+#   REFLECTOR: global.anthropic.claude-haiku-4-5 # evidence-linked lessons
 VISION_MODEL_ID:
   NAME: global.anthropic.claude-opus-4-8
   TYPE: bedrock
@@ -169,6 +170,7 @@ ENABLE_SKILLS: true
 # ACE Playbook Configuration (Agentic Context Engineering)
 ENABLE_PLAYBOOK: true
 PLAYBOOK:
+  REFLECTION_TIMEOUT: 30 # Seconds to wait for extraction (1–120); timeout stores nothing
   MAX_ENTRIES: 500 # Maximum playbook entries before refinement
   SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
   MAX_INJECT: 10 # Maximum entries to inject per query

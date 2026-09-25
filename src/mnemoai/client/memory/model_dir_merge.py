@@ -139,11 +139,7 @@ def forked_dirs(models_root, key: str) -> List[Path]:
 
 
 def merge_playbook_entries(donor: Any, target: Any) -> List[dict]:
-    """Target entries, then every donor entry whose strategy isn't already there.
-
-    Dedupes on the exact ``strategy`` text — the key ``PlaybookStore.append``
-    already uses, so a merged file looks like one the store wrote itself.
-    """
+    """Preserve versioned identities; legacy rows still deduplicate by strategy."""
     merged = (
         [e for e in target if isinstance(e, dict)] if isinstance(target, list) else []
     )
@@ -152,6 +148,15 @@ def merge_playbook_entries(donor: Any, target: Any) -> List[dict]:
         return merged
     for entry in donor:
         if not isinstance(entry, dict):
+            continue
+        if entry.get("id"):
+            existing = next((e for e in merged if e.get("id") == entry["id"]), None)
+            if existing is not None:
+                if existing != entry:
+                    raise ValueError("Conflicting playbook revisions; keep both stores")
+                continue
+            merged.append(entry)
+            seen.add(entry.get("strategy"))
             continue
         strategy = entry.get("strategy")
         if not strategy or strategy in seen:
@@ -281,7 +286,11 @@ def _merge_playbook(donor_path: Path, target_path: Path) -> Optional[int]:
     donor = _read_entries(donor_path / _PLAYBOOK_FILE)
     if donor is None or existing is None:
         return None
-    merged = merge_playbook_entries(donor, existing)
+    try:
+        merged = merge_playbook_entries(donor, existing)
+    except ValueError:
+        logger.warning("Conflicting playbook revisions in %s; donor preserved", donor_path)
+        return None
     added = len(merged) - len(existing)
     if added <= 0:
         return 0

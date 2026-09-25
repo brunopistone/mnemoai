@@ -295,9 +295,34 @@ User-declared shell commands run around a tool call (`~/.mnemoai/hooks/hooks.jso
 
 ### ACE Playbook learning (`client/memory/reflector.py`, `client/memory/playbook_store.py`)
 
-After each interaction, the Reflector analyzes tool trajectories, detects failure patterns, and extracts reusable strategies stored in the PlaybookStore. Relevant strategies are injected into the system prompt for future queries.
+After tool-using interactions, `Reflector` measures observed tool outcomes and
+`memory/reflection.py` makes one bounded, tool-free model call to extract up to
+three scoped lessons. `AREA_MODELS.REFLECTOR` uses the normal provider machinery;
+without an override it builds an independent non-reasoning main-model variant.
+Provider errors, invalid evidence IDs, timeouts, and cancellation store nothing.
+Capture tool evidence before post-answer compaction, and keep usage attributed
+to the actual reflector model.
 
-**An injected block may only claim what the data behind it can support.** The strategies come from Reflector's **static phrasing tables** — there is no model call in `reflector.py` — and no entry records whether it ever helped (`confidence` can only rise; there is no usefulness count). So the block headed `[Playbook - Learned Strategies]` listing `Effective strategies:` asserted both learning and effectiveness, on every turn, at 262 tokens compaction can never reclaim. It is now `PLAYBOOK_BLOCK_MARKER` (`[Tool-use notes from past sessions]`) + `Noted after past errors/successes:`, capped at `_MAX_INJECT_PER_GROUP` (2). Two coupled details: the marker is **public because `context_report._SYSTEM_SEGMENTS` segments the LIVE prompt by it**, so a rename in one place silently stops attributing the block in `/context` (a test pins the two to the same constant, and the compaction-survival test builds its fixture FROM the constant rather than copying it); and the cap lives in **code, not `PLAYBOOK.MAX_INJECT`**, whose default reaches only fresh installs — every `config.yaml` written so far, and all three `*.example` templates, set it to `10` explicitly.
+**An injected block may only claim what its evidence supports.** Keep the public
+`PLAYBOOK_BLOCK_MARKER` and two-per-outcome injection cap. Model inference and
+legacy notes are not proven strategies. Repetition never raises confidence;
+exposure, observed tool outcomes, and explicit helpful/unhelpful feedback are
+separate counters. Negative feedback can make a note dormant without deleting it.
+`playbook_records.py` defines stable IDs, revisions, scope, sources, and history.
+Back up legacy JSON before migration; preserve unknown fields and provenance.
+Use locked read/modify/replace transactions and revision-checked edits so a
+second session cannot overwrite a disable. Capacity refinement archives records.
+`/learned` is user-only (`client/learned.py`), not a model tool; it refreshes only
+the generated notes block without losing the conversation summary. Session
+`off` suppresses injection, not storage. Full dependency-based retraction remains
+future work.
+
+Playbook runtime settings have an interactive path: `/config playbook` edits
+only the four `PLAYBOOK` tuning fields and reloads them without changing models
+or the conversation. Full `/config` and newly enabling learning in `/features`
+offer the reflector and wait limit. Lock/directory errors disable optional
+learning without aborting chat; lock waits are bounded. Tests include real
+process contention, abrupt writer exit, and scripted configuration flows.
 
 **A trait inferred from markers needs a neutral case, or absence of evidence becomes evidence** (`managers/user_profile_manager.py`). `verbosity`/`directness`/`abstraction` each default their observation to 0.5 when nothing matches; `technical_level` folded a **0.0** on every prompt containing none of its 21 listed terms — i.e. most real prompts — so the EMA converged to the floor for any user and the `<profile>` block injected `beginner-level` into every turn (observed: 0.00018 after 915 interactions, and it got there AGAIN after `_repair_inflated_counts` had reset it, because that repair fixed the inflation while the live signal kept pulling). The fold is now skipped without evidence. Post-fix the smallest folded observation is `1/3`, so a value at the floor is unreachable by honest accrual — which is what licenses the second one-shot repair (`_repair_degenerate_tech_level`, own flag `_tech_signal_repaired`, same `_SATURATION_EPSILON` rule: only a **saturated** value is reset, an unsaturated one still carries signal).
 

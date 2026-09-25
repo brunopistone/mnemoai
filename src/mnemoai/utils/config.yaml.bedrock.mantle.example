@@ -74,6 +74,7 @@ MODEL_ID:
 #   ROUTER: anthropic.claude-haiku-4-5      # classification (one label per turn)
 #   ORCHESTRATOR: anthropic.claude-opus-4-8 # task decomposition into subtasks
 #   SUMMARY: anthropic.claude-haiku-4-5     # conversation compaction
+#   REFLECTOR: anthropic.claude-haiku-4-5   # evidence-linked lessons
 VISION_MODEL_ID:
   NAME: qwen.qwen3-vl-235b-a22b-instruct
   TYPE: mantle
@@ -237,6 +238,7 @@ ENABLE_SKILLS: true
 # ACE Playbook Configuration (Agentic Context Engineering)
 ENABLE_PLAYBOOK: true
 PLAYBOOK:
+  REFLECTION_TIMEOUT: 30 # Seconds to wait for extraction (1–120); timeout stores nothing
   MAX_ENTRIES: 500 # Maximum playbook entries before refinement
   SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
   MAX_INJECT: 10 # Maximum entries to inject per query

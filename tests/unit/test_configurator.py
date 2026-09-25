@@ -821,9 +821,10 @@ def test_prompt_provider_type_embeddings_has_no_mantle(monkeypatch):
 def _run_build(provider, default_model, answers, template_file="config.yaml.example"):
     """Drive _build_config against a shipped template with scripted answers.
 
-    Note the two ``AREA_MODELS`` prompts that follow the ROUTING/ORCH toggles when
+    Note the router/orchestrator prompts that follow the ROUTING/ORCH toggles when
     those are enabled ("use the same model as Chat?"); answering yes writes
-    nothing, which is why these sequences still produce no AREA_MODELS section.
+    nothing. The reflector and its wait limit use their defaults in these
+    provider-focused cases; dedicated playbook tests exercise other values.
     """
     import builtins
 
@@ -831,8 +832,18 @@ def _run_build(provider, default_model, answers, template_file="config.yaml.exam
 
     text = (C._templates_dir() / template_file).read_text()
     it = iter(answers)
-    builtins.input = lambda *a, **k: next(it)
-    return yaml.safe_load(C._build_config(provider, default_model, text, template_file))
+    def answer(prompt=""):
+        if "Reflector — use the same model" in prompt:
+            return "y"
+        if "Reflection wait" in prompt:
+            return ""
+        return next(it)
+    previous = builtins.input
+    try:
+        builtins.input = answer
+        return yaml.safe_load(C._build_config(provider, default_model, text, template_file))
+    finally:
+        builtins.input = previous
 
 
 def test_config_openai_transforms_base_template():
@@ -1595,9 +1606,9 @@ class TestFeaturesToggles:
 
     def test_dependencies_noop_for_features_without_extra_info(self, monkeypatch):
         from mnemoai.utils import configurator as C
-        # Turning on the playbook needs nothing extra.
+        # Skills have no dependent model or settings to configure.
         monkeypatch.setattr(C, "_ask", lambda *a, **k: pytest.fail("should not ask"))
-        out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_PLAYBOOK"})
+        out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_SKILLS"})
         assert out == self.CFG
 
 

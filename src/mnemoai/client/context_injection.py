@@ -120,7 +120,8 @@ def inject_subagents_context(client) -> str:
 
 def get_playbook_context(client) -> str:
     """Formatted general playbook strategies for the system prompt, or ""."""
-    if not client.playbook:
+    if not client.playbook or not getattr(client.playbook, "enabled", True):
+        client._playbook_selected_ids = []
         return ""
 
     # Empty task → general (not task-specific) strategies.
@@ -130,7 +131,9 @@ def get_playbook_context(client) -> str:
         include_failures=True,
     )
 
-    return client.playbook.format_for_prompt(entries) if entries else ""
+    selected = client.playbook.prompt_entries(entries)
+    client._playbook_selected_ids = [e["id"] for e in selected if "id" in e]
+    return client.playbook.format_for_prompt(selected) if selected else ""
 
 
 def get_conversation_context(client) -> str:

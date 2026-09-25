@@ -102,13 +102,14 @@ class TestReflectOnTrajectory:
 
         assert reflector.metrics["total_tool_calls"] == 2
 
-    def test_failure_produces_a_playbook_entry(self, tmp_path):
+    def test_failure_without_extraction_model_never_fabricates_a_lesson(self, tmp_path):
         reflector = Reflector(persist_path=str(tmp_path))
         entries = reflector.reflect_on_trajectory(
             messages=_failing_turn(1), task="do thing 1"
         )
-        assert entries
-        assert entries[0].outcome == "failure"
+        assert entries == []
+        assert reflector.metrics["failed_calls"] == 1
+        assert reflector.last_error
 
 
 class TestFindToolResult:
@@ -148,7 +149,7 @@ class TestPlaybookConfidence:
     def store(self, tmp_path):
         return PlaybookStore(persist_path=str(tmp_path))
 
-    def test_duplicate_strategy_bumps_confidence_once_per_append(self, store):
+    def test_duplicate_strategy_does_not_invent_usefulness(self, store):
         def entry():
             return PlaybookEntry(
                 context="reading files",
@@ -164,16 +165,16 @@ class TestPlaybookConfidence:
 
         store.append(entry())
         assert len(store.entries) == 1
-        assert store.entries[0]["confidence"] == pytest.approx(1.0)
+        assert store.entries[0]["confidence"] == pytest.approx(0.9)
 
-    def test_confidence_is_capped_at_one(self, store):
+    def test_repeated_observations_leave_confidence_unchanged(self, store):
         for _ in range(5):
             store.append(
                 PlaybookEntry(
                     context="c", strategy="s", source="test", confidence=0.9
                 )
             )
-        assert store.entries[0]["confidence"] == pytest.approx(1.0)
+        assert store.entries[0]["confidence"] == pytest.approx(0.9)
 
     def test_entries_persist_and_reload(self, tmp_path):
         store = PlaybookStore(persist_path=str(tmp_path))

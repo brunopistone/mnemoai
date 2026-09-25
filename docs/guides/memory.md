@@ -144,15 +144,17 @@ cleanup limits) see [Episodic Memory Configuration](../configuration.md#episodic
 
 ## ACE Playbook (Agentic Context Engineering)
 
-The ACE Playbook learns strategies from both successes AND failures, implementing the Agentic Context Engineering framework for continuous improvement.
+The playbook stores scoped, model-inferred lessons alongside legacy tool-use
+notes. These are suggestions with evidence, not proven rules or permissions.
 
 **How it works:**
 
-1. **Reflector**: After each interaction, analyzes tool executions:
-   - Detects failure patterns (file not found, string not found, permission denied, etc.)
-   - Identifies successful strategies for specific tools (file_edit, execute_bash)
-   - Extracts specific, actionable insights (not generic summaries)
-   - Tracks metrics (success/failure rates, failure types) in `metrics.json`
+1. **Reflector:** after a tool-using turn, one tool-free model call receives the
+   task and bounded tool evidence. It may return up to three lessons or none.
+   Invalid output, cancellation, timeouts, and provider errors store nothing.
+   The existing `ENABLE_PLAYBOOK` toggle controls this feature; enabling it now
+   incurs an additional model call on tool-using turns. Obvious named credential
+   fields are redacted, but this is not a comprehensive secret-detection system.
 
 2. **Playbook Store**: Maintains structured strategy entries:
 
@@ -160,30 +162,82 @@ The ACE Playbook learns strategies from both successes AND failures, implementin
    {
      "context": "editing python files",
      "strategy": "Read the file first to get exact string including whitespace before using str_replace",
-     "source": "Failed file_edit on 2026-02-01: string_not_found",
+     "id": "mem-example",
+     "revision": 1,
+     "status": "active",
+     "provenance": "model",
+     "scope": "/path/to/project",
+     "source_refs": [
+       { "session_id": "session-id", "turn": 4, "tool_call_id": "call-id" }
+     ],
      "outcome": "failure",
      "tools": ["file_edit"],
-     "confidence": 0.9
+     "confidence": 0.5
    }
    ```
 
-3. **Context Injection**: Injects relevant strategies into the system prompt at startup:
+3. **Context injection:** refreshes eligible notes for each turn and after
+   `/learned` changes. New lessons apply to the project directory where they
+   were recorded; legacy scope remains unknown rather than being invented.
 
    ```
-   [Playbook - Learned Strategies]
-   Avoid these patterns:
-     ✗ [editing files]: Read the file first to get exact string before str_replace
-   Effective strategies:
-     ✓ [searching files]: Use glob_search instead of find for better performance
+   [Tool-use notes from past sessions]
+   Noted after past errors:
+     · [editing files]: Read the current target before retrying an edit
    ```
 
-4. **Lazy Refinement**: Only deduplicates when hitting token limits, using semantic similarity if embeddings are configured.
+4. **Preservation:** old files are backed up before adding record metadata.
+   Repeated observations retain source references without increasing confidence.
+   Capacity refinement archives entries instead of deleting them. Edit history
+   stays attached to the same ID, with revision checks and cross-process locking.
 
-**What gets stored:**
+### Inspect and control learning
 
-- **Failures**: Specific patterns like `string_not_found`, `file_not_found`, `permission_denied`, `command_failed`, etc.
-- **Successes**: Only for tools with reusable patterns (file_edit, execute_bash with specific commands)
-- **Not stored**: Generic successes without actionable strategies
+The feature is not YAML-only:
+
+| Change | Interactive path | When it applies |
+|---|---|---|
+| Initial setup | `/config` | Full configuration restart |
+| Enable/disable learning | `/features` | Restart; enabling offers model and timeout setup |
+| Reflector provider/model | `/model` → Reflector | In place if learning is already enabled |
+| Reflector inference parameters | `/params` → Reflector | In place; select an override with `/model` first |
+| Timeout, capacity, candidate count, similarity threshold | `/config playbook` | In place; no model rebuild or conversation reset |
+| Inspect/edit/disable notes and give feedback | `/learned` | Next memory injection; revisions persist |
+| Suppress injection for this session | `/learned off` / `/learned on` | Immediate; extraction still runs |
+
+`/config playbook` changes only `PLAYBOOK`, preserves other configuration, and
+supports cancelling or stepping back without a partial save. Capacity changes
+take effect at the next refinement. The candidate-count setting is still subject
+to the two-notes-per-outcome injection cap. Similarity tuning applies when
+embeddings are available. YAML remains an alternative, not a requirement.
+
+`/learned` shows the current model's store path, injection state, entries, and
+the most recent reflection error, if any. These commands are user-only:
+
+- `/learned inspect <id>`: evidence references, scope, counters, and edit history.
+- `/learned edit <id>`: edit `context` and `strategy` as JSON in `$EDITOR`, then
+  confirm the change.
+- `/learned disable <id>` / `/learned restore <id>`: control future injection
+  without erasing the record.
+- `/learned helpful <id>` / `/learned unhelpful <id>`: explicit feedback.
+- `/learned off` / `/learned on`: suppress/enable injection for this session.
+  This does not stop extraction; use `/features` to disable the whole playbook.
+- `/learned clear`: confirm removal of all entries, retaining a backup beside
+  `playbook.json`.
+
+An unambiguous ID prefix works. Lists show at most 30 entries; inspect accepts
+any ID. Disabled and archived entries remain inspectable. Negative feedback
+can make an active entry dormant; restoring its status does not reset feedback.
+
+`injection_count` counts turns supplied with the note. Observed tool outcomes
+are associations, not proof the note helped or the user's task succeeded.
+Only explicit helpful/unhelpful feedback changes the feedback-based confidence;
+below 0.2 the note is not injected. Legacy scores are retained, with provenance
+labeled `legacy`. No automatic causal usefulness claim is made.
+
+This first delivery does not provide dependency-cascade retraction, erase old
+transcripts, or remove information from requests already sent. Source references
+may outlive session transcripts; their IDs are not a promise of perpetual replay.
 
 **Key Differences from Episodic Memory:**
 
@@ -199,10 +253,19 @@ The ACE Playbook learns strategies from both successes AND failures, implementin
 ```yaml
 ENABLE_PLAYBOOK: true
 PLAYBOOK:
-  MAX_ENTRIES: 500 # Maximum entries before refinement
+  MAX_ENTRIES: 500 # Active entries before archival/refinement
   SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
   MAX_INJECT: 10 # Maximum entries to inject per query
+  REFLECTION_TIMEOUT: 30 # Wait bound, clamped to 1–120 seconds
 ```
+
+Use `/model` to choose the **Reflector model**, or configure
+`AREA_MODELS.REFLECTOR` like any other area, including a different provider.
+Without an override, reflection uses a separate, non-reasoning main-model
+instance. An explicit override uses its configured parameters. `/params` edits
+its parameters after an override is configured; `/usage` includes reported
+reflector tokens. A timed-out provider request may finish later, but its result
+cannot create a lesson, and another reflection does not start while it is pending.
 
 **Storage Location:**
 

@@ -57,7 +57,8 @@ def wired(tmp_path, monkeypatch):
     )
 
     playbook = SimpleNamespace(
-        get_relevant_entries=lambda task, top_k, include_failures: ["entry"],
+        get_relevant_entries=lambda task, top_k, include_failures: [{"id": "entry"}],
+        prompt_entries=lambda entries: entries,
         format_for_prompt=lambda entries: PLAYBOOK_TEXT,
     )
     return SimpleNamespace(

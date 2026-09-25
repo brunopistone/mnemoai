@@ -6,11 +6,13 @@ templates' comments and prompt blocks are preserved.
 """
 
 import getpass
+import math
 import re
 import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+import yaml
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.key_binding import KeyBindings
@@ -33,6 +35,7 @@ from mnemoai.models.provider_params import (
     supported_keys,
     tunable_params,
 )
+from mnemoai.utils.atomic_write import atomic_write_text
 from mnemoai.utils.config import Config
 from mnemoai.utils.console import print_error, print_notice
 from mnemoai.utils.logger import logger
@@ -1243,7 +1246,11 @@ def _build_config(
     # --- Other feature toggles (default from the template) ---
     text = _set_bool(text, "ENABLE_RAG", _ask_bool("Enable RAG (document indexing & search)?", _truthy(_get_top_level(text, "ENABLE_RAG"))))
     text = _set_bool(text, "ENABLE_EPISODIC_MEMORY", _ask_bool("Enable episodic memory (learn from past tasks)?", _truthy(_get_top_level(text, "ENABLE_EPISODIC_MEMORY"))))
-    text = _set_bool(text, "ENABLE_PLAYBOOK", _ask_bool("Enable ACE playbook (learn strategies)?", _truthy(_get_top_level(text, "ENABLE_PLAYBOOK"))))
+    learning = _ask_bool(
+        "Enable playbook learning (additional model calls after tool turns)?",
+        _truthy(_get_top_level(text, "ENABLE_PLAYBOOK")),
+    )
+    text = _set_bool(text, "ENABLE_PLAYBOOK", learning)
     memory = _ask_bool("Enable persistent memory (agent curates MEMORY.md)?", _truthy(_get_top_level(text, "ENABLE_MEMORY")))
     text = _set_bool(text, "ENABLE_MEMORY", memory)
     if memory:
@@ -1270,9 +1277,13 @@ def _build_config(
     # answering yes writes NOTHING (absence is what makes the area follow the chat
     # model), so Enter-through leaves the template exactly as it was. SUMMARY has
     # no toggle to hang off, so it stays a /model-only choice.
-    for area, enabled in (("ROUTER", routing), ("ORCHESTRATOR", orchestration)):
+    for area, enabled in (
+        ("ROUTER", routing), ("ORCHESTRATOR", orchestration), ("REFLECTOR", learning),
+    ):
         if enabled:
             text = _prompt_model_section(text, area, is_llm=False)
+    if learning:
+        text = _prompt_playbook_settings(text, timeout_only=True)
 
     text = _set_bool(text, "USE_PROFILING", _ask_bool("Enable user profiling (personalized responses)?", _truthy(_get_in_section(text, "PROFILE", "USE_PROFILING"))), section="PROFILE")
 
@@ -1354,6 +1365,133 @@ def run_first_run_setup() -> Optional[Path]:
         return None
 
 
+_PLAYBOOK_SETTINGS = {
+    "REFLECTION_TIMEOUT": ("Reflection wait (seconds, 1–120)", 30, "float", 1, 120),
+    "MAX_ENTRIES": ("Active notes before archival (at least 1)", 500, "int", 1, None),
+    "MAX_INJECT": ("Candidate notes per turn (0 = none; at most 2 per outcome)", 10, "int", 0, None),
+    "SIMILARITY_THRESHOLD": ("Semantic similarity threshold (0–1; needs embeddings)", 0.85, "float", 0, 1),
+}
+
+
+def _playbook_options(text: str) -> dict:
+    data = yaml.safe_load(text)
+    if not isinstance(data, dict):
+        raise ValueError("Configuration must be a mapping")
+    options = data.get("PLAYBOOK")
+    if options is None:
+        options = {}
+    if not isinstance(options, dict):
+        raise ValueError("PLAYBOOK must be a mapping")
+    return options
+
+
+def _set_playbook_option(text: str, key: str, value: str) -> str:
+    """Edit a direct child only, retaining unrelated fields and block comments."""
+    lines = text.splitlines()
+    idx = next((i for i, line in enumerate(lines) if re.match(r"^PLAYBOOK\s*:", line)), -1)
+    if idx < 0:
+        return text + ("" if text.endswith("\n") else "\n") + f"PLAYBOOK:\n  {key}: {value}\n"
+    tail = lines[idx].split(":", 1)[1].split(" #", 1)[0].strip()
+    if tail and not tail.startswith("#"):
+        # A flow mapping needs expansion before individual fields can be edited.
+        if tail not in ("{}", "null", "~") and not (tail.startswith("{") and tail.endswith("}")):
+            raise ValueError("Expand PLAYBOOK into a block mapping before editing its settings")
+        options = _playbook_options(text)
+        options[key] = yaml.safe_load(value)
+        expanded = yaml.safe_dump({"PLAYBOOK": options}, sort_keys=False)
+        expanded_lines = expanded.rstrip().splitlines()
+        comment = lines[idx].partition(" #")[2]
+        if comment:
+            expanded_lines[0] += f" #{comment}"
+        lines[idx:idx + 1] = expanded_lines
+    else:
+        end = idx + 1
+        while end < len(lines):
+            if lines[end].strip() and not lines[end].lstrip().startswith("#") and _indent_of(lines[end]) == 0:
+                break
+            end += 1
+        indent = min(
+            (_indent_of(line) for line in lines[idx + 1:end]
+             if line.strip() and not line.lstrip().startswith("#")),
+            default=2,
+        )
+        found = next((j for j in range(idx + 1, end)
+                      if _indent_of(lines[j]) == indent
+                      and re.match(rf"\s*{re.escape(key)}:", lines[j])), None)
+        if found is None:
+            lines.insert(idx + 1, f"{' ' * indent}{key}: {value}")
+        else:
+            last = found + 1
+            while last < end and lines[last].strip() and _indent_of(lines[last]) > indent:
+                last += 1
+            comment = lines[found].partition(" #")[2]
+            lines[found:last] = [
+                f"{' ' * indent}{key}: {value}" + (f" #{comment}" if comment else "")
+            ]
+    return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+
+
+def _prompt_playbook_settings(text: str, timeout_only: bool = False) -> str:
+    steps = []
+    for key, spec in _PLAYBOOK_SETTINGS.items():
+        if timeout_only and key != "REFLECTION_TIMEOUT":
+            continue
+
+        def step(current, back, key=key, spec=spec):
+            label, default, kind, minimum, maximum = spec
+            options = _playbook_options(current)
+            hint = str(options.get(key, default))
+            while True:
+                raw = _ask_number(label, default=hint, kind=kind, allow_back=back)
+                try:
+                    parsed = int(raw) if kind == "int" else float(raw)
+                    valid = math.isfinite(parsed) and parsed >= minimum
+                    valid = valid and (maximum is None or parsed <= maximum)
+                except (ValueError, TypeError, OverflowError):
+                    valid = False
+                if valid:
+                    if key in options and parsed == options[key]:
+                        return current
+                    literal = str(int(parsed)) if parsed == int(parsed) else str(parsed)
+                    return _set_playbook_option(current, key, literal)
+                hint = str(default)
+                label = spec[0] + " — value outside the allowed range"
+        steps.append(step)
+    return _run_steps(text, steps)
+
+
+def run_playbook_settings() -> Optional[Path]:
+    """Tune only PLAYBOOK settings; model selection stays in /model."""
+    dest = _config_to_edit()
+    if not dest.is_file():
+        print_error("No config.yaml found. Run /config first.")
+        return None
+    text = dest.read_text()
+    try:
+        new_text = _prompt_playbook_settings(text)
+    except (KeyboardInterrupt, _Cancelled):
+        print_notice("Cancelled; playbook settings unchanged.")
+        return None
+    except yaml.YAMLError:
+        print_error("Cannot parse config.yaml; playbook settings unchanged.")
+        return None
+    except ValueError as e:
+        print_error(f"Playbook settings unchanged: {e}")
+        return None
+    if new_text == text:
+        print_notice("Playbook settings unchanged.")
+        return None
+    if dest.read_text() != text:
+        print_error("Configuration changed while the dialog was open; please try again.")
+        return None
+    try:
+        atomic_write_text(str(dest.resolve()), new_text)
+    except OSError as e:
+        print_error(f"Could not save playbook settings ({type(e).__name__}); original preserved.")
+        return None
+    return dest
+
+
 def run_reconfigure() -> Optional[Path]:
     """Re-run the configurator over an existing config (``/config``), confirming
     the overwrite first; returns the written Path or None."""
@@ -1403,6 +1541,7 @@ _MODEL_SECTIONS = {
     "4": ("ROUTER", f"Router model — {AREA_DESCRIPTIONS['ROUTER']}", False),
     "5": ("ORCHESTRATOR", f"Orchestrator model — {AREA_DESCRIPTIONS['ORCHESTRATOR']}", False),
     "6": ("SUMMARY", f"Summary model — {AREA_DESCRIPTIONS['SUMMARY']}", False),
+    "7": ("REFLECTOR", f"Reflector model — {AREA_DESCRIPTIONS['REFLECTOR']}", False),
 }
 
 # The feature each area's work depends on: area -> (toggle, its name in a prompt).
@@ -1412,6 +1551,7 @@ _MODEL_SECTIONS = {
 _AREA_FEATURE = {
     "ROUTER": ("ENABLE_ROUTING", "Query routing"),
     "ORCHESTRATOR": ("ENABLE_ORCHESTRATION", "Orchestration"),
+    "REFLECTOR": ("ENABLE_PLAYBOOK", "Playbook learning"),
 }
 
 
@@ -1697,6 +1837,7 @@ _PARAM_SECTIONS = {
     "4": ("ROUTER", "Router model"),
     "5": ("ORCHESTRATOR", "Orchestrator model"),
     "6": ("SUMMARY", "Summary model"),
+    "7": ("REFLECTOR", "Reflector model"),
 }
 
 
@@ -2007,7 +2148,7 @@ def run_model_override() -> Optional[ModelOverride]:
 _FEATURE_TOGGLES = [
     ("ENABLE_RAG", "RAG — index & search your documents"),
     ("ENABLE_EPISODIC_MEMORY", "Episodic memory — recall similar past tasks"),
-    ("ENABLE_PLAYBOOK", "ACE playbook — learn tool strategies"),
+    ("ENABLE_PLAYBOOK", "Playbook learning — extra model calls after tool turns"),
     ("ENABLE_WEB_SEARCH", "Web search (needs a Brave API key)"),
     ("ENABLE_WEB_CRAWL", "Web crawler — fetch & read pages"),
     ("ENABLE_ROUTING", "Query routing — per-query tool subsets"),
@@ -2050,6 +2191,9 @@ def _prompt_feature_dependencies(text: str, newly_on: set) -> str:
             + " need an embeddings model — let's set one."
         )
         text = _prompt_model_section(text, "EMBED_MODEL_ID", is_llm=False)
+    if "ENABLE_PLAYBOOK" in newly_on:
+        text = _prompt_model_section(text, "REFLECTOR", is_llm=False)
+        text = _prompt_playbook_settings(text, timeout_only=True)
     return text
 
 
