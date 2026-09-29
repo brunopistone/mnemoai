@@ -3,7 +3,6 @@
 import asyncio
 import json
 import os
-import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -45,11 +44,8 @@ from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 from mnemoai.client.memory.episodic_compaction import compact_stores
 from mnemoai.client.memory.episodic_memory import EpisodicMemoryManager
 from mnemoai.client.memory.model_dir_merge import unfork_model_dirs
-from mnemoai.client.memory.playbook_store import (
-    PLAYBOOK_BLOCK_MARKER,
-    PLAYBOOK_END_MARKER,
-    PlaybookStore,
-)
+from mnemoai.client.memory.playbook_context import split_prompt
+from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector, current_turn_messages
 from mnemoai.client.session_log import (
     SessionLog,
@@ -214,20 +210,6 @@ class LangGraphClient:
         """Replace only generated notes; preserve the conversation and its summary."""
         if not getattr(self, "agent", None):
             return
-        legacy_pattern = (
-            r"(?m)^" + re.escape(PLAYBOOK_BLOCK_MARKER) + r"\n"
-            r"(?:(?:Noted after past (?:errors|successes):|  · [^\n]*)\n?)*"
-        )
-        bounded_pattern = (
-            r"(?ms)^" + re.escape(PLAYBOOK_BLOCK_MARKER) + r"\n.*?^"
-            + re.escape(PLAYBOOK_END_MARKER) + r"(?:\n|$)"
-        )
-
-        def split_prompt(text):
-            prefix, marker, summary = text.partition("<conversation_summary>")
-            prefix = re.sub(bounded_pattern, "", prefix)
-            return re.sub(legacy_pattern, "", prefix).strip(), marker + summary
-
         self.system_prompt = "\n\n".join(filter(None, split_prompt(self.system_prompt)))
         base, summary = split_prompt(self.agent.system_prompt)
         block = self._get_playbook_context()
@@ -453,6 +435,7 @@ class LangGraphClient:
                         plan_mode_provider=lambda: self.plan_mode_active,
                         auto_approve_provider=lambda: self.auto_approve_mode,
                     )
+                    self.agent._playbook_context_provider = self._get_playbook_context
                     # Mid-loop compaction hook: the agent calls this (sync) before a
                     # model call when history exceeds its high-water mark, reusing the
                     # same manager as the post-turn /compact path.
@@ -872,9 +855,11 @@ class LangGraphClient:
             failed_before = self.reflector.metrics["failed_calls"]
             total_before = self.reflector.metrics["total_tool_calls"]
             cancel_event = getattr(self.agent, "_cancel_event", None)
+            scope = os.path.realpath(os.getcwd())
             entries = self.reflector.reflect_on_trajectory(
                 messages=messages, task=task, model=model, source=source,
-                scope=os.path.realpath(os.getcwd()),
+                scope=scope,
+                evidence_filter=lambda evidence: self.playbook.filter_learning_evidence(evidence, scope),
                 timeout=max(1, min(120, float(config.get("PLAYBOOK", {}).get(
                     "REFLECTION_TIMEOUT", 30
                 )))),
@@ -888,8 +873,8 @@ class LangGraphClient:
                     success=self.reflector.metrics["failed_calls"] == failed_before,
                 )
             if entries:
-                self.playbook.append_batch(entries)
-                logger.debug(f"Reflector: learned {len(entries)} strategies")
+                stored = self.playbook.append_batch(entries)
+                logger.debug("Reflector proposed %d lessons; %d records stored/updated", len(entries), stored)
         except Exception as e:
             logger.error(f"Reflection failed: {e}")
 

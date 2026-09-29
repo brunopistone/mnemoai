@@ -314,8 +314,22 @@ Use locked read/modify/replace transactions and revision-checked edits so a
 second session cannot overwrite a disable. Capacity refinement archives records.
 `/learned` is user-only (`client/learned.py`), not a model tool; it refreshes only
 the generated notes block without losing the conversation summary. Session
-`off` suppresses injection, not storage. Full dependency-based retraction remains
-future work.
+`off` suppresses injection, not storage.
+
+First-stage F4 is explicit, user-confirmed retraction, not inferred dependency
+propagation. `memory/retraction.py` identifies observations and builds impact
+previews; `PlaybookStore.apply_retraction` commits the previewed lifecycle token
+under the existing lock. Retractions keep reasons, prior state, and source IDs
+in the same atomic JSON record; malformed metadata fails closed. Quarantine is
+scope-bound and checked both before extraction and at append time. Shared
+evidence is only a review candidate: do not delete or disable other entries by
+guessing that they depend on a withdrawn note. Restoration returns the prior
+state; clear explicitly warns that it also discards learning quarantines.
+`memory/playbook_context.py` refreshes existing generated blocks before model
+streams (including retries and quiet workers), without rewriting historical
+messages or adding the parent's memory to custom prompts that did not carry it.
+In-flight requests, episodic recall, curated memory, and permissions are outside
+this stage. Automatic dependency cascades remain future work.
 
 Playbook runtime settings have an interactive path: `/config playbook` edits
 only the four `PLAYBOOK` tuning fields and reloads them without changing models

@@ -157,7 +157,7 @@ class ChatInterface:
         ]),
         ("Assistant", [
             ("/memory [clear]", "View (or clear) persistent memory"),
-            ("/learned [action]", "Inspect, edit or disable tool-use notes"),
+            ("/learned [action]", "Inspect, edit or retract tool-use notes"),
             ("/skills [name]", "List installed skills (or preview one)"),
             ("/mcp [verbose]", "MCP status (verbose for tools & setup)"),
             ("/hooks", "List the tool hooks this session runs"),
@@ -191,7 +191,7 @@ class ChatInterface:
         ("/compact", "Summarize & shrink context (optional focus)"),
         ("/rewind", "Take back your last prompt and the turn it ran"),
         ("/memory", "View persistent memory (/memory clear to wipe)"),
-        ("/learned", "Inspect, edit or disable learned tool-use notes"),
+        ("/learned", "Inspect, edit or retract learned tool-use notes"),
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/auto", "Skip confirmations (/auto off|edits|writes|all)"),
         ("/save", "Save conversation (/save [path])"),

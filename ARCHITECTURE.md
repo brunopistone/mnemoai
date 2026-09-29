@@ -220,6 +220,14 @@ for BM25-only retrieval and block vector operations and automatic cleanup.
 
 ### Evidence-linked playbook and `/learned`
 
+First-stage retraction is implemented in `client/memory/retraction.py`: stable
+observation identities, scope-bound learning quarantine, and a lifecycle-token
+impact preview. `PlaybookStore` applies confirmed retract/restore operations
+atomically and rechecks proposed lessons at commit time. `playbook_context.py`
+refreshes existing generated notes at each stream request, including retries
+and workers. It preserves historical text and custom prompts without playbook
+blocks. Shared evidence is not an inferred dependency; cascades are not enabled.
+
 `client/memory/playbook_records.py` defines IDs, revisions, scope, sources,
 history, eligibility, and separate exposure/outcome/feedback counters.
 `playbook_store.py` migrates with a backup, uses `utils/file_lock.py` around

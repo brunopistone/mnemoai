@@ -195,15 +195,15 @@ notes. These are suggestions with evidence, not proven rules or permissions.
 
 The feature is not YAML-only:
 
-| Change | Interactive path | When it applies |
-|---|---|---|
-| Initial setup | `/config` | Full configuration restart |
-| Enable/disable learning | `/features` | Restart; enabling offers model and timeout setup |
-| Reflector provider/model | `/model` → Reflector | In place if learning is already enabled |
-| Reflector inference parameters | `/params` → Reflector | In place; select an override with `/model` first |
-| Timeout, capacity, candidate count, similarity threshold | `/config playbook` | In place; no model rebuild or conversation reset |
-| Inspect/edit/disable notes and give feedback | `/learned` | Next memory injection; revisions persist |
-| Suppress injection for this session | `/learned off` / `/learned on` | Immediate; extraction still runs |
+| Change                                                   | Interactive path               | When it applies                                  |
+| -------------------------------------------------------- | ------------------------------ | ------------------------------------------------ |
+| Initial setup                                            | `/config`                      | Full configuration restart                       |
+| Enable/disable learning                                  | `/features`                    | Restart; enabling offers model and timeout setup |
+| Reflector provider/model                                 | `/model` → Reflector           | In place if learning is already enabled          |
+| Reflector inference parameters                           | `/params` → Reflector          | In place; select an override with `/model` first |
+| Timeout, capacity, candidate count, similarity threshold | `/config playbook`             | In place; no model rebuild or conversation reset |
+| Inspect/edit/disable notes and give feedback             | `/learned`                     | Next memory injection; revisions persist         |
+| Suppress injection for this session                      | `/learned off` / `/learned on` | Immediate; extraction still runs                 |
 
 `/config playbook` changes only `PLAYBOOK`, preserves other configuration, and
 supports cancelling or stepping back without a partial save. Capacity changes
@@ -235,9 +235,59 @@ Only explicit helpful/unhelpful feedback changes the feedback-based confidence;
 below 0.2 the note is not injected. Legacy scores are retained, with provenance
 labeled `legacy`. No automatic causal usefulness claim is made.
 
-This first delivery does not provide dependency-cascade retraction, erase old
-transcripts, or remove information from requests already sent. Source references
-may outlive session transcripts; their IDs are not a promise of perpetual replay.
+### Retract an incorrect note
+
+Disabling a note is a preference about injection. Retraction records a reason
+for withdrawing it and blocks reuse of its known evidence for automatic learning:
+
+```text
+/learned preview mem-<id>
+/learned retract mem-<id> That failure was temporary, not a permanent restriction.
+/learned retracted
+/learned restore mem-<id> New verification shows that the withdrawal was mistaken.
+```
+
+Retraction and restoration always show an impact preview and require confirmation.
+The plan is checked again before writing: changes to notes or their source
+relationships require a fresh preview. Original data is backed up, and the
+reason, actor, time, prior state, and revisions remain inspectable.
+
+The first stage has deliberately narrow semantics:
+
+- The selected record stops being injected. Known observation IDs are quarantined
+  from automatic reflection in that model/project scope. Filtering happens before
+  the model call and again when committing its output, including late responses.
+- A model cannot re-enable the exact withdrawn record by proposing it again.
+  Unknown evidence is not treated as independent evidence when the scope has
+  an active quarantine. Fresh, independently identified observations can support
+  new lessons; this is not a semantic ban on every future paraphrase.
+- Other notes sharing evidence are listed for manual review and left unchanged.
+  Sharing a tool result is **not** proof that one conclusion depends on another.
+  There are no automatic dependency cascades in this stage.
+- Restoring a retraction requires a reason and returns the note to its prior state
+  (which may have been disabled or archived). Another retracted note may keep
+  shared evidence quarantined; the preview shows that. Ordinary disable/restore
+  commands continue to work as before on notes without an active retraction.
+- Legacy or incomplete provenance is reported explicitly. Retraction can withdraw
+  the record, but cannot reliably trace unknown sources. It does not infer links
+  from similar wording, transcript text read under new observation IDs, or age.
+
+Current generated playbook blocks are refreshed at the model-send boundary for
+foreground and delegated work. User messages, historical summaries, old tool
+results, and already-sent requests are not rewritten or recalled. A new process
+or a restored session observes the same persisted retractions. No tool permission
+is granted or revoked, and the model has no retraction tool it can approve itself.
+
+`/learned clear` removes all records, including retractions, after a warning and
+with a backup. That intentionally removes their learning quarantines too; original
+transcripts and other memory subsystems are not erased. Retraction is not a
+privacy-purge command. Before downgrading to a version without retraction support,
+reverse active retractions or restore an appropriate pre-retraction backup;
+older versions may refuse the new lifecycle state rather than silently trust it.
+
+Source references may outlive session transcripts; their IDs are not a promise
+of perpetual replay. Use `/config playbook`, `/model`, and `/features` as before:
+retraction adds no configuration toggle and makes no extra model call.
 
 **Key Differences from Episodic Memory:**
 
