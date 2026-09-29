@@ -9,6 +9,27 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.27.0] — 2026-09-29
+
+### Added
+
+- First-stage memory retraction: `/learned preview <id>`,
+  `/learned retract <id> <reason>`, `/learned retracted`, and reasoned restoration. Previews name the
+  affected record and shared-evidence candidates without inventing dependencies.
+- Retraction records preserve reasons, prior states, evidence identities, and
+  reversible history. Known observations are quarantined from automatic learning
+  in their original scope, with checks both before extraction and before saving.
+
+### Changed
+
+- Foreground and worker model sends refresh existing generated playbook blocks,
+  including retries. Stale snapshots cannot re-inject withdrawn records;
+  unavailable lifecycle state omits optional notes rather than trusting a cache.
+- Clearing a store explicitly warns when it will also remove retractions and
+  their learning quarantines. Related notes, original transcripts, episodic
+  stores, user-authored memory, and permission settings are not automatically
+  changed by a retraction. Dependency cascades remain a later milestone.
+
 ## [1.26.0] — 2026-09-25
 
 ### Added
@@ -5209,7 +5230,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.26.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.27.0...HEAD
+[1.27.0]: https://github.com/brunopistone/mnemoai/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/brunopistone/mnemoai/compare/v1.25.0...v1.26.0
 [1.25.0]: https://github.com/brunopistone/mnemoai/compare/v1.24.0...v1.25.0
 [0.11.1]: https://github.com/brunopistone/mnemoai/compare/v0.11.0...v0.11.1

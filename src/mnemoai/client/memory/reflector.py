@@ -249,6 +249,7 @@ class Reflector:
     def reflect_on_trajectory(
         self, messages: List[Any], task: str, scope_to_last_turn: bool = True,
         *, model=None, source=None, scope="", timeout=30, cancel=None, record_usage=None,
+        evidence_filter=None,
     ) -> List[PlaybookEntry]:
         """Analyze an execution trajectory and extract all strategies.
 
@@ -297,10 +298,14 @@ class Reflector:
                 ))
         if not evidence:
             return []
-        if model is None or self._in_flight.is_set():
-            self.last_error = "Reflection model unavailable or a prior request is still running"
-            return []
         try:
+            if evidence_filter is not None:
+                evidence = evidence_filter(evidence)
+            if not evidence:
+                return []
+            if model is None or self._in_flight.is_set():
+                self.last_error = "Reflection model unavailable or a prior request is still running"
+                return []
             entries = reflection.extract(
                 evidence, task, model, scope=scope, timeout=timeout, cancel=cancel,
                 record_usage=record_usage, in_flight=self._in_flight,

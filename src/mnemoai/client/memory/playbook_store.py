@@ -9,6 +9,13 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from mnemoai.client.memory import playbook_records as records
+from mnemoai.client.memory import retraction
+from mnemoai.client.memory.playbook_context import (
+    PLAYBOOK_BLOCK_MARKER as PLAYBOOK_BLOCK_MARKER,
+)
+from mnemoai.client.memory.playbook_context import (
+    PLAYBOOK_END_MARKER as PLAYBOOK_END_MARKER,
+)
 from mnemoai.client.memory.reflector import PlaybookEntry
 from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.file_lock import file_lock
@@ -20,9 +27,6 @@ from mnemoai.utils.logger import logger
 #
 # Historical heuristic notes remain readable alongside model-extracted lessons.
 # Neither a repeated observation nor an LLM's own score proves effectiveness.
-PLAYBOOK_BLOCK_MARKER = "[Tool-use notes from past sessions]"
-PLAYBOOK_END_MARKER = "[End tool-use notes]"
-
 # Injected on EVERY turn and never reclaimable by compaction, so an unverified note
 # is kept cheap. Capped in code rather than by lowering PLAYBOOK.MAX_INJECT, whose
 # default reaches only fresh installs — every config.yaml written so far sets it to
@@ -118,7 +122,8 @@ class PlaybookStore:
             before = copy.deepcopy(self.entries)
             try:
                 result = change()
-                self._save()
+                if self.entries != before:
+                    self._save()
                 return result
             except BaseException:
                 self.entries = before
@@ -129,15 +134,15 @@ class PlaybookStore:
         os.makedirs(self.persist_path, exist_ok=True)
         atomic_write_json(self.playbook_file, self.entries)
 
-    def append(self, entry: PlaybookEntry) -> None:
+    def append(self, entry: PlaybookEntry) -> int:
         """Append a new entry (delta update).
 
         Args:
             entry: PlaybookEntry to add
         """
-        self.append_batch([entry])
+        return self.append_batch([entry])
 
-    def append_batch(self, entries: List[PlaybookEntry]) -> None:
+    def append_batch(self, entries: List[PlaybookEntry]) -> int:
         """Append multiple entries efficiently.
 
         Args:
@@ -146,12 +151,18 @@ class PlaybookStore:
         incoming = [records.normalize(entry.to_dict()) for entry in entries]
 
         def add():
+            accepted = 0
             for entry in incoming:
+                blocked = retraction.quarantined(self.entries, entry["scope"])
+                if blocked and not retraction.allows_sources(entry["source_refs"], blocked):
+                    continue
                 existing = next(
                     (old for old in self.entries if records.key(old) == records.key(entry)),
                     None,
                 )
                 if existing is not None:
+                    if existing["status"] == "retracted":
+                        continue
                     known = {records.ref_key(ref) for ref in existing["source_refs"]}
                     new_refs = [
                         ref for ref in entry["source_refs"]
@@ -161,6 +172,7 @@ class PlaybookStore:
                         existing["source_refs"].extend(new_refs)
                         existing["revision"] += 1
                         existing["last_seen"] = records.now()
+                        accepted += 1
                     # Repetition never increases confidence or re-enables a note.
                     continue
                 if any(
@@ -168,11 +180,17 @@ class PlaybookStore:
                     for current in self.entries for old in current["history"]
                 ):
                     continue  # a user edited/superseded this wording
+                if any(old["id"] == entry["id"] for old in self.entries):
+                    raise ValueError("Duplicate entry identity; edit the existing record instead")
                 self.entries.append(entry)
-            self._refine()
+                accepted += 1
+            if accepted:
+                self._refine()
+            return accepted
 
         if incoming:
-            self._transaction(add)
+            return self._transaction(add)
+        return 0
 
     def _refine(self) -> None:
         """Lazy refinement - merge similar entries when over limit."""
@@ -389,6 +407,14 @@ class PlaybookStore:
             Formatted string for prompt injection
         """
         entries = self.prompt_entries(entries)
+        return self._format_selected(entries)
+
+    def prepare_prompt(self, top_k=10):
+        """Return text and IDs from the same selection, without a second state read."""
+        selected = self._select_prompt_entries(self.get_relevant_entries("", top_k=top_k))
+        return self._format_selected(selected), [entry["id"] for entry in selected]
+
+    def _format_selected(self, entries):
         if not entries or not getattr(self, "enabled", True):
             return ""
 
@@ -421,6 +447,16 @@ class PlaybookStore:
 
     def prompt_entries(self, entries):
         """The same filtering/caps drive both rendering and exposure accounting."""
+        if entries and hasattr(self, "lock_file"):
+            try:
+                current = {entry["id"]: entry for entry in self.snapshot()}
+            except (OSError, ValueError):
+                return []
+            entries = [current[entry["id"]] for entry in entries if entry.get("id") in current]
+        return self._select_prompt_entries(entries)
+
+    @staticmethod
+    def _select_prompt_entries(entries):
         selected = [entry for entry in entries if records.eligible(entry)]
         return [
             entry for outcome in ("failure", "success")
@@ -437,6 +473,8 @@ class PlaybookStore:
                 raise ValueError("Entry changed; inspect it again before editing")
             if action not in {"edit", "disable", "restore", "helpful", "unhelpful"}:
                 raise ValueError("Unknown playbook action")
+            if entry["status"] == "retracted":
+                raise ValueError("Use the retraction restore preview before changing this entry")
             if action == "edit":
                 for value, limit in ((context, 200), (strategy, 800)):
                     if not isinstance(value, str) or not value.strip() or len(value) > limit:
@@ -456,6 +494,46 @@ class PlaybookStore:
                 )
             return copy.deepcopy(entry)
         return self._transaction(change)
+
+    def preview_retraction(self, entry_id, action="retract", reason=""):
+        """Read-only impact preview; shared evidence is not a proven dependency."""
+        return retraction.preview(self.snapshot(), entry_id, action, reason)
+
+    def apply_retraction(self, entry_id, *, action, reason, token):
+        """Commit precisely the user-confirmed lifecycle plan in one transaction."""
+        reason = retraction.reason_text(reason)
+
+        def change():
+            plan = retraction.preview(self.entries, entry_id, action, reason)
+            if plan["token"] != token:
+                raise ValueError("Playbook changed; preview the retraction again")
+            entry = next(e for e in self.entries if e["id"] == entry_id)
+            self._backup()
+            if action == "retract":
+                meta = {
+                    "id": "ret-" + uuid.uuid4().hex, "actor": "user", "at": records.now(),
+                    "reason": reason, "previous_status": entry["status"],
+                    "withdrawn_revision": entry["revision"], "scope": entry["scope"],
+                    "source_ids": plan["source_ids"],
+                }
+                records.checkpoint(entry, "retract", reason=reason)
+                entry["retraction"] = meta
+                entry["status"] = "retracted"
+            else:
+                records.checkpoint(entry, "restore_retraction", reason=reason)
+                entry["status"] = plan["result_status"]
+                entry["retraction"]["restored_at"] = records.now()
+                entry["retraction"]["restore_reason"] = reason
+            retraction.validate(entry)
+            return copy.deepcopy(entry)
+
+        return self._transaction(change)
+
+    def filter_learning_evidence(self, evidence, scope):
+        """Exclude quarantined observations before paying for model extraction."""
+        entries = self.snapshot()
+        blocked = retraction.quarantined(entries, scope)
+        return [item for item in evidence if retraction.allows_sources([item["ref"]], blocked)]
 
     def record_exposure(self, entry_ids, success=None):
         """Count exposure/outcome associations, never inferred helpfulness."""

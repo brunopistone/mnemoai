@@ -125,15 +125,11 @@ def get_playbook_context(client) -> str:
         return ""
 
     # Empty task → general (not task-specific) strategies.
-    entries = client.playbook.get_relevant_entries(
-        task="",
+    block, selected_ids = client.playbook.prepare_prompt(
         top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
-        include_failures=True,
     )
-
-    selected = client.playbook.prompt_entries(entries)
-    client._playbook_selected_ids = [e["id"] for e in selected if "id" in e]
-    return client.playbook.format_for_prompt(selected) if selected else ""
+    client._playbook_selected_ids = selected_ids
+    return block
 
 
 def get_conversation_context(client) -> str:

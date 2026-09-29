@@ -6,7 +6,9 @@ import math
 import uuid
 from datetime import datetime, timezone
 
-STATUSES = frozenset({"active", "disabled", "archived"})
+from mnemoai.client.memory import retraction
+
+STATUSES = frozenset({"active", "disabled", "archived", "retracted"})
 COUNTERS = (
     "injection_count", "observed_success_count", "observed_failure_count",
     "helpful_count", "unhelpful_count",
@@ -69,6 +71,7 @@ def normalize(entry: dict) -> dict:
         or any(type(out[key]) is not int or out[key] < 0 for key in COUNTERS)
     ):
         raise ValueError("Invalid playbook metadata; original file left untouched")
+    retraction.validate(out)
     return out
 
 
@@ -89,12 +92,14 @@ def eligible(entry: dict) -> bool:
     )
 
 
-def checkpoint(entry: dict, action: str) -> None:
+def checkpoint(entry: dict, action: str, *, reason=None) -> None:
     """Keep edited text and state recoverable without recursively copying history."""
     entry["history"].append({
         "revision": entry["revision"], "at": now(), "action": action,
         **{field: copy.deepcopy(entry.get(field)) for field in (
             "context", "strategy", "scope", "status", "provenance",
         )},
+        **({"retraction": copy.deepcopy(entry["retraction"])} if "retraction" in entry else {}),
+        **({"reason": reason, "actor": "user"} if reason is not None else {}),
     })
     entry["revision"] += 1

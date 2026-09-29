@@ -50,6 +50,9 @@ from mnemoai.client.agent.reasoning_utils import (
 )
 from mnemoai.client.agent.router import ROUTE_TOOLS, is_trivial_query
 from mnemoai.client.file_ledger import FileLedger
+from mnemoai.client.memory.playbook_context import (
+    refresh_messages as refresh_playbook_messages,
+)
 from mnemoai.client.ui import turn_view
 from mnemoai.client.usage_tracker import UsageTracker
 from mnemoai.models import prompt_cache
@@ -254,6 +257,7 @@ class LangGraphAgent:
         self.model = model
         self.tools = tools
         self.system_prompt = system_prompt
+        self._playbook_context_provider = None
         self.verbose = verbose
         self.callbacks = callbacks or []
         # When True (pinned-input UI), reasoning is buffered into a collapsed
@@ -2151,6 +2155,11 @@ class LangGraphAgent:
         server primes the stream with one on acceptance, before prefill starts."""
         idle = getattr(self, "_stream_idle_timeout", 0) or 0
         if idle <= 0:
+            messages = refresh_playbook_messages(
+                messages, getattr(self, "_playbook_context_provider", None)
+            )
+            if self._cancelled():
+                raise KeyboardInterrupt
             yield from active_model.stream(messages, config=config)
             return
         # Falls back to `idle` when unset, so a hand-built agent (tests) behaves as
@@ -2158,10 +2167,18 @@ class LangGraphAgent:
         first_token = getattr(self, "_stream_first_token_timeout", 0) or idle
 
         q: "queue.Queue" = queue.Queue()
+        abandoned = threading.Event()
 
         def _reader():
             try:
-                for chunk in active_model.stream(messages, config=config):
+                fresh = refresh_playbook_messages(
+                    messages, getattr(self, "_playbook_context_provider", None)
+                )
+                if abandoned.is_set():
+                    return  # a slow refresh must not start an abandoned request
+                if self._cancelled():
+                    raise KeyboardInterrupt
+                for chunk in active_model.stream(fresh, config=config):
                     q.put((None, chunk))
             except BaseException as e:  # propagate the stream's own error verbatim
                 q.put((e, None))
@@ -2182,37 +2199,40 @@ class LangGraphAgent:
         # contentless keep-alives faster than `poll` would otherwise never let the
         # window expire, since only an EMPTY poll advanced the count.
         deadline = time.monotonic() + budget
-        while True:
-            if self._cancelled():
-                raise KeyboardInterrupt("cancelled while waiting for stream")
-            if time.monotonic() >= deadline:
-                # Nothing for `budget` seconds — the stream is wedged (likely a
-                # dead socket after sleep). Abandon the reader; let retry re-run.
-                raise _StreamIdleTimeout(
-                    f"No {'stream data' if started else 'first token'} for "
-                    f"{budget:.0f}s (connection likely dropped)"
-                )
-            try:
-                item, chunk = q.get(timeout=poll)
-            except queue.Empty:
-                continue
-            if item is self._STREAM_DONE:
-                return
-            if item is not None:  # the reader captured an exception — re-raise it
-                raise item
-            # Real data resets the clock and, the first time, narrows the window from
-            # the first-token budget to the per-chunk one. A contentless priming/
-            # keep-alive chunk does NEITHER — an OpenAI-shaped server emits one the
-            # moment it ACCEPTS the request, long before prefill produces a token,
-            # and treating that as the stream starting forfeits the whole window.
-            fresh = started or stream_policy.chunk_has_payload(chunk)
-            if fresh:
-                started, budget = True, idle
-            yield chunk
-            if fresh:
-                # Timed from AFTER the consumer returns, so the window covers the
-                # wait for the NEXT chunk, not the time spent rendering this one.
-                deadline = time.monotonic() + budget
+        try:
+            while True:
+                if self._cancelled():
+                    raise KeyboardInterrupt("cancelled while waiting for stream")
+                if time.monotonic() >= deadline:
+                    # Nothing for `budget` seconds — the stream is wedged (likely a
+                    # dead socket after sleep). Abandon the reader; let retry re-run.
+                    raise _StreamIdleTimeout(
+                        f"No {'stream data' if started else 'first token'} for "
+                        f"{budget:.0f}s (connection likely dropped)"
+                    )
+                try:
+                    item, chunk = q.get(timeout=poll)
+                except queue.Empty:
+                    continue
+                if item is self._STREAM_DONE:
+                    return
+                if item is not None:  # the reader captured an exception — re-raise it
+                    raise item
+                # Real data resets the clock and, the first time, narrows the window from
+                # the first-token budget to the per-chunk one. A contentless priming/
+                # keep-alive chunk does NEITHER — an OpenAI-shaped server emits one the
+                # moment it ACCEPTS the request, long before prefill produces a token,
+                # and treating that as the stream starting forfeits the whole window.
+                fresh = started or stream_policy.chunk_has_payload(chunk)
+                if fresh:
+                    started, budget = True, idle
+                yield chunk
+                if fresh:
+                    # Timed from AFTER the consumer returns, so the window covers the
+                    # wait for the NEXT chunk, not the time spent rendering this one.
+                    deadline = time.monotonic() + budget
+        finally:
+            abandoned.set()
 
     def _stream_once_quiet(self, active_model, messages: list, config: dict) -> tuple:
         """Stream a turn SILENTLY, accumulating the response with no display.
