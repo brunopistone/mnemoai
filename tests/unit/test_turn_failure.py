@@ -19,7 +19,7 @@ non-streamed purely to obtain the provider's real error.
 import time
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from mnemoai.client.agent import turn_failure
 from mnemoai.client.agent.agent import (
@@ -249,6 +249,59 @@ class TestFailedTurnReachesTheTranscript:
         a = _agent(_OkGraph())
         a.invoke("hello")
         assert a.session_log.turns == [["hello", "done"]]
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 4])
+def test_step_limit_followup_reaches_provider_without_replaying_tools(limit):
+    """Actual graph cutoffs before/after tools; inspect the next wire request."""
+    adapter = pytest.importorskip("langchain_aws.chat_models.bedrock_converse")
+    a = _agent()
+    a.recursion_limit = limit
+    a.router = None
+    a.callbacks = []
+    a.verbose = False
+    a._start_spinner = lambda: None
+    a._get_route_model = lambda state: None
+    a._get_route_tools = lambda state: []
+    a._run_spawn_batch = lambda calls: {}
+    requests, executions = [], []
+    finishing = False
+
+    def stream(messages, config, **kwargs):
+        wire, _ = adapter._messages_to_bedrock(messages)
+        calls = [b["toolUse"]["toolUseId"] for m in wire for b in m["content"] if "toolUse" in b]
+        results = [b["toolResult"]["toolUseId"] for m in wire for b in m["content"] if "toolResult" in b]
+        assert calls == results == executions
+        requests.append(wire)
+        if finishing:
+            return AIMessage(content="continued without restarting", id=f"reply_{len(requests)}"), False
+        ident = f"call_{len(requests)}"
+        return AIMessage(
+            content=[{"type": "tool_use", "id": ident, "name": "x", "input": {}}],
+            tool_calls=[{"id": ident, "name": "x", "args": {}}],
+        ), False
+
+    def tools(calls, route_tools, messages, **kwargs):
+        for call in calls:
+            executions.append(call["id"])
+            messages.append(ToolMessage(content="completed work", tool_call_id=call["id"]))
+
+    a._stream_response = stream
+    a._run_tool_calls = tools
+    a.graph = a._build_graph()
+    assert "step limit" in a.invoke("large task")
+    assert len(executions) == limit // 2
+    assert len(a.session_log.turns) == 1
+    history = list(a._messages)
+    finishing = True
+    # The same running agent handles both a user follow-up and a background
+    # completion. Neither can bypass the safety limit or repeat completed tools.
+    assert a.invoke("continue").startswith("continued without restarting")
+    a.drain_background_completions = lambda: [HumanMessage(content="[background work finished]")]
+    assert a.invoke("").startswith("continued without restarting")
+    assert len(executions) == limit // 2
+    assert a._messages[:len(history)] == history, "request repair must not erase the record"
+    assert len(a.session_log.turns) == 3
 
 
 class TestFailedTurnIsClosedOut:

@@ -75,6 +75,7 @@ MODEL_ID:
 #   ORCHESTRATOR: anthropic.claude-opus-4-8 # task decomposition into subtasks
 #   SUMMARY: anthropic.claude-haiku-4-5     # conversation compaction
 #   REFLECTOR: anthropic.claude-haiku-4-5   # evidence-linked lessons
+#   REVIEWER: anthropic.claude-haiku-4-5    # supervisor feedback and verification
 VISION_MODEL_ID:
   NAME: qwen.qwen3-vl-235b-a22b-instruct
   TYPE: mantle
@@ -237,6 +238,12 @@ NOTIFY:
 ENABLE_SKILLS: true
 # ACE Playbook Configuration (Agentic Context Engineering)
 ENABLE_PLAYBOOK: true
+ENABLE_REVIEW: false # Startup default; /review on|off changes this session only
+REVIEW:
+  MAX_ROUNDS: 2 # Chat-model correction rounds (0 = report only, maximum 4)
+  TOTAL_TIMEOUT: 180 # Shared supervision seconds; started tools finish safely
+  TIMEOUT: 45 # Seconds, including evidence preparation/model initialization (1–120)
+  MAX_INPUT_TOKENS: 6000 # Conservative estimate, not a provider billing quota (1000–32000)
 PLAYBOOK:
   REFLECTION_TIMEOUT: 30 # Seconds to wait for extraction (1–120); timeout stores nothing
   MAX_ENTRIES: 500 # Maximum playbook entries before refinement

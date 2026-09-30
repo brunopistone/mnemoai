@@ -36,10 +36,25 @@ def is_error_result(result: Any) -> bool:
         return True
     if result.get("success") is False or result.get("status") in ("error", "failed"):
         return True
+    code = exit_status(result)
+    return code is not None and code != 0
+
+
+def exit_status(result: Any):
+    """Reported process exit code, or None when no process result was observed."""
+    if hasattr(result, "content"):
+        result = result.content
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(result, dict):
+        return None
     for key in _EXIT_CODES:
         if result.get(key) is not None:
             try:
-                return int(result[key]) != 0
+                return int(result[key])
             except (TypeError, ValueError):
                 continue
-    return False
+    return None

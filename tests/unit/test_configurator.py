@@ -837,6 +837,8 @@ def _run_build(provider, default_model, answers, template_file="config.yaml.exam
             return "y"
         if "Reflection wait" in prompt:
             return ""
+        if "Enable supervised peer review" in prompt:
+            return "n"  # independent opt-in; reviewer UX has its own tests
         return next(it)
     previous = builtins.input
     try:
@@ -861,6 +863,7 @@ def test_config_openai_transforms_base_template():
     )
     m = d["MODEL_ID"]
     assert m["TYPE"] == "openai" and m["NAME"] == "gpt-5-mini"
+    assert d["ENABLE_REVIEW"] is False
     # Both areas answered "same as chat" -> nothing written, so the section stays
     # the commented example the template ships.
     assert "AREA_MODELS" not in d

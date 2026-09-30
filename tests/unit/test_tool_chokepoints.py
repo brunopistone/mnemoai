@@ -16,6 +16,7 @@ these tests are also what would catch it being re-forked.
 """
 
 import logging
+import threading
 from contextlib import contextmanager
 
 import pytest
@@ -24,6 +25,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from mnemoai.client import hooks
 from mnemoai.client.agent import tool_loop
 from mnemoai.client.agent.agent import LangGraphAgent
+from mnemoai.client.review_evidence import Capture
 
 
 @contextmanager
@@ -90,6 +92,38 @@ def _run(agent, name="grep_search", args=None, tool_id="t1"):
         content="", tool_calls=[{"name": name, "args": args or {}, "id": tool_id}]
     )
     return agent._execute_tools({"messages": [ai]})["messages"]
+
+
+@pytest.mark.parametrize("allowed", [False, True])
+def test_review_observes_but_never_answers_the_confirmation_gate(tmp_path, allowed):
+    ran = []
+    agent = _agent([_Tool("execute_bash", lambda args: ran.append(args) or '{"exit_code":0}')])
+    agent._review_capture = Capture("task", tmp_path)
+    agent._confirm_tool = lambda *a: allowed
+    _run(agent, name="execute_bash", args={"command": "pytest"})
+    assert bool(ran) is allowed
+    assert agent._review_capture.tools[0]["status"] == ("completed" if allowed else "blocked")
+
+
+def test_background_observations_cannot_contaminate_a_foreground_review(tmp_path):
+    agent = _agent([_Tool("grep_search")])
+    agent._review_capture = Capture("new foreground task", tmp_path)
+    agent._review_excluded = threading.local()
+    agent._review_excluded.value = True
+    _run(agent)
+    assert agent._review_capture.tools == []
+    agent._review_excluded.value = False
+    _run(agent)
+    assert len(agent._review_capture.tools) == 1
+
+
+def test_review_capture_cannot_bypass_plan_mode(tmp_path):
+    agent = _agent([_Tool("fs_write", lambda args: pytest.fail("plan mode must block"))])
+    agent._review_capture = Capture("task", tmp_path)
+    agent._is_blocked_by_plan_mode = lambda *a: True
+    agent._confirm_tool = lambda *a: pytest.fail("plan mode runs before approval")
+    _run(agent, name="fs_write", args={"path": "file"})
+    assert agent._review_capture.tools[0]["status"] == "blocked"
 
 
 class TestMainLoopChokepoint:

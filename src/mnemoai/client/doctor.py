@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, List, NamedTuple, Optional, Tuple
 
 from mnemoai import app_version
-from mnemoai.client import hooks
+from mnemoai.client import hooks, review
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.steering_store import SteeringStore
 from mnemoai.client.user_commands import UserCommandStore
@@ -696,6 +696,25 @@ def collect(client: Any = None) -> List[Check]:
     checks.extend(_tool_checks(client))
     checks.extend(_feature_checks())
     checks.extend(_state_checks(client))
+    reviewer = getattr(client, "reviewer", None)
+    enabled = reviewer.enabled if reviewer is not None else config.get("ENABLE_REVIEW", False) is True
+    try:
+        options = review.settings()
+        overrides = area_models.reviewer_overrides()
+        label = area_models.label(overrides, config.get("MODEL_ID", {}).get("NAME", "?"))
+        cached = getattr(client, "_area_model_cache", {}) if client else {}
+        unavailable = "REVIEWER" in cached and cached["REVIEWER"] is None
+        checks.append(Check(
+            "Features", "peer review", WARN if enabled and unavailable else INFO,
+            f"{'on' if enabled else 'off'}; supervisor; {label}; "
+            f"{options['MAX_ROUNDS']} correction rounds; total {options['TOTAL_TIMEOUT']}s; "
+            f"review wait {options['TIMEOUT']}s; input estimate ≤{options['MAX_INPUT_TOKENS']} tokens",
+            "Reviewer unavailable; /model → Reviewer to reconfigure." if unavailable else
+            "/review on|off; /config review; /features controls the startup default.",
+        ))
+    except (TypeError, ValueError):
+        checks.append(Check("Features", "peer review", WARN, "invalid review configuration",
+                            "Use /config review and /model → Reviewer; no fallback approval."))
     return checks
 
 

@@ -21,17 +21,19 @@ from mnemoai.client import (
     file_ledger,
     hooks,
     provenance,
+    review,
     rewind,
     session_artifacts,
     transcript_export,
     usage_tracker,
 )
-from mnemoai.client.agent import auto_approve, turn_failure
+from mnemoai.client.agent import auto_approve, mid_turn, supervised_turn, turn_failure
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
     convert_strands_messages_to_langchain,
 )
+from mnemoai.client.agent.reasoning_utils import extract_visible_text
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
 from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
@@ -75,6 +77,7 @@ from mnemoai.utils.paths import (
     sweep_old_rag_artifacts,
     sweep_old_sessions,
 )
+from mnemoai.utils.review_protocol import is_feedback
 
 
 class LangGraphClient:
@@ -137,6 +140,7 @@ class LangGraphClient:
         # read per tool call by the confirmation gate. Session-scoped — never
         # persisted, so a new run always starts back at "off".
         self.auto_approve_mode: str = auto_approve.DEFAULT_MODE
+        self.reviewer = review.Reviewer(enabled=config.get("ENABLE_REVIEW", False) is True)
 
         # Set by the pinned UI, which shows the context size in its footer: the
         # per-turn `[Context: N tokens]` line then has nothing left to add and is
@@ -490,8 +494,45 @@ class LangGraphClient:
         # injections (episodic/plan/steering) — there's no user prompt to frame —
         # and let the agent run on the drained completion messages alone.
         delivery_only = not (prompt or "").strip()
+        review_capture = None
+        review_context = []
 
         try:
+            reviewer = getattr(self, "reviewer", None)
+            if reviewer is not None and reviewer.enabled:
+                if not delivery_only:
+                    try:
+                        review_capture = reviewer.begin(prompt)
+                        review_context.append({
+                            "id": "initial-policy", "kind": "execution_constraints",
+                            "text": f"At task start: plan mode={self.plan_mode_active}; "
+                                    f"auto tier={getattr(self, 'auto_approve_mode', 'off')}.",
+                        })
+                        for message in list(self.agent.messages)[-6:]:
+                            kind = getattr(message, "type", "")
+                            if kind in {"human", "ai"} and getattr(message, "content", None):
+                                visible = extract_visible_text(message.content)
+                                if kind == "human":
+                                    visible = turn_view.user_prompt_text(visible)
+                                if not visible:
+                                    continue
+                                review_context.append({
+                                    "id": f"prior-{len(review_context) + 1}",
+                                    "kind": "prior_user_request" if kind == "human" else "prior_actor_statement",
+                                    "text": visible,
+                                })
+                    except Exception as e:
+                        logger.warning("Review evidence unavailable (%s)", type(e).__name__)
+                        reviewer.incomplete("Evidence capture unavailable; no review performed.")
+                        print("\n" + review.render(reviewer.last))
+                else:
+                    reviewer.reset()
+                    reviewer.incomplete("Background delivery has no new user request; not reviewed.")
+                    print("\nPeer review skipped: background delivery has no new user request.")
+            self.agent._review_capture = review_capture
+            self.agent._completion_supervisor = (
+                lambda state, steps: self._supervise_turn(review_capture, state, review_context, steps)
+            ) if review_capture is not None else None
             self._reflection_messages = []
             if getattr(self, "playbook", None):
                 self.refresh_playbook_context()
@@ -520,6 +561,8 @@ class LangGraphClient:
                 steering = self._steering_reminder()
                 if steering:
                     prompt = steering + prompt
+                    if review_capture is not None:
+                        review_context.append({"id": "steering", "kind": "user_steering", "text": steering})
 
             with self.mcp_client:
                 before = list(self.agent.messages)
@@ -531,8 +574,20 @@ class LangGraphClient:
                 try:
                     response = self.agent(prompt)
                 finally:
+                    self.agent._completion_supervisor = None
                     if getattr(self, "reflector", None) and self.agent.messages != before:
                         self._reflection_messages = current_turn_messages(self.agent.messages)
+                if review_capture is not None:
+                    if self.reviewer.last is None:
+                        if isinstance(self.agent, LangGraphAgent):
+                            self.reviewer.incomplete("The actor stopped before normal completion; no correction was started.")
+                            self._save_review_report(self.reviewer.last)
+                            print("\n" + review.render(self.reviewer.last))
+                        else:
+                            # An embedded/custom agent may not implement the turn hook.
+                            self._finish_review(review_capture, response, review_context)
+                    else:
+                        self._save_review_report(self.reviewer.last)
 
                 if hasattr(self.agent, "_code_formatter"):
                     self.agent._code_formatter.flush()
@@ -577,12 +632,20 @@ class LangGraphClient:
         except KeyboardInterrupt:
             with self.spinner_lock:
                 self.spinner.stop()
+            if review_capture is not None:
+                print("\n" + review.render(self.reviewer.incomplete(
+                    "Actor execution cancelled; completed work is retained.", preserve=True)))
+                self._save_review_report(self.reviewer.last)
             return "Operation was cancelled."
 
         except Exception as e:
             # Clean user-facing message for any model/MCP/runtime failure.
             with self.spinner_lock:
                 self.spinner.stop()
+            if review_capture is not None:
+                print("\n" + review.render(self.reviewer.incomplete(
+                    "Actor execution failed; completed work is retained.", preserve=True)))
+                self._save_review_report(self.reviewer.last)
             # ONE report per failure: the print below IS the user-facing error,
             # so the record is file-only — a second red line about the same
             # exception is noise. The traceback never leaves the log file.
@@ -613,8 +676,105 @@ class LangGraphClient:
             return msg
 
         finally:
+            self.agent._review_capture = None
+            self.agent._completion_supervisor = None
             with self.spinner_lock:
                 self.spinner.stop()
+
+    def _supervise_turn(self, capture, state, context, steps):
+        """The hook runs before the agent commits this single user turn."""
+        fresh = state["messages"][getattr(self.agent, "_turn_seed_len", 0):]
+        response = self.agent._last_visible_from(fresh)
+        if not response or mid_turn.has_pending(self.agent):
+            self.reviewer.incomplete("No completed answer, or new user guidance is pending; supervision stopped.")
+            return
+        self.agent._emit_answer(response)
+        self._finish_review(capture, response, context, state=state, steps=steps)
+
+    def _save_review_report(self, report):
+        log = getattr(self.agent, "session_log", None)
+        if log is not None:
+            try:
+                log.log_review(report)
+            except Exception:
+                logger.warning("Could not persist the peer-review record; report remains available.")
+
+    def _finish_review(self, capture, response, context, *, state=None, steps=0):
+        """The only enabled completion checkpoint, after every parent execution route."""
+        try:
+            overrides = area_models.reviewer_overrides()
+            usage_name = str(overrides.get("NAME") or self.llm_controller.model_name)
+            label = area_models.label(
+                overrides, self.llm_controller.model_name, self.llm_controller.model_type,
+            )
+        except Exception:
+            usage_name = "reviewer unavailable"
+            label = "configured reviewer (unavailable)"
+        tracker = getattr(self.agent, "usage", None)
+        usage_epoch = getattr(self, "_review_usage_epoch", 0)
+
+        def account(result):
+            if tracker is not None and usage_epoch == getattr(self, "_review_usage_epoch", 0):
+                tracker.record(result, usage_name)
+
+        event = getattr(self.agent, "_cancel_event", None)
+        with self.spinner_lock:
+            self.spinner.start("Reviewing completed work…")
+        try:
+            def policy_context():
+                return [*context, {
+                    "id": "current-policy", "kind": "execution_constraints",
+                    "text": f"At completion: plan mode={self.plan_mode_active}; "
+                            f"auto tier={getattr(self, 'auto_approve_mode', 'off')}. "
+                            "Refused/pending actions are not approved by this review.",
+                }]
+            options = dict(
+                model_factory=lambda: self._area_model("REVIEWER"), model_label=label,
+                context=policy_context, cancel=(lambda: event.is_set()) if event is not None else None,
+                usage=account,
+            )
+            if state is None:
+                report = self.reviewer.finish(capture, response, **options)
+                self._save_review_report(report)
+            else:
+                def progress(kind, item, revision):
+                    with self.spinner_lock:
+                        self.spinner.stop()
+                    if kind == "review":
+                        print("\n" + review.render(item, history=False) + "\n")
+                    else:
+                        print(f"\nChat model · responding to reviewer · correction round {revision}\n")
+
+                self.reviewer.supervise(
+                    capture, response, steps=steps,
+                    actor=lambda feedback, budget: supervised_turn.continue_work(self.agent, state, feedback, budget),
+                    progress=progress, **options,
+                )
+                report = self.reviewer.last
+        except Exception as exc:
+            # Optional review must not turn a completed answer into a query failure.
+            logger.warning("Review unavailable (%s); answer preserved", type(exc).__name__)
+            report = None
+        finally:
+            with self.spinner_lock:
+                self.spinner.stop()
+        if state is None:
+            print("\n" + (review.render(report) if report else "Peer review · inconclusive · review unavailable.") + "\n")
+        elif report:
+            print(f"\nSupervisor · {report['verdict']} · {report.get('revisions', 0)} correction round(s). "
+                  "/review last for the exchange.\n")
+        with self.spinner_lock:
+            self.spinner.start(WRAP_UP_LABEL)
+
+    def reload_review_settings(self):
+        """Apply review limits in place without changing the session's on/off choice."""
+        try:
+            config.reload()
+            review.settings()
+            self.reviewer.reset()
+            return True
+        except Exception:
+            return False
 
     def compact_conversation(self, focus_instructions: str = "") -> bool:
         """Manually compact the conversation (/compact); True if it ran.
@@ -705,9 +865,11 @@ class LangGraphClient:
         re-install the pre-reload model. ``SUMMARY`` has no holder to re-point —
         ``_summary_model()`` rebuilds it lazily off the dropped cache.
         """
-        self._area_model_cache.clear()
+        self._area_model_cache = {}
         if hasattr(self, "_summary_model_cached"):
             del self._summary_model_cached
+        if getattr(self, "reviewer", None) is not None:
+            self.reviewer.reset()
         router = getattr(self.agent, "router", None)
         if router is not None:
             router.model = self._area_model("ROUTER") or self.model
@@ -759,6 +921,9 @@ class LangGraphClient:
         """
         if self.agent is not None and hasattr(self.agent, "_last_input_tokens"):
             self.agent._last_input_tokens = None
+        # /load, /resume, /branch and /rewind replace the task context too.
+        if getattr(self, "reviewer", None) is not None:
+            self.reviewer.reset()
 
     def _compact_now(self, force: bool = False) -> bool:
         """Mid-loop compaction hook the agent calls before each model call.
@@ -978,29 +1143,34 @@ class LangGraphClient:
         needn't run on the model that writes the answer. Cached per area — these are
         built once at startup and reused for every turn.
 
-        None means "use the main model", which is also what a failed build returns:
-        an unreachable side model must degrade to a working turn, not break one.
+        None selects the main model for routing/decomposition only. REFLECTOR
+        and REVIEWER instead treat it as unavailable: optional analysis must not
+        silently substitute a model or break the working chat turn.
         """
-        if area in self._area_model_cache:
-            return self._area_model_cache[area]
+        cache = self._area_model_cache
+        if area in cache:
+            return cache[area]
         model = None
-        overrides = area_models.overrides_for(area)
-        if overrides or area == "REFLECTOR":
+        overrides = area_models.reviewer_overrides() if area == "REVIEWER" else area_models.overrides_for(area)
+        if overrides or area in {"REFLECTOR", "REVIEWER"}:
             try:
                 # No callbacks: these calls are internal, and the streaming handler
                 # belongs to the visible turn.
+                actual = {"MAX_TOKENS": review.DEFAULT_OUTPUT_TOKENS, **overrides} if area == "REVIEWER" else overrides
                 model = self.llm_controller.build_model_variant(
-                    overrides, callbacks=[], non_reasoning=not bool(overrides),
-                ) if area == "REFLECTOR" else self.llm_controller.build_model_variant(overrides)
+                    actual, callbacks=[], non_reasoning=not bool(overrides),
+                ) if area in {"REFLECTOR", "REVIEWER"} else self.llm_controller.build_model_variant(overrides)
                 logger.info(
                     "%s uses %s",
                     area_models.DESCRIPTIONS.get(area, area).capitalize(),
                     area_models.label(overrides, self.llm_controller.model_name),
                 )
             except Exception as e:
-                fallback = "reflection unavailable" if area == "REFLECTOR" else "using the main model"
+                fallback = "review unavailable" if area == "REVIEWER" else (
+                    "reflection unavailable" if area == "REFLECTOR" else "using the main model"
+                )
                 logger.error(f"{area} model override failed to build; {fallback}: {e}")
-        self._area_model_cache[area] = model
+        cache[area] = model
         return model
 
     def _invoke_model_once(self, prompt: str) -> str:
@@ -1165,6 +1335,9 @@ class LangGraphClient:
         self.current_conversation_path = None
 
         # /usage counts THIS conversation, so a cleared context starts from zero.
+        if getattr(self, "reviewer", None) is not None:
+            self.reviewer.reset()
+        self._review_usage_epoch = getattr(self, "_review_usage_epoch", 0) + 1
         tracker = getattr(self.agent, "usage", None) if self.agent else None
         if tracker is not None:
             tracker.reset()
@@ -1487,7 +1660,7 @@ class LangGraphClient:
             return
         try:
             messages_for_profile = convert_langchain_messages_to_strands(
-                current_turn_messages(self.agent.messages)
+                [m for m in current_turn_messages(self.agent.messages) if not is_feedback(getattr(m, "content", ""))]
             )
             self.profile_manager.analyze_conversation(messages_for_profile)
         except Exception as e:  # noqa: BLE001

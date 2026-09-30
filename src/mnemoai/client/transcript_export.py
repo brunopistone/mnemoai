@@ -30,6 +30,7 @@ from typing import Any, List, Optional
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from mnemoai.client.ui import turn_view
+from mnemoai.utils.review_protocol import feedback_summary, is_feedback
 
 # Tool args worth showing inline. A tool call's value in a transcript is "what did
 # it do", and a whole file body pasted into an argument defeats that.
@@ -106,6 +107,11 @@ def render(
         if isinstance(msg, ToolMessage):
             continue  # results are noise in a transcript; the CALL is recorded
         if isinstance(msg, HumanMessage):
+            content = _text_of(getattr(msg, "content", ""))
+            if is_feedback(content):
+                head = "### Peer reviewer (automated)\n\n" if md else "PEER REVIEWER (AUTOMATED)\n\n"
+                body.append(head + feedback_summary(content))
+                continue
             text = _clean_user_text(_text_of(getattr(msg, "content", "")))
             if not text:
                 continue  # tool-result-only / pure-injection message

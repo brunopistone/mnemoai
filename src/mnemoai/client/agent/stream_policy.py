@@ -70,6 +70,9 @@ TRANSIENT_NETWORK_MARKERS = (
     "peer closed connection",
     "remotedisconnected",
     "incomplete read",
+    # A Converse response ended before its terminal event. Discard the partial
+    # generation and retry the same request, never accept unfinished tool calls.
+    "incomplete bedrock response stream: missing messagestop event",
     # A provider names a retryable condition after its EXCEPTION CLASS, and a
     # class name has no spaces — so "ServiceUnavailableException" does not contain
     # "service unavailable" and read as deterministic (observed on Bedrock: the

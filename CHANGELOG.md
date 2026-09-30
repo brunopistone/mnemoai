@@ -9,6 +9,45 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.28.0] — 2026-09-30
+
+### Fixed
+
+- Continuing after the safety step limit no longer replays unanswered native
+  tool-call blocks that can make Bedrock reject every later turn with
+  `No tool output found`. History repair reconciles content, normalized/raw calls
+  and stream chunks; completed results and the original transcript are preserved.
+  The step limit and tool permissions are unchanged.
+- An incomplete Bedrock response (`missing messageStop event`) now uses the
+  existing bounded stream-retry path, including background sub-agents. Completed
+  tool work stays in context; unconfirmed output/tool calls are discarded.
+- Exhausted background failures are reported as failures consistently, and
+  cancelling during retry cannot leave a background job marked running.
+  An individual sub-agent stop prevents another retry or execution of a late
+  model response.
+
+### Added
+
+- Opt-in supervisor review: `/review on|off|last`, an optional
+  `AREA_MODELS.REVIEWER`, `/model` and `/params` rows, a `/features` startup
+  default, `/config review` limits, and `/doctor` diagnostics.
+- Bounded task, tool-result, current-file and Git-diff evidence; strict
+  pass/revise/inconclusive results with evidence-linked findings. Failed checks,
+  stale artifacts, incomplete evidence, timeout and provider errors cannot
+  silently become a pass. Review usage is attributed to the actual model.
+- The reviewer can send findings/questions to the chat model, which makes
+  authorized corrections or supplies counterevidence before re-review. Shared
+  round/time/step budgets stop unresolved exchanges without granting permission.
+- Corrections remain one user turn with original file provenance. Automated
+  feedback is labelled as model advice, not a user request; separate audit
+  records follow session-recording controls. Existing `/review` macros remain callable; built-in controls
+  also work through `/config review on|off|last`.
+
+Review is off by default. Only the chat model can edit or run tools through the
+existing gates; the reviewer never approves actions. `MAX_ROUNDS: 0` keeps the
+one-shot report-only behavior. Pre-execution plan checkpoints are not included,
+and review is not proof that the work is bug-free.
+
 ## [1.27.0] — 2026-09-29
 
 ### Added
@@ -5230,7 +5269,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.27.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.28.0...HEAD
+[1.28.0]: https://github.com/brunopistone/mnemoai/compare/v1.27.0...v1.28.0
 [1.27.0]: https://github.com/brunopistone/mnemoai/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/brunopistone/mnemoai/compare/v1.25.0...v1.26.0
 [1.25.0]: https://github.com/brunopistone/mnemoai/compare/v1.24.0...v1.25.0

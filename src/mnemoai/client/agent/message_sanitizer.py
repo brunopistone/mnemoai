@@ -186,15 +186,81 @@ def _strip_malformed_thinking(content: object) -> object:
     return cleaned if changed else content
 
 
+def _content_call_id(block: object):
+    """Client-executed call id; None means this is not a local tool call."""
+    if not isinstance(block, dict):
+        return None
+    if block.get("type") in ("tool_use", "tool_call"):
+        return block.get("id") or ""
+    if block.get("type") in ("function_call", "custom_tool_call"):
+        # Responses item ids (fc_...) are NOT the tool's call_id.
+        return block.get("call_id") or ""
+    if isinstance(block.get("toolUse"), dict):
+        return block["toolUse"].get("toolUseId") or ""
+    return None  # leave provider-executed tools and signed reasoning alone
+
+
+def _repair_ai_tool_pairs(msg: AIMessage, result_ids: set):
+    """Reconcile every replayable representation, not only .tool_calls."""
+    kept_ids = set()
+    removed = False
+
+    def keep(call_id):
+        nonlocal removed
+        if isinstance(call_id, str) and call_id and call_id in result_ids:
+            kept_ids.add(call_id)
+            return True
+        removed = True
+        return False
+
+    updates = {}
+    content = _strip_malformed_thinking(msg.content)
+    if isinstance(content, list):
+        filtered = [
+            block for block in content
+            if (call_id := _content_call_id(block)) is None or keep(call_id)
+        ]
+        if len(filtered) != len(content):
+            content = filtered
+    if content is not msg.content:
+        updates["content"] = content
+
+    # Chunks/raw calls can reconstruct .tool_calls on revalidation or in an
+    # adapter; invalid_tool_calls are also serialized by OpenAI.
+    for field in ("tool_calls", "invalid_tool_calls", "tool_call_chunks"):
+        calls = getattr(msg, field, None)
+        if calls:
+            good = [call for call in calls if keep(call.get("id"))]
+            if len(good) != len(calls):
+                updates[field] = good
+    raw_calls = msg.additional_kwargs.get("tool_calls")
+    if isinstance(raw_calls, list) and raw_calls:
+        good = [call for call in raw_calls if keep(call.get("id"))]
+        if len(good) != len(raw_calls):
+            kwargs = dict(msg.additional_kwargs)
+            if good:
+                kwargs["tool_calls"] = good
+            else:
+                kwargs.pop("tool_calls")
+            updates["additional_kwargs"] = kwargs
+
+    has_content = bool(content.strip()) if isinstance(content, str) else bool(content)
+    if removed and not kept_ids and not has_content:
+        return None, kept_ids
+    return msg.model_copy(update=updates) if updates else msg, kept_ids
+
+
 def sanitize_tool_pairs(messages: List[BaseMessage]) -> List[BaseMessage]:
     """Drop orphaned tool calls/results so strict providers don't 400.
 
     Every assistant ``tool_call`` needs a following ``ToolMessage`` with the same
     id and vice versa; an orphan (from a cut-short turn or a compaction slice)
     makes providers like the OpenAI Responses API reject the request. Keeps only
-    calls whose id has a result and drops results with no surviving call; an
-    assistant message left with no calls and no text is dropped. Returns a new
-    list (inputs not mutated); a clean history passes through unchanged.
+    calls whose id has a result, including native content blocks, raw calls and
+    accumulated stream chunks. Drops results with no surviving call; an assistant
+    message left with no calls and no content is dropped. Returns a new list
+    (inputs not mutated); a clean history passes through unchanged. This repairs
+    the request, not the audit record, and never executes or retries tools.
     """
     result_ids = {
         m.tool_call_id
@@ -202,39 +268,15 @@ def sanitize_tool_pairs(messages: List[BaseMessage]) -> List[BaseMessage]:
         if isinstance(m, ToolMessage) and getattr(m, "tool_call_id", None)
     }
 
-    # Pre-pass: drop malformed (empty-inner-text) thinking blocks from assistant
-    # messages so an Anthropic request isn't rejected wholesale (see
-    # _strip_malformed_thinking). Only rebuilds a message whose content changed
-    # (the helper returns the same object when nothing needed dropping).
-    repaired: List[BaseMessage] = []
-    for msg in messages:
-        if isinstance(msg, AIMessage):
-            fixed = _strip_malformed_thinking(msg.content)
-            if fixed is not msg.content:
-                msg = msg.model_copy(update={"content": fixed})
-        repaired.append(msg)
-    messages = repaired
-
     # First pass: fix assistant messages, tracking which call ids survive.
     kept_call_ids: set = set()
     intermediate: List[BaseMessage] = []
     for msg in messages:
-        calls = getattr(msg, "tool_calls", None)
-        if isinstance(msg, AIMessage) and calls:
-            good = [c for c in calls if c.get("id") in result_ids]
-            if len(good) == len(calls):
-                kept_call_ids.update(c.get("id") for c in good)
-                intermediate.append(msg)
+        if isinstance(msg, AIMessage):
+            msg, kept = _repair_ai_tool_pairs(msg, result_ids)
+            kept_call_ids.update(kept)
+            if msg is None:
                 continue
-            if good:
-                kept_call_ids.update(c.get("id") for c in good)
-                intermediate.append(msg.model_copy(update={"tool_calls": good}))
-                continue
-            # No surviving calls: keep the turn only if it has visible text.
-            if str(msg.content).strip():
-                intermediate.append(msg.model_copy(update={"tool_calls": []}))
-            # else drop the message entirely (it was only orphaned calls)
-            continue
         intermediate.append(msg)
 
     # Second pass: drop tool results whose originating call didn't survive.

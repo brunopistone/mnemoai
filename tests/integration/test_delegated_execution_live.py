@@ -1,6 +1,7 @@
 """Live approval policy for foreground orchestration and unattended workers."""
 
 import json
+import threading
 import time
 
 import pytest
@@ -8,6 +9,64 @@ import pytest
 from mnemoai.utils.config import config
 
 pytestmark = pytest.mark.integration
+
+
+def test_live_background_agent_recovers_from_an_injected_incomplete_stream(
+    live_client, monkeypatch, record_testsuite_property
+):
+    """A real provider stream is interrupted once; the same worker then completes."""
+    agent = live_client.agent
+    bind = agent._bind_tools
+    requests, states = [], []
+
+    class InterruptOnce:
+        def __init__(self, model):
+            self.model = model
+
+        def stream(self, messages, config=None):
+            requests.append(list(messages))
+            states.append(agent._activity.snapshot()[-1].status)
+            attempt = len(requests)
+            stream = iter(self.model.stream(messages, config=config))
+            try:
+                for chunk in stream:
+                    yield chunk
+                    if attempt == 1:
+                        raise ValueError("Incomplete Bedrock response stream: missing messageStop event.")
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    close()
+
+    monkeypatch.setattr(agent, "_bind_tools", lambda model, tools: InterruptOnce(bind(model, tools)))
+    monkeypatch.setattr(agent, "_subagent_tools", lambda subagent: [])
+    monkeypatch.setattr(agent, "_empty_response_retries", 2)
+    monkeypatch.setattr(agent, "_sleep_or_cancel", lambda delay: False)
+    monkeypatch.setattr(agent, "_prompt_confirm",
+                        lambda *a, **kw: pytest.fail("background retry must never request approval"))
+    finished = threading.Event()
+    monkeypatch.setattr(agent, "_on_background_complete", lambda ident: finished.set(), raising=False)
+    before = {r.agent_id for r in agent._bg_agents.list_all()}
+    agent._handle_spawn_agent(
+        "general-purpose",
+        "Connectivity fixture: do not use tools. Reply with exactly STREAM_RETRY_OK.",
+        "live incomplete-stream retry", run_in_background=True,
+    )
+    if not finished.wait(120):
+        agent.request_cancel()
+        finished.wait(5)
+        pytest.fail("background retry did not complete")
+    record = next(r for r in agent._bg_agents.list_all() if r.agent_id not in before)
+    assert record.status == "done", record.result
+    assert "STREAM_RETRY_OK" in record.result
+    assert len(requests) == 2 and requests[0] == requests[1]
+    assert states == ["running", "running"]
+    assert agent._activity.snapshot()[-1].status == "done"
+    agent.drain_background_completions()
+    record_testsuite_property(
+        "incomplete_stream_test",
+        "real configured provider + background worker; first response interrupted with the reported error",
+    )
 
 
 @pytest.mark.parametrize(
