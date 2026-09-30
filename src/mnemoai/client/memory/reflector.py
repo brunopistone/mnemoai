@@ -10,6 +10,7 @@ from mnemoai.client.memory import reflection
 from mnemoai.client.memory.playbook_records import PlaybookEntry as PlaybookEntry
 from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.logger import logger
+from mnemoai.utils.review_protocol import is_feedback
 
 # An unstructured tool result longer than this is treated as CONTENT, never as an
 # error message: a real failure report is short, while file contents are not (and
@@ -39,7 +40,7 @@ def current_turn_messages(messages: List[Any]) -> List[Any]:
     """
     last_human = -1
     for i, msg in enumerate(messages):
-        if getattr(msg, "type", None) == "human":
+        if getattr(msg, "type", None) == "human" and not is_feedback(getattr(msg, "content", "")):
             last_human = i
         elif isinstance(msg, dict) and _is_prompt_dict(msg):
             last_human = i
@@ -55,14 +56,15 @@ def _is_prompt_dict(msg: dict) -> bool:
         return False
     content = msg.get("content")
     if isinstance(content, str):
-        return bool(content.strip())
+        return bool(content.strip()) and not is_feedback(content)
     if isinstance(content, list):
         # A tool result is a ``toolResult`` block; a prompt carries text.
         for block in content:
             if isinstance(block, dict) and block.get("toolResult") is not None:
                 return False
         return any(
-            isinstance(b, dict) and str(b.get("text", "")).strip() for b in content
+            isinstance(b, dict) and str(b.get("text", "")).strip() and not is_feedback(b.get("text", ""))
+            for b in content
         )
     return False
 

@@ -5,13 +5,139 @@ launch/drain/resume + headless auto-deny — on a bare agent with stubbed loops,
 no LLM.
 """
 
+import json
 import threading
 
-from langchain_core.messages import AIMessage, HumanMessage
+import pytest
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
 from mnemoai.client.agent import subagents
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
+
+_MISSING_STOP = "Incomplete Bedrock response stream: missing messageStop event."
+
+
+class TestInterruptedStreamRecovery:
+    """Retry only the unfinished generation, not the tools already completed."""
+
+    def _launch(self, tmp_path, monkeypatch, *, drops=2, retries=2, error=_MISSING_STOP, cancel=False,
+                stop_after_write=False):
+        monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path / "app"))
+        written = tmp_path / "completed-work.txt"
+        calls = []
+
+        class Write:
+            name = "fs_write"
+
+            def invoke(self, args):
+                calls.append(args)
+                with written.open("a") as output:
+                    output.write(args["file_text"])
+                if stop_after_write:
+                    agent._activity.request_stop_all()
+                return '{"success":true}'
+
+        class Model:
+            requests = 0
+
+            def __init__(self):
+                self.contexts = []
+
+            def bind_tools(self, tools):
+                return self
+
+            def stream(self, messages, config=None):
+                self.requests += 1
+                self.contexts.append(list(messages))
+                if self.requests == 1:
+                    yield AIMessageChunk(content="", tool_call_chunks=[{
+                        "name": "fs_write", "id": "completed-call", "index": 0,
+                        "args": json.dumps({"path": str(written), "file_text": "once\n"}),
+                    }])
+                elif self.requests <= drops + 1:
+                    # Even a completely parsed tool call is not executable if
+                    # its enclosing response never finished.
+                    yield AIMessageChunk(content="Unconfirmed partial response.")
+                    yield AIMessageChunk(content="", tool_call_chunks=[{
+                        "name": "fs_write", "id": "discard-this-call", "index": 0,
+                        "args": json.dumps({"path": str(written), "file_text": "DUPLICATE\n"}),
+                    }])
+                    raise ValueError(error)
+                else:
+                    yield AIMessageChunk(content="Completed without replaying work.")
+
+        model = Model()
+        agent = LangGraphAgent(model, [Write()], "Perform the fixture task.", verbose=False)
+        agent._empty_response_retries = retries
+        agent._stream_idle_timeout = 0
+        agent._transient_retry_delay = lambda exc, attempt: 0
+        agent._trusted_confirm_categories.add("write")  # explicit fixture authorization
+        agent._prompt_confirm = lambda *a, **kw: pytest.fail("Background work must not prompt")
+        statuses = []
+
+        def wait(delay):
+            statuses.append((agent._activity.snapshot()[0].status, agent._bg_agents.list_all()[0].status))
+            if cancel:
+                agent._cancel_event.set()
+                return True
+            return False
+
+        agent._sleep_or_cancel = wait
+        done = threading.Event()
+        agent._on_background_complete = lambda ident: done.set()
+        agent._launch_background_subagent(subagents.get_subagent("general-purpose"), "finish the fixture", "retry")
+        assert done.wait(5), "background run did not finish"
+        return agent, model, calls, written, statuses
+
+    def test_retries_without_failing_activity_or_replaying_prior_tools(self, tmp_path, monkeypatch):
+        agent, model, calls, written, statuses = self._launch(tmp_path, monkeypatch)
+        assert model.requests == 4  # completed tool turn, two dropped attempts, recovered response
+        assert len(calls) == 1 and written.read_text() == "once\n"
+        assert statuses == [("running", "running"), ("running", "running")]
+        assert agent._activity.snapshot()[0].status == "done"
+        record = agent._bg_agents.list_all()[0]
+        assert record.status == "done" and record.result == "Completed without replaying work."
+        for context in model.contexts[1:]:
+            assert any(isinstance(m, ToolMessage) and m.tool_call_id == "completed-call" for m in context)
+            assert all("Unconfirmed partial" not in str(m.content) for m in context)
+            assert all(tc["id"] != "discard-this-call" for m in context for tc in getattr(m, "tool_calls", []))
+
+    @pytest.mark.parametrize("retries,requests", [(0, 2), (2, 4)])
+    def test_exhaustion_is_finite_and_the_registry_reports_failure(self, tmp_path, monkeypatch, retries, requests):
+        agent, model, calls, written, _ = self._launch(tmp_path, monkeypatch, drops=100, retries=retries)
+        assert model.requests == requests
+        assert len(calls) == 1 and written.read_text() == "once\n"
+        assert agent._activity.snapshot()[0].status == "failed"
+        record = agent._bg_agents.list_all()[0]
+        assert record.status == "failed" and _MISSING_STOP in record.result
+        assert not agent._bg_agents.any_running()
+
+    def test_a_deterministic_failure_is_not_retried(self, tmp_path, monkeypatch):
+        agent, model, calls, _, statuses = self._launch(
+            tmp_path, monkeypatch, drops=100, error="ValidationException: invalid tool schema",
+        )
+        assert model.requests == 2 and len(calls) == 1
+        assert statuses == []
+        assert agent._bg_agents.list_all()[0].status == "failed"
+
+    def test_cancel_during_retry_does_not_leave_a_running_background_job(self, tmp_path, monkeypatch):
+        agent, model, calls, written, _ = self._launch(tmp_path, monkeypatch, drops=100, cancel=True)
+        assert model.requests == 2 and len(calls) == 1
+        assert written.read_text() == "once\n"
+        assert agent._activity.snapshot()[0].status == "stopped"
+        assert not agent._bg_agents.any_running()
+        record = agent._bg_agents.list_all()[0]
+        assert record.status == "failed" and "stopped" in record.result
+        assert len(agent.drain_background_completions()) == 1
+        assert agent.drain_background_completions() == []
+
+    def test_stop_between_iterations_is_not_reported_as_success(self, tmp_path, monkeypatch):
+        agent, model, calls, written, _ = self._launch(tmp_path, monkeypatch, stop_after_write=True)
+        assert model.requests == 1 and len(calls) == 1
+        assert written.read_text() == "once\n"
+        assert agent._activity.snapshot()[0].status == "stopped"
+        assert agent._bg_agents.list_all()[0].status == "failed"
 
 
 class TestRegistry:

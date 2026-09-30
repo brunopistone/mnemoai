@@ -5,6 +5,8 @@ artifact for a bug report or PR, so the tests care about what a READER sees —
 no ANSI, no injected context, no thousand-line tool results.
 """
 
+import json
+
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -13,6 +15,14 @@ from langchain_core.messages import (
 )
 
 from mnemoai.client import transcript_export as tx
+from mnemoai.utils.review_protocol import DATA_MARKER, FEEDBACK_PREFIX
+
+
+def test_export_labels_feedback_as_reviewer_not_as_user():
+    feedback = HumanMessage(content=FEEDBACK_PREFIX + DATA_MARKER + json.dumps({"summary": "Check VALUE."}))
+    exported = tx.render([HumanMessage(content="original task"), feedback, AIMessage(content="fixed")])
+    assert exported.count("### User") == 1
+    assert "### Peer reviewer (automated)" in exported and "Check VALUE." in exported
 
 
 def _convo():

@@ -251,6 +251,8 @@ class TestReservedNames:
         The two lists live apart on purpose — this module stays pure file logic so
         ``/doctor`` can consult it without importing the UI — so a new built-in
         added without reserving it would let a same-named file load and never fire.
+        /review is an explicit compatibility exception: a legacy macro gets
+        priority and /config review still reaches the new controls.
         """
         from mnemoai.client.ui.chat_interface import ChatInterface
 

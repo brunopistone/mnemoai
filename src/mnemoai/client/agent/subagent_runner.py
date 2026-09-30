@@ -179,11 +179,20 @@ def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
 
     def _run() -> None:
         agent._set_headless(True)
+        # Detached work must never be attributed to a later foreground review.
+        excluded = getattr(agent, "_review_excluded", None)
+        if excluded is not None:
+            excluded.value = True
         try:
             result = agent._run_one_subagent(
                 subagent, prompt, label, drive_spinner=False, kind="background"
             )
             agent._bg_agents.complete(rec.agent_id, result)
+        except KeyboardInterrupt:
+            agent._bg_agents.complete(
+                rec.agent_id, f"The {subagent.name} sub-agent was stopped; completed work is retained.",
+                failed=True,
+            )
         except Exception as e:  # never crash the daemon
             logger.error(f"Background sub-agent {rec.agent_id} failed: {e}")
             agent._bg_agents.complete(
@@ -348,7 +357,9 @@ def run_one_subagent(
     pool. Increments the (thread-local) spawn depth so a nested spawn from
     THIS thread is refused; restores it on the way out. ``drive_spinner`` is
     False inside a parallel batch (the batch owns one shared spinner).
-    ``kind`` ("spawn"|"background") tags the activity-panel row."""
+    ``kind`` ("spawn"|"background") tags the activity-panel row. Background
+    failures propagate to the registry owner; foreground failures return a
+    report to their caller."""
     # Bind tools onto a CALLBACK-FREE copy of the base model: the chat model
     # carries the streaming callback handler at the instance level (bound at
     # init), which LangChain MERGES with per-call config — so an empty config
@@ -391,13 +402,20 @@ def run_one_subagent(
             progress=_progress,
             activity=sink,
         )
+        if kind == "background" and (sink.is_cancelled() or agent._cancelled()):
+            raise KeyboardInterrupt
         # A stopped agent returns cleanly via the loop's cancel path; finish_ok
         # marks it "stopped" vs. "done" and records the final answer.
         sink.finish_ok(result)
         return result
+    except KeyboardInterrupt:
+        sink.finish("stopped")
+        raise
     except Exception as e:
-        logger.error(f"spawn_agent ({subagent.name}) failed: {e}")
         sink.finish("failed")
+        if kind == "background":
+            raise  # the background registry must report failure, not a successful error string
+        logger.error(f"spawn_agent ({subagent.name}) failed: {e}")
         return f"The {subagent.name} sub-agent failed: {e}"
     finally:
         agent._spawn_depth -= 1

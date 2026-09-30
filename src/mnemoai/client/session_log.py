@@ -279,6 +279,10 @@ class SessionLog:
             {"t": "turn", "n": self._turn, "ts": time.time(), "messages": payload}
         )
 
+    def log_review(self, record) -> None:
+        """Keep a bounded advisory record, never replay it as chat instructions."""
+        self._append({"t": "review", "n": self._turn, "ts": time.time(), "review": record})
+
     def log_compaction(
         self, summary: str = "", kept: Optional[List[Any]] = None, seeded: bool = False
     ) -> None:

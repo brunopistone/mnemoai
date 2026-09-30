@@ -116,6 +116,25 @@ afterwards. Details in
 
 **When orchestration is disabled**, `full` routes use all tools in a single agent loop (the previous behavior). No regression. Distinct from model-initiated **sub-agents** (`spawn_agent`): the orchestrator is framework-driven (it decomposes complex `full` queries for you), while sub-agents are the model's own on-demand delegation — both now share the same bounded concurrency engine.
 
+## Interrupted model responses
+
+A dropped response, including Bedrock's
+`Incomplete Bedrock response stream: missing messageStop event`, is retried
+inside the same worker. The retry reissues the interrupted model request with
+its existing context; it does not restart the whole sub-agent or replay tools
+that already completed. Tool calls from an unfinished response are not executed.
+The agent stays running while retrying and can finish normally after recovery.
+
+`LLM.MAX_RETRIES` controls additional attempts: the templates set 5, allowing up
+to 6 attempts for one interrupted model request. `0` disables those retries.
+The existing delay/backoff and jitter apply. Restart the app after changing the
+retry count. Authentication/validation errors are not blindly retried.
+
+Retries remain finite. If recovery is exhausted, the run is marked failed and
+its parent is notified; completed filesystem work is not rolled back. Cancelling
+during backoff stops further requests, and a stopped background run is finalized
+rather than left running. No background approval prompt is introduced.
+
 ## Sub-agents (`spawn_agent`)
 
 Distinct from the orchestrator (which the framework drives), sub-agents are

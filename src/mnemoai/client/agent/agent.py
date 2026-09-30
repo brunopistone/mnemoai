@@ -32,6 +32,7 @@ from mnemoai.client.agent import (
     response_parsing,
     stream_policy,
     subagent_runner,
+    supervised_turn,
     tool_formatting,
     tool_loop,
     turn_failure,
@@ -59,6 +60,7 @@ from mnemoai.models import prompt_cache
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
+from mnemoai.utils.review_protocol import ReviewStopped, is_feedback
 
 INTERRUPTED_MARKER = "[Turn interrupted by the user before it completed.]"
 
@@ -258,6 +260,9 @@ class LangGraphAgent:
         self.tools = tools
         self.system_prompt = system_prompt
         self._playbook_context_provider = None
+        self._review_capture = None
+        self._review_excluded = threading.local()
+        self._completion_supervisor = None
         self.verbose = verbose
         self.callbacks = callbacks or []
         # When True (pinned-input UI), reasoning is buffered into a collapsed
@@ -1190,6 +1195,9 @@ class LangGraphAgent:
         tool_calls_made = 0
 
         for _ in range(max_iterations):
+            review_budget = supervised_turn.budget_for(self)
+            if review_budget is not None:
+                review_budget.take_step()
             # Cooperative cancel: either the whole turn was cancelled (Esc/Ctrl+C
             # → global _cancel_event) OR this specific agent was stopped from the
             # panel (x / stop-all → its per-run cancel Event). Sub-agents run on
@@ -1210,9 +1218,10 @@ class LangGraphAgent:
                 # Both stream (so quiet sub-agents keep the idle-timeout + network
                 # retry); quiet just suppresses display + touches no shared state
                 # (streams, drops deltas), making it concurrency-safe.
-                response, _ = self._stream_response(
-                    worker_messages, config, model=worker_model, quiet=quiet
-                )
+                stream_options = {"model": worker_model, "quiet": quiet}
+                if activity is not None:
+                    stream_options["stop_requested"] = activity.is_cancelled
+                response, _ = self._stream_response(worker_messages, config, **stream_options)
             except _ContextOverflow as overflow:
                 # A worker's own history overflowed. Workers run on a local
                 # message list (not self._messages), so end this worker with
@@ -1229,6 +1238,8 @@ class LangGraphAgent:
                 )
 
             if response is None:
+                if review_budget is not None:
+                    raise ReviewStopped("Sub-agent returned no usable response within supervision")
                 # Fallback invoke bypasses _stream_response, so scrub here too.
                 response = worker_model.invoke(
                     self._strip_malformed_reasoning(worker_messages), config=config
@@ -1566,6 +1577,8 @@ class LangGraphAgent:
                 messages, config, model=active_model, mark_answer=True
             )
         except _ContextOverflow as overflow:
+            if supervised_turn.budget_for(self) is not None:
+                raise ReviewStopped("Correction exceeded the model context; compact before retrying") from overflow
             # The prompt exceeded the context window. Compact history and retry
             # ONCE on the shrunken prompt so the in-flight task continues instead
             # of dead-ending. If it still overflows (or nothing could be
@@ -1617,7 +1630,7 @@ class LangGraphAgent:
                     ],
                     "thinking": None,
                 }
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ReviewStopped):
             raise  # user cancel — propagate so the turn rolls back cleanly
         except Exception as e:
             # A stream error that survived the retry wrapper. Two families:
@@ -1631,6 +1644,8 @@ class LangGraphAgent:
             # history is intact, so the user can just send again (a transient issue
             # then re-runs on a fresh connection). Tailor the wording per family.
             self._stop_spinner()
+            if supervised_turn.budget_for(self) is not None:
+                raise ReviewStopped(f"Chat model correction failed ({type(e).__name__})") from e
             if isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e):
                 # The line names the CAUSE (the prose below can't — it's the turn's
                 # answer); exc_info sends the trace to the log file, not the screen.
@@ -1676,6 +1691,8 @@ class LangGraphAgent:
             return {"messages": [AIMessage(content=msg)], "thinking": None}
 
         if response is None:
+            if supervised_turn.budget_for(self) is not None:
+                raise ReviewStopped("Chat model returned no correction or counterevidence")
             response = active_model.invoke(messages, config=config)
 
         self._capture_input_tokens(response)
@@ -1686,6 +1703,8 @@ class LangGraphAgent:
         # is invisible while streaming. On an empty streamed turn, do one
         # authoritative non-streaming invoke to get definitive content + metadata.
         if not visible and not response.tool_calls:
+            if supervised_turn.budget_for(self) is not None:
+                raise ReviewStopped("Chat model returned no visible correction or counterevidence")
             authoritative = active_model.invoke(messages, config=config)
             if authoritative is not None:
                 response = authoritative
@@ -1936,6 +1955,7 @@ class LangGraphAgent:
         model=None,
         mark_answer: bool = False,
         quiet: bool = False,
+        stop_requested=None,
     ) -> tuple:
         """Stream a model response, handling spinner and output.
 
@@ -1959,11 +1979,15 @@ class LangGraphAgent:
         messages = self._strip_malformed_reasoning(messages)
         attempts = getattr(self, "_empty_response_retries", 0) + 1
         for attempt in range(attempts):
+            if self._cancelled() or (stop_requested is not None and stop_requested()):
+                raise KeyboardInterrupt("sub-agent stopped before stream retry")
             try:
                 response, had_reasoning = self._stream_once(
                     active_model, messages, config, print_reasoning, mark_answer,
                     quiet=quiet,
                 )
+            except ReviewStopped:
+                raise
             except Exception as e:
                 # Context overflow is the caller's to handle — never retry it here.
                 if isinstance(e, _ContextOverflow):
@@ -1983,13 +2007,23 @@ class LangGraphAgent:
                 # Esc/Ctrl+C wakes it INSTANTLY (an async KeyboardInterrupt can't
                 # preempt a C-level time.sleep, which is why cancel felt stuck for
                 # the whole backoff). If cancelled mid-wait, abort the turn now.
-                if self._sleep_or_cancel(delay):
-                    raise KeyboardInterrupt("cancelled during retry backoff")
+                remaining = delay
+                while True:
+                    if stop_requested is not None and stop_requested():
+                        raise KeyboardInterrupt("sub-agent stopped during retry backoff")
+                    interval = min(remaining, 0.1) if stop_requested is not None else remaining
+                    if self._sleep_or_cancel(interval):
+                        raise KeyboardInterrupt("cancelled during retry backoff")
+                    remaining -= interval
+                    if remaining <= 0:
+                        break
                 if not quiet:  # quiet runs may be concurrent — don't touch spinner
                     self._start_spinner()
                 continue
             # Retry only a completely empty turn; the reasoning-only case is the
             # caller's responsibility.
+            if self._cancelled() or (stop_requested is not None and stop_requested()):
+                raise KeyboardInterrupt("cancelled before accepting the model response")
             if not self._is_empty_response(response) or attempt == attempts - 1:
                 return response, had_reasoning
             logger.debug(
@@ -2111,7 +2145,14 @@ class LangGraphAgent:
     def _sleep_or_cancel(self, delay: float) -> bool:
         """Delegates to :func:`stream_policy.sleep_or_cancel` with this agent's
         cancel event (``None`` on a bare object → a plain short sleep)."""
-        return stream_policy.sleep_or_cancel(getattr(self, "_cancel_event", None), delay)
+        budget = supervised_turn.budget_for(self)
+        if budget is not None:
+            budget.check()
+            delay = min(delay, budget.remaining())
+        cancelled = stream_policy.sleep_or_cancel(getattr(self, "_cancel_event", None), delay)
+        if budget is not None:
+            budget.check()
+        return cancelled
 
     @staticmethod
     def _is_context_overflow_error(exc: Exception) -> bool:
@@ -2154,6 +2195,10 @@ class LangGraphAgent:
         does not end it (``stream_policy.chunk_has_payload``) — an OpenAI-shaped
         server primes the stream with one on acceptance, before prefill starts."""
         idle = getattr(self, "_stream_idle_timeout", 0) or 0
+        review_budget = supervised_turn.budget_for(self)
+        if review_budget is not None:
+            review_budget.check()
+            idle = min(idle, review_budget.remaining()) if idle > 0 else review_budget.remaining()
         if idle <= 0:
             messages = refresh_playbook_messages(
                 messages, getattr(self, "_playbook_context_provider", None)
@@ -2165,6 +2210,8 @@ class LangGraphAgent:
         # Falls back to `idle` when unset, so a hand-built agent (tests) behaves as
         # before rather than inheriting a 10-minute first-token wait.
         first_token = getattr(self, "_stream_first_token_timeout", 0) or idle
+        if review_budget is not None:
+            first_token = min(first_token, review_budget.remaining())
 
         q: "queue.Queue" = queue.Queue()
         abandoned = threading.Event()
@@ -2176,6 +2223,8 @@ class LangGraphAgent:
                 )
                 if abandoned.is_set():
                     return  # a slow refresh must not start an abandoned request
+                if review_budget is not None:
+                    review_budget.check()
                 if self._cancelled():
                     raise KeyboardInterrupt
                 for chunk in active_model.stream(fresh, config=config):
@@ -2201,6 +2250,8 @@ class LangGraphAgent:
         deadline = time.monotonic() + budget
         try:
             while True:
+                if review_budget is not None:
+                    review_budget.check()
                 if self._cancelled():
                     raise KeyboardInterrupt("cancelled while waiting for stream")
                 if time.monotonic() >= deadline:
@@ -2211,7 +2262,8 @@ class LangGraphAgent:
                         f"{budget:.0f}s (connection likely dropped)"
                     )
                 try:
-                    item, chunk = q.get(timeout=poll)
+                    wait = min(poll, review_budget.remaining()) if review_budget is not None else poll
+                    item, chunk = q.get(timeout=max(0.001, wait))
                 except queue.Empty:
                     continue
                 if item is self._STREAM_DONE:
@@ -2385,7 +2437,7 @@ class LangGraphAgent:
             # call): still show the block so the thinking isn't lost.
             if styled and reasoning_buf:
                 self._flush_reasoning_block(reasoning_buf, reasoning_started)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ReviewStopped):
             raise
         except Exception as e:
             self._stop_spinner()
@@ -2949,15 +3001,21 @@ class LangGraphAgent:
         # concurrently (bounded pool) and stash each result by tool_id; the loop
         # below then just picks up its precomputed result. A single spawn is run
         # inline by the loop (no pool overhead).
-        spawn_results = self._run_spawn_batch(last_message.tool_calls)
+        review_budget = supervised_turn.budget_for(self)
+        spawn_results = {} if review_budget is not None else self._run_spawn_batch(last_message.tool_calls)
 
         tool_results: List[BaseMessage] = []
-        self._run_tool_calls(
-            last_message.tool_calls,
-            route_tools,
-            tool_results,
-            spawn_results=spawn_results,
-        )
+        try:
+            self._run_tool_calls(
+                last_message.tool_calls,
+                route_tools,
+                tool_results,
+                spawn_results=spawn_results,
+            )
+        except BaseException:
+            if review_budget is not None:
+                state["messages"].extend(tool_results)  # retain completed calls on interruption
+            raise
 
         self._start_spinner()
 
@@ -3113,6 +3171,7 @@ class LangGraphAgent:
         # "values"` yields the full accumulated state after each step, so the
         # last snapshot before the limit IS the work so far.
         result = None
+        steps_used = 0
         run_config = {"recursion_limit": self.recursion_limit}
         # `stream` is the compiled-graph API; fall back to `invoke` for any
         # graph-like object that only implements that (keeps a minimal stub or an
@@ -3121,15 +3180,25 @@ class LangGraphAgent:
         try:
             if streamer is None:
                 result = self.graph.invoke(initial_state, config=run_config)
+                steps_used = 1
             else:
                 for snapshot in streamer(
                     initial_state, config=run_config, stream_mode="values"
                 ):
                     result = snapshot
+                    steps_used += 1
+                steps_used = max(0, steps_used - 1)  # first value is the seeded state
+            supervisor = getattr(self, "_completion_supervisor", None)
+            if supervisor is not None and result is not None:
+                if self._cancelled():
+                    raise KeyboardInterrupt
+                supervisor(result, max(0, self.recursion_limit - steps_used))
         except KeyboardInterrupt:
             # User cancelled mid-turn (the UI injects KeyboardInterrupt into this
             # worker thread). CLOSE the turn out rather than deleting it: keep the
             # user message and append an explicit interrupted marker.
+            if result:
+                self._commit_turn(result, turn_log, log=False)
             marker = AIMessage(content=INTERRUPTED_MARKER)
             self._messages.append(marker)
             # Log the cancelled turn too — resuming should show the question was
@@ -3293,6 +3362,10 @@ class LangGraphAgent:
         new_messages: List[BaseMessage] = []
         for m in produced:
             if isinstance(m, (SystemMessage, HumanMessage)):
+                if isinstance(m, HumanMessage) and is_feedback(m.content):
+                    if m not in self._messages:
+                        new_messages.append(m)
+                    continue
                 typed = mid_turn.stored_text(m)
                 if typed:
                     # Deliberately NOT dedup'd: the same words sent twice in one

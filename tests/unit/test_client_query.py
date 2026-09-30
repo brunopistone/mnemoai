@@ -5,6 +5,10 @@ from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+from langchain_core.messages import AIMessage
+
+from mnemoai.client import review
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.managers.agent_conversation_manager import CompactionError
 
@@ -115,3 +119,78 @@ def test_playbook_directory_error_does_not_escape_optional_initialization():
     client._initialize_playbook()
     assert client.playbook is None and client.reflector is None
     assert client._playbook_error == "directory unavailable"
+
+
+@pytest.mark.parametrize("actor_path", ["direct", "orchestrated", "single_worker"])
+def test_every_parent_result_reaches_the_same_review_checkpoint(actor_path, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    client.reviewer = review.Reviewer(enabled=True)
+    client.llm_controller = SimpleNamespace(model_name="fixture", model_type="ollama")
+    client.agent._cancel_event = threading.Event()
+    client.agent.session_log = None
+    client.agent.usage = None
+    reviewer_model = Mock()
+    reviewer_model.invoke.return_value = AIMessage(content='{"verdict":"pass","summary":"Checked","findings":[]}')
+    client._area_model = Mock(return_value=reviewer_model)
+    client.auto_approve_mode = "off"
+    client.agent._trusted_confirm_categories = set()
+
+    def answer(prompt):
+        # Parent execution returns the same contract for each graph route.
+        assert client.agent._review_capture is not None
+        client.agent._review_capture.record(
+            "execute_bash", {"command": "pytest"}, {"exit_code": 0, "stdout": actor_path}, "completed",
+        )
+        client.agent.messages.append(SimpleNamespace(type="ai", content=actor_path))
+        return actor_path
+
+    client.agent.side_effect = answer
+    assert client.query("Run the tests") == actor_path
+    reviewer_model.invoke.assert_called_once()
+    assert client.reviewer.last["verdict"] == "pass"
+    assert actor_path in reviewer_model.invoke.call_args.args[0][1].content
+    assert client.auto_approve_mode == "off" and client.agent._trusted_confirm_categories == set()
+    assert client.agent._review_capture is None
+
+
+def test_review_off_leaves_execution_unchanged(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    client.reviewer = review.Reviewer(enabled=False)
+    client._area_model = Mock(side_effect=AssertionError("review must remain inert"))
+    monkeypatch.setattr(review, "Capture", Mock(side_effect=AssertionError("must not inspect files")))
+    assert client.query("question") == "the answer"
+    client._area_model.assert_not_called()
+
+
+def test_unavailable_reviewer_preserves_answer_and_history(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    client.reviewer = review.Reviewer(enabled=True)
+    client.llm_controller = SimpleNamespace(model_name="fixture", model_type="ollama")
+    client.agent._cancel_event = threading.Event()
+    client.agent.session_log = None
+    client.agent.usage = None
+    client._area_model = Mock(return_value=None)
+    assert client.query("question") == "the answer"
+    assert client.reviewer.last["verdict"] == "inconclusive"
+
+
+def test_actor_failure_does_not_review_an_older_answer(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = _client()
+    client.reviewer = review.Reviewer(enabled=True)
+    client.agent.side_effect = RuntimeError("actor failed")
+    client._area_model = Mock(side_effect=AssertionError("must not invoke reviewer"))
+    assert "Something went wrong" in client.query("question")
+    assert client.reviewer.last["verdict"] == "inconclusive"
+    client._area_model.assert_not_called()
+
+
+def test_replaced_conversation_invalidates_the_last_review():
+    client = _client()
+    client.reviewer = review.Reviewer(enabled=True)
+    client.reviewer.incomplete("old task")
+    client._forget_context_size()
+    assert client.reviewer.enabled and client.reviewer.last is None

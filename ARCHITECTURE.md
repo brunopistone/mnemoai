@@ -218,6 +218,33 @@ for BM25-only retrieval and block vector operations and automatic cleanup.
 
 ## Key Subsystems — Implementation Detail
 
+### Supervisor peer review
+
+`client/review_evidence.py` owns the bounded per-turn `Capture`: observed tool
+outcomes, original/follow-up requirements, current named files and scoped Git
+diffs with revision fingerprints. `client/review.py` owns input budgets,
+strict evidence-linked verdict parsing, one in-flight reviewer call, cancellation,
+late-result suppression, and the bounded reviewer/actor dialogue. `client.query`
+installs an agent completion hook, so review and corrections finish before the
+original turn is committed. The shared tool loop observes without granting trust.
+Background worker threads opt out of this foreground capture.
+
+`client/agent/supervised_turn.py` runs corrections with the foreground chat model's
+normal `_call_model`/`_execute_tools`, preserving route, permissions, user prompt,
+and remaining step budget. A thread-local shared deadline reaches model waits
+and tool starts; corrections cannot launch detached work. `utils/review_protocol.py`
+marks automated feedback so history retains context while user-turn counting,
+rewind and reflection keep the original boundary.
+
+`AREA_MODELS.REVIEWER` uses ordinary provider dispatch but has no tool binding or
+fallback-on-explicit-failure. Configuration reaches `/model`, `/params`,
+`/features`, `/config review` and `/doctor`. Session logs retain a bounded `review`
+record without replaying it as conversation. Existing `/review` macros keep their
+meaning; `/config review on|off|last` is the unambiguous control alias.
+`MAX_ROUNDS` bounds corrections (zero means report-only); `TOTAL_TIMEOUT` bounds
+the exchange without abandoning in-flight writes. Pre-execution plan review is
+not implemented. The reviewer itself never executes tools or approves actions.
+
 ### Evidence-linked playbook and `/learned`
 
 First-stage retraction is implemented in `client/memory/retraction.py`: stable
@@ -348,6 +375,15 @@ The model calls `ask_user_question(question, options)` when a decision is genuin
 `question_dialog` (`tui`) is deliberately **not** built on `select_from_list`: that picker backs `/load`, `--resume` and the configurator, where the listed rows genuinely are the whole answer. It is a `RadioList(select_on_focus=True)` plus a one-line `TextArea` whose `accept_handler` submits, so Enter confirms from either field and Tab moves between them (prompt_toolkit's `Dialog` already binds Tab/S-Tab); Esc dismisses. The echo to scrollback happens inside the dialog — the one window where a plain `print` is safe — and distinguishes all three outcomes, since a dismissal and a decline read identically otherwise. Off-TTY the same three outcomes are reachable through two `input()` prompts (the row, then the note), with EOF meaning "no note" rather than an error.
 
 ### Agent collaborators (`client/agent/{message_codec,message_sanitizer,plan_policy,tool_formatting,turn_failure,confirmation_gate,tool_loop}.py`)
+
+Tool-pair repair reconciles all local-call encodings: normalized and invalid
+calls, native `tool_use`/`toolUse`/`tool_call` content, Responses
+`function_call`/`custom_tool_call` content, raw OpenAI calls and stream chunks.
+Provider serializers can replay any surviving copy, so clearing `.tool_calls`
+alone is insufficient after a graph step-limit cutoff. Repair is non-mutating,
+preserves completed pairs and signed reasoning/provider-managed tool blocks,
+and neither re-executes tools nor fabricates results. Regression coverage checks
+the serialized request and continuation in the same running agent.
 
 `LangGraphAgent` is the coordinator; its **stateless** logic lives in sibling modules so the class stays focused on the graph/loop. `message_codec` = Strands↔LangChain message conversion; `message_sanitizer` = orphaned tool-pair repair (`sanitize_tool_pairs`); `plan_policy` = the plan-mode block decision + read-only-bash heuristic + data tables (`PLAN_BLOCKED_TOOLS`, `READONLY_BASH_CMDS`, …); `tool_formatting` = the `[⚙ …]` marker rendering (`format_tool_call`/`elide_middle`), `normalize_tool_args`, and `tool_error_message`; `turn_failure` = the marker a dead turn leaves in history + the recovery the user is pointed at (`failure_marker`/`is_failure_marker`/`classify`/`recovery_advice`) — several paths report a failed turn (`invoke`'s generic except, `_call_model`'s stream and model-failure branches), and the wording must be the same in all of them. The agent keeps thin `_sanitize_tool_pairs`/`_is_blocked_by_plan_mode`/`_format_tool_call`/… methods that **delegate** into these, preserving the historical class surface the unit tests build against (`LangGraphAgent.__new__(...)` + `LangGraphAgent._…`) and the `getattr(agent, "_sanitize_tool_pairs", …)` call in `AgentConversationManager`. When adding pure tool/plan/message logic, put it in the collaborator and delegate — don't grow `agent.py`.
 

@@ -372,6 +372,18 @@ VISION_MODEL_ID:
 
 ### Per-area models (`AREA_MODELS`)
 
+`REVIEWER` selects the optional supervisor model. It exchanges feedback with the
+chat model, which alone executes authorized corrections. Enable it for
+this session with `/review on`, or set its startup default in `/features`.
+Choose its provider/model with `/model` → Reviewer and tune an explicit override
+with `/params`. `/config review` edits `REVIEW.TIMEOUT` (45 seconds by default)
+and `REVIEW.MAX_INPUT_TOKENS` (6000 estimated input tokens), plus shared
+`REVIEW.MAX_ROUNDS` (2 corrections; 0 means report-only) and
+`REVIEW.TOTAL_TIMEOUT` (180 seconds), without restarting.
+No reviewer override means a separate main-model invocation; an explicit build
+failure is inconclusive, not silent fallback or permission approval.
+See [Peer review](guides/peer-review.md) for scope, limits and macro compatibility.
+
 For learning configuration, use `/features` to enable/disable the playbook,
 `/model` and `/params` for its reflector, and `/config playbook` for learning
 limits without a restart. Full `/config` setup also offers reflector selection
@@ -404,7 +416,7 @@ AREA_MODELS:
 
 **You don't have to write it by hand.** The first-run configurator offers a
 router model when `ENABLE_ROUTING` is on and an orchestrator model when
-`ENABLE_ORCHESTRATION` is on, and `/model` lists all three areas beside the chat,
+`ENABLE_ORCHESTRATION` is on, and `/model` lists all areas beside the chat,
 vision and embeddings sections (`/params` tunes an area you've already
 configured). Each starts with the same question — _use the same model as chat?_ —
 and answering yes writes **nothing**, because that is exactly what "no entry"

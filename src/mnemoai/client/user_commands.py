@@ -43,7 +43,7 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 BUILTIN_COMMANDS = (
     "auto", "branch", "clear", "compact", "config", "context", "copy", "diff",
     "doctor", "exit", "export", "features", "files", "help", "hooks", "learned", "load", "mcp",
-    "memory", "model", "params", "plan", "quit", "rename", "rewind", "save", "skills",
+    "memory", "model", "params", "plan", "quit", "rename", "review", "rewind", "save", "skills",
     "usage", "why",
 )
 
@@ -187,6 +187,11 @@ class UserCommandStore:
             root = commands_dir()
         self.root = Path(root)
         self.reserved = {str(r).lstrip("/").lower() for r in reserved}
+        # /review was the documented macro example before peer review existed.
+        # Keep it callable; the UI also exposes /config review on|off|last.
+        # An explicitly supplied reserved set still has its original meaning.
+        if reserved is BUILTIN_COMMANDS:
+            self.reserved.discard("review")
 
     def _scan(self) -> Tuple[List[UserCommand], List[CommandIssue]]:
         """Scan the root once, returning (valid commands, rejected issues)."""

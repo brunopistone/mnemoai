@@ -45,6 +45,14 @@ def _agent(idle=0.2, first_token=None):
 
 
 class TestTransientNetworkClassifier:
+    def test_incomplete_bedrock_response_is_transient_including_wrapped_errors(self):
+        error = ValueError("Incomplete Bedrock response stream: missing messageStop event.")
+        assert stream_policy.is_transient_network_error(error)
+        assert stream_policy.is_transient_network_error(ExceptionGroup("worker", [error]))
+        assert not stream_policy.is_transient_network_error(
+            ValueError("ValidationException: missing required messageStop property")
+        )
+
     def test_matches_common_socket_errors(self):
         for msg in [
             "Connection reset by peer",
@@ -595,6 +603,65 @@ class TestNoBlockingNonStreamingFallback:
         resp, _ = a._stream_response([], {})
         assert resp.content == "recovered"
         assert calls["n"] == 2  # 500 retried, then succeeded
+
+    @pytest.mark.parametrize("partial", [False, True])
+    def test_incomplete_bedrock_response_retries_the_stream_not_invoke(self, partial):
+        class Model:
+            calls = 0
+
+            def stream(self, messages, config=None):
+                self.calls += 1
+                if self.calls == 1:
+                    if partial:
+                        yield AIMessageChunk(content="unfinished")
+                    raise ValueError("Incomplete Bedrock response stream: missing messageStop event.")
+                yield AIMessageChunk(content="recovered")
+
+            def invoke(self, *args, **kwargs):
+                pytest.fail("must retry streaming, not use an unbounded fallback")
+
+        agent = self._agent()
+        agent._empty_response_retries = 2
+        agent._sleep_or_cancel = lambda delay: False
+        model = Model()
+        response, _ = agent._stream_response([], {}, model=model)
+        assert response.content == "recovered" and model.calls == 2
+
+    def test_individual_stop_during_backoff_prevents_another_request(self):
+        agent = self._agent()
+        agent._empty_response_retries = 5
+        agent._transient_retry_delay = lambda *args: 10
+        stopped = threading.Event()
+        attempts, waits = [], []
+
+        def fail(*args, **kwargs):
+            attempts.append(1)
+            raise ValueError("Incomplete Bedrock response stream: missing messageStop event.")
+
+        def wait(delay):
+            waits.append(delay)
+            stopped.set()
+            return False
+
+        agent._stream_once = fail
+        agent._sleep_or_cancel = wait
+        with pytest.raises(KeyboardInterrupt):
+            agent._stream_response([], {}, model=object(), stop_requested=stopped.is_set)
+        assert attempts == [1] and waits == [0.1]
+
+    def test_individual_stop_during_generation_does_not_return_tool_calls(self):
+        agent = self._agent()
+        stopped = threading.Event()
+
+        def returned_after_stop(*args, **kwargs):
+            stopped.set()
+            return AIMessageChunk(content="", tool_calls=[
+                {"name": "fs_write", "args": {"path": "must-not-run"}, "id": "late"},
+            ]), False
+
+        agent._stream_once = returned_after_stop
+        with pytest.raises(KeyboardInterrupt):
+            agent._stream_response([], {}, model=object(), stop_requested=stopped.is_set)
 
 
 class TestAuxAttempts:

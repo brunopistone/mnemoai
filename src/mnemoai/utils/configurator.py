@@ -27,6 +27,7 @@ from prompt_toolkit.widgets import (
     TextArea,
 )
 
+from mnemoai.client.review import SETTINGS as _REVIEW_SETTINGS
 from mnemoai.models.area_models import AREAS
 from mnemoai.models.area_models import CONFIG_SECTION as AREA_SECTION
 from mnemoai.models.area_models import DESCRIPTIONS as AREA_DESCRIPTIONS
@@ -1251,6 +1252,11 @@ def _build_config(
         _truthy(_get_top_level(text, "ENABLE_PLAYBOOK")),
     )
     text = _set_bool(text, "ENABLE_PLAYBOOK", learning)
+    reviewing = _ask_bool(
+        "Enable supervised peer review (reviewer and chat-model correction rounds)?",
+        _explicit_bool(_get_top_level(text, "ENABLE_REVIEW")),
+    )
+    text = _set_bool(text, "ENABLE_REVIEW", reviewing)
     memory = _ask_bool("Enable persistent memory (agent curates MEMORY.md)?", _truthy(_get_top_level(text, "ENABLE_MEMORY")))
     text = _set_bool(text, "ENABLE_MEMORY", memory)
     if memory:
@@ -1279,11 +1285,14 @@ def _build_config(
     # no toggle to hang off, so it stays a /model-only choice.
     for area, enabled in (
         ("ROUTER", routing), ("ORCHESTRATOR", orchestration), ("REFLECTOR", learning),
+        ("REVIEWER", reviewing),
     ):
         if enabled:
             text = _prompt_model_section(text, area, is_llm=False)
     if learning:
         text = _prompt_playbook_settings(text, timeout_only=True)
+    if reviewing:
+        text = _prompt_review_settings(text)
 
     text = _set_bool(text, "USE_PROFILING", _ask_bool("Enable user profiling (personalized responses)?", _truthy(_get_in_section(text, "PROFILE", "USE_PROFILING"))), section="PROFILE")
 
@@ -1373,32 +1382,32 @@ _PLAYBOOK_SETTINGS = {
 }
 
 
-def _playbook_options(text: str) -> dict:
+def _settings_options(text: str, section: str) -> dict:
     data = yaml.safe_load(text)
     if not isinstance(data, dict):
         raise ValueError("Configuration must be a mapping")
-    options = data.get("PLAYBOOK")
+    options = data.get(section)
     if options is None:
         options = {}
     if not isinstance(options, dict):
-        raise ValueError("PLAYBOOK must be a mapping")
+        raise ValueError(f"{section} must be a mapping")
     return options
 
 
-def _set_playbook_option(text: str, key: str, value: str) -> str:
+def _set_settings_option(text: str, section: str, key: str, value: str) -> str:
     """Edit a direct child only, retaining unrelated fields and block comments."""
     lines = text.splitlines()
-    idx = next((i for i, line in enumerate(lines) if re.match(r"^PLAYBOOK\s*:", line)), -1)
+    idx = next((i for i, line in enumerate(lines) if re.match(rf"^{re.escape(section)}\s*:", line)), -1)
     if idx < 0:
-        return text + ("" if text.endswith("\n") else "\n") + f"PLAYBOOK:\n  {key}: {value}\n"
+        return text + ("" if text.endswith("\n") else "\n") + f"{section}:\n  {key}: {value}\n"
     tail = lines[idx].split(":", 1)[1].split(" #", 1)[0].strip()
     if tail and not tail.startswith("#"):
         # A flow mapping needs expansion before individual fields can be edited.
         if tail not in ("{}", "null", "~") and not (tail.startswith("{") and tail.endswith("}")):
-            raise ValueError("Expand PLAYBOOK into a block mapping before editing its settings")
-        options = _playbook_options(text)
+            raise ValueError(f"Expand {section} into a block mapping before editing its settings")
+        options = _settings_options(text, section)
         options[key] = yaml.safe_load(value)
-        expanded = yaml.safe_dump({"PLAYBOOK": options}, sort_keys=False)
+        expanded = yaml.safe_dump({section: options}, sort_keys=False)
         expanded_lines = expanded.rstrip().splitlines()
         comment = lines[idx].partition(" #")[2]
         if comment:
@@ -1432,14 +1441,20 @@ def _set_playbook_option(text: str, key: str, value: str) -> str:
 
 
 def _prompt_playbook_settings(text: str, timeout_only: bool = False) -> str:
-    steps = []
-    for key, spec in _PLAYBOOK_SETTINGS.items():
-        if timeout_only and key != "REFLECTION_TIMEOUT":
-            continue
+    specs = {k: v for k, v in _PLAYBOOK_SETTINGS.items() if not timeout_only or k == "REFLECTION_TIMEOUT"}
+    return _prompt_scoped_settings(text, "PLAYBOOK", specs)
 
+
+def _prompt_review_settings(text: str) -> str:
+    return _prompt_scoped_settings(text, "REVIEW", _REVIEW_SETTINGS)
+
+
+def _prompt_scoped_settings(text: str, section: str, specs: dict) -> str:
+    steps = []
+    for key, spec in specs.items():
         def step(current, back, key=key, spec=spec):
             label, default, kind, minimum, maximum = spec
-            options = _playbook_options(current)
+            options = _settings_options(current, section)
             hint = str(options.get(key, default))
             while True:
                 raw = _ask_number(label, default=hint, kind=kind, allow_back=back)
@@ -1453,7 +1468,7 @@ def _prompt_playbook_settings(text: str, timeout_only: bool = False) -> str:
                     if key in options and parsed == options[key]:
                         return current
                     literal = str(int(parsed)) if parsed == int(parsed) else str(parsed)
-                    return _set_playbook_option(current, key, literal)
+                    return _set_settings_option(current, section, key, literal)
                 hint = str(default)
                 label = spec[0] + " — value outside the allowed range"
         steps.append(step)
@@ -1462,24 +1477,33 @@ def _prompt_playbook_settings(text: str, timeout_only: bool = False) -> str:
 
 def run_playbook_settings() -> Optional[Path]:
     """Tune only PLAYBOOK settings; model selection stays in /model."""
+    return _run_scoped_settings("playbook", _prompt_playbook_settings)
+
+
+def run_review_settings() -> Optional[Path]:
+    """Tune only review budgets; keep the session and its on/off choice."""
+    return _run_scoped_settings("review", _prompt_review_settings)
+
+
+def _run_scoped_settings(label, prompt) -> Optional[Path]:
     dest = _config_to_edit()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config first.")
         return None
     text = dest.read_text()
     try:
-        new_text = _prompt_playbook_settings(text)
+        new_text = prompt(text)
     except (KeyboardInterrupt, _Cancelled):
-        print_notice("Cancelled; playbook settings unchanged.")
+        print_notice(f"Cancelled; {label} settings unchanged.")
         return None
     except yaml.YAMLError:
-        print_error("Cannot parse config.yaml; playbook settings unchanged.")
+        print_error(f"Cannot parse config.yaml; {label} settings unchanged.")
         return None
     except ValueError as e:
-        print_error(f"Playbook settings unchanged: {e}")
+        print_error(f"{label.capitalize()} settings unchanged: {e}")
         return None
     if new_text == text:
-        print_notice("Playbook settings unchanged.")
+        print_notice(f"{label.capitalize()} settings unchanged.")
         return None
     if dest.read_text() != text:
         print_error("Configuration changed while the dialog was open; please try again.")
@@ -1487,7 +1511,7 @@ def run_playbook_settings() -> Optional[Path]:
     try:
         atomic_write_text(str(dest.resolve()), new_text)
     except OSError as e:
-        print_error(f"Could not save playbook settings ({type(e).__name__}); original preserved.")
+        print_error(f"Could not save {label} settings ({type(e).__name__}); original preserved.")
         return None
     return dest
 
@@ -1542,6 +1566,7 @@ _MODEL_SECTIONS = {
     "5": ("ORCHESTRATOR", f"Orchestrator model — {AREA_DESCRIPTIONS['ORCHESTRATOR']}", False),
     "6": ("SUMMARY", f"Summary model — {AREA_DESCRIPTIONS['SUMMARY']}", False),
     "7": ("REFLECTOR", f"Reflector model — {AREA_DESCRIPTIONS['REFLECTOR']}", False),
+    "8": ("REVIEWER", f"Reviewer model — {AREA_DESCRIPTIONS['REVIEWER']}", False),
 }
 
 # The feature each area's work depends on: area -> (toggle, its name in a prompt).
@@ -1552,6 +1577,7 @@ _AREA_FEATURE = {
     "ROUTER": ("ENABLE_ROUTING", "Query routing"),
     "ORCHESTRATOR": ("ENABLE_ORCHESTRATION", "Orchestration"),
     "REFLECTOR": ("ENABLE_PLAYBOOK", "Playbook learning"),
+    "REVIEWER": ("ENABLE_REVIEW", "Peer review"),
 }
 
 
@@ -1838,6 +1864,7 @@ _PARAM_SECTIONS = {
     "5": ("ORCHESTRATOR", "Orchestrator model"),
     "6": ("SUMMARY", "Summary model"),
     "7": ("REFLECTOR", "Reflector model"),
+    "8": ("REVIEWER", "Reviewer model"),
 }
 
 
@@ -2149,6 +2176,7 @@ _FEATURE_TOGGLES = [
     ("ENABLE_RAG", "RAG — index & search your documents"),
     ("ENABLE_EPISODIC_MEMORY", "Episodic memory — recall similar past tasks"),
     ("ENABLE_PLAYBOOK", "Playbook learning — extra model calls after tool turns"),
+    ("ENABLE_REVIEW", "Peer review — supervisor feedback and chat-model corrections"),
     ("ENABLE_WEB_SEARCH", "Web search (needs a Brave API key)"),
     ("ENABLE_WEB_CRAWL", "Web crawler — fetch & read pages"),
     ("ENABLE_ROUTING", "Query routing — per-query tool subsets"),
@@ -2194,6 +2222,9 @@ def _prompt_feature_dependencies(text: str, newly_on: set) -> str:
     if "ENABLE_PLAYBOOK" in newly_on:
         text = _prompt_model_section(text, "REFLECTOR", is_llm=False)
         text = _prompt_playbook_settings(text, timeout_only=True)
+    if "ENABLE_REVIEW" in newly_on:
+        text = _prompt_model_section(text, "REVIEWER", is_llm=False)
+        text = _prompt_review_settings(text)
     return text
 
 

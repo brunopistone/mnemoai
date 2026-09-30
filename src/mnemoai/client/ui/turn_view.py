@@ -10,6 +10,7 @@ import threading
 import time
 
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
+from mnemoai.utils.review_protocol import feedback_summary, is_feedback
 
 _GREEN = "\033[32m"
 _GRAY = "\033[90m"
@@ -46,6 +47,8 @@ def user_prompt_text(text: str) -> str:
     user said" means — the replay used to print the raw episodic block, which
     dumped a ~30-line wall of tool names above the first prompt on every resume.
     """
+    if is_feedback(text):
+        return ""
     text = _EPHEMERAL_RE.sub("", text or "")
     if text.lstrip().startswith(_EPISODIC_PREFIX):
         # Shape: "[Episodic Memory …]\n<entries>\n\n<the real prompt>".
@@ -652,6 +655,9 @@ def render_conversation(messages: list) -> str:
         )
         content = getattr(msg, "content", "")
         if cls == "HumanMessage":
+            if is_feedback(content):
+                out.append(_bordered("Peer reviewer (automated)", feedback_summary(content)))
+                continue
             # Show only what the user typed: a stored prompt still carries the
             # prepended episodic-memory block, which otherwise replayed as a wall
             # of tool names above the first message on every resume.

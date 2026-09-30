@@ -55,6 +55,7 @@ nav:
       - Extending & advanced:
           - Orchestration & sub-agents: guides/orchestration.md
           - Memory & learning: guides/memory.md
+          - Peer review: guides/peer-review.md
           - Knowledge & web tools: guides/knowledge-and-web.md
           - External MCP servers: guides/mcp.md
           - Tool hooks: guides/hooks.md

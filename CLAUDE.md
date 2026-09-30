@@ -161,6 +161,15 @@ Used in both episodic memory and RAG. Pattern: get top-N candidates from vector 
 
 ### Transient-failure retry (`client/agent/stream_policy.py`) ★
 
+`Incomplete Bedrock response stream: missing messageStop event` is a truncated
+generation, not a valid partial answer or a task failure. Match this specific
+protocol error in the shared retry policy; retry the same model request with
+completed tool results still in context. Never synthesize the missing event or
+restart completed tools. A worker stays running through retries; only exhaustion
+or a non-retryable failure ends it. Background runner exceptions must reach the
+registry owner so it cannot mark a failed run done, and retry cancellation must
+finalize the registry as well as the activity panel.
+
 One home for "was this failure worth retrying, and how long do we wait" — used by the streamed turn AND by every non-streamed call. **A graceful fallback is what hides a missing retry:** route classification, task decomposition and the compaction summary each degrade cleanly (bind every tool / one `full` subtask / drop that batch), so on a provider overload (`529 overloaded_error`) they took the fallback on the FIRST rejection while the stream beside them recovered on attempt 2 — nothing crashed, the turn just got quietly dumber, and the compaction case lost that slice of history for good. All three now go through `call_with_transient_retry` / `acall_with_transient_retry` (`router._invoke_with_retry`, `agent._aux_invoke`, `agent_conversation_manager._with_transient_retry`): retry only `is_transient_network_error`, re-raise a deterministic error at once, and re-raise the last transient so the fallback still runs. Attempts cap at `AUX_RETRY_ATTEMPTS` (3) even when `LLM.MAX_RETRIES` is higher — with a working fallback a quick second chance beats a long stall, the opposite trade-off from the streamed turn. Backoff is **jittered** (`RETRY_JITTER`, applied after the 30s cap — waves/sub-agents/summary batches fan out together, so a deterministic delay makes them all re-collide) and defers to the provider's own `retry-after` when present (`retry_after_seconds`, httpx + botocore shapes, non-numeric ignored). The module stays logger-free and config-free: call sites read `LLM.*` and log via the shared `retry_notice` wording.
 
 **Classification is by phrasing, so a provider that words a failure differently is a silent gap.** `TRANSIENT_NETWORK_MARKERS` had `connection closed`, but botocore's `ConnectionClosedError` reads "Connection **was** closed before we received a valid response…" — no substring match, so the single most retryable failure there is (a dropped `converse-stream` socket) was classified deterministic and retried **zero** times, surfacing as "an error I can't recover from automatically". Only `ReadTimeoutError`/`ConnectTimeoutError` matched at all (via `timeout`); five of botocore's seven transport errors were fatal. Its wordings are now matched explicitly. When adding a provider, check its exception `fmt` strings against the tuple rather than assuming the generic phrasings cover them.
@@ -281,6 +290,14 @@ The terminal is a conversation, so **a stack trace must never render into it** �
 
 ### Agent collaborators (`client/agent/{message_codec,message_sanitizer,plan_policy,tool_formatting,turn_failure,confirmation_gate,tool_loop}.py`) ★
 
+**Tool-pair repair must cover every replayable copy.** Bedrock/Anthropic keep
+`tool_use` in content as well as `.tool_calls`; OpenAI also carries raw calls,
+Responses `function_call` blocks, and stream chunks. Removing only `.tool_calls`
+leaves an unanswered invocation on the wire after a step-limit/cancel cutoff.
+Repair outgoing history without replaying tools, inventing outputs, erasing the
+audit record, or stripping provider-executed tools and signed reasoning. Tests
+must inspect provider serialization as well as the normalized message fields.
+
 `LangGraphAgent` is the coordinator; its **stateless** logic lives in siblings it delegates to: `message_codec` (Strands↔LangChain), `message_sanitizer` (`sanitize_tool_pairs`), `plan_policy` (plan-block decision + read-only-bash heuristic + tables), `tool_formatting` (marker rendering, arg normalization, error translation), `turn_failure` (the marker a dead turn leaves in history + the recovery it names). Thin `_…` methods on the agent delegate in, preserving the class surface the unit tests build against. Put new pure tool/plan/message logic in the collaborator, not `agent.py`.
 
 **A turn that dies must leave a RECORD and name a way out** (`turn_failure.py`). Three things followed from one turn failing on its FIRST model call. (1) **It has to be logged even though it produced nothing:** `stream_mode="values"` yields the SEEDED state before any node runs, so such a turn reached `_commit_turn` with a truthy result and zero new messages, and the early return skipped `_log_turn` — the prompt was in live history and absent from the transcript, i.e. the divergence the session-log invariant is about, in its smallest form (the question was on screen and gone at the next `--resume`). The early return is gone; `_commit_turn` takes `log=False` for the one caller that logs afterwards itself (the `GraphRecursionError` branch appends its own `INTERRUPTED_MARKER`), because **one turn must produce exactly ONE record** — two are two turns to the picker's count and to `discard_if_empty`. (2) **It has to be closed out:** history otherwise ends on a dangling `HumanMessage` and the provider adapters MERGE consecutive user messages (`langchain-aws` joins two into one Bedrock `user` block), so the failed prompt rode along as a silent prefix of the next question. `failure_marker(exc)` is appended like `INTERRUPTED_MARKER` — SENT, not stripped (the model should see the turn died), carrying only the exception's CLASS name because the provider's prose can be a whole JSON body, and skipped by `_last_visible_from` so it can never be surfaced as an answer. (3) **The recovery is named:** `classify`/`recovery_advice` map the failure to `/compact` (outgrown window), `/rewind` + `/model` (contents rejected — retrying is pointless) or nothing (a connection failure, where "send it again" already IS the recovery), replacing "an error I can't recover from automatically", which was true and useless. And because a zero-chunk stream carries NO reason at all (langchain-core raises a bare `ValueError`, while `disable_streaming = False` means the non-streamed call that would return the real `ValidationException` is never made), `_stream_once` wraps only that case in `_EmptyStream` and `_diagnose_empty_stream` re-issues the same prompt non-streamed purely to read the provider's answer — after the turn has already failed, callback-free so nothing renders, on a daemon thread joined for at most `_DIAGNOSTIC_PROBE_SECONDS` and polled so Esc still ends the wait (a blocking `invoke` can't be preempted), swallowing everything: a probe that breaks must not replace the failure it was investigating.
@@ -292,6 +309,38 @@ Three take the **agent as their first arg** (not pure — they read or call back
 ### Tool hooks (`client/hooks.py`, mounted in `client/agent/tool_loop.py`) ★
 
 User-declared shell commands run around a tool call (`~/.mnemoai/hooks/hooks.json`, `/hooks`), for what a prompt can't enforce: format what gets written, refuse a path, auto-approve read-only commands, hint on failure. Events `PreToolUse`/`PostToolUse`/`PostToolUseFailure`, `matcher` globs the TOOL NAME, `type: command` only. **Gate order is the design — below the existing gates, never above:** safety floor → plan-mode block → `PreToolUse` hook → `_confirm_tool` → the tool. A `deny` is honored anywhere; an `allow` reaches exactly ONE gate (the confirmation prompt for that call) — it can't unblock plan mode or touch the server-side floors, because a config file must not widen what the app may do. Within an event, `deny` beats `allow` regardless of file order. Mounted ONCE (both chokepoints already share `tool_loop`): `agent._run_hooks` above the confirm gate + on both answer paths, `additionalContext` appended to the `ToolMessage` as `[Hook] …`, `_hook_deny_message` worded so a standing rule isn't retried as a transient failure. **App-home only and startup-snapshotted** — deliberately unlike steering: a `hooks.json` from a `git clone` would be RCE on the first edit, and hooks are code, so an edit mid-session must not change what's running (restart to apply; `active()` is lock-guarded because hooks fire from sub-agent/wave threads). **Never blocking, never interactive:** a crash, any non-`2` exit, or a `timeout` overrun is reported and skipped, and nothing can prompt (no terminal on those threads). Real bash (`bash_path()`); JSON on stdin (long `tool_input` values clipped, clipped keys named); `exit 2` denies with stderr as the reason; plain stdout is a user notice, never model context. No config toggle — presence is the switch, `hooks.json.example` is seeded/refreshed and the live file is NEVER created by seeding.
+
+### Supervisor peer review (`client/review.py`, `client/review_evidence.py`)
+
+F5 runs through an agent completion hook BEFORE committing the original turn.
+`client.query` installs the hook for direct, atomic and orchestrated execution.
+Explicitly opt-in (`/review on|off`, startup
+`ENABLE_REVIEW`); `/config review` edits budgets in place. `REVIEWER` is a
+callback-free area model, not a spawned tool-using agent. An explicit reviewer
+failure is inconclusive, never fallback presented as the chosen reviewer.
+Capture bounded original/visible context, mid-turn instructions, real tool
+outcomes and current scoped file/diff snapshots. Tool observation stays below
+existing permission decisions; detached workers are excluded from later turns.
+Timeout covers preparation and model initialization too; late responses cannot
+publish a verdict or create overlapping requests. Account for reported usage,
+including a missing-usage call on timeout.
+
+`Reviewer.supervise` sends actionable findings to the foreground chat model via
+`agent/supervised_turn.py`, which reuses `_call_model` and `_execute_tools`.
+The chat model can fix or dispute a finding; the reviewer rechecks actual evidence.
+One shared deadline, round limit and remaining original actor-step budget govern
+the exchange; retries cannot reset them. No detached correction jobs and no
+background editing thread that survives a timeout. Already-started tools finish
+safely, but nothing new starts after expiry. `MAX_ROUNDS: 0` retains report-only.
+
+Automated feedback uses `utils/review_protocol.py` framing and remains model
+context, never a new user request. The whole exchange is logged as ONE turn, with
+file provenance tied to the original prompt. Reflection and user-turn counters
+skip the synthetic boundary. Bounded audit records remain separate from chat.
+Changed artifact revisions make a displayed report historical; replaced task
+context clears it. Preserve the documented `review.md` macro: it has priority
+over the convenience `/review` spelling, while `/config review on|off|last`
+always reaches built-in controls. Do not turn foreground execution headless.
 
 ### ACE Playbook learning (`client/memory/reflector.py`, `client/memory/playbook_store.py`)
 

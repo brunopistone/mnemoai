@@ -9,7 +9,16 @@ Once an orphan is persisted in agent.messages it breaks every subsequent turn,
 so the sanitizer repairs the list before each model call (and in compaction).
 """
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+import copy
+
+import pytest
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
 from mnemoai.client.agent.agent import LangGraphAgent
 
@@ -99,6 +108,128 @@ def test_multiple_orphans_mixed_with_valid():
     # good pair + the two bracketing messages survive; both orphans gone.
     assert _types(out) == ["HumanMessage", "AIMessage", "ToolMessage", "AIMessage"]
     assert out[1].tool_calls[0]["id"] == "good"
+
+
+def _native_call(call_id, shape):
+    if shape == "tool_use":
+        return {"type": shape, "id": call_id, "name": "x", "input": {}}
+    if shape == "toolUse":
+        return {"toolUse": {"toolUseId": call_id, "name": "x", "input": {}}}
+    if shape == "tool_call":
+        return {"type": shape, "id": call_id, "name": "x", "args": {}}
+    return {
+        "type": shape, "call_id": call_id, "id": f"item_{call_id}",
+        "name": "x", "arguments": "{}",
+    }
+
+
+@pytest.mark.parametrize("shape", ["tool_use", "toolUse", "tool_call", "function_call", "custom_tool_call"])
+@pytest.mark.parametrize("normalized", [False, True], ids=["native-only", "duplicated"])
+def test_native_calls_are_paired_even_without_normalized_calls(shape, normalized):
+    content = [
+        {"type": "text", "text": "progress"},
+        _native_call("good", shape),
+        _native_call("unanswered", shape),
+    ]
+    ai = AIMessage(content=content)
+    if normalized:
+        ai.tool_calls = _call("good", "unanswered").tool_calls
+    before = copy.deepcopy(ai)
+    result = _result("good")
+    out = S([ai, result])
+    assert out[0].content == content[:2]
+    assert out[0].tool_calls == (_call("good").tool_calls if normalized else [])
+    assert out[1] is result
+    assert ai == before
+    assert S(out)[0] is out[0], "repair must be idempotent"
+
+
+@pytest.mark.parametrize("shape", ["tool_use", "toolUse", "tool_call", "function_call"])
+def test_orphan_native_call_only_message_is_dropped(shape):
+    assert S([AIMessage(content=[_native_call("pending", shape)])]) == []
+
+
+@pytest.mark.parametrize("surviving", [False, True])
+def test_openai_raw_calls_and_stream_chunks_cannot_resurrect_removed_calls(surviving):
+    ids = ["good", "pending"] if surviving else ["pending"]
+    ai = AIMessageChunk(
+        content="progress",
+        additional_kwargs={
+            "reasoning_content": "keep this",
+            "tool_calls": [
+                {"id": ident, "type": "function", "function": {"name": "x", "arguments": "{}"}}
+                for ident in ids
+            ],
+        },
+        tool_call_chunks=[
+            {"id": ident, "name": "x", "args": "{}", "index": i}
+            for i, ident in enumerate(ids)
+        ],
+    )
+    before = copy.deepcopy(ai)
+    out = S([ai, _result("good")] if surviving else [ai])
+    expected = ["good"] if surviving else []
+    assert [c["id"] for c in out[0].tool_calls] == expected
+    assert [c["id"] for c in out[0].tool_call_chunks] == expected
+    assert [c["id"] for c in out[0].additional_kwargs.get("tool_calls", [])] == expected
+    assert out[0].additional_kwargs["reasoning_content"] == "keep this"
+    # Revalidation must not re-create the call from stale chunk/raw fields.
+    rebuilt = AIMessageChunk.model_validate(out[0].model_dump())
+    assert [c["id"] for c in rebuilt.tool_calls] == expected
+    assert ai == before
+
+
+def test_unanswered_invalid_calls_are_removed_too():
+    ai = AIMessage(
+        content="progress",
+        invalid_tool_calls=[{"id": "pending", "name": "x", "args": "{", "error": "partial"}],
+    )
+    assert S([ai])[0].invalid_tool_calls == []
+    assert ai.invalid_tool_calls
+
+
+def test_bedrock_serialized_request_has_no_unanswered_tool_use():
+    # Test the real adapter, not just tool_calls: it upserts that field but also
+    # sends tool_use blocks already in content, which hid the original defect.
+    adapter = pytest.importorskip("langchain_aws.chat_models.bedrock_converse")
+    ai = AIMessage(
+        content=[_native_call("good", "tool_use"), _native_call("pending", "tool_use")],
+        tool_calls=_call("good", "pending").tool_calls,
+    )
+    wire, _ = adapter._messages_to_bedrock(
+        S([HumanMessage(content="task"), ai, _result("good"), HumanMessage(content="continue")])
+    )
+    calls = [b["toolUse"]["toolUseId"] for m in wire for b in m["content"] if "toolUse" in b]
+    results = [b["toolResult"]["toolUseId"] for m in wire for b in m["content"] if "toolResult" in b]
+    assert calls == results == ["good"]
+
+
+def test_openai_responses_serialized_request_has_no_unanswered_function_call():
+    adapter = pytest.importorskip("langchain_openai.chat_models.base")
+    ai = AIMessage(
+        content=[_native_call("good", "function_call"), _native_call("pending", "function_call")],
+        tool_calls=_call("good", "pending").tool_calls,
+    )
+    wire = adapter._construct_responses_api_input(
+        S([HumanMessage(content="task"), ai, _result("good"), HumanMessage(content="continue")])
+    )
+    calls = [b["call_id"] for b in wire if b.get("type") == "function_call"]
+    results = [b["call_id"] for b in wire if b.get("type") == "function_call_output"]
+    assert calls == results == ["good"]
+
+
+def test_provider_managed_calls_and_signed_reasoning_are_not_client_orphans():
+    # Provider-executed tools need no local ToolMessage; neither do reasoning
+    # chain items. Repair must not strip these unrelated capabilities.
+    blocks = [
+        {"type": "thinking", "thinking": "reasoned", "signature": "sig"},
+        {"type": "reasoning", "id": "rs_1", "encrypted_content": "encrypted"},
+        {"type": "server_tool_use", "id": "srv_1", "name": "web_search", "input": {}},
+        {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+        {"type": "image_generation_call", "id": "img_1"},
+    ]
+    ai = AIMessage(content=blocks + [_native_call("pending", "tool_use")])
+    assert S([ai])[0].content == blocks
 
 
 # --- malformed thinking-block stripping (Anthropic extended thinking) --------

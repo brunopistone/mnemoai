@@ -52,7 +52,7 @@ _FRAMING = (
 _BLOCK_RE = re.compile(rf"\A\s*<{BLOCK_TAG}>.*?</{BLOCK_TAG}>\s*", re.DOTALL)
 
 
-def open_window(agent) -> None:
+def open_window(agent, reset=True) -> None:
     """Start accepting mid-turn messages for the turn that is starting.
 
     Also discards anything a previous turn left undelivered: the caller reclaims
@@ -61,11 +61,13 @@ def open_window(agent) -> None:
     """
     lock = getattr(agent, "_mid_turn_lock", None)
     if lock is None:
-        agent._mid_turn_queue = []
+        if reset:
+            agent._mid_turn_queue = []
         agent._mid_turn_open = True
         return
     with lock:
-        agent._mid_turn_queue = []
+        if reset:
+            agent._mid_turn_queue = []
         agent._mid_turn_open = True
 
 
@@ -136,6 +138,9 @@ def drain(agent) -> List[BaseMessage]:
     texts = _take(agent)
     if not texts:
         return []
+    capture = getattr(agent, "_review_capture", None)
+    if capture is not None:
+        capture.add_instructions(texts)
     notify = getattr(agent, "_on_mid_turn_delivered", None)
     if notify is not None:
         try:

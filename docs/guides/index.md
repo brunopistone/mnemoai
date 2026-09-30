@@ -17,3 +17,7 @@ Task-oriented guides for using and extending Mnemo AI day to day.
 Looking for configuration keys? See [Configuration](../configuration.md). Looking
 for a tool's exact parameters? See the [Tools reference](../reference/tools.md).
 Setting up for the first time? See [Getting Started](../getting-started/index.md).
+
+For an optional second model's assessment of completed work, see
+[Peer review](peer-review.md). The reviewer sends feedback; the chat model alone
+can make authorized corrections. Neither agreement nor review grants permission.

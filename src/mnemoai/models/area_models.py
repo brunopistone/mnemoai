@@ -49,7 +49,7 @@ CONFIG_SECTION = "AREA_MODELS"
 # Deliberately NOT an area: the aggregator. Its output is the user-visible answer,
 # streamed through the same path as an ordinary reply — a different model there
 # would change the voice of the answer, not just the cost of an internal step.
-AREAS: Tuple[str, ...] = ("ROUTER", "ORCHESTRATOR", "SUMMARY", "REFLECTOR")
+AREAS: Tuple[str, ...] = ("ROUTER", "ORCHESTRATOR", "SUMMARY", "REFLECTOR", "REVIEWER")
 
 # One line each, for `/doctor` and the startup log.
 DESCRIPTIONS = {
@@ -57,7 +57,29 @@ DESCRIPTIONS = {
     "ORCHESTRATOR": "task decomposition",
     "SUMMARY": "conversation compaction",
     "REFLECTOR": "evidence-linked learning",
+    "REVIEWER": "supervisor feedback and verification",
 }
+
+
+def reviewer_overrides():
+    """An explicit invalid reviewer must not silently turn into the chat model."""
+    section = config.get(CONFIG_SECTION, {})
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError("AREA_MODELS must be a mapping for peer review")
+    values = [v for k, v in section.items() if _canonical(k) == "REVIEWER"]
+    if len(values) > 1:
+        raise ValueError("Duplicate REVIEWER configuration")
+    if values:
+        raw = values[0]
+        if raw is not None and not isinstance(raw, (str, dict)):
+            raise ValueError("REVIEWER must be a model name or mapping")
+        if isinstance(raw, dict):
+            for key in ("NAME", "TYPE"):
+                if raw.get(key) is not None and not isinstance(raw[key], str):
+                    raise ValueError(f"REVIEWER.{key} must be text")
+    return overrides_for("REVIEWER")
 
 
 def overrides_for(area: str) -> Dict[str, Any]:

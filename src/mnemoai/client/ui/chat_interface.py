@@ -14,7 +14,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 
 from mnemoai import app_version
-from mnemoai.client import file_ledger, file_mentions, learned
+from mnemoai.client import file_ledger, file_mentions, learned, review
 from mnemoai.client.agent import auto_approve
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
@@ -45,6 +45,7 @@ from mnemoai.utils.configurator import (
     run_params_override,
     run_playbook_settings,
     run_reconfigure,
+    run_review_settings,
 )
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger, one_line
@@ -94,7 +95,9 @@ class ChatInterface:
         built-ins from completing.
         """
         try:
-            return list(self._COMMANDS) + self.user_commands.completions()
+            custom = self.user_commands.completions()
+            names = {name.lower() for name, _ in custom}
+            return [(name, label) for name, label in self._COMMANDS if name.lower() not in names] + custom
         except Exception:
             return list(self._COMMANDS)
 
@@ -154,6 +157,7 @@ class ChatInterface:
         ("Modes", [
             ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
             ("/auto [tier]", "Skip confirmations: off/edits/writes/all"),
+            ("/review [mode]", "Supervisor dialogue: on, off, last"),
         ]),
         ("Assistant", [
             ("/memory [clear]", "View (or clear) persistent memory"),
@@ -163,7 +167,7 @@ class ChatInterface:
             ("/hooks", "List the tool hooks this session runs"),
         ]),
         ("Configure", [
-            ("/config", "Full setup; /config playbook for learning"),
+            ("/config", "Full setup; /config playbook|review for limits"),
             ("/model", "Override one model (LLM/vision/embeds/router…)"),
             ("/params", "Tune inference params (temp, top_p, …)"),
             ("/features", "Enable/disable features (RAG, memory, web, …)"),
@@ -180,7 +184,7 @@ class ChatInterface:
     # Slash commands for autocomplete — the actual insertable tokens (the
     # welcome-box labels carry arg hints / alternates instead).
     _COMMANDS = [
-        ("/config", "Full setup (/config playbook for learning settings)"),
+        ("/config", "Full setup (/config playbook|review for limits)"),
         ("/model", "Override one model (LLM, vision, embeddings, router, …)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/features", "Enable/disable features (RAG, memory, web search, …)"),
@@ -194,6 +198,7 @@ class ChatInterface:
         ("/learned", "Inspect, edit or retract learned tool-use notes"),
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/auto", "Skip confirmations (/auto off|edits|writes|all)"),
+        ("/review", "Supervisor feedback and corrections (/review on|off|last)"),
         ("/save", "Save conversation (/save [path])"),
         ("/load", "Load a saved conversation (/load lists saved)"),
         ("/usage", "Show token usage for this session"),
@@ -1302,6 +1307,13 @@ class ChatInterface:
             ) + "\n")
             return None
 
+        if query.lower() == "/review" or query.lower().startswith("/review "):
+            # Preserve the previously documented /review <path> user macro.
+            if self.user_commands.get("review") is None:
+                print("\n" + review.command(self.client, query[len("/review"):]) + "\n")
+                return None
+            print("\nYour /review macro is active; peer-review controls: /config review on|off|last.")
+
         if query.lower() == "/context":
             print("\n" + self.client.context_report() + "\n")
             return None
@@ -1348,8 +1360,17 @@ class ChatInterface:
             return None
 
         if query.lower().startswith("/config "):
-            if query[len("/config"):].strip().lower() != "playbook":
-                print_error("Usage: /config [playbook]")
+            section = query[len("/config"):].strip().lower()
+            if section.startswith("review "):
+                print("\n" + review.command(self.client, section[len("review"):]) + "\n")
+            elif section == "review":
+                if run_review_settings() is not None:
+                    if self.client.reload_review_settings():
+                        print("\nReview settings applied. This conversation continues.\n")
+                    else:
+                        print_error("Settings saved, but could not be applied; restart to retry.")
+            elif section != "playbook":
+                print_error("Usage: /config [playbook|review]")
             elif run_playbook_settings() is not None:
                 if self.client.reload_playbook_settings():
                     print("\nPlaybook settings applied. This conversation continues.\n")
@@ -1365,12 +1386,17 @@ class ChatInterface:
         # /params does on those same rows. Enabling the area's own feature is not
         # that case: the router and the orchestrator are built during startup, so
         # there is no live holder to re-point.
+        # Reviewer is always wired, even when off, so enabling it applies in place.
         if query.lower() == "/model":
             written = run_model_override()
             if written is None:
                 return None
-            in_place = written.section in AREAS and not written.enabled_feature
+            in_place = written.section in AREAS and (
+                not written.enabled_feature or written.section == "REVIEWER"
+            )
             if in_place and self.client.reload_area_models():
+                if written.section == "REVIEWER" and written.enabled_feature:
+                    self.client.reviewer.enabled = True
                 print("\n" + render_model_update(written, applied=True) + "\n")
             else:
                 # Either a change the running process can't absorb, or a reload that

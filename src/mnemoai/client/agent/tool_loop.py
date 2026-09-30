@@ -42,9 +42,10 @@ from typing import Any, Dict, List, Optional, Sequence
 from langchain_core.messages import BaseMessage, ToolMessage
 
 from mnemoai.client import hooks
-from mnemoai.client.agent import ask_user, confirmation_gate
+from mnemoai.client.agent import ask_user, confirmation_gate, supervised_turn
 from mnemoai.client.agent.agent_activity import ActivitySink
 from mnemoai.utils.logger import logger
+from mnemoai.utils.review_protocol import ReviewStopped
 from mnemoai.utils.tool_results import is_error_result
 
 
@@ -60,10 +61,32 @@ def run_tool_calls(
     strict_tools: bool = False,
 ) -> None:
     """Run ``tool_calls``, appending one ToolMessage each to ``messages``."""
+    capture = getattr(agent, "_review_capture", None)
+    if getattr(getattr(agent, "_review_excluded", None), "value", False):
+        capture = None
     for call in tool_calls:
         name = call["name"]
         tool_id = call["id"]
         args = agent._normalize_tool_args(call["args"])
+
+        def reply(content, status="blocked", evidence=None):
+            _reply(messages, tool_id, name, content)
+            if capture is not None:
+                capture.record(name, args, content if evidence is None else evidence, status)
+
+        budget = supervised_turn.budget_for(agent)
+        if budget is not None:
+            try:
+                budget.check()
+            except ReviewStopped as exc:
+                reply(f"Blocked: {exc}. No new tool was started.")
+                continue
+            if name == "start_background_task" or (
+                name in {"spawn_agent", "resume_agent"} and args.get("run_in_background", True)
+            ):
+                reply("Blocked: automatic review corrections cannot launch detached work. "
+                      "Use foreground tools or a foreground sub-agent within the same budget.")
+                continue
 
         if strict_tools and not any(t.name == name for t in tools):
             # Give interactive tools their precise refusal without dispatching
@@ -77,7 +100,7 @@ def run_tool_calls(
             else:
                 notice = f"Tool not found: {name}"
             logger.warning(notice)
-            _reply(messages, tool_id, name, notice)
+            reply(notice)
             continue
 
         # exit_plan_mode / spawn_agent / resume_agent / ask_user_question are
@@ -85,6 +108,8 @@ def run_tool_calls(
         client_msg = agent._client_side_tool_message(name, args, tool_id, spawn_results)
         if client_msg is not None:
             messages.append(client_msg)
+            if capture is not None:
+                capture.record(name, args, client_msg.content, "client_result")
             continue
 
         if activity is not None:
@@ -97,12 +122,12 @@ def run_tool_calls(
 
         if not tool:
             logger.warning(f"Tool not found: {name}")
-            _reply(messages, tool_id, name, f"Tool not found: {name}")
+            reply(f"Tool not found: {name}")
             continue
 
         # Plan mode: hard-block mutating/exec tools, ABOVE the confirm gate.
         if agent._is_blocked_by_plan_mode(name, args):
-            _reply(messages, tool_id, name, agent._plan_mode_block_message(name))
+            reply(agent._plan_mode_block_message(name))
             continue
 
         # User hooks, BELOW plan mode and ABOVE the prompt: a deny is final, but an
@@ -110,7 +135,7 @@ def run_tool_calls(
         # block above it or the server-side floors.
         pre = agent._run_hooks(hooks.PRE_TOOL_USE, name, args, quiet=quiet)
         if pre.denied:
-            _reply(messages, tool_id, name, agent._hook_deny_message(name, pre.reason))
+            reply(agent._hook_deny_message(name, pre.reason))
             continue
 
         # Hard gate: confirm destructive tools before running.
@@ -125,10 +150,12 @@ def run_tool_calls(
                 "or an applicable /auto tier."
                 if unattended else "User declined to run this command."
             )
-            _reply(messages, tool_id, name, notice)
+            reply(notice)
             continue
 
         try:
+            if budget is not None:
+                budget.check()  # approval/hook waits do not extend the shared deadline
             logger.debug(f"{log_label}: {name} with args: {args}")
             result = agent._invoke_tool(tool, name, args, quiet=quiet)
             # Note the file this call touched, for /files and /diff. AFTER the
@@ -139,12 +166,14 @@ def run_tool_calls(
             content = agent._truncate_tool_result(str(result))
             event = hooks.POST_TOOL_USE_FAILURE if failed_result else hooks.POST_TOOL_USE
             post = agent._run_hooks(event, name, args, str(result), quiet=quiet)
-            _reply(messages, tool_id, name, _with_context(content, post))
+            reply(_with_context(content, post), "failed" if failed_result else "completed", result)
             if activity is not None:
                 if failed_result:
                     activity.tool_error(name, str(result))
                 else:
                     activity.tool_result(name, str(result))
+        except ReviewStopped as e:
+            reply(f"Blocked: {e}. No new tool was started.")
         except Exception as e:
             # `str(e) or repr(e)` — a bare TimeoutError has an empty str(), so this
             # logged the label and nothing else. (`e or …` would NOT work: an
@@ -155,7 +184,7 @@ def run_tool_calls(
             failed = agent._run_hooks(
                 hooks.POST_TOOL_USE_FAILURE, name, args, str(e) or repr(e), quiet=quiet
             )
-            _reply(messages, tool_id, name, _with_context(agent._tool_error_message(name, e), failed))
+            reply(_with_context(agent._tool_error_message(name, e), failed), "failed")
 
 
 def _with_context(content: str, outcome) -> str:

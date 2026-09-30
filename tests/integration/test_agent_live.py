@@ -8,6 +8,7 @@ routing, tool invocation, and that no query returns a silent empty turn.
 import json
 
 import pytest
+from langchain_core.messages import AIMessage, ToolMessage
 
 pytestmark = pytest.mark.integration
 
@@ -77,6 +78,50 @@ class TestBashTimeoutLive:
             result.get("error") and "timed out" in result.get("message", "")
             for result in results
         ), "the live model must actually exercise the shell timeout"
+
+
+@pytest.mark.parametrize("cutoff", [1, 2], ids=["before-tool", "after-tool"])
+def test_live_continue_after_step_limit(live_client, _neutral_cwd, monkeypatch, cutoff):
+    """Real model + graph + MCP, with a deliberately tiny initial step budget."""
+    agent = live_client.agent
+    target = _neutral_cwd / f"step-limit-{cutoff}.txt"
+    target.write_text("CONTINUITY_TOKEN_582931\n")
+    read_tool = next(tool for tool in agent.tools if tool.name == "fs_read")
+    model = agent._bind_tools(agent.model, [read_tool])
+    monkeypatch.setattr(agent, "router", None)
+    monkeypatch.setattr(agent, "_get_route_model", lambda state: model)
+    monkeypatch.setattr(agent, "_get_route_tools", lambda state: [read_tool])
+    monkeypatch.setattr(agent, "graph", agent._build_graph())
+    monkeypatch.setattr(agent, "recursion_limit", cutoff)
+    executions = []
+    invoke_tool = agent._invoke_tool
+
+    def observe(tool, name, args, quiet=False):
+        executions.append(name)
+        assert name == "fs_read" and args["path"] == str(target)
+        return invoke_tool(tool, name, args, quiet=quiet)
+
+    monkeypatch.setattr(agent, "_invoke_tool", observe)
+    stopped = agent.invoke(
+        f"Call fs_read(path='{target}', mode='Line') exactly once, then quote "
+        "the token from that file. Make the tool call now; do not just describe it."
+    )
+    assert "step limit" in stopped
+    assert any(isinstance(m, AIMessage) and m.tool_calls for m in agent._messages)
+    assert len(executions) == cutoff - 1
+    assert sum(isinstance(m, ToolMessage) for m in agent._messages) == cutoff - 1
+
+    # Restore an ordinary test budget; do not restart/reload/compact the agent.
+    monkeypatch.setattr(agent, "recursion_limit", 8)
+    answer = agent.invoke(
+        "Continue the previous request. If the file contents are already in a "
+        "tool result, use them without reading again; otherwise read the file once."
+    )
+    assert "CONTINUITY_TOKEN_582931" in answer, answer
+    assert executions == ["fs_read"], "completed tool work must not be repeated"
+    followup = agent.invoke("Reply with exactly CONTINUED_OK and do not use tools.")
+    assert "CONTINUED_OK" in followup, followup
+    assert executions == ["fs_read"]
 
 
 class TestPlanModeEnforcementLive:
