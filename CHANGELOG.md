@@ -13,6 +13,10 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Fixed
 
+- Require PyJWT 2.15.0+ and urllib3 2.8.0+ in published dependencies and update
+  the lockfile to patched versions. This covers the reported JWT
+  verification/key-handling and HTTP streaming/proxy advisories, including
+  upgrades into environments with older transitive dependencies already installed.
 - Continuing after the safety step limit no longer replays unanswered native
   tool-call blocks that can make Bedrock reject every later turn with
   `No tool output found`. History repair reconciles content, normalized/raw calls
