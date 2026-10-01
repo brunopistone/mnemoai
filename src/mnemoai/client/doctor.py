@@ -706,8 +706,10 @@ def collect(client: Any = None) -> List[Check]:
         unavailable = "REVIEWER" in cached and cached["REVIEWER"] is None
         checks.append(Check(
             "Features", "peer review", WARN if enabled and unavailable else INFO,
-            f"{'on' if enabled else 'off'}; supervisor; {label}; "
-            f"{options['MAX_ROUNDS']} correction rounds; total {options['TOTAL_TIMEOUT']}s; "
+            f"{'on' if enabled else 'off'}; code/documents; {label}; "
+            f"{options['MAX_STRATEGY_ROUNDS']} strategy revisions; "
+            f"{options['MAX_CHANGE_REVIEWS']} change reviews; "
+            f"{options['MAX_ROUNDS']} final correction rounds; overhead {options['TOTAL_TIMEOUT']}s; "
             f"review wait {options['TIMEOUT']}s; input estimate ≤{options['MAX_INPUT_TOKENS']} tokens",
             "Reviewer unavailable; /model → Reviewer to reconfigure." if unavailable else
             "/review on|off; /config review; /features controls the startup default.",

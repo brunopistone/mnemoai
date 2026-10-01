@@ -1,15 +1,15 @@
 # Peer review
 
-Peer review is an optional supervisor dialogue. The chat model does the work;
+Peer review is an optional supervisor dialogue for coding and document work. The chat model does the work;
 a reviewer examines it and sends findings or questions back. The chat model
 can correct a supported problem, run authorized checks, or explain counterevidence.
 The reviewer then rechecks the updated result. You do not need to relay their
 messages manually.
 
 Only the chat model executes tools or edits files. The reviewer grants no
-permission. The loop ends with **pass**, **revise** (unresolved findings), or
-**inconclusive**, and stops at its shared round/time/step limits. Automatic
-pre-execution plan review and per-tool/per-token supervision are not implemented.
+permission. Each checkpoint ends with **pass**, **revise** (supported findings), or
+**inconclusive**. A strategy pass is not a final artifact pass. This is checkpoint
+supervision, not continuous/per-token monitoring or parallel editing.
 
 ## Use it
 
@@ -20,18 +20,65 @@ Implement the change and run the relevant checks.
 /review off
 ```
 
-It is off by default. When on, completion of a nonempty user request starts the
-dialogue, whether execution was direct, atomic, or orchestrated. Corrections use
-the foreground chat model and its normal tools. A background-result delivery
-without a new user request is explicitly unreviewed.
+It is off by default. When on:
+
+1. The chat model identifies coding, debugging, code review, document/text
+   creation/editing/review, including relevant follow-ups. Greetings/thanks skip
+   even this preparation; other general Q&A returns to ordinary chat without a
+   reviewer call. Classification uses bounded task/context data, not an
+   English-only keyword allowlist.
+2. Before edits, the chat model proposes an overall strategy: scope, material to
+   inspect, approach, milestones and verification criteria. This tool-free call
+   does not pretend to have read files; inspection is an implementation step.
+   The reviewer critiques the strategy, and the chat model may refine it.
+3. The reviewer checks completed edit batches during direct execution, and
+   between dependency waves during orchestration. Supported feedback reaches the
+   next chat-model call or worker wave. No review races an active foreground
+   batch; stale snapshots are not applied.
+4. A final artifact review can ask the foreground chat model to make bounded
+   corrections or supply counterevidence.
+
+The original request, permission gates, user-turn boundary and agent step limit
+remain in force. Background-only notifications do not trigger review. Detached
+workers are not independently reviewed; their incomplete coverage is disclosed.
+Embedded/custom agents without these lifecycle hooks retain completion-only
+review compatibility.
+
+**A reviewer outage does not stop implementation.** Transient reviewer failures
+receive bounded retries within the wait limit. If review remains unavailable,
+further checkpoints are skipped for that task and normal authorized work continues.
+One brief notice is shown per outage, not an “unreviewed” warning on every answer.
+A later artifact task may try again; a successful reviewer response re-arms the
+notice for a genuinely new outage. Details remain inspectable, and unavailable
+review is never recorded as a pass. Actual findings remain visible.
 
 **Existing `/review` macros keep working.** If you have a user-authored
 `commands/review.md`, that macro retains priority. Use the always-available
 aliases `/config review on`, `/config review off`, and `/config review last`
 for peer-review controls. No command file is renamed or removed.
 
-The first answer streams, followed by labelled reviewer feedback and any chat-model
-corrections. `/review last` shows the exchange and its unresolved findings.
+The first answer and any corrections still stream, labelled **draft** while review
+is pending. Reviewer feedback is collapsed into at most two grey lines instead of
+printing every finding. After review, the chat model's chosen answer appears in a
+separate **Final answer** block. Unresolved findings or incomplete execution
+remain explicit. Reviewer outages use the once-only notice and quiet status,
+without repeating a warning or claiming successful verification.
+
+In the interactive terminal, click the grey review row or press **Ctrl+O** to
+expand/collapse a height-limited, scrollable detail pane. Use arrows or
+Page Up/Page Down to scroll; Esc closes the focused pane without cancelling work
+or losing an unsent message. An approval prompt closes the pane and restores the
+normal approval channel. Work and its time budget continue while details are open.
+Terminal mouse reporting is enabled while the review row is visible; use your
+terminal's Shift-selection/scroll override for native scrollback where necessary.
+
+The pane is an explicitly labelled snapshot, so a new review does not move text
+while you read it. `/review last` refreshes the report (including artifact
+staleness) and opens the pane; `/config review last` does the same when a legacy
+`/review` macro is installed. Off-TTY, explicit detail requests print the full grey
+report, and automatic feedback remains compact. No feedback is removed from the
+model's context or review audit.
+
 Review feedback is labelled as automated advice, not a user request or an approval.
 It remains in the task's history so follow-ups make sense, but it does not create
 additional user turns or replace the original prompt in file provenance.
@@ -54,6 +101,8 @@ Selecting or enabling the reviewer through `/model` preserves the conversation.
 ```yaml
 ENABLE_REVIEW: false
 REVIEW:
+  MAX_STRATEGY_ROUNDS: 1
+  MAX_CHANGE_REVIEWS: 2
   TIMEOUT: 45
   MAX_INPUT_TOKENS: 6000
   MAX_ROUNDS: 2
@@ -66,18 +115,24 @@ REVIEW:
 #     MAX_TOKENS: 2048
 ```
 
-`TIMEOUT` is 1–120 seconds per reviewer call, including evidence preparation,
-model initialization and the response. `MAX_ROUNDS` allows 0–4 chat-model
-correction rounds (default 2); zero retains one-shot, report-only review.
-There can be at most one initial review plus one recheck per correction round.
-`TOTAL_TIMEOUT` is a shared 1–1800-second supervision budget (default 180),
-starting after the original actor execution. Retries and rounds never reset it.
+`TIMEOUT` is 1–120 seconds per checkpoint call, including evidence preparation,
+model initialization, retries and the response. `MAX_STRATEGY_ROUNDS` allows
+0–3 strategy revisions (default 1); zero still gets an initial strategy review.
+`MAX_CHANGE_REVIEWS` allows 0–8 intermediate reviews (default 2); zero disables
+intermediate checks, not strategy/final review. A write round qualifies as a
+batch; shell rounds qualify when the scoped Git diff changed.
+`MAX_ROUNDS` allows 0–4 final chat-model correction rounds (default 2); zero
+retains report-only final review.
+`TOTAL_TIMEOUT` is a shared 1–1800-second supervision-overhead budget (default 180),
+covering strategy preparation, reviewer waits and final correction rounds.
+Normal implementation time between checkpoints is not charged. Retries and
+checkpoints never replenish the budget; exhaustion stops review, not ordinary work.
 Additional actor steps also consume what remains of the original agent step
 budget. A started tool or approval dialog may finish after the deadline; no
 new action starts afterward. Expiry is not rollback and never abandons an
 editing actor on a detached thread.
 
-`MAX_INPUT_TOKENS` is a conservative estimate (1000–32000) per reviewer request,
+`MAX_INPUT_TOKENS` is a conservative estimate (1000–32000) per preparation/reviewer request,
 not a provider billing quota. The reviewer's output
 limit defaults to 2048 tokens; an explicit reviewer `MAX_TOKENS` overrides it.
 Actual reported usage is attributed to the model in `/usage`; there are no

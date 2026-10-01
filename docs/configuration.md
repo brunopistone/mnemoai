@@ -372,16 +372,20 @@ VISION_MODEL_ID:
 
 ### Per-area models (`AREA_MODELS`)
 
-`REVIEWER` selects the optional supervisor model. It exchanges feedback with the
+`REVIEWER` selects the optional coding/document supervisor model. It exchanges feedback with the
 chat model, which alone executes authorized corrections. Enable it for
 this session with `/review on`, or set its startup default in `/features`.
 Choose its provider/model with `/model` → Reviewer and tune an explicit override
 with `/params`. `/config review` edits `REVIEW.TIMEOUT` (45 seconds by default)
 and `REVIEW.MAX_INPUT_TOKENS` (6000 estimated input tokens), plus shared
-`REVIEW.MAX_ROUNDS` (2 corrections; 0 means report-only) and
-`REVIEW.TOTAL_TIMEOUT` (180 seconds), without restarting.
+`REVIEW.MAX_STRATEGY_ROUNDS` (1 strategy revision), `REVIEW.MAX_CHANGE_REVIEWS`
+(2 intermediate checks), `REVIEW.MAX_ROUNDS` (2 final corrections; 0 means
+report-only final review) and `REVIEW.TOTAL_TIMEOUT` (180 seconds of total
+supervision overhead, excluding normal implementation), without restarting.
 No reviewer override means a separate main-model invocation; an explicit build
-failure is inconclusive, not silent fallback or permission approval.
+failure is inconclusive, not silent model fallback or permission approval.
+Unavailable review produces one notice per outage and does not block authorized
+work; later tasks can retry without repeated warnings.
 See [Peer review](guides/peer-review.md) for scope, limits and macro compatibility.
 
 For learning configuration, use `/features` to enable/disable the playbook,

@@ -178,11 +178,14 @@ class Capture:
         self.tools = []
         self.followups = []
         self.paths = set()
+        self._written_paths = set()
         self.gaps = set()
         self.failed_commands = {}
         self.before = self._git()
         self.bindings = {}
         self.after = None
+        self.write_serial = 0
+        self.shell_serial = 0
 
     def add_instructions(self, texts):
         with self._lock:
@@ -195,12 +198,12 @@ class Capture:
                         self.gaps.add("Additional user instructions exceeded the capture limit.")
 
     def reopen(self):
-        """Fresh round observations, retaining the original task and unresolved checks."""
+        """Open the next checkpoint without erasing already observed tool evidence."""
         with self._lock:
             self._closed = False
-            self.tools = []
             self.bindings = {}
             self.after = None
+            self._written_paths = set()
             self.gaps = {gap for gap in self.gaps if not (
                 gap.startswith("Evidence ") or gap.startswith("Named-file inspection incomplete")
                 or gap in {
@@ -224,6 +227,29 @@ class Capture:
             with self._lock:
                 if self._closed:
                     return
+                if status == "completed":
+                    if name in {"fs_write", "file_edit"}:
+                        self.write_serial += 1
+                    elif name == "execute_bash":
+                        self.shell_serial += 1
+                    if name in {"fs_read", "fs_write", "file_edit"} and not (
+                        name == "fs_read" and args.get("mode") == "Directory"
+                    ):
+                        path = args.get("file_path" if name == "file_edit" else "path")
+                        if isinstance(path, str) and path:
+                            path = os.path.abspath(os.path.expanduser(path))
+                            writing = name in {"fs_write", "file_edit"}
+                            if writing and path not in self.paths and len(self.paths) >= _FILE_LIMIT:
+                                replaceable = self.paths - self._written_paths
+                                if replaceable:
+                                    self.paths.remove(sorted(replaceable)[-1])
+                                    self.gaps.add("Some named-file evidence was omitted to prioritize current changes.")
+                            if path in self.paths or len(self.paths) < _FILE_LIMIT:
+                                self.paths.add(path)
+                                if writing:
+                                    self._written_paths.add(path)
+                            else:
+                                self.gaps.add("Named-file evidence exceeded the capture limit.")
                 if len(self.tools) >= _TOOL_LIMIT:
                     self.gaps.add("Tool evidence exceeded the capture limit.")
                     return
@@ -241,13 +267,6 @@ class Capture:
                 })
                 if cut_args or cut_result:
                     self.gaps.add("Some tool arguments/results were truncated.")
-                if status == "completed" and name in {"fs_read", "file_edit", "fs_write"}:
-                    path = args.get("file_path" if name == "file_edit" else "path")
-                    if isinstance(path, str) and path:
-                        if len(self.paths) < _FILE_LIMIT:
-                            self.paths.add(os.path.abspath(os.path.expanduser(path)))
-                        else:
-                            self.gaps.add("Named-file evidence exceeded the capture limit.")
                 if name in {"execute_bash", "start_background_task"}:
                     payload = result
                     if isinstance(payload, str):

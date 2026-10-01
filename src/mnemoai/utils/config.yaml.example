@@ -177,8 +177,10 @@ ENABLE_SKILLS: true
 ENABLE_PLAYBOOK: true
 ENABLE_REVIEW: false # Startup default; /review on|off changes this session only
 REVIEW:
-  MAX_ROUNDS: 2 # Chat-model correction rounds (0 = report only, maximum 4)
-  TOTAL_TIMEOUT: 180 # Shared supervision seconds; started tools finish safely
+  MAX_STRATEGY_ROUNDS: 1 # Strategy revisions before implementation (0–3)
+  MAX_CHANGE_REVIEWS: 2 # Intermediate completed-batch reviews per task (0–8)
+  MAX_ROUNDS: 2 # Final correction rounds (0 = final report only, maximum 4)
+  TOTAL_TIMEOUT: 180 # Total review/strategy/correction overhead, excluding normal implementation
   TIMEOUT: 45 # Seconds, including evidence preparation/model initialization (1–120)
   MAX_INPUT_TOKENS: 6000 # Conservative estimate, not a provider billing quota (1000–32000)
 PLAYBOOK:

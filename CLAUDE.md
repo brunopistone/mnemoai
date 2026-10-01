@@ -312,8 +312,13 @@ User-declared shell commands run around a tool call (`~/.mnemoai/hooks/hooks.jso
 
 ### Supervisor peer review (`client/review.py`, `client/review_evidence.py`)
 
-F5 runs through an agent completion hook BEFORE committing the original turn.
-`client.query` installs the hook for direct, atomic and orchestrated execution.
+F5 uses `client/work_review.py` for artifact-focused supervision. The chat model
+selects code/document work and proposes a strategy before graph execution;
+ordinary conversation never calls the reviewer. Strategy feedback is model data,
+not a new user request: routing must skip synthetic feedback when finding the
+real query. Strategy calls consume the original step budget. Completed edit
+batches and joined orchestrator waves provide bounded change checkpoints, and a
+completion hook runs final review before committing the original user turn.
 Explicitly opt-in (`/review on|off`, startup
 `ENABLE_REVIEW`); `/config review` edits budgets in place. `REVIEWER` is a
 callback-free area model, not a spawned tool-using agent. An explicit reviewer
@@ -328,10 +333,22 @@ including a missing-usage call on timeout.
 `Reviewer.supervise` sends actionable findings to the foreground chat model via
 `agent/supervised_turn.py`, which reuses `_call_model` and `_execute_tools`.
 The chat model can fix or dispute a finding; the reviewer rechecks actual evidence.
-One shared deadline, round limit and remaining original actor-step budget govern
-the exchange; retries cannot reset them. No detached correction jobs and no
+One cumulative overhead allowance, phase limits and remaining original actor-step
+budget govern the exchange; retries cannot replenish them. Normal implementation
+time between checkpoints is excluded. No detached correction jobs and no
 background editing thread that survives a timeout. Already-started tools finish
-safely, but nothing new starts after expiry. `MAX_ROUNDS: 0` retains report-only.
+safely, but automatic corrections cannot start new tools after expiry.
+`MAX_ROUNDS: 0` retains report-only final review. `MAX_STRATEGY_ROUNDS` bounds plan
+revisions and `MAX_CHANGE_REVIEWS` bounds intermediate checks; both reach YAML
+templates and `/config review`.
+
+Reviewer unavailability is fail-open for ordinary work, never for permission
+gates: retry transient failures within the checkpoint wait, then disable further
+review for that task. Emit ONE brief notice per outage, preserved across tasks;
+a valid reviewer response re-arms it. Do not print repeated “unreviewed” warnings
+or label unavailable review a pass. Keep details/audit records and actual findings.
+Late attempts cannot outlive the wait and start another request; every attempted
+reviewer call is accounted once, including unknown usage on failures.
 
 Automated feedback uses `utils/review_protocol.py` framing and remains model
 context, never a new user request. The whole exchange is logged as ONE turn, with
@@ -341,6 +358,17 @@ Changed artifact revisions make a displayed report historical; replaced task
 context clears it. Preserve the documented `review.md` macro: it has priority
 over the convenience `/review` spelling, while `/config review on|off|last`
 always reaches built-in controls. Do not turn foreground execution headless.
+
+Automatic review output is compact and grey (`ui/review_view.py`); full findings
+stay available in the click/Ctrl+O detail pane and `/review last`. The immutable
+`Reviewer.view` snapshot is display-only and reset with review context. Painting
+must not call `current_report()` (it checks files/Git); explicit `/review last`
+still checks staleness on the command worker. Expanding details never dispatches
+model input, changes permissions or pauses budgets. Close it for real approval
+prompts and context resets, preserving the unsent input. Actor output remains
+streamed as drafts; one clearly labelled chosen answer follows review. Never
+label an inconclusive/revise result as verified completion or persist the display
+copy as a second conversation turn.
 
 ### ACE Playbook learning (`client/memory/reflector.py`, `client/memory/playbook_store.py`)
 

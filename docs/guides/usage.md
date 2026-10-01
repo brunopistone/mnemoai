@@ -262,6 +262,8 @@ silences only the turn-end half, keeping the ones that are waiting on you.
 ### Keyboard Shortcuts
 
 - `Ctrl+J`: Insert a new line in the input (`Enter` submits)
+- `Ctrl+O`: Expand/collapse peer-review details when available; Esc closes the
+  focused detail pane. The grey pinned review row is also clickable.
 - `Enter`: Submit the message. **While the assistant is working**, a submitted
   message is **queued** (shown as a dim `> … (queued)` line) and runs as its own
   turn after the current one finishes — it's never folded into the running turn

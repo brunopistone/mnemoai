@@ -11,17 +11,21 @@ import uuid
 import tiktoken
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from mnemoai.client.agent import stream_policy
 from mnemoai.client.agent.reasoning_utils import extract_visible_text
 from mnemoai.client.memory.reflection import redact
 from mnemoai.client.review_evidence import Capture, digest, text
 from mnemoai.utils.config import config
+from mnemoai.utils.logger import logger
 from mnemoai.utils.review_protocol import DATA_MARKER, FEEDBACK_PREFIX, ReviewStopped
 
 SETTINGS = {
     "TIMEOUT": ("Review wait (seconds, 1–120)", 45, "float", 1, 120),
     "MAX_INPUT_TOKENS": ("Estimated review input tokens (1000–32000)", 6000, "int", 1000, 32000),
-    "MAX_ROUNDS": ("Chat-model correction rounds (0–4)", 2, "int", 0, 4),
-    "TOTAL_TIMEOUT": ("Shared supervision budget (seconds, 1–1800)", 180, "float", 1, 1800),
+    "MAX_ROUNDS": ("Final chat-model correction rounds (0–4)", 2, "int", 0, 4),
+    "TOTAL_TIMEOUT": ("Total supervision overhead (seconds, 1–1800)", 180, "float", 1, 1800),
+    "MAX_CHANGE_REVIEWS": ("Intermediate change reviews per task (0–8)", 2, "int", 0, 8),
+    "MAX_STRATEGY_ROUNDS": ("Strategy revision rounds (0–3)", 1, "int", 0, 3),
 }
 DEFAULT_OUTPUT_TOKENS = 2048
 
@@ -108,9 +112,15 @@ def parse_verdict(response, ids):
     return data
 
 
-def packet(items, gaps, limit):
-    prompt = config.prompt("REVIEWER_SYSTEM_PROMPT")
+def estimated_input_tokens(prompt, payload):
     encoder = tiktoken.get_encoding("o200k_base")
+    return math.ceil(len(encoder.encode(prompt + payload, disallowed_special=())) * 1.5) + 256
+
+
+def packet(items, gaps, limit, checkpoint="completion"):
+    prompt = config.prompt("REVIEWER_SYSTEM_PROMPT")
+    if checkpoint != "completion":
+        prompt += "\n\n" + config.require_prompt("REVIEW_CHECKPOINT_PROMPT").format(checkpoint=checkpoint)
     kept = []
     for item in items:
         cleaned = copy.deepcopy(item)
@@ -122,8 +132,8 @@ def packet(items, gaps, limit):
         kept.append(cleaned)
 
     def build():
-        payload = json.dumps({"evidence": kept, "coverage_gaps": sorted(gaps)}, ensure_ascii=True)
-        estimate = math.ceil(len(encoder.encode(prompt + payload, disallowed_special=())) * 1.5) + 256
+        payload = json.dumps({"checkpoint": checkpoint, "evidence": kept, "coverage_gaps": sorted(gaps)}, ensure_ascii=True)
+        estimate = estimated_input_tokens(prompt, payload)
         return payload, estimate
 
     payload, estimated = build()
@@ -146,12 +156,25 @@ class Reviewer:
         self._in_flight = threading.Lock()
         self._generation = 0
         self._last_evidence = []
+        self.view = None  # optional immutable UI snapshot; never part of model context
+        self._outage_notified = False
+        self.artifact_task = ""
 
-    def reset(self):
+    def reset(self, clear_task=True):
         self._generation += 1
         self.last = None
         self._capture = None
         self._last_evidence = []
+        self.view = None
+        if clear_task:
+            self.artifact_task = ""
+
+    def unavailable_notice(self):
+        """One notice for an outage, re-armed only by a successful reviewer call."""
+        if self._outage_notified:
+            return False
+        self._outage_notified = True
+        return True
 
     def begin(self, task):
         self.reset()
@@ -171,30 +194,34 @@ class Reviewer:
         return self.last
 
     def finish(self, capture, answer, *, model_factory, model_label, context=(), cancel=None, usage=None,
-               time_limit=None):
+               time_limit=None, checkpoint="completion"):
         """Returns an advisory report, never changes the actor's answer or artifacts."""
         generation = self._generation
         started = time.monotonic()
         report = {
-            "id": "review-" + uuid.uuid4().hex, "checkpoint": "completion",
+            "id": "review-" + uuid.uuid4().hex, "checkpoint": checkpoint,
             "reviewer": model_label, "verdict": "inconclusive", "summary": "",
             "findings": [], "coverage_gaps": [], "evidence": [], "input_tokens_estimate": 0,
             "valid_verdict": False, "stale": False,
         }
         try:
             options = settings()
+            timeout = options["TIMEOUT"] if time_limit is None else min(options["TIMEOUT"], time_limit)
+            deadline = started + timeout
             if not self.enabled or (cancel and cancel()):
                 raise InterruptedError("Review cancelled; the actor's answer is preserved")
             if not self._in_flight.acquire(blocking=False):
                 raise RuntimeError("A prior reviewer call is still running; no new call started")
             inbox = queue.Queue(maxsize=1)
-            accounted = threading.Event()
+            accounted = set()
+            attempts_sent = [0]
             accounting_lock = threading.Lock()
 
-            def account(response):
+            def account(response, attempt=None):
                 with accounting_lock:
-                    if not accounted.is_set():
-                        accounted.set()
+                    attempt = attempts_sent[0] if attempt is None else attempt
+                    if attempt and attempt not in accounted:
+                        accounted.add(attempt)
                         if usage is not None:
                             try:
                                 usage(response)
@@ -204,10 +231,26 @@ class Reviewer:
             abandoned = threading.Event()
             sent = threading.Event()
 
+            def active():
+                if abandoned.is_set() or generation != self._generation or not self.enabled or (cancel and cancel()):
+                    raise InterruptedError("Review cancelled")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Review timed out")
+
+            class RetryWait:
+                def wait(self, delay):
+                    until = time.monotonic() + delay
+                    while True:
+                        active()
+                        remaining = until - time.monotonic()
+                        if remaining <= 0:
+                            return False
+                        abandoned.wait(min(0.05, remaining))
+
             def invoke():
                 try:
                     items = capture.finish(answer, context() if callable(context) else context)
-                    messages, kept, estimate = packet(items, capture.gaps, options["MAX_INPUT_TOKENS"])
+                    messages, kept, estimate = packet(items, capture.gaps, options["MAX_INPUT_TOKENS"], checkpoint)
                     if abandoned.is_set() or (cancel and cancel()) or generation != self._generation:
                         return
                     model = model_factory()
@@ -215,9 +258,26 @@ class Reviewer:
                         return
                     if model is None:
                         raise RuntimeError("Reviewer model unavailable; no fallback was substituted")
-                    sent.set()
-                    response = model.invoke(messages, config={"callbacks": []})
-                    account(response)
+                    def call():
+                        active()
+                        with accounting_lock:
+                            attempts_sent[0] += 1
+                            attempt = attempts_sent[0]
+                        sent.set()
+                        try:
+                            response = model.invoke(messages, config={"callbacks": []})
+                        except BaseException:
+                            account(None, attempt)
+                            raise
+                        account(response, attempt)
+                        return response
+                    llm = config.get("LLM", {}) or {}
+                    response = stream_policy.call_with_transient_retry(
+                        call, stream_policy.aux_attempts(llm.get("MAX_RETRIES", 3)),
+                        float(llm.get("RETRY_DELAY", 1)), float(llm.get("RETRY_BACKOFF", 2)),
+                        cancel_event=RetryWait(),
+                    )
+                    active()
                     verdict = parse_verdict(response, {i["id"] for i in kept})
                     stale = capture.stale()
                     if stale:
@@ -230,13 +290,15 @@ class Reviewer:
                         evidence=[{"id": i["id"], "kind": i["kind"], "revision": i.get("revision", digest(i))}
                                   for i in kept],
                     )
-                    inbox.put(((verdict, kept), None))
+                    outcome = ((verdict, kept), None)
                 except BaseException as exc:
                     if sent.is_set():
                         account(None)
-                    inbox.put((None, exc))
+                    outcome = (None, exc)
                 finally:
                     self._in_flight.release()
+                # Publish only once a subsequent checkpoint can acquire the slot.
+                inbox.put(outcome)
 
             try:
                 threading.Thread(target=invoke, daemon=True, name="mnemoai-reviewer").start()
@@ -244,8 +306,6 @@ class Reviewer:
                 self._in_flight.release()
                 raise
             try:
-                timeout = options["TIMEOUT"] if time_limit is None else min(options["TIMEOUT"], time_limit)
-                deadline = started + timeout
                 while True:
                     if (cancel and cancel()) or generation != self._generation or not self.enabled:
                         raise InterruptedError("Review cancelled; the actor's answer is preserved")
@@ -263,6 +323,7 @@ class Reviewer:
                 report.update(verdict)
                 if generation == self._generation:
                     self._last_evidence = evidence
+                    self._outage_notified = False
             finally:
                 abandoned.set()
                 if sent.is_set():
@@ -274,13 +335,17 @@ class Reviewer:
                 KeyboardInterrupt: "Review cancelled; the actor's answer is preserved.",
             }.get(type(exc), f"Review unavailable or invalid ({type(exc).__name__}); no verdict assumed.")
             report["coverage_gaps"] = ["Review did not complete; evidence coverage was not established."]
+            report["unavailable"] = not isinstance(exc, (InterruptedError, KeyboardInterrupt))
+            if report["unavailable"]:
+                logger.error("Review checkpoint unavailable (%s)", type(exc).__name__,
+                             exc_info=True, extra={"console": False})
         report["elapsed_seconds"] = round(time.monotonic() - started, 3)
         if generation == self._generation:
             self.last, self._capture = report, capture
         return report
 
     def supervise(self, capture, answer, *, actor, steps, model_factory, model_label,
-                  context=(), cancel=None, usage=None, progress=None):
+                  context=(), cancel=None, usage=None, progress=None, time_limit=None):
         """Ask, respond, and recheck within one user task; return the latest actor answer."""
         generation = self._generation
         rounds, revisions = [], 0
@@ -290,7 +355,8 @@ class Reviewer:
         try:
             options = settings()
             budget = LoopBudget(
-                options["TOTAL_TIMEOUT"], steps, cancel,
+                options["TOTAL_TIMEOUT"] if time_limit is None else min(options["TOTAL_TIMEOUT"], time_limit),
+                steps, cancel,
                 current=lambda: self.enabled and generation == self._generation,
             )
             while True:
@@ -370,14 +436,29 @@ def render(report, history=True):
     def plain(value):
         return " ".join("".join(c for c in str(value) if c.isprintable() or c.isspace()).split())
     lines = [
-        f"Peer review · {report['verdict']} · {plain(report['reviewer'])}",
+        f"Peer review · {report.get('checkpoint', 'completion')} · {report['verdict']} · {plain(report['reviewer'])}",
         report["summary"],
     ]
+    if report.get("strategy"):
+        lines.extend(["", "Chat model strategy:", report["strategy"], ""])
+    if history:
+        for item in report.get("checkpoints", [])[:-1]:
+            lines.append(f"  Checkpoint {item.get('checkpoint', 'completion')} · {item['verdict']} — {item['summary']}")
+            if item.get("strategy"):
+                lines.append("    Proposed strategy: " + item["strategy"])
+            for finding in item.get("findings", []):
+                lines.extend([
+                    f"    {finding['issue']} [{', '.join(finding['evidence_ids'])}]",
+                    f"    Suggested verification (not executed): {finding['verification']}",
+                ])
+            lines.extend("    Coverage: " + gap for gap in item.get("coverage_gaps", []))
     if history and report.get("rounds"):
         for i, item in enumerate(report["rounds"]):
             lines.append(f"  Round {i + 1} · reviewer: {item['verdict']} — {item['summary']}")
             for finding in item["findings"]:
                 lines.append(f"    {finding['issue']} [{', '.join(finding['evidence_ids'])}]")
+                lines.append(f"    Suggested verification (not executed): {finding['verification']}")
+            lines.extend("    Coverage: " + gap for gap in item.get("coverage_gaps", []))
             if item.get("actor_response"):
                 lines.append(f"    Chat model: {plain(item['actor_response'])}")
     for finding in report["findings"]:
@@ -404,7 +485,7 @@ def command(client, arguments):
         reviewer.enabled = action == "on"
         return (
             f"Peer review {action} for this session. "
-            + ("The reviewer and chat model may exchange bounded correction rounds. " if reviewer.enabled else "")
+            + ("Coding/document tasks use strategy, change and completion reviews. " if reviewer.enabled else "")
             + "Permissions unchanged. /model → Reviewer; /config review; /features for the startup default."
         )
     if action not in {"", "last"}:
