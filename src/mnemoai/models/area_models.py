@@ -57,7 +57,7 @@ DESCRIPTIONS = {
     "ORCHESTRATOR": "task decomposition",
     "SUMMARY": "conversation compaction",
     "REFLECTOR": "evidence-linked learning",
-    "REVIEWER": "supervisor feedback and verification",
+    "REVIEWER": "coding/document strategy and change review",
 }
 
 

@@ -54,7 +54,7 @@ from mnemoai.client.file_ledger import FileLedger
 from mnemoai.client.memory.playbook_context import (
     refresh_messages as refresh_playbook_messages,
 )
-from mnemoai.client.ui import turn_view
+from mnemoai.client.ui import review_view, turn_view
 from mnemoai.client.usage_tracker import UsageTracker
 from mnemoai.models import prompt_cache
 from mnemoai.utils.config import config
@@ -263,6 +263,7 @@ class LangGraphAgent:
         self._review_capture = None
         self._review_excluded = threading.local()
         self._completion_supervisor = None
+        self._work_review = None
         self.verbose = verbose
         self.callbacks = callbacks or []
         # When True (pinned-input UI), reasoning is buffered into a collapsed
@@ -611,7 +612,7 @@ class LangGraphAgent:
         so it is decomposed instead of answered.
         """
         for msg in reversed(messages or []):
-            if isinstance(msg, HumanMessage):
+            if isinstance(msg, HumanMessage) and not is_feedback(msg.content):
                 return cls._strip_ephemeral(str(msg.content)).strip()
         return ""
 
@@ -667,7 +668,7 @@ class LangGraphAgent:
         # per-turn injected blocks (steering/plan-mode), which the model must see
         # but which would otherwise dominate the classification (see
         # _last_human_query).
-        query = self._strip_ephemeral(str(messages[-1].content)) if messages else ""
+        query = self._last_human_query(messages)
         route = self.router.classify(query, context)
         logger.debug(f"Query routed to: {route}")
         return {"route": route}
@@ -694,7 +695,7 @@ class LangGraphAgent:
         history = list(messages)
         # Drop the trailing current-query HumanMessage (passed separately).
         for i in range(len(history) - 1, -1, -1):
-            if isinstance(history[i], HumanMessage):
+            if isinstance(history[i], HumanMessage) and not is_feedback(history[i].content):
                 del history[i]
                 break
         # Drop the leading system prompt(s) / any stray SystemMessage.
@@ -769,6 +770,9 @@ class LangGraphAgent:
         all_worker_messages: List[BaseMessage] = []
         for wr in worker_results:
             all_worker_messages.extend(wr.get("messages", []))
+        work_review = getattr(self, "_work_review", None)
+        if work_review is not None:
+            all_worker_messages.extend(work_review.wave_notes)
 
         # Step 3: aggregate.
         if len(subtasks) == 1:
@@ -816,6 +820,7 @@ class LangGraphAgent:
         results: Dict[int, dict] = {}
         max_workers = getattr(self, "_max_subagent_concurrency", 1)
         remaining = set(range(total))
+        review_history = list(history) if history is not None else None
 
         descriptions = [str(s.get("description", "")) for s in subtasks]
 
@@ -867,7 +872,7 @@ class LangGraphAgent:
                         self._start_spinner(f"step {i + 1}/{total}: {label}")
                         try:
                             results[i] = self._run_subtask(
-                                i, subtasks, results, history
+                                i, subtasks, results, review_history
                             )
                         finally:
                             self._stop_spinner()
@@ -887,7 +892,7 @@ class LangGraphAgent:
                         self._set_headless(True)
                         try:
                             return idx, self._run_subtask(
-                                idx, subtasks, results, history
+                                idx, subtasks, results, review_history
                             )
                         finally:
                             self._set_headless(False)
@@ -919,6 +924,18 @@ class LangGraphAgent:
                     finally:
                         self._stop_spinner()
                 remaining -= set(ready)
+                work_review = getattr(self, "_work_review", None)
+                if work_review is not None and remaining:
+                    completed_messages = [
+                        message for i in ready for message in results[i].get("messages", [])
+                    ]
+                    notes = work_review.after_batch(
+                        list(review_history or []) + completed_messages, wave=True,
+                    )
+                    if notes:
+                        if review_history is None:
+                            review_history = []
+                        review_history.extend(notes)
         finally:
             # Hand the pinned region back even on a cancel or a failed step, else
             # the checklist stays above the prompt for the rest of the session.
@@ -2414,7 +2431,7 @@ class LangGraphAgent:
                             # part of the SAME committed line — a separate flushed
                             # marker write is a lone partial line the pinned UI
                             # repaint erases before the answer joins it.
-                            chunk_content = self._answer_marker() + chunk_content
+                            chunk_content = self._answer_prefix() + chunk_content
                         answer_marker_printed = True
                         # Record that this turn has shown a visible answer, so the
                         # invoke() safety net doesn't re-emit it.
@@ -2488,6 +2505,12 @@ class LangGraphAgent:
         """The cyan ● prefix for a streamed answer (prepended to the first chunk)."""
         return "\033[36m●\033[0m "
 
+    def _answer_prefix(self) -> str:
+        """A reply is a draft until the optional supervisor has finished."""
+        if getattr(self, "_completion_supervisor", None) is not None:
+            return review_view.draft_prefix() + self._answer_marker()
+        return self._answer_marker()
+
     def _emit_answer(self, text: str) -> None:
         """Display an answer that was PRODUCED WITHOUT STREAMING, rendered exactly
         like a streamed one (``●`` marker + markdown via ``CodeFormatter``).
@@ -2504,7 +2527,7 @@ class LangGraphAgent:
             return
         self._stop_spinner()
         fmt = CodeFormatter()
-        fmt.process_chunk(self._answer_marker() + text)
+        fmt.process_chunk(self._answer_prefix() + text)
         fmt.flush()
         # Commit the final line to scrollback (patch_stdout only commits on a
         # newline; the pinned UI would otherwise erase an uncommitted tail).
@@ -3026,6 +3049,12 @@ class LangGraphAgent:
         # (the `deliver` node) — one without the other is what retired the first
         # version of this in 1.8.0. See mid_turn.py.
         tool_results.extend(mid_turn.drain(self))
+        work_review = getattr(self, "_work_review", None)
+        if work_review is not None:
+            tool_results.extend(work_review.after_batch(list(state["messages"]) + tool_results))
+            # A checkpoint is another model wait: deliver guidance accepted
+            # during it before the actor can start the next batch.
+            tool_results.extend(mid_turn.drain(self))
         return {"messages": tool_results}
 
     def _should_continue(self, state: AgentState) -> str:
@@ -3178,6 +3207,12 @@ class LangGraphAgent:
         # embedded custom graph working — it just can't recover a limit hit).
         streamer = getattr(self.graph, "stream", None)
         try:
+            preparation_steps = 0
+            work_review = getattr(self, "_work_review", None)
+            if work_review is not None:
+                result = initial_state  # preserve strategy/guidance if interrupted before graph execution
+                preparation_steps = work_review.prepare(initial_state, self.recursion_limit)
+                run_config["recursion_limit"] = max(1, self.recursion_limit - preparation_steps)
             if streamer is None:
                 result = self.graph.invoke(initial_state, config=run_config)
                 steps_used = 1
@@ -3188,6 +3223,7 @@ class LangGraphAgent:
                     result = snapshot
                     steps_used += 1
                 steps_used = max(0, steps_used - 1)  # first value is the seeded state
+            steps_used += preparation_steps
             supervisor = getattr(self, "_completion_supervisor", None)
             if supervisor is not None and result is not None:
                 if self._cancelled():

@@ -23,7 +23,7 @@ from mnemoai.client.memory.episodic_memory import (
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
-from mnemoai.client.ui import notify, screen, status_bar, turn_view
+from mnemoai.client.ui import notify, review_view, screen, status_bar, turn_view
 from mnemoai.client.ui.command_feedback import render_mcp_status, render_model_update
 from mnemoai.client.ui.spinner import WRAP_UP_LABEL
 from mnemoai.client.ui.tui import (
@@ -157,7 +157,7 @@ class ChatInterface:
         ("Modes", [
             ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
             ("/auto [tier]", "Skip confirmations: off/edits/writes/all"),
-            ("/review [mode]", "Supervisor dialogue: on, off, last"),
+            ("/review [mode]", "Code/document review: on, off, last"),
         ]),
         ("Assistant", [
             ("/memory [clear]", "View (or clear) persistent memory"),
@@ -198,7 +198,7 @@ class ChatInterface:
         ("/learned", "Inspect, edit or retract learned tool-use notes"),
         ("/plan", "Toggle read-only plan mode (blocks edits & shell)"),
         ("/auto", "Skip confirmations (/auto off|edits|writes|all)"),
-        ("/review", "Supervisor feedback and corrections (/review on|off|last)"),
+        ("/review", "Code/document strategy and change review (/review on|off|last)"),
         ("/save", "Save conversation (/save [path])"),
         ("/load", "Load a saved conversation (/load lists saved)"),
         ("/usage", "Show token usage for this session"),
@@ -395,6 +395,7 @@ class ChatInterface:
             ("@", "attach a file or directory (completes as you type)"),
             ("Esc", "interrupt the current turn"),
             ("Ctrl+A", "agents panel (↑↓ move · Enter view · x stop · Esc leave)"),
+            ("Ctrl+O", "expand/collapse peer-review details (Esc closes)"),
             ("Ctrl+X Ctrl+K", "stop every running agent"),
             ("Ctrl+C / Ctrl+D", "exit (twice)"),
         ]
@@ -973,7 +974,7 @@ class ChatInterface:
             # only time the current step.
             status.begin_turn()
             try:
-                if first in dialog_cmds:
+                if first in dialog_cmds and not self._is_review_control(line):
                     result = self._pinned_reader.run_dialog(
                         lambda: self._dispatch(line)
                     )
@@ -1081,6 +1082,10 @@ class ChatInterface:
                 width=width,
             )
 
+        def _review_snapshot():
+            reviewer = getattr(self.client, "reviewer", None)
+            return review_view.current_display(reviewer)
+
         reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
             commands=self._completion_commands,
@@ -1098,6 +1103,7 @@ class ChatInterface:
             agents_stop=_agents_stop,
             agents_stop_all=_agents_stop_all,
             agents_turn=_agents_turn,
+            review_provider=_review_snapshot,
         )
 
         # Route the worker-thread confirmation gate through the app (a plain
@@ -1268,6 +1274,28 @@ class ChatInterface:
                 ledger.record(str(mention.path), file_ledger.ATTACHED)
         return expanded
 
+    @staticmethod
+    def _is_review_control(line):
+        parts = line.lower().split()
+        return (
+            len(parts) == 3 and parts[:2] == ["/config", "review"]
+            and parts[2] in {"on", "off", "last"}
+        )
+
+    def _review_command(self, arguments):
+        result = review.command(self.client, arguments)
+        if arguments.strip().lower() in {"", "last"}:
+            reader = getattr(self, "_pinned_reader", None)
+            if reader is not None and reader.show_review_details(result):
+                return
+            # Explicit detail requests remain available off-TTY and when no pane
+            # can open; automatic review output is compact in either frontend.
+            result = "\n".join(
+                f"{review_view.GRAY}{line}{review_view.RESET}"
+                for line in review_view.plain(result).splitlines()
+            )
+        print("\n" + result + "\n")
+
     def _dispatch(self, query: str):
         """Handle one submitted line (slash command or query); returns
         :data:`_EXIT` to end the loop, else ``None``. Shared by both loops."""
@@ -1310,7 +1338,7 @@ class ChatInterface:
         if query.lower() == "/review" or query.lower().startswith("/review "):
             # Preserve the previously documented /review <path> user macro.
             if self.user_commands.get("review") is None:
-                print("\n" + review.command(self.client, query[len("/review"):]) + "\n")
+                self._review_command(query[len("/review"):])
                 return None
             print("\nYour /review macro is active; peer-review controls: /config review on|off|last.")
 
@@ -1362,7 +1390,7 @@ class ChatInterface:
         if query.lower().startswith("/config "):
             section = query[len("/config"):].strip().lower()
             if section.startswith("review "):
-                print("\n" + review.command(self.client, section[len("review"):]) + "\n")
+                self._review_command(section[len("review"):])
             elif section == "review":
                 if run_review_settings() is not None:
                     if self.client.reload_review_settings():

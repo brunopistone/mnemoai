@@ -7,11 +7,17 @@ drive the non-TTY branch with input() mocked — no modal, no terminal.
 
 import builtins
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
+from prompt_toolkit.buffer import EditReadOnlyBuffer
+from prompt_toolkit.data_structures import Point
+from prompt_toolkit.keys import Keys
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 
 from mnemoai.client.agent import ask_user
-from mnemoai.client.ui import tui
+from mnemoai.client.ui import review_view, tui
 
 
 @pytest.fixture
@@ -993,6 +999,192 @@ class TestStopAgentBindings:
         a.finish("stopped")
         row = next(t for _c, t in r._agents_text() if "core" in t)
         assert "cancelling" not in row and "✗" in row
+
+
+class TestReviewPane:
+    @staticmethod
+    def reader():
+        holder = {"view": review_view.snapshot(
+            (1, 1), "complete",
+            {"verdict": "revise", "summary": "Check the implementation."},
+            details="Full finding\n" + "\n".join(f"Evidence line {i}" for i in range(80)),
+        )}
+        dispatch = Mock()
+        reader = tui.PinnedPromptReader(
+            prompt_text=lambda: "> ", commands=[], dispatch=dispatch,
+            review_provider=lambda: holder["view"],
+        )
+        reader._buffer.text = "my unsent message"
+        reader._buffer.cursor_position = 3
+        return reader, holder, dispatch
+
+    @staticmethod
+    def press(reader, key):
+        bindings = [b for b in reader._make_bindings().bindings if b.keys == (key,) and b.filter()]
+        assert bindings
+        bindings[-1].handler(SimpleNamespace(app=reader._app, current_buffer=reader._buffer))
+
+    def test_default_is_one_grey_clickable_row_not_full_findings(self):
+        reader, _, dispatch = self.reader()
+        assert not reader._review_expanded
+        fragments = reader._review_text()
+        assert all(style == "class:pinned-review" for style, text, handler in fragments)
+        assert "Full finding" not in "".join(t for s, t, h in fragments)
+        assert "Ctrl+O" in fragments[0][1] and callable(fragments[0][2])
+        dispatch.assert_not_called()
+
+    def test_ctrl_o_opens_scrollable_read_only_details_and_preserves_draft(self):
+        reader, _, dispatch = self.reader()
+        self.press(reader, Keys.ControlO)
+        assert reader._review_expanded
+        assert reader._app.layout.has_focus(reader._review_area)
+        assert "Evidence line 79" in reader._review_area.text
+        assert reader._review_area.window.right_margins
+        assert reader._review_area.window.wrap_lines()
+        with pytest.raises(EditReadOnlyBuffer):
+            reader._review_area.buffer.insert_text("must not edit review")
+        self.press(reader, Keys.ControlO)
+        assert not reader._review_expanded
+        assert reader._app.layout.has_focus(reader._buffer)
+        assert reader._buffer.text == "my unsent message" and reader._buffer.cursor_position == 3
+        dispatch.assert_not_called()
+
+    @pytest.mark.parametrize("key", [Keys.Escape, Keys.ControlC, Keys.ControlM])
+    def test_closing_details_never_submits_feedback_or_cancels_work(self, key):
+        reader, _, dispatch = self.reader()
+        reader._busy = True
+        reader._request_cancel = Mock()
+        reader._open_review()
+        self.press(reader, key)
+        assert not reader._review_expanded and reader._buffer.text == "my unsent message"
+        reader._request_cancel.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_click_toggles_details_without_dispatching_or_approving(self):
+        reader, _, dispatch = self.reader()
+        click = MouseEvent(Point(1, 0), MouseEventType.MOUSE_UP, MouseButton.LEFT, frozenset())
+        reader._review_mouse(click)
+        assert reader._review_expanded
+        reader._review_mouse(click)
+        assert not reader._review_expanded
+        reader._confirm_pending = True
+        reader._confirm_answer = Mock()
+        reader._review_mouse(click)
+        assert not reader._review_expanded
+        reader._confirm_answer.assert_not_called()
+        dispatch.assert_not_called()
+
+    @pytest.mark.parametrize("next_view", [None, review_view.snapshot((1, 2), "waiting")])
+    def test_context_reset_closes_stale_details(self, next_view):
+        reader, holder, _ = self.reader()
+        reader._open_review()
+        holder["view"] = next_view
+        reader._sync_review()
+        assert not reader._review_expanded
+        assert reader._app.layout.has_focus(reader._buffer)
+        assert reader._buffer.text == "my unsent message"
+
+    def test_live_progress_keeps_an_open_snapshot_stable(self):
+        reader, holder, _ = self.reader()
+        reader._open_review()
+        text = reader._review_area.text
+        holder["view"] = review_view.snapshot((1, 1), "correcting", revision=2)
+        reader._sync_review()
+        assert reader._review_expanded and reader._review_area.text == text
+        reader._close_review()
+        assert "round 2" in "".join(t for s, t, h in reader._review_text())
+
+    def test_details_never_replace_a_pending_dialog(self):
+        reader, _, dispatch = self.reader()
+        pending = object()
+        reader._pending_dialog = pending
+        reader._open_review()
+        assert not reader._review_expanded and reader._pending_dialog is pending
+        dispatch.assert_not_called()
+
+    def test_focus_can_return_to_the_prompt_while_details_remain_open(self):
+        reader, _, _ = self.reader()
+        reader._open_review()
+        reader._app.layout.focus(reader._buffer)
+        # No review Enter binding may consume a genuine prompt submission.
+        enter = [b for b in reader._make_bindings().bindings if b.keys == (Keys.ControlM,) and b.filter()]
+        assert enter == []
+        assert reader._review_expanded
+
+    def test_page_down_scrolls_the_real_pinned_detail_window(self):
+        import asyncio
+
+        from prompt_toolkit.application import Application
+        from prompt_toolkit.input.defaults import create_pipe_input
+        from prompt_toolkit.output import DummyOutput
+
+        reader, _, dispatch = self.reader()
+        original = reader._app
+        with create_pipe_input() as pipe:
+            app = Application(
+                layout=original.layout, key_bindings=original.key_bindings,
+                input=pipe, output=DummyOutput(), full_screen=False,
+                before_render=lambda app: reader._sync_review(),
+            )
+            reader._app = app
+            observed = {}
+
+            async def until(predicate):
+                for _ in range(500):
+                    if predicate():
+                        return
+                    await asyncio.sleep(0.01)
+                raise AssertionError("pinned detail window did not scroll")
+
+            async def run():
+                async def feed():
+                    try:
+                        await until(lambda: app.layout.current_window.render_info is not None)
+                        pipe.send_text("\x0f")
+                        area = reader._review_area.window
+                        await until(lambda: reader._review_expanded and area.render_info is not None)
+                        pipe.send_text("\x1b[6~")
+                        await until(lambda: area.render_info.vertical_scroll > 0)
+                        observed["top"] = area.render_info.vertical_scroll
+                    finally:
+                        app.exit()
+                feeder = asyncio.create_task(feed())
+                await app.run_async()
+                await feeder
+            asyncio.run(run())
+        assert observed["top"] > 0
+        assert reader._buffer.text == "my unsent message"
+        dispatch.assert_not_called()
+
+    def test_real_confirmation_closes_details_and_keeps_its_answer(self, monkeypatch):
+        import asyncio
+
+        reader, _, dispatch = self.reader()
+        reader._open_review()
+        monkeypatch.setattr(tui.notify, "notify_waiting", lambda: None)
+        async def in_terminal(func):
+            func()
+        monkeypatch.setattr(tui, "run_in_terminal", in_terminal)
+
+        async def run():
+            reader._loop = asyncio.get_running_loop()
+            task = asyncio.create_task(asyncio.to_thread(
+                reader._await_confirm, "Proceed?", "[y/n]", lambda: None,
+            ))
+            try:
+                async def ready():
+                    while not reader._confirm_pending or reader._review_expanded:
+                        await asyncio.sleep(0.01)
+                await asyncio.wait_for(ready(), 2)
+                assert reader._app.layout.has_focus(reader._buffer)
+                reader._confirm_answer("no")
+                assert await asyncio.wait_for(task, 2) == "no"
+            finally:
+                reader._cancelled = True
+                await task
+        asyncio.run(run())
+        assert reader._buffer.text == "my unsent message"
+        dispatch.assert_not_called()
 
 
 class TestDetailScroll:

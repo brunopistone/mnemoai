@@ -9,6 +9,42 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.28.1] — 2026-10-01
+
+### Changed
+
+- Focus optional peer review on code and document work: discuss the chat model's
+  strategy before edits, review completed change batches or orchestrator waves,
+  then review the final result. General conversation skips the reviewer.
+  Strategy/change limits are available through `/config review` and all YAML
+  templates. Only the chat model edits; existing permissions are unchanged.
+
+### Fixed
+
+- Collapse automatic peer-review feedback into grey summaries, with click/Ctrl+O
+  expansion in a scrollable pane and full off-TTY details through `/review last`.
+  Label chat-model drafts and clearly separate the final answer or unverified
+  latest answer without duplicating conversation turns.
+- Continue authorized work when the reviewer is unavailable, with bounded
+  retries and one brief notice per outage instead of repeated “unreviewed”
+  warnings. Later tasks can retry; unavailable review never becomes a pass.
+- Preserve write and verification evidence between checkpoints, prioritize
+  changed files when capture limits are reached, and keep directory listings
+  as tool evidence instead of treating them as missing file snapshots.
+- Release completed reviewer requests before accepting the next checkpoint,
+  and deliver user guidance received during review before the next edit batch.
+
+### Tests
+
+- Add live code and document authoring checks, including in-chat drafts, saved
+  files, and reviewer-directed correction of deliberately incorrect statements.
+- Cover review configuration, bounded retries/budgets, outage recovery, terminal
+  expansion, unsent input preservation, cancellation and permission boundaries.
+
+Review remains off by default. `MAX_ROUNDS: 0` keeps final review report-only;
+strategy/change checkpoints have separate limits. Review is not proof that the
+work is bug-free.
+
 ## [1.28.0] — 2026-09-30
 
 ### Fixed

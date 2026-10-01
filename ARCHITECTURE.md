@@ -220,13 +220,28 @@ for BM25-only retrieval and block vector operations and automatic cleanup.
 
 ### Supervisor peer review
 
+`client/ui/review_view.py` owns the display-only layer: two-line grey summaries,
+immutable detail snapshots, draft labels, and the separately displayed final
+chat answer (or explicitly unverified latest answer). `Reviewer.view` is cleared
+with its generation; the pinned UI rejects stale-generation snapshots and never
+checks files or runs Git during repaint. Click/Ctrl+O opens a height-limited,
+read-only, wrapping pane, with explicit page navigation in the non-full-screen
+application. Closing it preserves the prompt; approval prompts take focus.
+`/review last` still checks artifact staleness on the command worker before
+opening details, with a full grey-text fallback outside the pinned UI. The
+display copy of the answer is not appended to model history or the session log.
+
 `client/review_evidence.py` owns the bounded per-turn `Capture`: observed tool
 outcomes, original/follow-up requirements, current named files and scoped Git
 diffs with revision fingerprints. `client/review.py` owns input budgets,
 strict evidence-linked verdict parsing, one in-flight reviewer call, cancellation,
-late-result suppression, and the bounded reviewer/actor dialogue. `client.query`
-installs an agent completion hook, so review and corrections finish before the
-original turn is committed. The shared tool loop observes without granting trust.
+late-result suppression, and the bounded reviewer/actor dialogue.
+`client/work_review.py` selects artifact tasks through a tool-free chat-model
+strategy call, negotiates the strategy, reviews completed edit batches/between
+orchestrator waves, and invokes final correction review. Synthetic strategy and
+checkpoint notes remain in the original turn; routing skips them as user input.
+The final completion hook finishes before that turn is committed.
+The shared tool loop observes without granting trust.
 Background worker threads opt out of this foreground capture.
 
 `client/agent/supervised_turn.py` runs corrections with the foreground chat model's
@@ -241,9 +256,14 @@ fallback-on-explicit-failure. Configuration reaches `/model`, `/params`,
 `/features`, `/config review` and `/doctor`. Session logs retain a bounded `review`
 record without replaying it as conversation. Existing `/review` macros keep their
 meaning; `/config review on|off|last` is the unambiguous control alias.
-`MAX_ROUNDS` bounds corrections (zero means report-only); `TOTAL_TIMEOUT` bounds
-the exchange without abandoning in-flight writes. Pre-execution plan review is
-not implemented. The reviewer itself never executes tools or approves actions.
+`MAX_ROUNDS` bounds final corrections (zero means report-only final review);
+`MAX_STRATEGY_ROUNDS` bounds strategy revisions and `MAX_CHANGE_REVIEWS` bounds
+intermediate checks. `TOTAL_TIMEOUT` is cumulative supervision overhead, excluding
+normal implementation between checkpoints. Unavailable review disables further
+checks for the task but does not stop normal work. One notice is latched across
+the outage until a valid reviewer response re-arms it. Detailed status never
+claims a pass, and retries/calls remain bounded and accounted. The reviewer itself
+never executes tools or approves actions.
 
 ### Evidence-linked playbook and `/learned`
 

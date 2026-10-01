@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import shutil
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ from mnemoai.client import (
     session_artifacts,
     transcript_export,
     usage_tracker,
+    work_review,
 )
 from mnemoai.client.agent import auto_approve, mid_turn, supervised_turn, turn_failure
 from mnemoai.client.agent.agent import LangGraphAgent
@@ -56,7 +58,7 @@ from mnemoai.client.session_log import (
     read_session,
     turn_summaries,
 )
-from mnemoai.client.ui import clipboard, turn_view
+from mnemoai.client.ui import clipboard, review_view, turn_view
 from mnemoai.client.ui.spinner import WRAP_UP_LABEL, Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models import area_models
@@ -495,14 +497,20 @@ class LangGraphClient:
         # and let the agent run on the drained completion messages alone.
         delivery_only = not (prompt or "").strip()
         review_capture = None
+        review_work = None
         review_context = []
 
         try:
             reviewer = getattr(self, "reviewer", None)
             if reviewer is not None and reviewer.enabled:
-                if not delivery_only:
+                if not delivery_only and not work_review.obvious_conversation(prompt):
                     try:
-                        review_capture = reviewer.begin(prompt)
+                        if isinstance(self.agent, LangGraphAgent):
+                            review_work = work_review.WorkReview(self, prompt, review_context)
+                        else:
+                            # Compatibility for embedded agents without lifecycle hooks.
+                            review_capture = reviewer.begin(prompt)
+                            self._publish_review("waiting", announce=False)
                         review_context.append({
                             "id": "initial-policy", "kind": "execution_constraints",
                             "text": f"At task start: plan mode={self.plan_mode_active}; "
@@ -522,13 +530,13 @@ class LangGraphClient:
                                     "text": visible,
                                 })
                     except Exception as e:
-                        logger.warning("Review evidence unavailable (%s)", type(e).__name__)
-                        reviewer.incomplete("Evidence capture unavailable; no review performed.")
-                        print("\n" + review.render(reviewer.last))
+                        logger.error("Review evidence unavailable (%s)", type(e).__name__,
+                                     exc_info=True, extra={"console": False})
+                        reviewer.incomplete("Evidence capture unavailable; no review performed.")["unavailable"] = True
+                        self._publish_review("complete", reviewer.last)
                 else:
-                    reviewer.reset()
-                    reviewer.incomplete("Background delivery has no new user request; not reviewed.")
-                    print("\nPeer review skipped: background delivery has no new user request.")
+                    reviewer.reset(clear_task=False)
+            self.agent._work_review = review_work
             self.agent._review_capture = review_capture
             self.agent._completion_supervisor = (
                 lambda state, steps: self._supervise_turn(review_capture, state, review_context, steps)
@@ -561,7 +569,7 @@ class LangGraphClient:
                 steering = self._steering_reminder()
                 if steering:
                     prompt = steering + prompt
-                    if review_capture is not None:
+                    if review_capture is not None or review_work is not None:
                         review_context.append({"id": "steering", "kind": "user_steering", "text": steering})
 
             with self.mcp_client:
@@ -575,22 +583,36 @@ class LangGraphClient:
                     response = self.agent(prompt)
                 finally:
                     self.agent._completion_supervisor = None
+                    if review_work is not None:
+                        review_capture = review_work.capture
                     if getattr(self, "reflector", None) and self.agent.messages != before:
                         self._reflection_messages = current_turn_messages(self.agent.messages)
                 if review_capture is not None:
+                    if review_work is not None:
+                        review_work.finalize()
                     if self.reviewer.last is None:
                         if isinstance(self.agent, LangGraphAgent):
                             self.reviewer.incomplete("The actor stopped before normal completion; no correction was started.")
                             self._save_review_report(self.reviewer.last)
-                            print("\n" + review.render(self.reviewer.last))
+                            self._publish_review("complete", self.reviewer.last)
                         else:
                             # An embedded/custom agent may not implement the turn hook.
                             self._finish_review(review_capture, response, review_context)
                     else:
                         self._save_review_report(self.reviewer.last)
+                elif review_work is not None and self.reviewer.last is not None:
+                    self._save_review_report(self.reviewer.last)
 
                 if hasattr(self.agent, "_code_formatter"):
                     self.agent._code_formatter.flush()
+
+                if review_capture is not None:
+                    # Drafts may have streamed before the verdict was known. End
+                    # with the returned actor answer, never with reviewer prose.
+                    try:
+                        print("\n" + review_view.final_answer(response, self.reviewer.last), flush=True)
+                    except Exception:
+                        logger.debug("Could not render reviewed answer", exc_info=True)
 
                 # The answer has streamed, but the prompt is NOT free yet — and
                 # the stream stopped the spinner at its first token (text was
@@ -632,9 +654,11 @@ class LangGraphClient:
         except KeyboardInterrupt:
             with self.spinner_lock:
                 self.spinner.stop()
+            if review_work is not None and review_capture is None:
+                self.reviewer.view = None
             if review_capture is not None:
-                print("\n" + review.render(self.reviewer.incomplete(
-                    "Actor execution cancelled; completed work is retained.", preserve=True)))
+                self._publish_review("complete", self.reviewer.incomplete(
+                    "Actor execution cancelled; completed work is retained.", preserve=True))
                 self._save_review_report(self.reviewer.last)
             return "Operation was cancelled."
 
@@ -643,8 +667,8 @@ class LangGraphClient:
             with self.spinner_lock:
                 self.spinner.stop()
             if review_capture is not None:
-                print("\n" + review.render(self.reviewer.incomplete(
-                    "Actor execution failed; completed work is retained.", preserve=True)))
+                self._publish_review("complete", self.reviewer.incomplete(
+                    "Actor execution failed; completed work is retained.", preserve=True))
                 self._save_review_report(self.reviewer.last)
             # ONE report per failure: the print below IS the user-facing error,
             # so the record is file-only — a second red line about the same
@@ -678,18 +702,20 @@ class LangGraphClient:
         finally:
             self.agent._review_capture = None
             self.agent._completion_supervisor = None
+            self.agent._work_review = None
             with self.spinner_lock:
                 self.spinner.stop()
 
-    def _supervise_turn(self, capture, state, context, steps):
+    def _supervise_turn(self, capture, state, context, steps, time_limit=None):
         """The hook runs before the agent commits this single user turn."""
         fresh = state["messages"][getattr(self.agent, "_turn_seed_len", 0):]
         response = self.agent._last_visible_from(fresh)
         if not response or mid_turn.has_pending(self.agent):
             self.reviewer.incomplete("No completed answer, or new user guidance is pending; supervision stopped.")
+            self._publish_review("complete", self.reviewer.last)
             return
         self.agent._emit_answer(response)
-        self._finish_review(capture, response, context, state=state, steps=steps)
+        self._finish_review(capture, response, context, state=state, steps=steps, time_limit=time_limit)
 
     def _save_review_report(self, report):
         log = getattr(self.agent, "session_log", None)
@@ -699,8 +725,40 @@ class LangGraphClient:
             except Exception:
                 logger.warning("Could not persist the peer-review record; report remains available.")
 
-    def _finish_review(self, capture, response, context, *, state=None, steps=0):
-        """The only enabled completion checkpoint, after every parent execution route."""
+    def _publish_review(self, phase, report=None, revision=0, *, announce=True):
+        """Publish bounded display text without changing review decisions or history."""
+        reviewer = getattr(self, "reviewer", None)
+        if reviewer is None:
+            return
+        if report is not None and report is not reviewer.last:
+            return  # a reset/replaced task must not publish a late UI verdict
+        try:
+            generation = reviewer._generation
+            previous = reviewer.view
+            display = review_view.snapshot(
+                (id(reviewer), generation), phase, report, revision,
+                details=review.render(report) if report else "",
+            )
+            if generation != reviewer._generation:
+                return
+            reviewer.view = display
+            if report and report.get("unavailable"):
+                if announce and reviewer.unavailable_notice():
+                    print("\n\033[90mPeer review unavailable; continuing without it.\033[0m", flush=True)
+                return
+            repeated = (
+                phase == "complete" and previous is not None
+                and previous.label == display.label and previous.summary == display.summary
+            )
+            if announce and not repeated:
+                print("\n" + review_view.compact(
+                    display, shutil.get_terminal_size().columns,
+                ), flush=True)
+        except Exception:
+            logger.debug("Could not render peer-review status", exc_info=True)
+
+    def _review_options(self, context, checkpoint="completion"):
+        """Use the same isolated reviewer, usage accounting and policy at every checkpoint."""
         try:
             overrides = area_models.reviewer_overrides()
             usage_name = str(overrides.get("NAME") or self.llm_controller.model_name)
@@ -718,51 +776,58 @@ class LangGraphClient:
                 tracker.record(result, usage_name)
 
         event = getattr(self.agent, "_cancel_event", None)
+        def policy_context():
+            return [*context, {
+                "id": "current-policy", "kind": "execution_constraints",
+                "text": f"At {checkpoint}: plan mode={self.plan_mode_active}; "
+                        f"auto tier={getattr(self, 'auto_approve_mode', 'off')}. "
+                        "Refused/pending actions are not approved by this review.",
+            }]
+        return dict(
+            model_factory=lambda: self._area_model("REVIEWER"), model_label=label,
+            context=policy_context, cancel=(lambda: event.is_set()) if event is not None else None,
+            usage=account,
+        )
+
+    def _finish_review(self, capture, response, context, *, state=None, steps=0, time_limit=None):
+        """Completion review, including bounded corrections by the foreground actor."""
+        self._publish_review("reviewing", announce=False)
         with self.spinner_lock:
             self.spinner.start("Reviewing completed work…")
         try:
-            def policy_context():
-                return [*context, {
-                    "id": "current-policy", "kind": "execution_constraints",
-                    "text": f"At completion: plan mode={self.plan_mode_active}; "
-                            f"auto tier={getattr(self, 'auto_approve_mode', 'off')}. "
-                            "Refused/pending actions are not approved by this review.",
-                }]
-            options = dict(
-                model_factory=lambda: self._area_model("REVIEWER"), model_label=label,
-                context=policy_context, cancel=(lambda: event.is_set()) if event is not None else None,
-                usage=account,
-            )
+            options = self._review_options(context)
             if state is None:
-                report = self.reviewer.finish(capture, response, **options)
+                report = self.reviewer.finish(capture, response, time_limit=time_limit, **options)
                 self._save_review_report(report)
             else:
                 def progress(kind, item, revision):
                     with self.spinner_lock:
                         self.spinner.stop()
                     if kind == "review":
-                        print("\n" + review.render(item, history=False) + "\n")
+                        self._publish_review("feedback", item, revision)
                     else:
-                        print(f"\nChat model · responding to reviewer · correction round {revision}\n")
+                        self._publish_review("correcting", item, revision, announce=False)
+                        print(
+                            f"\n\033[90mChat model · draft correction {revision} "
+                            "(review pending)\033[0m\n", flush=True,
+                        )
 
                 self.reviewer.supervise(
                     capture, response, steps=steps,
                     actor=lambda feedback, budget: supervised_turn.continue_work(self.agent, state, feedback, budget),
-                    progress=progress, **options,
+                    progress=progress, time_limit=time_limit, **options,
                 )
                 report = self.reviewer.last
         except Exception as exc:
             # Optional review must not turn a completed answer into a query failure.
-            logger.warning("Review unavailable (%s); answer preserved", type(exc).__name__)
-            report = None
+            logger.error("Review unavailable (%s); answer preserved", type(exc).__name__,
+                         exc_info=True, extra={"console": False})
+            report = self.reviewer.incomplete(f"Review unavailable ({type(exc).__name__}); task continues.")
+            report["unavailable"] = True
         finally:
             with self.spinner_lock:
                 self.spinner.stop()
-        if state is None:
-            print("\n" + (review.render(report) if report else "Peer review · inconclusive · review unavailable.") + "\n")
-        elif report:
-            print(f"\nSupervisor · {report['verdict']} · {report.get('revisions', 0)} correction round(s). "
-                  "/review last for the exchange.\n")
+        self._publish_review("complete", report)
         with self.spinner_lock:
             self.spinner.start(WRAP_UP_LABEL)
 

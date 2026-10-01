@@ -331,3 +331,86 @@ def test_invalid_runtime_limits_fail_loudly(raw, monkeypatch):
     monkeypatch.setitem(review.config._config_data, "REVIEW", raw)
     with pytest.raises(ValueError):
         review.settings()
+
+
+def test_reviewer_retry_backoff_ends_at_checkpoint_deadline(state, monkeypatch):
+    reviewer, capture, _ = state
+    calls = []
+    class Down:
+        def invoke(self, *args, **kwargs):
+            calls.append(1)
+            raise RuntimeError("503 service unavailable")
+    monkeypatch.setitem(review.config._config_data, "LLM", {"MAX_RETRIES": 3, "RETRY_DELAY": 30})
+    monkeypatch.setattr(review, "settings", lambda: {"TIMEOUT": 1, "MAX_INPUT_TOKENS": 6000})
+    report = finish(reviewer, capture, Down())
+    assert report["unavailable"] and report["verdict"] == "inconclusive"
+    assert calls == [1]
+    assert reviewer._in_flight.acquire(timeout=1), "backoff must not hold a late retry open"
+    reviewer._in_flight.release()
+    assert calls == [1]
+
+
+def test_each_reviewer_retry_is_accounted_exactly_once(state, monkeypatch):
+    reviewer, capture, _ = state
+    attempts, usage = [], []
+    class Flaky:
+        def invoke(self, *args, **kwargs):
+            attempts.append(1)
+            if len(attempts) < 3:
+                raise RuntimeError("503 service unavailable")
+            return AIMessage(content=json.dumps(verdict()))
+    monkeypatch.setitem(review.config._config_data, "LLM", {"MAX_RETRIES": 3, "RETRY_DELAY": 0})
+    report = finish(reviewer, capture, Flaky(), usage=usage.append)
+    assert report["verdict"] == "pass"
+    assert len(usage) == len(attempts) == 3
+    assert usage[:2] == [None, None] and isinstance(usage[2], AIMessage)
+
+
+def test_changed_file_is_retained_after_tool_capture_limit(state):
+    reviewer, capture, root = state
+    for i in range(30):
+        path = root / f"read-{i}.txt"
+        path.write_text("old context")
+        capture.record("fs_read", {"path": str(path)}, "old context", "completed")
+    changed = root / "changed.py"
+    changed.write_text("ACTUAL NEW CODE")
+    capture.record("fs_write", {"path": str(changed)}, '{"success":true}', "completed")
+    evidence = capture.finish("Done.")
+    assert any(item.get("kind") == "current_file" and "ACTUAL NEW CODE" in item["content"]
+               for item in evidence)
+    assert "Tool evidence exceeded the capture limit." in capture.gaps
+
+
+def test_reopening_keeps_write_and_check_evidence_with_stable_ids(state):
+    _, capture, root = state
+    capture.record("fs_write", {"path": str(root / "code.py")}, '{"success":true}', "completed")
+    capture.record("execute_bash", {"command": "tests"}, {"exit_status": 0}, "completed")
+    before = list(capture.tools)
+    capture.finish("A batch is complete.")
+    capture.reopen()
+    assert capture.tools == before
+    capture.record("fs_read", {"path": str(root / "code.py")}, "current code", "completed")
+    assert [entry["id"] for entry in capture.tools] == ["tool-1", "tool-2", "tool-3"]
+
+
+def test_finished_result_is_published_after_releasing_the_review_slot(state, monkeypatch):
+    reviewer, capture, _ = state
+    original = review.queue.Queue
+    published_locked = []
+    class ObservedQueue(original):
+        def put(self, value, *args, **kwargs):
+            published_locked.append(reviewer._in_flight.locked())
+            return super().put(value, *args, **kwargs)
+    monkeypatch.setattr(review.queue, "Queue", ObservedQueue)
+    assert finish(reviewer, capture)["verdict"] == "pass"
+    assert published_locked == [False]
+
+
+def test_directory_listing_is_tool_evidence_not_a_missing_file_snapshot(state):
+    reviewer, capture, root = state
+    capture.record("fs_read", {"path": str(root), "mode": "Directory"}, "Directory entries", "completed")
+    report = finish(reviewer, capture)
+    assert capture.paths == set()
+    assert report["verdict"] == "pass"
+    assert any(item["kind"] == "tool" for item in report["evidence"])
+    assert not report["coverage_gaps"]

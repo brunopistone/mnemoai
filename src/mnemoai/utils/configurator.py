@@ -2176,7 +2176,7 @@ _FEATURE_TOGGLES = [
     ("ENABLE_RAG", "RAG — index & search your documents"),
     ("ENABLE_EPISODIC_MEMORY", "Episodic memory — recall similar past tasks"),
     ("ENABLE_PLAYBOOK", "Playbook learning — extra model calls after tool turns"),
-    ("ENABLE_REVIEW", "Peer review — supervisor feedback and chat-model corrections"),
+    ("ENABLE_REVIEW", "Peer review — coding/document strategies and changes"),
     ("ENABLE_WEB_SEARCH", "Web search (needs a Brave API key)"),
     ("ENABLE_WEB_CRAWL", "Web crawler — fetch & read pages"),
     ("ENABLE_ROUTING", "Query routing — per-query tool subsets"),

@@ -16,10 +16,12 @@ from prompt_toolkit.application import Application, run_in_terminal
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.completion import Completer, Completion, merge_completers
+from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import History, InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.key_binding.bindings.scroll import scroll_page_down, scroll_page_up
 from prompt_toolkit.key_binding.defaults import load_key_bindings
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
@@ -34,6 +36,7 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.styles import Style
@@ -49,7 +52,7 @@ from prompt_toolkit.widgets import (
 from mnemoai.client import file_mentions
 from mnemoai.client.agent import ask_user
 from mnemoai.client.agent.agent_activity import glance_runs
-from mnemoai.client.ui import notify, turn_view
+from mnemoai.client.ui import notify, review_view, turn_view
 from mnemoai.utils.radio_select import commit_paging, highlighted_value
 
 # Override the default reverse-video bottom-toolbar so the pinned status/queue
@@ -66,6 +69,7 @@ _TUI_STYLE = Style(
         ("pinned-panel", "noreverse bg:default fg:#888888"),
         ("pinned-panel-hint", "noreverse bg:default fg:#5f5fff"),
         ("pinned-panel-sel", "noreverse bg:default fg:#ffffff bold"),
+        ("pinned-review", "noreverse bg:default fg:#888888"),
         ("pinned-footer", "noreverse bg:default fg:#6c6c6c"),
         ("pinned-footer-model", "noreverse bg:default fg:#87afff"),  # = turn_view._HEADER
         ("pinned-footer-warn", "noreverse bg:default fg:#d78700"),
@@ -236,6 +240,7 @@ class PinnedPromptReader:
         agents_stop: Optional[Callable[[str], bool]] = None,
         agents_stop_all: Optional[Callable[[], int]] = None,
         agents_turn: Optional[Callable[[], int]] = None,
+        review_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
         """Build the pinned app.
 
@@ -272,6 +277,8 @@ class PinnedPromptReader:
             agents_turn: Returns the current conversation turn number, so the live
                 panel shows this turn's agents instead of every earlier turn's
                 (Ctrl+A still reaches all of them). Absent → 0, i.e. no scoping.
+            review_provider: Cheap immutable review display snapshot; no file or
+                model access. Click/Ctrl+O opens its grey scrollable detail pane.
         """
         self._prompt_text = prompt_text
         self._dispatch = dispatch
@@ -294,6 +301,9 @@ class PinnedPromptReader:
         self._agents_stop_all = agents_stop_all or (lambda: 0)
         # Current turn number, for scoping the live glance (see _glance_rows).
         self._agents_turn = agents_turn or (lambda: 0)
+        self._review_provider = review_provider or (lambda: None)
+        self._review_expanded = False
+        self._review_open_display = None
         self._nav_mode = False  # Ctrl+A: navigate the agents panel
         self._nav_index = 0     # highlighted row, in FULL-list coordinates
         self._panel_offset = 0  # first row the (scrolling) panel viewport shows
@@ -339,6 +349,11 @@ class PinnedPromptReader:
             # (both react to text changes), making the popup appear only sometimes.
             complete_while_typing=True,
             accept_handler=self._on_accept,
+        )
+        self._review_area = TextArea(
+            read_only=True, scrollbar=True, wrap_lines=True,
+            height=Dimension(min=3, preferred=8, max=10),
+            style="class:pinned-review",
         )
         self._app = self._build_app()
 
@@ -611,6 +626,88 @@ class PinnedPromptReader:
     # Rows reserved below the input for the completion menu when it's expected.
     _MENU_RESERVE = 8
 
+    def _review_display(self):
+        try:
+            value = self._review_provider()
+            return value if isinstance(value, review_view.ReviewDisplay) else None
+        except Exception:
+            return None  # optional chrome cannot disable the prompt
+
+    def _review_text(self):
+        display = self._review_open_display if self._review_expanded else self._review_display()
+        if display is None:
+            return []
+        try:
+            width = self._app.output.get_size().columns
+        except Exception:
+            width = shutil.get_terminal_size().columns
+        hint = " · Ctrl+O: close" if self._review_expanded else " · Ctrl+O: details"
+        if width < 45:
+            hint = " · Ctrl+O"
+        glyph = "▾" if self._review_expanded else "▸"
+        label = review_view.clipped(f" {glyph} {display.label}", max(0, width - len(hint)))
+        line = review_view.clipped(label + hint, width)
+        return [("class:pinned-review", line, self._review_mouse)]
+
+    def _review_mouse(self, event):
+        if event.event_type == MouseEventType.MOUSE_UP and event.button == MouseButton.LEFT:
+            self._toggle_review()
+            return None
+        return NotImplemented
+
+    def _toggle_review(self):
+        if self._confirm_pending or self._pending_dialog is not None:
+            return
+        if self._review_expanded:
+            self._close_review()
+        else:
+            self._open_review()
+
+    def _open_review(self, text=None):
+        display = self._review_display()
+        if display is None or self._confirm_pending or self._pending_dialog is not None:
+            return
+        if text is not None:
+            display = review_view.ReviewDisplay(
+                display.key, "Peer review · details", "", review_view.plain(text),
+            )
+        self._nav_mode = False
+        self._review_open_display = display
+        body = "↑/↓ PgUp/PgDn scroll · Esc/Ctrl+O close\n\n" + display.details
+        self._review_area.buffer.set_document(Document(body, 0), bypass_readonly=True)
+        self._review_expanded = True
+        self._app.layout.focus(self._review_area)
+
+    def _close_review(self):
+        if not getattr(self, "_review_expanded", False):
+            return
+        self._review_expanded = False
+        self._review_open_display = None
+        self._app.layout.focus(self._buffer)
+
+    def _sync_review(self):
+        # A context reset must close old details as well as clear the compact row.
+        if self._review_expanded:
+            current = self._review_display()
+            if current is None or current.key != self._review_open_display.key:
+                self._close_review()
+
+    def show_review_details(self, text) -> bool:
+        """Worker-thread slash-command entry; opening details never starts a query."""
+        if (
+            self._loop is None or self._app is None or self._review_display() is None
+            or self._confirm_pending or self._pending_dialog is not None
+        ):
+            return False
+        def show():
+            self._open_review(text)
+            self._app.invalidate()
+        try:
+            self._loop.call_soon_threadsafe(show)
+        except RuntimeError:
+            return False
+        return True
+
     def _input_height(self) -> Dimension:
         """Input height: 1 line, growing to reserve ``_MENU_RESERVE`` rows when a
         completion menu is active so it has room even with the input at the
@@ -677,6 +774,14 @@ class PinnedPromptReader:
             ),
             filter=Condition(lambda: bool(self._steps_text())),
         )
+        review_window = ConditionalContainer(
+            Window(FormattedTextControl(self._review_text), height=1),
+            filter=Condition(lambda: self._review_display() is not None),
+        )
+        review_details = ConditionalContainer(
+            self._review_area,
+            filter=Condition(lambda: self._review_expanded and self._review_display() is not None),
+        )
         # Live "agents" panel pinned BELOW the input: one row per hidden sub-agent.
         # Height-capped (_PANEL_MAX_ROWS + hint) so it can't eat scrollback — with
         # more runs than that the panel SCROLLS (↑/↓ in nav mode) rather than
@@ -708,6 +813,8 @@ class PinnedPromptReader:
                     queued_window,
                     reasoning_window,
                     steps_window,
+                    review_window,
+                    review_details,
                     status_window,
                     input_window,
                     agents_window,
@@ -732,6 +839,8 @@ class PinnedPromptReader:
             full_screen=False,  # pinned at bottom; prints scroll above via patch_stdout
             refresh_interval=0.1,  # ~10 Hz, animates the spinner
             erase_when_done=True,
+            before_render=lambda app: self._sync_review(),
+            mouse_support=Condition(lambda: self._review_display() is not None),
         )
 
     def _make_bindings(self) -> KeyBindings:
@@ -854,6 +963,34 @@ class PinnedPromptReader:
             if self._confirm_answer:
                 self._confirm_answer("all")
 
+        review_visible = Condition(lambda: self._review_display() is not None)
+        review_ok = review_visible & Condition(
+            lambda: not self._confirm_pending and self._pending_dialog is None
+        )
+        review_open = Condition(
+            lambda: self._review_expanded and self._app.layout.has_focus(self._review_area)
+        ) & review_ok
+
+        @kb.add("c-o", filter=review_visible, eager=True)
+        def _(event) -> None:
+            self._toggle_review()
+
+        @kb.add("escape", filter=review_open)
+        @kb.add("c-c", filter=review_open, eager=True)
+        @kb.add("enter", filter=review_open, eager=True)
+        def _(event) -> None:
+            self._close_review()
+
+        # Pinned (non-full-screen) apps do not enable page navigation by default.
+        @kb.add("pagedown", filter=review_open, eager=True)
+        @kb.add("space", filter=review_open, eager=True)
+        def _(event) -> None:
+            scroll_page_down(event)
+
+        @kb.add("pageup", filter=review_open, eager=True)
+        def _(event) -> None:
+            scroll_page_up(event)
+
         # --- agents-panel navigation ---------------------------------------
         # Ctrl+A toggles nav-mode, but ONLY when the panel is showable and no
         # confirm/dialog is pending — otherwise it falls through to the default
@@ -868,6 +1005,7 @@ class PinnedPromptReader:
 
         @kb.add("c-a", filter=nav_toggle_ok)
         def _(event) -> None:
+            self._close_review()
             self._nav_mode = not self._nav_mode
             if self._nav_mode:
                 # Land on the OLDEST still-running agent — the one the tail-
@@ -1182,6 +1320,7 @@ class PinnedPromptReader:
             # Await the terminal write (dropping the awaitable makes a failure
             # silent), but never let it stop the prompt from being painted.
             try:
+                self._close_review()  # focus returns to the real approval channel
                 await run_in_terminal(echo)
             except Exception:
                 pass
@@ -1363,6 +1502,7 @@ class PinnedPromptReader:
         box = {}
 
         def _stop_app() -> None:
+            self._close_review()
             self._pending_dialog = (func, box, done)
             self._app.exit(result=_RESTART)
 

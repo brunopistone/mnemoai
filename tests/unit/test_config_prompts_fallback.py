@@ -31,6 +31,10 @@ def test_bundled_prompt_used_when_user_file_missing_key(monkeypatch, tmp_path):
     assert c._prompts_data.get("MEMORY_EXTRACTION_PROMPT")
     assert c._prompts_data.get("SUMMARY_TASK_PROMPT")
     assert c._prompts_data.get("REVIEWER_SYSTEM_PROMPT")
+    assert c._prompts_data.get("WORK_STRATEGY_PROMPT")
+    assert c._prompts_data.get("WORK_REVIEW_FEEDBACK_PROMPT")
+    checkpoint = c._prompts_data["REVIEW_CHECKPOINT_PROMPT"].format(checkpoint="strategy")
+    assert 'checkpoint "strategy"' in checkpoint
 
 
 def test_user_prompt_overrides_bundled(monkeypatch, tmp_path):

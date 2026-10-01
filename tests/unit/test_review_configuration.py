@@ -20,6 +20,8 @@ MODEL_ID:
   TYPE: ollama
 ENABLE_REVIEW: false
 REVIEW:
+  MAX_STRATEGY_ROUNDS: 1
+  MAX_CHANGE_REVIEWS: 2
   TIMEOUT: 45 # preserve comment
   MAX_INPUT_TOKENS: 6000
   MAX_ROUNDS: 2
@@ -51,7 +53,9 @@ def test_scoped_settings_preserve_everything_else(config_file, monkeypatch):
     assert C.run_review_settings() == config_file
     data = yaml.safe_load(config_file.read_text())
     assert data["REVIEW"] == {"TIMEOUT": 60, "MAX_INPUT_TOKENS": 8000,
-                              "MAX_ROUNDS": 2, "TOTAL_TIMEOUT": 180, "CUSTOM": {"TIMEOUT": 900}}
+                              "MAX_ROUNDS": 2, "TOTAL_TIMEOUT": 180,
+                              "MAX_STRATEGY_ROUNDS": 1, "MAX_CHANGE_REVIEWS": 2,
+                              "CUSTOM": {"TIMEOUT": 900}}
     assert data["MODEL_ID"] == yaml.safe_load(CFG)["MODEL_ID"]
     assert data["ENABLE_REVIEW"] is False
     assert "# preserve comment" in config_file.read_text()
@@ -164,6 +168,48 @@ def test_legacy_review_macro_keeps_priority_and_controls_have_an_alias(tmp_path,
     ui._dispatch("/config review on")
     assert ui.client.reviewer.enabled
     assert sum(name.lower() == "/review" for name, _ in ui._completion_commands()) == 1
+
+
+@pytest.mark.parametrize("command", ["/review last", "/config review last"])
+def test_explicit_details_use_the_pane_without_dispatching_model_input(command, tmp_path, capsys):
+    ui = ChatInterface.__new__(ChatInterface)
+    ui._user_commands = UserCommandStore(root=tmp_path)
+    if command.startswith("/config"):
+        (tmp_path / "review.md").write_text("An existing user macro")
+    reviewer = review.Reviewer(enabled=True)
+    reviewer.last = {"verdict": "pass", "reviewer": "fixture", "summary": "FULL REPORT",
+                     "findings": [], "coverage_gaps": []}
+    ui.client = SimpleNamespace(reviewer=reviewer, query=Mock())
+    ui._pinned_reader = SimpleNamespace(show_review_details=Mock(return_value=True))
+    ui._dispatch(command)
+    ui._pinned_reader.show_review_details.assert_called_once()
+    assert "FULL REPORT" in ui._pinned_reader.show_review_details.call_args.args[0]
+    assert "FULL REPORT" not in capsys.readouterr().out
+    ui.client.query.assert_not_called()
+
+
+@pytest.mark.parametrize("command,inline", [
+    ("/config review last", True),
+    ("/CONFIG  REVIEW  ON", True),
+    ("/config review off", True),
+    ("/config review", False),
+    ("/config", False),
+    ("/config review invalid", False),
+])
+def test_review_controls_do_not_exit_the_pinned_app_for_a_settings_dialog(command, inline):
+    assert ChatInterface._is_review_control(command) is inline
+
+
+def test_explicit_details_keep_a_grey_off_tty_fallback(tmp_path, capsys):
+    ui = ChatInterface.__new__(ChatInterface)
+    ui._user_commands = UserCommandStore(root=tmp_path)
+    reviewer = review.Reviewer(enabled=True)
+    reviewer.last = {"verdict": "pass", "reviewer": "fixture", "summary": "FULL REPORT",
+                     "findings": [], "coverage_gaps": []}
+    ui.client = SimpleNamespace(reviewer=reviewer)
+    ui._dispatch("/review last")
+    output = capsys.readouterr().out
+    assert "FULL REPORT" in output and "\033[90m" in output
 
 
 def test_reload_keeps_actor_model_history_and_session_toggle(monkeypatch):

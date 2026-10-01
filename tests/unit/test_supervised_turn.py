@@ -17,6 +17,7 @@ from mnemoai.client.client import LangGraphClient
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.session_log import SessionLog, read_session, turn_summaries
 from mnemoai.client.ui.turn_view import user_prompt_text
+from mnemoai.client.work_review import WorkReview
 from mnemoai.utils.review_protocol import (
     DATA_MARKER,
     FEEDBACK_PREFIX,
@@ -60,7 +61,18 @@ class WriteTool:
 def setup(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path / "app"))
-    monkeypatch.setitem(review.config._config_data, "REVIEW", {})
+    monkeypatch.setitem(review.config._config_data, "REVIEW", {"MAX_CHANGE_REVIEWS": 0})
+    # These tests isolate the final correction engine. Strategy/change lifecycle
+    # ordering is exercised end to end in test_work_review.
+    def prepared(work, state, steps):
+        work.options = {**review.settings(), "MAX_CHANGE_REVIEWS": 0}
+        work.remaining = work.options["TOTAL_TIMEOUT"]
+        work.kind = "code"
+        work.capture = review.Capture(work.task)
+        work.agent._review_capture = work.capture
+        work.agent._completion_supervisor = work.complete
+        return 0
+    monkeypatch.setattr(WorkReview, "prepare", prepared)
     client = LangGraphClient.__new__(LangGraphClient)
     client.agent = LangGraphAgent(Model(), [WriteTool()], system_prompt="Follow the user.", verbose=False)
     client.agent.session_log = SessionLog(cwd=str(tmp_path))
@@ -95,7 +107,7 @@ def feed_actor(client, responses):
     return requests
 
 
-def test_revise_chat_edits_recheck_pass_is_one_original_user_turn(setup):
+def test_revise_chat_edits_recheck_pass_is_one_original_user_turn(setup, capsys):
     client, root = setup
     target = root / "value.py"
     target.write_text("VALUE = 1\n")
@@ -123,6 +135,13 @@ def test_revise_chat_edits_recheck_pass_is_one_original_user_turn(setup):
     assert current_turn_messages(client.agent.messages)[0].content == "Set VALUE to 2."
     assert sum(bool(user_prompt_text(m.content)) for m in client.agent.messages if isinstance(m, HumanMessage)) == 1
     assert "review" in client.agent.session_log.path.read_text()
+    output = capsys.readouterr().out
+    assert output.count("Final answer · chat model") == 1
+    assert "Corrected VALUE to 2." in output.split("Final answer · chat model")[-1]
+    assert "Chat model · draft (review pending)" in output
+    assert "Suggested verification" not in output, "full feedback must stay collapsed"
+    assert "Suggested verification" in client.reviewer.view.details
+    assert "\033[90mPeer review" in output
 
 
 def test_chat_can_dispute_finding_without_editing(setup):
@@ -140,7 +159,7 @@ def test_chat_can_dispute_finding_without_editing(setup):
     assert any(i["kind"] == "prior_review_exchange" for i in judge.packets[1]["evidence"])
 
 
-def test_denied_edit_is_never_approved_by_the_reviewer(setup):
+def test_denied_edit_is_never_approved_by_the_reviewer(setup, capsys):
     client, root = setup
     target = root / "value.py"
     target.write_text("VALUE = 1\n")
@@ -159,6 +178,9 @@ def test_denied_edit_is_never_approved_by_the_reviewer(setup):
     assert target.read_text() == "VALUE = 1\n"
     assert client.reviewer.last["verdict"] == "inconclusive"
     client.agent._confirm_tool.assert_called_once()
+    output = capsys.readouterr().out
+    assert "Final answer · chat model" not in output
+    assert "Chat model answer · review incomplete" in output
 
 
 def test_round_limit_does_not_reset_on_disagreement(setup, monkeypatch):
@@ -182,7 +204,7 @@ def test_zero_rounds_preserves_one_shot_review(setup, monkeypatch):
     assert len(requests) == 1 and client.reviewer.last["revisions"] == 0
 
 
-def test_cancellation_during_correction_keeps_work_and_one_turn(setup):
+def test_cancellation_during_correction_keeps_work_and_one_turn(setup, capsys):
     client, _ = setup
     client._area_model = lambda area: Judge([result("revise")])
     count = 0
@@ -198,6 +220,9 @@ def test_cancellation_during_correction_keeps_work_and_one_turn(setup):
     assert saved["turns"] == 1
     assert any("initial answer" in str(m) for m in saved["messages"])
     assert client.reviewer.last["verdict"] == "inconclusive"
+    output = capsys.readouterr().out
+    assert "Final answer · chat model" not in output
+    assert "Suggested verification" not in output
 
 
 def test_time_budget_stops_new_tools_but_keeps_completed_calls(setup):
