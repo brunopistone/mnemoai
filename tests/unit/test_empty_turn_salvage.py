@@ -479,7 +479,7 @@ def test_call_model_reasoning_retry_uses_a_twin_of_the_bound_model():
     a._extract_thinking = lambda r: "pondering"
     a._extract_visible = lambda c: c if isinstance(c, str) else ""
     a._was_truncated_by_tokens = lambda r: False
-    a._capture_input_tokens = lambda r: None
+    a._capture_input_tokens = lambda r, **kwargs: None
     a._disable_reasoning = lambda: (_ for _ in ()).throw(
         AssertionError("must not mutate the shared model when a twin is available")
     )
@@ -613,7 +613,7 @@ def _continue_agent(retries=3):
     a._start_spinner = lambda label="Thinking": None
     a._stop_spinner = lambda: None
     a._max_continue_retries = retries
-    a._capture_input_tokens = lambda r: None
+    a._capture_input_tokens = lambda r, **kwargs: None
     a._extract_thinking = lambda r: None
     return a
 

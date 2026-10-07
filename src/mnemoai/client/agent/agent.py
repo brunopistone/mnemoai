@@ -21,7 +21,7 @@ from langchain_core.tools import BaseTool
 from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, StateGraph
 
-from mnemoai.client import hooks
+from mnemoai.client import hooks, usage_tracker
 from mnemoai.client.agent import (
     ask_user,
     cancellation,
@@ -729,6 +729,7 @@ class LangGraphAgent:
 
     def _orchestrate(self, state: AgentState) -> Dict[str, Any]:
         """Decompose the task into subtasks, run a worker per subtask, aggregate."""
+        self._last_input_tokens = None  # worker/aggregator prompts are not the parent context
         # An orchestrated turn has no drain point — each subtask worker runs on its
         # own isolated context and the aggregator answers a fixed prompt — so stop
         # accepting mid-turn messages here. The UI then queues one as its own turn,
@@ -1255,17 +1256,17 @@ class LangGraphAgent:
                 )
 
             if response is None:
+                self._record_usage(None, model=worker_model)
                 if review_budget is not None:
                     raise ReviewStopped("Sub-agent returned no usable response within supervision")
                 # Fallback invoke bypasses _stream_response, so scrub here too.
-                response = worker_model.invoke(
+                response = self._invoke_accounted(
+                    worker_model,
                     self._strip_malformed_reasoning(worker_messages), config=config
                 )
-
-            # Count the worker's spend toward the session totals, but NOT toward
-            # _last_input_tokens: this is a private worker context, and treating it
-            # as the main conversation's size would skew the compaction trigger.
-            self._record_usage(response)
+            else:
+                # Private worker usage must never replace the parent's context size.
+                self._record_usage(response, model=worker_model)
 
             worker_messages.append(response)
 
@@ -1359,6 +1360,7 @@ class LangGraphAgent:
                 model=retry_model or worker_model,
                 mark_answer=True,
             )
+            self._record_usage(retry_response, model=retry_model or worker_model)
         except _ContextOverflow:
             retry_response = None  # fall through to the fallback message below
         finally:
@@ -1404,6 +1406,7 @@ class LangGraphAgent:
             retry_response, _ = self._stream_response(
                 retry_messages, {}, model=retry_model or worker_model, quiet=True
             )
+            self._record_usage(retry_response, model=retry_model or worker_model)
         except Exception:
             retry_response = None
         finally:
@@ -1445,6 +1448,8 @@ class LangGraphAgent:
         self._start_spinner()
         try:
             response, _ = self._stream_response(messages, config, mark_answer=True)
+            if response is None:
+                self._record_usage(None)
         except _ContextOverflow:
             # Aggregation prompt overflowed; force-compact and let the retry (or
             # the None-fallback invoke below) run on the shrunken prompt.
@@ -1454,14 +1459,19 @@ class LangGraphAgent:
                 messages = rebuilt
                 try:
                     response, _ = self._stream_response(messages, config, mark_answer=True)
+                    if response is None:
+                        self._record_usage(None)
                 except _ContextOverflow:
                     response = None
 
         if response is None:
             # Fallback invoke bypasses _stream_response's reasoning scrub.
-            response = self.model.invoke(
+            response = self._invoke_accounted(
+                self.model,
                 self._strip_malformed_reasoning(messages), config=config
             )
+        else:
+            self._record_usage(response)
 
         self._stop_spinner()
         return self._extract_visible(response.content) or str(response.content)
@@ -1504,7 +1514,7 @@ class LangGraphAgent:
         block (thinking-only scrub, no tool-pair repair)."""
         return message_sanitizer.strip_malformed_reasoning(messages)
 
-    def _capture_input_tokens(self, response: Any) -> None:
+    def _capture_input_tokens(self, response: Any, *, record_usage: bool = True) -> None:
         """Record the provider's exact prompt-token count from a response's
         ``usage_metadata`` (LangChain normalizes it across Anthropic/OpenAI/
         Bedrock). This is ground truth for the current context size — far more
@@ -1515,16 +1525,18 @@ class LangGraphAgent:
         and reset to None whenever history is rewritten), while the tracker
         ACCUMULATES every call for the whole session.
         """
-        self._record_usage(response)
+        if record_usage:
+            self._record_usage(response)
+        self._last_input_tokens = None
         try:
             um = getattr(response, "usage_metadata", None) or {}
             it = um.get("input_tokens")
-            if it:
+            if it is not None and int(it) > 0:
                 self._last_input_tokens = int(it)
         except Exception:
             pass
 
-    def _record_usage(self, response: Any) -> None:
+    def _record_usage(self, response: Any, *, model=None) -> None:
         """Add one model call to the session usage totals (best-effort).
 
         Separate from :meth:`_capture_input_tokens` because the quiet paths
@@ -1536,7 +1548,21 @@ class LangGraphAgent:
         tracker = getattr(self, "usage", None)
         if tracker is None:
             return  # bare test stub built via __new__
-        tracker.record(response, getattr(self, "usage_model_name", "") or "")
+        tracker.record(response, usage_tracker.model_name(
+            model, getattr(self, "usage_model_name", "") or "",
+        ))
+
+    def _invoke_accounted(self, model, messages, config=None):
+        """Record exactly one non-streamed attempt, including failed requests."""
+        record = usage_tracker.recorder(
+            getattr(self, "usage", None), model, getattr(self, "usage_model_name", ""),
+        )
+        response = None
+        try:
+            response = model.invoke(messages, config=config or {})
+            return response
+        finally:
+            record(response)
 
     def _record_file_activity(self, name: str, args: Dict[str, Any]) -> None:
         """Note the file a completed tool call touched (drives ``/files``, ``/why``).
@@ -1565,6 +1591,7 @@ class LangGraphAgent:
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with the current state, streaming the response."""
+        self._last_input_tokens = None  # the new request has not reported its size yet
         messages = list(state["messages"])
 
         # Swap in the compacted history if a compaction replaced it mid-turn.
@@ -1708,11 +1735,13 @@ class LangGraphAgent:
             return {"messages": [AIMessage(content=msg)], "thinking": None}
 
         if response is None:
+            self._record_usage(None)
             if supervised_turn.budget_for(self) is not None:
                 raise ReviewStopped("Chat model returned no correction or counterevidence")
-            response = active_model.invoke(messages, config=config)
-
-        self._capture_input_tokens(response)
+            response = self._invoke_accounted(active_model, messages, config=config)
+            self._capture_input_tokens(response, record_usage=False)
+        else:
+            self._capture_input_tokens(response)
         thinking = self._extract_thinking(response)
         visible = self._extract_visible(response.content)
 
@@ -1722,7 +1751,8 @@ class LangGraphAgent:
         if not visible and not response.tool_calls:
             if supervised_turn.budget_for(self) is not None:
                 raise ReviewStopped("Chat model returned no visible correction or counterevidence")
-            authoritative = active_model.invoke(messages, config=config)
+            authoritative = self._invoke_accounted(active_model, messages, config=config)
+            self._capture_input_tokens(authoritative, record_usage=False)
             if authoritative is not None:
                 response = authoritative
                 thinking = self._extract_thinking(response)
@@ -1801,6 +1831,7 @@ class LangGraphAgent:
                     model=retry_model or active_model,
                     mark_answer=True,
                 )
+                self._capture_input_tokens(retry_response)
             except _ContextOverflow:
                 retry_response = None  # degrade: keep the reasoning-only response
             finally:
@@ -1877,6 +1908,7 @@ class LangGraphAgent:
                 break  # the continuation prompt overflowed; give up gracefully
 
             if response is None:
+                self._capture_input_tokens(None)
                 break
 
             self._capture_input_tokens(response)
@@ -1986,6 +2018,9 @@ class LangGraphAgent:
         Returns ``(response, had_reasoning)``.
         """
         active_model = model or self.model_with_tools
+        record_discarded = usage_tracker.recorder(
+            getattr(self, "usage", None), active_model, getattr(self, "usage_model_name", ""),
+        )
         # Provider-agnostic egress guard: repair any invalid reasoning block before
         # it's re-fed (see message_sanitizer.strip_malformed_reasoning). This is
         # the single chokepoint for the streamed paths — main, quiet sub-agent,
@@ -2005,7 +2040,11 @@ class LangGraphAgent:
                 )
             except ReviewStopped:
                 raise
+            except KeyboardInterrupt:
+                record_discarded(None)
+                raise
             except Exception as e:
+                record_discarded(None)  # failed attempt; no complete usage report
                 # Context overflow is the caller's to handle — never retry it here.
                 if isinstance(e, _ContextOverflow):
                     raise
@@ -2040,9 +2079,11 @@ class LangGraphAgent:
             # Retry only a completely empty turn; the reasoning-only case is the
             # caller's responsibility.
             if self._cancelled() or (stop_requested is not None and stop_requested()):
+                record_discarded(response)
                 raise KeyboardInterrupt("cancelled before accepting the model response")
             if not self._is_empty_response(response) or attempt == attempts - 1:
                 return response, had_reasoning
+            record_discarded(response)  # only discarded attempts; caller records the final response
             logger.debug(
                 "Empty model response (attempt %d/%d); retrying",
                 attempt + 1,
@@ -2085,7 +2126,7 @@ class LangGraphAgent:
 
         def _probe() -> None:
             try:
-                active_model.invoke(body, config={})
+                self._invoke_accounted(active_model, body, config={})
             except BaseException as probe_exc:  # noqa: BLE001 — this IS the payload
                 outcome["error"] = probe_exc
 
@@ -2149,7 +2190,7 @@ class LangGraphAgent:
         """
         llm = config.get("LLM", {})
         return stream_policy.call_with_transient_retry(
-            lambda: model.invoke(messages, config={"callbacks": []}),
+            lambda: self._invoke_accounted(model, messages, config={"callbacks": []}),
             attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),
             base=float(llm.get("RETRY_DELAY", 1.0)),
             factor=float(llm.get("RETRY_BACKOFF", 2.0)),

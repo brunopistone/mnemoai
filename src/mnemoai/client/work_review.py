@@ -168,10 +168,10 @@ class WorkReview:
         response = None
         with self._charged(), supervised_turn.budget_scope(self.agent, budget):
             self.actor_steps += 1
-            try:
-                response, _ = self.agent._stream_response(messages, {}, model=model, quiet=True)
-            finally:
-                self.agent._record_usage(response)
+            response, _ = self.agent._stream_response(messages, {}, model=model, quiet=True)
+            # _stream_response records failed/discarded attempts itself. Only
+            # its returned final response belongs to this caller.
+            self.agent._record_usage(response)
         return parse_strategy(response)
 
     def _check(self, checkpoint, answer):

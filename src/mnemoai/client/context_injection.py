@@ -14,15 +14,14 @@ the ``plan_policy``/``cancellation`` collaborator pattern. No import of the clie
 class (functions receive the instance), so there is no import cycle.
 """
 
-import json
 from datetime import date
 
+from mnemoai.client import context_report
 from mnemoai.client.agent.subagents import available_subagents_block
 from mnemoai.client.memory.episode_tools import describe_tools
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import plans_dir
-from mnemoai.utils.tokenization import count_tokens
 
 # Warn once per process when embedding similarity is unavailable (see
 # compute_similarity) instead of on every turn.
@@ -333,19 +332,5 @@ def inject_episodic_context(client, prompt: str) -> str:
 
 
 def count_context_tokens(client) -> int:
-    """Total tokens in the current context. Prefers the provider's exact
-    ``input_tokens`` from the last turn (ground truth — includes system
-    prompt, tool calls, everything the API saw); falls back to the
-    conservative estimate when no turn has run yet."""
-    actual = getattr(client.agent, "_last_input_tokens", None) if client.agent else None
-    if actual:
-        return int(actual)
-    total_tokens = 0
-    if client.system_prompt:
-        total_tokens += count_tokens(client.system_prompt)
-    if client.agent and client.agent.messages:
-        messages_str = json.dumps(
-            [{"content": str(m.content)} for m in client.agent.messages], default=str
-        )
-        total_tokens += count_tokens(messages_str)
-    return total_tokens
+    """Last reported request size, or the same complete estimate as /context."""
+    return context_report.reported_input_tokens(client) or context_report.estimate(client)

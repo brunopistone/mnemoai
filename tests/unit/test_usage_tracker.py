@@ -6,9 +6,18 @@ concurrent sub-agents, and the distinction between "tokens spent this session"
 (cumulative) and "how big is my context" (the latest prompt).
 """
 
+import asyncio
 import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from mnemoai.client import usage_tracker as ut
+from mnemoai.client.agent.agent import LangGraphAgent
+from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
+from mnemoai.utils.config import config
 
 
 class _Resp:
@@ -314,3 +323,145 @@ class TestAgentAndClientWiring:
         c = LangGraphClient.__new__(LangGraphClient)
         c.agent = None
         assert "unavailable" in c.usage_report()
+
+
+@pytest.fixture
+def agent(monkeypatch):
+    monkeypatch.setitem(config._config_data, "LLM", {"MAX_RETRIES": 2, "RETRY_DELAY": 0})
+    result = LangGraphAgent.__new__(LangGraphAgent)
+    result.system_prompt = "test"
+    result.callbacks = []
+    result.usage_model_name = "actor"
+    result.usage = ut.UsageTracker()
+    result._last_input_tokens = None
+    result._start_spinner = lambda *a: None
+    result._stop_spinner = lambda *a: None
+    result._apply_mid_turn_compaction = lambda messages: messages
+    return result
+
+
+def test_authoritative_empty_stream_recovery_is_counted_once(agent):
+    initial = AIMessage(content="", usage_metadata=_usage(100, 10))
+    recovered = AIMessage(content="Recovered", usage_metadata=_usage(100, 20))
+    agent._stream_response = Mock(return_value=(initial, False))
+    model = SimpleNamespace(model_name="actor", invoke=Mock(return_value=recovered))
+    agent._get_route_model = lambda state: model
+    result = agent._call_model({"messages": [SystemMessage(content="test"), HumanMessage(content="Hi")]})
+    assert result["messages"][0].content == "Recovered"
+    assert agent.usage.totals()["calls"] == 2
+    assert agent.usage.totals()["total_tokens"] == 230
+    assert agent._last_input_tokens == 100
+
+
+def test_none_stream_and_fallback_invoke_are_distinct_attempts(agent):
+    agent._stream_response = Mock(return_value=(None, False))
+    model = SimpleNamespace(model_name="actor", invoke=Mock(return_value=AIMessage(
+        content="Recovered", usage_metadata=_usage(100, 20),
+    )))
+    agent._get_route_model = lambda state: model
+    agent._call_model({"messages": [SystemMessage(content="test"), HumanMessage(content="Hi")]})
+    assert agent.usage.totals()["calls"] == 2
+    assert agent.usage.totals()["calls_without_usage"] == 1
+    assert agent.usage.totals()["total_tokens"] == 120
+
+
+def test_decomposition_and_aggregation_are_attributed_without_changing_context(agent):
+    model = SimpleNamespace(model_id="decomposer", callbacks=None, invoke=Mock(return_value=AIMessage(
+        content='[{"description":"Do the task","category":"full"}]', usage_metadata=_usage(200, 20),
+    )))
+    agent.orchestrator_model = model
+    agent._non_reasoning = lambda _: model
+    agent._last_input_tokens = 123
+    assert agent._decompose_task("Do it", "Decompose", {"full"})
+    agent._stream_response = Mock(return_value=(AIMessage(content="Done", usage_metadata=_usage(100, 10)), False))
+    assert agent._aggregate_results("Do it", [{"task": "Do it", "result": "Done"}], "Summarize") == "Done"
+    rows = {r["model"]: r for r in agent.usage.snapshot()}
+    assert rows["decomposer"]["total_tokens"] == 220
+    assert rows["actor"]["total_tokens"] == 110
+    assert agent._last_input_tokens == 123  # auxiliary prompts cannot stand in for parent history
+
+
+def test_auxiliary_retry_records_failed_attempt_without_duplicating_success(agent):
+    model = SimpleNamespace(model_name="aux", invoke=Mock(side_effect=[
+        RuntimeError("503 service unavailable"),
+        AIMessage(content="OK", usage_metadata=_usage(10, 2)),
+    ]))
+    assert agent._aux_invoke(model, [], "Fixture").content == "OK"
+    assert agent.usage.totals()["calls"] == 2
+    assert agent.usage.totals()["calls_without_usage"] == 1
+    assert agent.usage.totals()["total_tokens"] == 12
+
+
+@pytest.mark.parametrize("first", [
+    AIMessage(content="", usage_metadata=_usage(50, 2)),
+    RuntimeError("503 service unavailable"),
+])
+def test_stream_retries_count_discarded_attempt_and_final_response_once(agent, first):
+    final = AIMessage(content="OK", usage_metadata=_usage(100, 5))
+    agent.model_with_tools = SimpleNamespace(model_name="actor")
+    agent._empty_response_retries = 1
+    agent._cancelled = lambda: False
+    agent._sleep_or_cancel = lambda delay: False
+    agent._transient_retry_delay = lambda *a: 0
+    agent._stream_once = Mock(side_effect=[
+        first if isinstance(first, Exception) else (first, False),
+        (final, False),
+    ])
+    response, _ = agent._stream_response([], {})
+    agent._capture_input_tokens(response)
+    totals = agent.usage.totals()
+    assert totals["calls"] == 2
+    assert totals["total_tokens"] == (105 if isinstance(first, Exception) else 157)
+    assert totals["calls_without_usage"] == int(isinstance(first, Exception))
+
+
+def test_compaction_records_real_summary_model_usage(agent):
+    agent.messages = [HumanMessage(content="old"), AIMessage(content="old reply"),
+                      HumanMessage(content="new"), AIMessage(content="new reply")]
+    agent.session_log = None
+    manager = AgentConversationManager(max_tokens=100000)
+    manager._session_blocks = lambda *a: []
+    model = SimpleNamespace(model_name="summary-model", ainvoke=AsyncMock(return_value=AIMessage(
+        content="Earlier facts.", usage_metadata=_usage(1000, 100),
+    )))
+    client = SimpleNamespace(spinner=Mock(), system_prompt="test")
+    assert asyncio.run(manager._compact(client, model, agent, keep_recent=2))
+    assert agent.usage.snapshot()[0]["model"] == "summary-model"
+    assert agent.usage.totals()["calls"] == 1
+    assert agent.usage.totals()["total_tokens"] == 1100
+    assert agent._last_input_tokens is None
+
+
+def test_parallel_summary_maps_reduce_and_retry_are_all_counted(monkeypatch):
+    monkeypatch.setitem(config._config_data, "LLM", {"MAX_RETRIES": 2, "RETRY_DELAY": 0})
+    manager = AgentConversationManager(max_tokens=100000)
+    manager._batch_messages = lambda messages, budget: [[{"content": "one"}], [{"content": "two"}]]
+    model = SimpleNamespace(model_name="summary", ainvoke=AsyncMock(side_effect=[
+        RuntimeError("503 service unavailable"),
+        AIMessage(content="summary A", usage_metadata=_usage(10, 2)),
+        AIMessage(content="summary B", usage_metadata=_usage(10, 2)),
+        AIMessage(content="combined", usage_metadata=_usage(10, 2)),
+    ]))
+    tracker = ut.UsageTracker()
+    assert asyncio.run(manager.generate_summary(
+        [], model, record_usage=ut.recorder(tracker, model),
+    ))
+    assert tracker.totals()["calls"] == model.ainvoke.call_count == 4
+    assert tracker.totals()["calls_without_usage"] == 1
+    assert tracker.totals()["total_tokens"] == 36
+
+
+def test_an_in_flight_accounting_callback_cannot_pollute_a_cleared_session():
+    tracker = ut.UsageTracker()
+    record = ut.recorder(tracker, SimpleNamespace(model_name="old session"))
+    tracker.reset()
+    record(_Resp(_usage(100, 20)))
+    assert tracker.totals()["calls"] == 0
+    ut.recorder(tracker, SimpleNamespace(bound=SimpleNamespace(model_id="new session")))(_Resp(_usage(10, 2)))
+    assert tracker.snapshot()[0]["model"] == "new session"
+    assert tracker.totals()["total_tokens"] == 12
+
+
+def test_context_estimate_is_labelled_in_usage_output():
+    output = ut.render(ut.UsageTracker(), context_tokens=500, estimated=True)
+    assert "~500" in output and "estimated next input" in output

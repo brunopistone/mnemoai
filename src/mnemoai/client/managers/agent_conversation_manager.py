@@ -7,6 +7,7 @@ import textwrap
 from datetime import date
 from typing import Any, Dict, List
 
+from mnemoai.client import usage_tracker
 from mnemoai.client.agent import stream_policy
 from mnemoai.client.agent.subagents import available_subagents_block
 from mnemoai.client.memory.skill_store import (
@@ -217,7 +218,7 @@ class AgentConversationManager:
         return prompt
 
     async def generate_summary(
-        self, messages: List[Dict], model: Any, focus_instructions: str = ""
+        self, messages: List[Dict], model: Any, focus_instructions: str = "", *, record_usage=None
     ) -> str:
         """Summarize older messages, batching so the summary CALL never itself
         overflows the model's context window.
@@ -254,13 +255,14 @@ class AgentConversationManager:
             1, int(config.get("LLM", {}).get("SUBAGENT_MAX_CONCURRENCY", 4))
         )
         sem = asyncio.Semaphore(max_concurrency)
+        accounting = {"record_usage": record_usage} if record_usage is not None else {}
 
         async def _map_one(idx: int, batch: List[Dict]):
             async with sem:
                 try:
                     return idx, await self._with_transient_retry(
                         lambda: self._summarize_batch(
-                            batch, model, focus_instructions, prior_summary=None
+                            batch, model, focus_instructions, prior_summary=None, **accounting
                         ),
                         f"Summary batch {idx + 1}/{len(batches)}",
                     )
@@ -293,7 +295,7 @@ class AgentConversationManager:
         # concatenated partials so no content is lost.
         try:
             reduced = await self._with_transient_retry(
-                lambda: self._reduce_summaries(partials, model, focus_instructions),
+                lambda: self._reduce_summaries(partials, model, focus_instructions, **accounting),
                 "Summary reduce",
             )
             if reduced:
@@ -325,7 +327,7 @@ class AgentConversationManager:
         )
 
     async def _reduce_summaries(
-        self, partials: List[str], model: Any, focus_instructions: str
+        self, partials: List[str], model: Any, focus_instructions: str, *, record_usage=None
     ) -> str:
         """Fold ordered per-batch partial summaries (and any previous compaction
         summary) into one coherent summary via a single model call.
@@ -347,7 +349,8 @@ class AgentConversationManager:
         # then produces one consolidated summary over them.
         reduce_input = [{"role": "user", "content": [{"text": merged_context}]}]
         return await self._summarize_batch(
-            reduce_input, model, focus_instructions, prior_summary=None
+            reduce_input, model, focus_instructions, prior_summary=None,
+            **({"record_usage": record_usage} if record_usage is not None else {}),
         )
 
     def _batch_messages(self, messages: List[Dict], budget: int) -> List[List[Dict]]:
@@ -418,6 +421,8 @@ class AgentConversationManager:
         model: Any,
         focus_instructions: str,
         prior_summary: str = None,
+        *,
+        record_usage=None,
     ) -> str:
         """Summarize ONE batch of messages (folding in ``prior_summary``).
 
@@ -442,7 +447,12 @@ class AgentConversationManager:
                     lc_messages.append(HumanMessage(content=content))
 
             lc_messages.append(HumanMessage(content=summary_prompt))
-            response = await model.ainvoke(lc_messages)
+            response = None
+            try:
+                response = await model.ainvoke(lc_messages)
+            finally:
+                if record_usage is not None:
+                    record_usage(response)
             summary_response = str(response.content)
         else:
             batch = [
@@ -455,15 +465,19 @@ class AgentConversationManager:
             if prior_summary:
                 system_prompt = f"{system_prompt}\n\n{prior_summary}"
 
-            async for event in model.stream(
-                batch, system_prompt=system_prompt, think=think_param
-            ):
-                if (
-                    "contentBlockDelta" in event
-                    and "delta" in event["contentBlockDelta"]
-                    and "text" in event["contentBlockDelta"]["delta"]
+            try:
+                async for event in model.stream(
+                    batch, system_prompt=system_prompt, think=think_param
                 ):
-                    summary_response += event["contentBlockDelta"]["delta"]["text"]
+                    if (
+                        "contentBlockDelta" in event
+                        and "delta" in event["contentBlockDelta"]
+                        and "text" in event["contentBlockDelta"]["delta"]
+                    ):
+                        summary_response += event["contentBlockDelta"]["delta"]["text"]
+            finally:
+                if record_usage is not None:
+                    record_usage(None)  # legacy stream lacks normalized usage metadata
 
         return self._strip_analysis(summary_response).strip()
 
@@ -836,8 +850,14 @@ class AgentConversationManager:
         # call has no measurable total; we surface the discrete stages instead).
         client.spinner.start(f"Summarizing {len(older)} older messages")
         try:
+            tracker = getattr(agent, "usage", None)
+            accounting = {}
+            if tracker is not None:
+                accounting["record_usage"] = usage_tracker.recorder(
+                    tracker, model, getattr(agent, "usage_model_name", ""),
+                )
             summary = await self.generate_summary(
-                messages_to_dict_list(older), model, focus_instructions
+                messages_to_dict_list(older), model, focus_instructions, **accounting,
             )
             client.spinner.set_label("Applying summary")
             clean_summary = "".join(c for c in summary if c.isprintable() or c in "\n\t")

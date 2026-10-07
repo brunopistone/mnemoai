@@ -816,19 +816,24 @@ LLM:
   MCP_CALL_TIMEOUT: 300 # Transport-layer timeout for one MCP tool call (s)
 ```
 
-**Token counting.** `TOKEN_COUNTING` only tunes the _pre-flight estimate_ for a
-prompt that hasn't been sent yet. Once a turn completes, the size comes from the
-provider's own `usage_metadata`, which is ground truth and needs no estimate —
-that is what `/usage` and the footer's context meter report (an estimate there is
-marked with a `~`).
+**Token counting.** `TOKEN_COUNTING` tunes the local estimate used when no current
+provider measurement is available, including after resume/load or compaction.
+The footer, `/context`, `/usage`'s context line and restore preflight share this
+full-input estimate: live system prompt, steering/plan instructions, tool
+definitions, message text, reasoning, tool calls and approximate framing.
+Estimates are marked `~` in the footer and context notices.
 
-The estimate is deliberately conservative, because undercounting overflows the
-window while overcounting only compacts a little early. Text is tokenized with
-tiktoken's `o200k_base`, then scaled per provider family:
+When available, `usage_metadata.input_tokens` is the provider-reported size of
+the **last request**, not a measurement of an unsent next request. `/usage`'s
+input/output totals are separate cumulative spending, not this context estimate.
+
+The estimate adds headroom but is not a guaranteed upper bound: tokenizers and
+request framing vary by model and provider. Text is tokenized with tiktoken's
+`o200k_base`, then scaled per provider family:
 
 | Provider `TYPE`                   | Multiplier              | Override key                                |
 | --------------------------------- | ----------------------- | ------------------------------------------- |
-| `openai`                          | 1.0 (tiktoken is exact) | `OPENAI_MULTIPLIER`                         |
+| `openai`                          | 1.0 (tokenizer basis)   | `OPENAI_MULTIPLIER`                         |
 | `anthropic`, `mantle`             | 1.5                     | `ANTHROPIC_MULTIPLIER`, `MANTLE_MULTIPLIER` |
 | `bedrock`, `sagemaker`, `litellm` | 1.35                    | `BEDROCK_MULTIPLIER`, …                     |
 | anything else                     | 1.35                    | `<TYPE>_MULTIPLIER`                         |
@@ -838,7 +843,7 @@ tiktoken's `o200k_base`, then scaled per provider family:
 
 `mlx` has no entry of its own and so takes the 1.35 fallback: one MLX server can
 serve any tokenizer family, so a fixed per-provider figure would be a guess, and
-the fallback errs upward — which compacts a little early rather than overflowing.
+the fallback adds headroom without promising exact counts.
 Set `MLX_MULTIPLIER` if you want it tighter for the model you actually run.
 
 !!! note "Two vestigial keys under `TOKEN_COUNTING`"

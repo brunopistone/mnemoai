@@ -14,7 +14,7 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 
 from mnemoai import app_version
-from mnemoai.client import file_ledger, file_mentions, learned, review
+from mnemoai.client import context_report, file_ledger, file_mentions, learned, review
 from mnemoai.client.agent import auto_approve
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
@@ -1055,12 +1055,10 @@ class ChatInterface:
             walks the whole history, so it is recomputed only when the history
             (or the system prompt) actually changes.
             """
-            agent = getattr(self.client, "agent", None)
-            exact = int(getattr(agent, "_last_input_tokens", 0) or 0) if agent else 0
+            exact = context_report.reported_input_tokens(self.client)
             if exact:
                 return exact, False
-            msgs = (getattr(agent, "messages", None) or []) if agent else []
-            key = (len(msgs), len(getattr(self.client, "system_prompt", "") or ""))
+            key = context_report.estimate_cache_key(self.client)
             if token_cache["key"] != key:
                 try:
                     token_cache["tokens"] = self.client._count_context_tokens()
