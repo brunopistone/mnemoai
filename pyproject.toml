@@ -45,6 +45,8 @@ dependencies = [
     "langchain-ollama>=1.0.1",
     "langchain-openai>=1.1.12",
     "langgraph>=1.1.3",
+    # Transitive security floor: resource auth action scopes must be enforced.
+    "langgraph-sdk>=0.4.4",
     "litellm>=1.81.1",
     "markdown-it-py>=4.2.0",
     "mcp[cli]>=1.26.0,<2",
@@ -58,7 +60,7 @@ dependencies = [
     "Pygments>=2.20.0",
     # Transitive security floors also protect pip installs, which ignore uv.lock.
     "PyJWT>=2.15.0",
-    "pypdf>=6.16.2",
+    "pypdf>=6.19.0",
     "python-docx>=1.2.0",
     "qdrant-client>=1.17.1",
     "tiktoken>=0.12.0",

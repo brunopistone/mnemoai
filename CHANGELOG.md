@@ -13,6 +13,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Fixed
 
+- Require `langgraph-sdk>=0.4.4` and `pypdf>=6.19.0` for both locked checkouts
+  and PyPI installs. This fixes SDK resource-authorization action scoping and
+  the reported PDF parsing/processing resource-exhaustion vulnerabilities.
 - Use the same complete context estimate for the footer, `/context`, `/usage`,
   and restore preflight checks. Include live system instructions, steering,
   tool schemas, tool-call arguments and reasoning instead of counting only
