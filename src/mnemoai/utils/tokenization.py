@@ -1,4 +1,4 @@
-"""Shared token-counting helper — provider-aware and never-undercount.
+"""Shared provider-aware token estimate.
 This is only the PRE-FLIGHT estimate for a not-yet-sent prompt. The exact size
 of an already-sent prompt comes from the provider's own ``usage_metadata`` (see
 the agent loop), which is ground truth and needs no estimation.
@@ -10,7 +10,7 @@ _ENCODING_NAME = "o200k_base"
 _encoder = None
 
 # Conservative multipliers over the tiktoken basis, per provider family. Chosen
-# to NEVER undercount (overflow is the failure mode). Overridable via
+# to add headroom (not a guaranteed upper bound). Overridable via
 # LLM.TOKEN_COUNTING.<TYPE>_MULTIPLIER.
 _DEFAULT_MULTIPLIERS = {
     "anthropic": 1.5,   # measured ~1.5x on code/JSON history
@@ -18,7 +18,7 @@ _DEFAULT_MULTIPLIERS = {
     "bedrock": 1.35,    # mixed; Claude on Bedrock still undercounts
     "sagemaker": 1.35,
     "litellm": 1.35,
-    "openai": 1.0,      # tiktoken is exact for OpenAI
+    "openai": 1.0,      # tokenizer basis; wrappers/model-specific encodings can differ
 }
 
 
@@ -44,9 +44,8 @@ def _multiplier(model_type: str) -> float:
 def count_tokens(text: str) -> int:
     """Conservatively estimate the token count of ``text`` for the current model.
 
-    Never undercounts: OpenAI is exact (tiktoken), other providers scale the
-    tiktoken basis by a safety multiplier so the context estimate can't fall
-    below the provider's real count.
+    Providers can use different tokenizers and request framing. Multipliers add
+    headroom but cannot guarantee an upper bound or replace reported usage.
     """
     if not text:
         return 0

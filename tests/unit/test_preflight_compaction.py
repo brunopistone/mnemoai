@@ -51,6 +51,10 @@ def _client(token_count, high_water=None, evict_returns=False, token_after_evict
     c.conversation_manager = _FakeManager(
         token_count, evict_returns=evict_returns, token_after_evict=token_after_evict
     )
+    # Threshold/eviction behavior is isolated from the shared full-input counter.
+    # Its real payload coverage is exercised in test_context_counting.py.
+    c._estimate_context_tokens = lambda: c.conversation_manager.count_tokens(c.agent.messages)
+    c._count_context_tokens = lambda: c.agent._last_input_tokens or c._estimate_context_tokens()
     return c
 
 

@@ -93,14 +93,58 @@ def _cache_write(details: Dict[str, Any]) -> int:
     return sum(_int(details.get(k)) for k in _CACHE_WRITE_KEYS)
 
 
+def model_name(model: Any, fallback: str = "") -> str:
+    """Attribute a request to the actual model, including tool-bound variants."""
+    for _ in range(4):
+        for field in ("model_id", "model_name", "model"):
+            try:
+                value = getattr(model, field, None)
+            except Exception:
+                continue
+            if isinstance(value, str) and value:
+                return value
+        try:
+            bound = getattr(model, "bound", None)
+        except Exception:
+            break
+        if bound is None or bound is model:
+            break
+        model = bound
+    return fallback or "unknown"
+
+
+def recorder(tracker, model=None, fallback=""):
+    """Capture the current accounting epoch before a request can outlive /clear."""
+    if tracker is None:
+        return lambda response: None
+    name = model_name(model, fallback)
+    epoch = tracker.epoch if isinstance(tracker, UsageTracker) else None
+
+    def record(response):
+        try:
+            if epoch is None:
+                tracker.record(response, name)
+            else:
+                tracker.record(response, name, epoch=epoch)
+        except Exception:
+            pass  # instrumentation must never change a model call's outcome
+    return record
+
+
 class UsageTracker:
     """Accumulates reported token usage per model for this session."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._by_model: Dict[str, ModelUsage] = {}
+        self._epoch = 0
 
-    def record(self, response: Any, model: str = "") -> None:
+    @property
+    def epoch(self) -> int:
+        with self._lock:
+            return self._epoch
+
+    def record(self, response: Any, model: str = "", *, epoch=None) -> None:
         """Add one model call's reported usage. Never raises.
 
         Called from the streaming/invoke paths, so a bad response shape or an
@@ -110,6 +154,8 @@ class UsageTracker:
             key = str(model or "unknown")
             um = _usage_of(response)
             with self._lock:
+                if epoch is not None and epoch != self._epoch:
+                    return
                 entry = self._by_model.get(key)
                 if entry is None:
                     entry = self._by_model[key] = ModelUsage(key)
@@ -152,6 +198,7 @@ class UsageTracker:
         """Clear all counters (``/clear`` starts a fresh conversation)."""
         with self._lock:
             self._by_model.clear()
+            self._epoch += 1
 
 
 def _fmt(n: int) -> str:
@@ -159,7 +206,7 @@ def _fmt(n: int) -> str:
     return f"{n:,}"
 
 
-def render(tracker: UsageTracker, context_tokens: int = 0) -> str:
+def render(tracker: UsageTracker, context_tokens: int = 0, *, estimated: bool = False) -> str:
     """Render the ``/usage`` report as plain text.
 
     Kept out of the tracker so it stays a pure data structure, and so the report
@@ -174,8 +221,8 @@ def render(tracker: UsageTracker, context_tokens: int = 0) -> str:
         lines = ["No tokens spent yet in this session."]
         if context_tokens:
             lines.append(
-                f"  Current context: {_fmt(context_tokens)} tokens "
-                "(what the next turn re-sends)"
+                f"  Current context: {'~' if estimated else ''}{_fmt(context_tokens)} tokens "
+                f"({'estimated next input' if estimated else 'provider-reported last input'})"
             )
             lines.append(
                 "  A restored conversation carries its context but no spend — "
@@ -214,8 +261,8 @@ def render(tracker: UsageTracker, context_tokens: int = 0) -> str:
     if context_tokens:
         out.append("")
         out.append(
-            f"  Current context: {_fmt(context_tokens)} tokens "
-            "(what the next turn re-sends)"
+            f"  Current context: {'~' if estimated else ''}{_fmt(context_tokens)} tokens "
+            f"({'estimated next input' if estimated else 'provider-reported last input'})"
         )
     out.append("")
     out.append(

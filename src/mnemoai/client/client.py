@@ -977,12 +977,10 @@ class LangGraphClient:
 
         ``_compact_now`` prefers the provider's exact ``input_tokens`` from the
         last turn over its own estimate, so that number must never outlive the
-        conversation it measured. A resume, a ``/load`` and a ``/branch`` all swap
-        the whole message list — and they rehydrate the **transcript**, which is
-        append-only and therefore still holds every message compaction had
-        already summarized away. The stale count then reads far too LOW for the
-        history now in memory, the high-water check passes, and the next turn goes
-        straight to a provider-side context overflow.
+        conversation it measured. A resume, a ``/load`` and a ``/branch`` swap
+        the whole message list (using its compaction checkpoint when available).
+        The replacement needs a fresh full-prompt estimate, not another
+        conversation's cached provider count.
         """
         if self.agent is not None and hasattr(self.agent, "_last_input_tokens"):
             self.agent._last_input_tokens = None
@@ -1015,11 +1013,7 @@ class LangGraphClient:
             # safety multiplier (e.g. 1.5x for mantle/anthropic), so it over-counts
             # the real prompt ~2x and would fire compaction far too early. Use the
             # estimate ONLY as a fallback before any turn has run (no actual yet).
-            actual = getattr(self.agent, "_last_input_tokens", None) or 0
-            if actual:
-                current = actual
-            else:
-                current = mgr.count_tokens(messages_to_dict_list(self.agent.messages))
+            current = self._count_context_tokens()
             if current <= high_water:
                 return False
             # Cheapest layer first: evict OLD tool-result bodies (no LLM call).
@@ -1027,7 +1021,7 @@ class LangGraphClient:
             # re-measure with the (conservative) estimate; if that alone brings us
             # back under the high-water mark, skip the expensive full summary.
             if mgr.evict_old_tool_results(self.agent):
-                if mgr.count_tokens(messages_to_dict_list(self.agent.messages)) <= high_water:
+                if self._estimate_context_tokens() <= high_water:
                     self._log_eviction_checkpoint()
                     return True
         keep = 2 if force else config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)
@@ -1357,6 +1351,10 @@ class LangGraphClient:
         """Delegates to :func:`context_injection.count_context_tokens`."""
         return context_injection.count_context_tokens(self)
 
+    def _estimate_context_tokens(self) -> int:
+        """Full-prompt fallback, also used after an eviction invalidates usage."""
+        return context_report.estimate(self)
+
     def _print_context_size(self) -> None:
         """Print ``[Context: N tokens]`` — only where nothing else shows it.
 
@@ -1367,7 +1365,8 @@ class LangGraphClient:
         """
         if getattr(self, "status_footer_active", False):
             return
-        print(f"\n\033[90m[Context: {self._count_context_tokens()} tokens]\033[0m")
+        estimate_mark = "" if context_report.reported_input_tokens(self) else "~"
+        print(f"\n\033[90m[Context: {estimate_mark}{self._count_context_tokens()} tokens]\033[0m")
 
     def clear_context(self) -> None:
         """Clear conversation history but keep system prompt."""
@@ -1754,7 +1753,10 @@ class LangGraphClient:
         tracker = getattr(self.agent, "usage", None) if self.agent else None
         if tracker is None:
             return "Usage tracking is unavailable (no agent running)."
-        return usage_tracker.render(tracker, self._count_context_tokens())
+        return usage_tracker.render(
+            tracker, self._count_context_tokens(),
+            estimated=not bool(context_report.reported_input_tokens(self)),
+        )
 
     def files_report(self) -> str:
         """The ``/files`` report: which files this session read, changed, attached."""

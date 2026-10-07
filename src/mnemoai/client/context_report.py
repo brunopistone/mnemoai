@@ -135,22 +135,33 @@ def _message_kind(msg: Any) -> str:
 def _message_text(msg: Any) -> str:
     """Everything a stored message re-sends: content, tool calls, reasoning."""
     pieces: List[str] = []
+    calls = getattr(msg, "tool_calls", None) or []
+    call_by_id = {call.get("id"): call for call in calls if isinstance(call, dict)}
     content = getattr(msg, "content", "")
     if isinstance(content, str):
         pieces.append(content)
     elif isinstance(content, list):
         for block in content:
             if isinstance(block, dict):
+                call = call_by_id.get(block.get("id"))
+                if (
+                    block.get("type") == "tool_use" and call is not None
+                    and block.get("name") == call.get("name")
+                    and block.get("input") == call.get("args")
+                ):
+                    continue  # native and normalized copies describe one tool call
                 pieces.append(str(block.get("text", "")) or json.dumps(block, default=str))
             else:
                 pieces.append(str(block))
     elif content:
         pieces.append(str(content))
-    for call in getattr(msg, "tool_calls", None) or []:
+    for call in calls:
         pieces.append(json.dumps(call, default=str))
-    reasoning = (getattr(msg, "additional_kwargs", {}) or {}).get("reasoning_content")
-    if reasoning:
-        pieces.append(str(reasoning))
+    extra = getattr(msg, "additional_kwargs", {}) or {}
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        reasoning = extra.get(key)
+        if reasoning:
+            pieces.append(str(reasoning))
     return "\n".join(p for p in pieces if p)
 
 
@@ -215,7 +226,7 @@ def _tools_part(client: Any) -> List[Part]:
     tools = list(getattr(client, "tools", None) or [])
     if not tools:
         return []
-    total = sum(count_tokens(tool_schema_text(t)) for t in tools)
+    total = sum(count_tokens(tool_schema_text(t)) + 4 for t in tools)
     return [
         Part(f"Tool schemas: {len(tools)} tools", total, group="tools"),
     ]
@@ -229,7 +240,7 @@ def _history_part(client: Any) -> List[Part]:
         return []
     by_kind = {"tool": 0, "assistant": 0, "user": 0, "other": 0}
     for msg in messages:
-        by_kind[_message_kind(msg)] += count_tokens(_message_text(msg))
+        by_kind[_message_kind(msg)] += count_tokens(_message_text(msg)) + 4
     detail = [
         ("tool results", by_kind["tool"]),
         ("assistant replies", by_kind["assistant"]),
@@ -261,10 +272,74 @@ def collect(client: Any) -> List[Part]:
         Part(label, count_tokens(text), group="prompt")
         for label, text in split_system_prompt(system)
     ]
+    if parts:
+        parts[0] = parts[0]._replace(tokens=parts[0].tokens + 4)
     parts.extend(_steering_part(client))
+    if getattr(client, "plan_mode_active", False) is True:
+        parts.append(Part("Plan-mode instructions", count_tokens(
+            context_injection.plan_mode_reminder(client),
+        ), group="steering"))
     parts.extend(_tools_part(client))
     parts.extend(_history_part(client))
     return parts
+
+
+def estimate(client: Any) -> int:
+    """One fallback for the footer, /usage, /context and restore preflight.
+
+    Includes the live agent prompt, per-turn instructions, tool definitions,
+    message text, reasoning, tool calls and approximate message framing. This is
+    an estimate, not a provider tokenizer or a guaranteed upper bound.
+    """
+    return sum(part.tokens for part in collect(client))
+
+
+def reported_input_tokens(client: Any) -> int:
+    """Positive provider count for the last request, or zero when unavailable."""
+    agent = getattr(client, "agent", None)
+    try:
+        return max(0, int(getattr(agent, "_last_input_tokens", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def estimate_cache_key(client: Any) -> tuple:
+    """Content-sensitive, tokenization-free cache key for the pinned footer.
+
+    Freeze mutable payload containers, retaining immutable strings rather than
+    copying/JSON-encoding large tool results on every repaint. Same-length
+    restore/eviction and in-place message edits must invalidate the estimate.
+    No file reads, model calls or tokenization belong on this repaint path.
+    """
+    def freeze(value):
+        if isinstance(value, dict):
+            return tuple((key, freeze(item)) for key, item in tuple(value.items()))
+        if isinstance(value, (list, tuple)):
+            return tuple(freeze(item) for item in tuple(value))
+        if isinstance(value, (str, int, float, bool, type(None))):
+            return value
+        return repr(value)
+
+    agent = getattr(client, "agent", None)
+    messages = getattr(agent, "messages", ()) or ()
+    tools = getattr(client, "tools", ()) or ()
+    return (
+        id(agent),
+        getattr(agent, "system_prompt", "") or getattr(client, "system_prompt", ""),
+        getattr(client, "plan_mode_active", False),
+        freeze(config.get("MODEL_ID", {})),
+        freeze((config.get("LLM", {}) or {}).get("TOKEN_COUNTING", {})),
+        tuple((
+            getattr(message, "type", ""),
+            freeze(getattr(message, "content", "")),
+            freeze(getattr(message, "tool_calls", None)),
+            freeze(getattr(message, "additional_kwargs", None)),
+        ) for message in list(messages)),
+        tuple((
+            getattr(tool, "name", ""), getattr(tool, "description", ""),
+            freeze(getattr(tool, "args_schema", None)),
+        ) for tool in list(tools)),
+    )
 
 
 def scale(parts: List[Part], target: int) -> List[Part]:
@@ -377,8 +452,8 @@ def render(
         out.append("  The total is the provider's exact count for the last turn;")
         out.append("  the split is estimated and scaled to it.")
     else:
-        out.append("  Nothing has been sent yet, so every number here is an estimate")
-        out.append("  — the provider's exact count replaces it after the first turn.")
+        out.append("  No current provider measurement is available; every number here is an estimate")
+        out.append("  — a later request with reported usage replaces it with the measured count.")
     out.append("  Steering files and tool schemas are re-sent in full every turn and")
     out.append("  compaction can never reclaim them; the conversation is what")
     out.append("  /compact shrinks.")
@@ -388,8 +463,7 @@ def render(
 def report(client: Any) -> str:
     """The whole ``/context`` report for a live client."""
     parts = collect(client)
-    agent = getattr(client, "agent", None)
-    exact = int(getattr(agent, "_last_input_tokens", 0) or 0) if agent else 0
+    exact = reported_input_tokens(client)
     total = exact or sum(p.tokens for p in parts)
     manager = getattr(client, "conversation_manager", None)
     limit = int(getattr(manager, "max_tokens", 0) or 0)

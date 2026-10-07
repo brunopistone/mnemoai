@@ -9,6 +9,23 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.28.2] — 2026-10-07
+
+### Fixed
+
+- Use the same complete context estimate for the footer, `/context`, `/usage`,
+  and restore preflight checks. Include live system instructions, steering,
+  tool schemas, tool-call arguments and reasoning instead of counting only
+  message text after resume/load.
+- Invalidate the footer estimate when history contents change, even when a
+  loaded conversation has the same message count. Missing provider metadata
+  no longer leaves an older count labelled as exact; estimates are marked `~`.
+- Count compaction map/reduce calls, decomposition, aggregation, recovery calls
+  and discarded stream retries in session usage without counting successful
+  responses twice. Attribute auxiliary calls to their actual models.
+- Keep restored history separate from new API spending; preserve compacted
+  summaries and stable counts across repeated resume and save/load cycles.
+
 ## [1.28.1] — 2026-10-01
 
 ### Changed

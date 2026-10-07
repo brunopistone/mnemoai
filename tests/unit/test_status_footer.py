@@ -27,7 +27,7 @@ class TestPrintContextSize:
         c = _client()
         c._count_context_tokens = lambda: 90096
         c._print_context_size()
-        assert "[Context: 90096 tokens]" in capsys.readouterr().out
+        assert "[Context: ~90096 tokens]" in capsys.readouterr().out
 
     def test_silent_while_the_footer_shows_it(self, capsys):
         c = _client(status_footer_active=True)
@@ -41,7 +41,7 @@ class TestPrintContextSize:
         assert not hasattr(c, "status_footer_active")
         c._count_context_tokens = lambda: 12
         c._print_context_size()
-        assert "[Context: 12 tokens]" in capsys.readouterr().out
+        assert "[Context: ~12 tokens]" in capsys.readouterr().out
 
     def test_the_flag_defaults_off_on_a_real_client(self):
         src = inspect.getsource(LangGraphClient.__init__)

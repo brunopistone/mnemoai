@@ -250,8 +250,6 @@ class QueryRouter:
         route = ""
         for _ in range(2):
             response = self._invoke_with_retry(model, messages)
-            if self.usage is not None:
-                self.usage.record(response, self.usage_model_name)
             route = self._parse_route(response.content)
             if route:
                 break
@@ -265,8 +263,16 @@ class QueryRouter:
         the streamed turn beside it recovered on its second attempt.
         """
         llm = config.get("LLM", {})
+        def invoke():
+            response = None
+            try:
+                response = model.invoke(messages, config={"callbacks": []})
+                return response
+            finally:
+                if self.usage is not None:
+                    self.usage.record(response, self.usage_model_name)
         return stream_policy.call_with_transient_retry(
-            lambda: model.invoke(messages, config={"callbacks": []}),
+            invoke,
             attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),
             base=float(llm.get("RETRY_DELAY", 1.0)),
             factor=float(llm.get("RETRY_BACKOFF", 2.0)),

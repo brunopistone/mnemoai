@@ -77,12 +77,12 @@ class TestCaptureInputTokens:
         a._capture_input_tokens(resp)
         assert a._last_input_tokens == 1147426  # exact provider count
 
-    def test_no_usage_metadata_leaves_prior_value(self):
+    def test_no_usage_metadata_invalidates_prior_measurement(self):
         from langchain_core.messages import AIMessage
         a = self._agent()
         a._last_input_tokens = 500
         a._capture_input_tokens(AIMessage(content="hi"))  # no usage_metadata
-        assert a._last_input_tokens == 500  # unchanged, not clobbered to None
+        assert a._last_input_tokens is None  # a stale value must not look exact
 
     def test_bad_response_is_safe(self):
         a = self._agent()

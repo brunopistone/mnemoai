@@ -236,9 +236,25 @@ to background and can load a prior run from disk after restart.
 
 ### Session token accounting (`/usage`) (`client/usage_tracker.py`) ★
 
+Non-streamed agent calls use `_invoke_accounted`; decomposition retries count
+each attempt. Stream callers record the returned response once, while
+`_stream_response` records only failed/discarded attempts. Compaction passes a
+per-operation recorder through map/reduce (including retries), with the actual
+model label and a clear/reset epoch so late results cannot repopulate old usage.
+Keep usage and context capture separate for auxiliary calls.
+
 `UsageTracker` accumulates the providers' **reported** `usage_metadata` (input/output/cache) per model for the session, rendered by `usage_tracker.render` and surfaced as `/usage`. Fed from `agent._record_usage`, called by `_capture_input_tokens` (main loop), the **worker loop** (sub-agents + orchestrator waves), and `QueryRouter` (which takes an optional `usage=` sink — classification is a real call the user never sees). Thread-safe: parallel waves record from pool threads. **Two invariants:** (1) `_record_usage` is deliberately SEPARATE from `_last_input_tokens` — a quiet worker's prompt must count toward usage but must NOT set the main conversation's "current context size", or it corrupts the compaction trigger; (2) a call whose response carries no usage increments `calls_without_usage` instead of adding zeros, so a partial total can't look complete (the report calls itself a lower bound). **No USD, by design** — pricing isn't uniform across Ollama/SageMaker/LiteLLM, so a price table would be confidently wrong. Reset by `/clear`. **Cache writes read from three shapes** (`_cache_write`): normalized `cache_creation`, a nested per-TTL dict, else the per-TTL keys (`ephemeral_5m_input_tokens`/`ephemeral_1h_input_tokens`) — Bedrock and Mantle report thousands of written tokens there while leaving `cache_creation: 0`, which showed a caching session as "0 written", the one number that proves caching engaged.
 
 ### Context breakdown (`/context`) (`client/context_report.py`) ★
+
+`context_report.estimate()` is the shared full-input fallback for context
+displays and restore preflight. Count the live agent system prompt, current
+steering/plan instructions, tool definitions, message text, reasoning, tool-call
+arguments and approximate framing. A provider count measures the last request;
+it is not a measurement of an unsent next one. Resume/load/compaction and missing
+usage invalidate it. The pinned estimate cache freezes message contents, not
+just list length, and must not tokenize or read files merely to build its key.
+These estimates add headroom; they are not guaranteed upper bounds.
 
 `/usage` is "what has this session spent"; `/context` is "what is my NEXT turn paying for, and which part can I shrink". Exists for the two costs nothing else surfaces: a large steering file (re-sent verbatim every turn, never reclaimable by compaction) and the tool schemas (bound on every call before a word of conversation). **Exact total, estimated split:** the total is the provider's reported `input_tokens` (the same ground truth the status footer shows) and each measured part is `scale`d onto it — unscaled, the estimator's ~2× over-count makes the parts sum to twice the number the user was just shown and reads as a bug (before any turn has run the report says it's estimating). The system prompt is broken up by **segmenting the live string** (`split_system_prompt`, marker-ordered with a moving cursor) rather than re-deriving each block, so it can't drift from what is actually sent (MEMORY.md edited mid-session, a compaction rebuild). Steering rows come from `SteeringStore.sizes()` — the size INJECTED, not on disk. `split_system_prompt`/`scale`/`render` are pure; `collect`/`report` take the client.
 

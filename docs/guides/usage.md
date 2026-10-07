@@ -219,13 +219,15 @@ fills. The meter turns **amber past 70%** and **red past 90%**, which is the poi
 at which [compaction](#commands) is close (it starts at 80% by default), so a long
 session tells you it's getting long before a summary interrupts it.
 
-The count is the provider's own number for the last turn. Before the first turn —
-and right after a `--resume`, where no turn has run yet — it's a local estimate and
-shown with a `~`; estimates run high, so the first real turn usually moves it down.
+The count is the provider's input-token number for the last request, not the size
+of the unsent next request. Before that measurement is available, after resume,
+`/load` or compaction, and when a response omits usage, it is a local estimate
+marked `~`. The estimate includes instructions, tools and structured history;
+it can differ from the provider's actual tokenizer.
 A narrow terminal drops the path, then the provider, keeping the meter.
 
 Off an interactive terminal (a pipe, CI) there's no footer, so the context size is
-printed after each turn as `[Context: N tokens]` instead.
+printed after each turn as `[Context: N tokens]` instead (`~N` for an estimate).
 
 ### When the terminal wants you back
 
@@ -548,8 +550,8 @@ conversation row is the part `/compact` shrinks.
 The **total** is exact (the provider's own count for the last turn, the same number
 the [status footer](#the-status-footer) shows); the **split** is estimated and scaled onto it,
 so the percentages are meaningful even though the per-part counts are approximate.
-Before the first turn of a session there is nothing to scale to and the report says
-so.
+After a restore, compaction, or a request with missing usage, the measurement is
+unavailable and the report explicitly switches to the full-input estimate.
 
 ### Checking token usage
 
@@ -562,13 +564,13 @@ Token usage this session (as reported by the provider)
     12 calls  ·  in 103,204  ·  out 307  ·  total 103,511
     cache: 41,208 read  ·  0 written
 
-  Current context: 10,741 tokens (what the next turn re-sends)
+  Current context: 10,741 tokens (provider-reported last input)
 ```
 
-**It counts work you never see.** Sub-agents, orchestrator workers and the query
-router are all real model calls, and they're usually where the tokens go — a single
-delegated research task can spend an order of magnitude more than the turn that
-triggered it. Those are exactly the numbers worth surfacing, so they're included.
+**It counts work you never see.** Sub-agents, orchestrator workers, decomposition,
+aggregation, routing, compaction summaries, review and recovery calls are included.
+Retries with missing usage are counted as unmeasured attempts, not silently
+treated as free requests.
 
 **The cache line is prompt caching at work.** On the providers that support it the
 stable start of every request — system prompt, tool definitions, prior turns — is
@@ -577,12 +579,16 @@ tool calls. See
 [`PROMPT_CACHE`](../configuration.md#prompt_cache-reuse-the-prompt-prefix-instead-of-re-paying-for-it)
 for what it applies to and how to turn it off.
 
-**`/usage` and the footer's context meter measure different things.** The footer is
-how big the prompt is _right now_ — what the next turn re-sends, and what
-[compaction](#commands) shrinks. `/usage` is cumulative spend since the session
+**`/usage` and the footer's context meter measure different things.** The footer
+shows the last measured request size, or an estimate of current input when that
+measurement is unavailable. `/usage` is cumulative spend since the session
 started (or since your last `/clear`, which resets it). A long conversation has a
 large context; a conversation with lots of delegated work has large usage. They move
 independently.
+
+Resume/load restores conversation context and its compaction summary, not past
+spending. A freshly resumed process therefore starts with zero spending; loading
+history into an existing process does not add its historical tokens to `/usage`.
 
 !!! note "No dollar figure, on purpose"
 
