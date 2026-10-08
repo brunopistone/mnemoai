@@ -379,18 +379,26 @@ class LangGraphAgent:
                 "Prompt caching enabled (ttl=%s)", self._cache_policy.control.get("ttl")
             )
 
-        self.model_with_tools = self._bind_tools(model, tools)
+        self._tool_routes = tool_routes
+        self.rebind_tools(tools)
 
+        self.graph = self._build_graph()
+
+    def rebind_tools(self, tools) -> None:
+        """Publish newly discovered tools without replacing history or permissions."""
+        model = self.model
+        tool_routes = self._tool_routes
+        model_with_tools = self._bind_tools(model, tools)
         # External (mcp.json) tools aren't in any route allowlist; tracked so the
         # orchestrator can describe them and they can be bound on every route.
-        self.external_tools: List[BaseTool] = []
+        external_tools: List[BaseTool] = []
 
         # Build per-route tool subsets and model bindings.
-        self.tools_by_route: Optional[Dict[str, List[BaseTool]]] = None
-        self.models_by_route: Optional[Dict[str, BaseChatModel]] = None
-        if router and tool_routes:
-            self.tools_by_route = {}
-            self.models_by_route = {}
+        tools_by_route = None
+        models_by_route = None
+        if self.router and tool_routes:
+            tools_by_route = {}
+            models_by_route = {}
             # Meta tools reach every route (incl. simple_qa); excluded from
             # external_tools so the orchestrator doesn't re-describe them.
             always_tools = [t for t in tools if t.name in self._ALWAYS_AVAILABLE_TOOLS]
@@ -403,7 +411,6 @@ class LangGraphAgent:
                 if t.name not in known_names
                 and t.name not in self._ALWAYS_AVAILABLE_TOOLS
             ]
-            self.external_tools = external_tools
             for route_name, tool_names in tool_routes.items():
                 if tool_names is None:
                     route_tools = tools  # 'full' already binds everything
@@ -414,10 +421,15 @@ class LangGraphAgent:
                 else:
                     matched = [t for t in tools if t.name in tool_names]
                     route_tools = matched + external_tools + always_tools
-                self.tools_by_route[route_name] = route_tools
-                self.models_by_route[route_name] = self._bind_tools(model, route_tools)
-
-        self.graph = self._build_graph()
+                tools_by_route[route_name] = route_tools
+                models_by_route[route_name] = self._bind_tools(model, route_tools)
+        # No partial update if a provider rejects a schema in any route.
+        self.tools = tools
+        self.model_with_tools = model_with_tools
+        self.external_tools = external_tools
+        self.tools_by_route = tools_by_route
+        self.models_by_route = models_by_route
+        self._last_input_tokens = None  # new schemas change the next request size
 
     def _bind_tools(self, model: BaseChatModel, tools: Optional[Sequence[BaseTool]]):
         """Bind a tool subset plus this provider's prompt-cache breakpoint.

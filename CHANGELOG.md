@@ -9,6 +9,31 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.29.0] — 2026-10-08
+
+### Added
+
+- One-command macOS/Linux installer with an isolated managed Python runtime,
+  checksum-verified uv bootstrap, repeatable updates, explicit version selection,
+  local-wheel testing and warnings for older commands shadowing the new install.
+
+### Changed
+
+- Open the prompt and resume picker while external MCP servers discover their
+  tools in the background. Show connecting/failed status; wait cancellably before
+  the first model request, then bind all tools without resetting history or trust.
+- Defer imports of unselected episodic storage backends and accurately label
+  memory/model/tool initialization in the startup spinner.
+
+### Fixed
+
+- Close MCP subprocesses even when shutdown interrupts their initialization,
+  including when a timeout has already started tearing down the connection.
+- Resolve already-prefixed tool-name collisions without mutating provider schemas.
+- Preserve original tracebacks when deferred MCP startup failures are reported.
+- Refuse unrelated installer destinations before updating a working runtime or
+  removing its launcher.
+
 ## [1.28.2] — 2026-10-07
 
 ### Fixed

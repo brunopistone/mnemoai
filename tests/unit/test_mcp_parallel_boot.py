@@ -78,6 +78,8 @@ def _multi(members):
     m._members = members
     m._tools = []
     m._cancel_probe = None
+    m._startup = None
+    m._startup_merged = False
     return m
 
 
@@ -303,3 +305,127 @@ class TestTheParallelHelper:
 
     def test_no_members_is_an_empty_result(self):
         assert _in_parallel([], lambda w: w) == []
+
+
+class TestBackgroundStartup:
+    def test_status_notices_a_server_that_dies_after_discovery(self):
+        external = _Member(["browser"])
+        m = _multi([("builtin", _Member(["read"])), ("browser", external)])
+        try:
+            m.start_background()
+            m.finish_startup()
+            external._connected = False
+            assert m.startup_status()[1].state == "disconnected"
+        finally:
+            m.shutdown()
+
+    def test_external_named_builtin_does_not_overwrite_the_core_result(self):
+        m = _multi([
+            ("builtin", _Member(["read"])), ("builtin", _Member(["read", "external"])),
+        ])
+        try:
+            assert [t.name for t in m.start_background()] == ["read"]
+            assert [t.name for t in m.finish_startup()] == ["read", "builtin__read", "external"]
+        finally:
+            m.shutdown()
+
+    def test_worker_interrupt_is_not_reported_as_an_optional_server_failure(self):
+        m = _multi([
+            ("builtin", _Member(["read"])), ("external", _Member(fail=KeyboardInterrupt())),
+        ])
+        try:
+            m.start_background()
+            with pytest.raises(KeyboardInterrupt):
+                m.finish_startup()
+        finally:
+            m.shutdown()
+
+    def test_prompt_does_not_wait_for_external_schemas(self):
+        gate = threading.Event()
+        external = _Member(["browser"], gate=gate)
+        m = _multi([("builtin", _Member(["read"])), ("browser", external)])
+        try:
+            assert [t.name for t in m.start_background()] == ["read"]
+            assert not gate.is_set()
+            assert [(s.name, s.state) for s in m.startup_status()] == [
+                ("builtin", "ready"), ("browser", "connecting"),
+            ]
+            # Re-entering the context (RAG setup/query) must not start it twice.
+            assert m.__enter__() is m
+            assert [t.name for t in m.finish_startup(wait=False)] == ["read"]
+            gate.set()
+            assert [t.name for t in m.list_tools_sync()] == ["read", "browser"]
+            assert m.finish_startup() is m.list_tools_sync()
+        finally:
+            gate.set()
+            m.shutdown()
+
+    def test_cancelled_wait_leaves_discovery_for_the_next_turn(self):
+        gate = threading.Event()
+        external = _Member(["browser"], gate=gate)
+        m = _multi([("builtin", _Member(["read"])), ("browser", external)])
+        try:
+            m.start_background()
+            m.set_cancel_probe(lambda: True)
+            assert external._cancel_probe is None
+            with pytest.raises(KeyboardInterrupt):
+                m.finish_startup()
+            gate.set()
+            m.set_cancel_probe(lambda: False)
+            assert [t.name for t in m.finish_startup()] == ["read", "browser"]
+            assert external._cancel_probe is m._cancel_probe
+        finally:
+            gate.set()
+            m.shutdown()
+
+    def test_failure_report_waits_for_foreground_and_only_prints_once(self, reports):
+        m = _multi([
+            ("builtin", _Member(["read"])),
+            ("broken", _Member(list_fail=ValueError("bad schema"))),
+        ])
+        try:
+            m.start_background()
+            m._startup.wait()
+            assert reports == []
+            assert m.startup_status()[1].state == "failed"
+            assert [t.name for t in m.finish_startup()] == ["read"]
+            m.finish_startup()
+            assert len(reports) == 1
+            assert reports[0][2] is threading.current_thread()
+        finally:
+            m.shutdown()
+
+    def test_builtin_schema_failure_still_aborts_and_closes_every_member(self):
+        members = [
+            ("builtin", _Member(list_fail=RuntimeError("no core schema"))),
+            ("external", _Member(["tool"])),
+        ]
+        m = _multi(members)
+        with pytest.raises(RuntimeError, match="no core schema"):
+            m.start_background()
+        assert all(w.shut_down for _, w in members)
+        assert all(s.state == "closed" for s in m.startup_status())
+
+    def test_shutdown_rejects_late_results(self):
+        gate = threading.Event()
+        m = _multi([
+            ("builtin", _Member(["read"])),
+            ("external", _Member(["tool"], gate=gate)),
+        ])
+        m.start_background()
+        m.shutdown()
+        gate.set()
+        for thread in m._startup.threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        with pytest.raises(RuntimeError, match="closed"):
+            m.finish_startup()
+        assert [t.name for t in m._tools] == ["read"]
+
+    def test_collisions_stay_stable_without_mutating_provider_wrappers(self):
+        builtin = _Member(["read", "ext__read"])
+        external = _Member(["read"])
+        m = _multi([("builtin", builtin), ("ext", external)])
+        assert [t.name for t in m.list_tools_sync()] == ["read", "ext__read", "ext__read_2"]
+        assert external._tools[0].name == "read"
+        assert [t.name for t in m.list_tools_sync()] == ["read", "ext__read", "ext__read_2"]

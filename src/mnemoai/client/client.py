@@ -396,8 +396,15 @@ class LangGraphClient:
                     self.llm_controller.initialize_model,
                     callbacks=[self.callback_handler],
                 )
+                background_tools = (
+                    self.mcp_client.start_background()
+                    if isinstance(self.mcp_client, MultiMCPClient) else None
+                )
                 with self.mcp_client:
-                    self.tools = self.mcp_client.list_tools_sync()
+                    self.tools = (
+                        background_tools if background_tools is not None
+                        else self.mcp_client.list_tools_sync()
+                    )
                     logger.info(f"Loaded {len(self.tools)} tools from MCP server")
 
                     if config.get("ENABLE_RAG", False):
@@ -480,7 +487,25 @@ class LangGraphClient:
             # exc_info, not format_exc(): the traceback belongs in the log file,
             # and the console formatter keeps the screen to one line.
             logger.error(f"Client start failed: {e}", exc_info=True)
+            shutdown = getattr(self.mcp_client, "shutdown", None)
+            if shutdown is not None:
+                shutdown()
             raise e
+
+    def refresh_tools(self, *, wait=False) -> None:
+        """Adopt a complete discovery snapshot only between model turns."""
+        if not isinstance(self.mcp_client, MultiMCPClient):
+            return
+        if self.mcp_client._startup is None:
+            return
+        if wait and any(s.state == "connecting" for s in self.mcp_client.startup_status()):
+            self.spinner.set_label("Connecting external tools")
+        tools = self.mcp_client.finish_startup(wait=wait)
+        if wait:
+            self.spinner.set_label("Thinking")
+        if tools is not self.tools:
+            self.agent.rebind_tools(tools)
+            self.tools = tools
 
     def query(self, prompt: str) -> str:
         """Send a query to the agent and return its response."""
@@ -501,6 +526,10 @@ class LangGraphClient:
         review_context = []
 
         try:
+            if isinstance(self.agent, LangGraphAgent):
+                # invoke() normally resets this, but discovery precedes invoke.
+                self.agent._cancel_event.clear()
+                self.refresh_tools(wait=True)
             reviewer = getattr(self, "reviewer", None)
             if reviewer is not None and reviewer.enabled:
                 if not delivery_only and not work_review.obvious_conversation(prompt):

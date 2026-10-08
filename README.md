@@ -34,9 +34,14 @@ Full documentation is available at **https://brunopistone.github.io/mnemoai/**
 ## 🚀 Quick Start
 
 ```bash
-pip install mnemoai-assistant   # or: uv tool install mnemoai-assistant
+curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh | sh
 mnemoai                          # verbose (shows thinking); --no-verbose to hide
 ```
+
+macOS/Linux: the installer manages an isolated Python runtime; re-run it to update.
+Follow its PATH hint if needed. Existing configuration and conversations stay in
+`~/.mnemoai`. Prefer managing Python yourself? `uv tool install mnemoai-assistant`,
+`pipx install mnemoai-assistant`, and `pip install mnemoai-assistant` still work.
 
 On first run, if no config is found, an interactive configurator launches and walks you through picking a provider, model, and feature toggles — then writes `~/.mnemoai/config/config.yaml`.
 

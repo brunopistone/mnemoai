@@ -314,6 +314,16 @@ Two tools legitimately stay on the loop because they really await: `web_search` 
 
 ### External MCP servers (`client/mcp_config.py`, `MultiMCPClient`)
 
+Interactive startup uses `client/mcp_startup.py` for external schema discovery.
+Built-in tools remain required before the prompt; external discovery continues in
+daemon threads. `client.refresh_tools(wait=True)` gates the first model request:
+all results merge in declaration order and `agent.rebind_tools()` atomically
+rebuilds main/route bindings without losing restored history or permissions.
+`/mcp`, `/doctor` and the toolbar distinguish pending discovery from failure.
+Only the foreground publishes tools or prints failures; rendering reads cached
+status. A cancelled wait leaves discovery alive, while shutdown closes even
+pending handshakes. The embedded synchronous API remains available.
+
 The built-in server is always launched; additional stdio MCP servers can be declared in `~/.mnemoai/mcp/mcp.json` (standard `mcpServers` schema; legacy flat `~/.mnemoai/mcp.json` still read). `load_external_servers()` parses them (tolerant: missing/bad file or entry → skip, don't crash). `MultiMCPClient` (in `mcp_tool_wrapper.py`) owns the built-in wrapper + one per external server, connects them together, and merges tools — namespacing a colliding external tool as `servername__tool` (built-in names always win; the server is still called with the original name). External tools are appended to **every** route in `agent.py` — including the no-tools `simple_qa` route — so routing never hides them (a short factual question like "what time is it?" classifies as `simple_qa`, so an external server such as `time` must be reachable there too). When orchestration is enabled, `_external_tools_prompt_block()` injects the external tool names/descriptions into the decomposition prompt and instructs the decomposer to route subtasks needing them to the `full` category (which binds every tool) — otherwise the decomposer, unaware they exist, can't target them. `/mcp` lists status.
 
 ### Multi-provider LLM abstraction (`models/controllers/llm_controller.py`)

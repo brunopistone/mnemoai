@@ -264,7 +264,9 @@ class TestMemberFailureIsReported:
         assert "McpError: nope" in message
         # exc_info → the traceback reaches the FILE; console=False → the app's own
         # red line stays the only thing on screen.
-        assert kwargs.get("exc_info") is True
+        details = kwargs["exc_info"]
+        assert details[2] is not None
+        assert "nope" in logging.Formatter().formatException(details)
         assert kwargs.get("extra") == {"console": False}
 
     def test_the_builtin_server_still_re_raises(self, reported):
@@ -282,7 +284,10 @@ class TestMemberFailureIsReported:
 
         assert "could not list tools; skipping." in printed[0]
         assert "McpError: boom" in printed[0]
-        assert records and records[0][1].get("exc_info") is True
+        assert records
+        details = records[0][1]["exc_info"]
+        assert details[2] is not None
+        assert "boom" in logging.Formatter().formatException(details)
 
 
 def test_the_console_record_is_suppressed_for_our_own_line(caplog):

@@ -16,7 +16,7 @@ def _inline(value) -> str:
 
 
 def render_mcp_status(
-    members, tools, *, verbose=False, config_path=None, width=88
+    members, tools, *, verbose=False, config_path=None, width=88, startup=()
 ) -> str:
     """Render already-loaded connection/tool data, without making MCP requests.
 
@@ -24,17 +24,27 @@ def render_mcp_status(
     need no namespace, and a server can itself return a prefixed tool name.
     """
     lines = [f"{_BOLD}MCP Tools{_RESET}", ""]
-    for name, wrapper in members:
+    for index, (name, wrapper) in enumerate(members):
         owned = [tool for tool in tools if getattr(tool, "mcp_client", None) is wrapper]
         connected = getattr(wrapper, "_connected", True)
         status = "connected" if connected else "disconnected"
+        if index < len(startup):
+            entry = startup[index]
+            status = "connected" if entry.state == "ready" else entry.state
+            if entry.state == "ready" and entry.tool_count and not owned:
+                status = "ready · awaiting tool activation"
+            connected = entry.state == "ready"
         color = _GREEN if connected else _DIM
-        noun = "tool" if len(owned) == 1 else "tools"
+        count = startup[index].tool_count if index < len(startup) else len(owned)
+        noun = "tool" if count == 1 else "tools"
         lines.append(
             f"  • {_inline(name)}: {color}{status}{_RESET} "
-            f"({_DIM}{len(owned)} {noun}{_RESET})"
+            f"({_DIM}{count} {noun}{_RESET})"
         )
         if verbose:
+            if count and not owned:
+                lines.append("    Tools awaiting activation after discovery finishes.")
+                continue
             labels = []
             for tool in owned:
                 exposed = _inline(tool.name)
@@ -68,6 +78,17 @@ def render_mcp_status(
     else:
         lines.append(f"  {_DIM}Use /mcp verbose for tools and setup details.{_RESET}")
     return "\n".join(lines)
+
+
+def mcp_startup_hint(startup) -> str:
+    """One quiet status line; never perform discovery during a UI repaint."""
+    pending = [_inline(s.name) for s in startup if s.state == "connecting"]
+    failed = [_inline(s.name) for s in startup if s.state in {"failed", "disconnected"}]
+    if pending:
+        return "Connecting tools: " + ", ".join(pending) + " · /mcp"
+    if failed:
+        return "Tools unavailable: " + ", ".join(failed) + " · /mcp"
+    return ""
 
 
 def render_model_update(change, *, applied: bool) -> str:

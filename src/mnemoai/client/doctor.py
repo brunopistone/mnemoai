@@ -435,6 +435,19 @@ def _external_mcp_checks(client: Any) -> List[Check]:
     if not declared:
         return []
 
+    snapshot = getattr(getattr(client, "mcp_client", None), "startup_status", None)
+    statuses = snapshot() if snapshot is not None else ()
+    if statuses:
+        states = {s.name: s.state for s in statuses}
+        pending = [n for n in declared if states.get(n) == "connecting"]
+        failed = [n for n in declared if states.get(n) not in {"ready", "connecting"}]
+        if pending or failed:
+            detail = "; ".join(filter(None, [
+                "connecting: " + ", ".join(pending) if pending else "",
+                "not running: " + ", ".join(failed) if failed else "",
+            ]))
+            return [Check("Tools", "external MCP servers", WARN if failed else INFO, detail)]
+
     # `_members` holds only the servers that actually connected (MultiMCPClient
     # prunes the failures in __enter__), with the built-in one first.
     members = getattr(getattr(client, "mcp_client", None), "_members", None)

@@ -9,9 +9,7 @@ from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.tool_results import is_error_result
 
-from .chroma_store import ChromaEpisodicStore
 from .episode_tools import NO_TOOLS, clip_task, format_tools
-from .faiss_store import FAISSEpisodicStore
 
 
 class EpisodicMemoryManager:
@@ -49,8 +47,12 @@ class EpisodicMemoryManager:
         )
 
         if store_type == "faiss":
+            from mnemoai.client.memory.faiss_store import FAISSEpisodicStore
+
             self.store = FAISSEpisodicStore(persist_path, embeddings_controller)
         else:
+            from mnemoai.client.memory.chroma_store import ChromaEpisodicStore
+
             self.store = ChromaEpisodicStore(persist_path, embeddings_controller)
 
     def count_tokens(self, text: str) -> int:
