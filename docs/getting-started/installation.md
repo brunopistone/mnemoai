@@ -38,8 +38,13 @@ Recommended one-command install (macOS/Linux):
 curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh | sh
 ```
 
-Re-run the same command to update to the latest stable PyPI release. The installer
-uses `uv` with an isolated, managed Python 3.12 runtime. If `uv` is missing, it
+Re-run the same command to update to the latest stable **GitHub release**. The
+installer resolves the release when it runs, pins its wheel by SHA-256, and checks
+the installed version before reporting success. GitHub publication no longer has
+to wait for PyPI indexing. If release discovery or checksum verification fails,
+installation stops rather than silently selecting an older release.
+
+The installer uses `uv` with an isolated, managed Python 3.12 runtime. If `uv` is missing, it
 downloads a pinned binary and verifies its SHA-256 checksum before executing it.
 Python bytecode is compiled during installation rather than on the first launch.
 This is still the Python application, not a native rewrite.
@@ -65,7 +70,7 @@ Inspect the script before running it if you prefer:
 curl -fsSLo install.sh https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh
 less install.sh
 sh install.sh
-sh install.sh --version 1.29.0  # optional explicit published version
+sh install.sh --version 1.29.0  # optional explicit PyPI version; bypasses latest-release lookup
 ```
 
 `MNEMOAI_INSTALL_DIR` and `MNEMOAI_BIN_DIR` override the runtime and command
@@ -79,6 +84,11 @@ curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.s
 From a checkout, `sh install.sh` runs the same installer. Release testing can use
 `sh install.sh --wheel /absolute/path/mnemoai_assistant-VERSION-py3-none-any.whl`.
 Windows and musl-based Linux are not supported by this installer.
+
+The completion message shows the verified installed version and executable path.
+If the plain `mnemoai` command still starts an older version, use that printed path
+directly and check `type -a mnemoai`. After correcting PATH, restart your shell,
+or run `hash -r` (bash) / `rehash` (zsh), to clear a cached executable location.
 
 Alternatives with your own Python:
 
@@ -98,6 +108,28 @@ uv tool upgrade mnemoai-assistant
 # or: pipx upgrade mnemoai-assistant
 # or: pip install -U mnemoai-assistant
 ```
+
+### Uninstall
+
+Close the assistant before uninstalling. For an installation made with `install.sh`:
+
+```bash
+mnemo_runtime="${MNEMOAI_INSTALL_DIR:-$HOME/.local/share/mnemoai-runtime}"
+mnemo_uv="$(command -v uv || printf '%s' "$mnemo_runtime/bootstrap/0.12.23/uv")"
+UV_TOOL_DIR="$mnemo_runtime/tools" \
+UV_TOOL_BIN_DIR="${MNEMOAI_BIN_DIR:-$HOME/.local/bin}" \
+"$mnemo_uv" --no-config tool uninstall mnemoai-assistant
+```
+
+For custom installation directories, set the same `MNEMOAI_INSTALL_DIR` and
+`MNEMOAI_BIN_DIR` values you used when installing. The command removes the
+application environment and its launcher, not independently installed copies.
+You may then move the now-unused runtime directory to Trash to reclaim its
+private Python, bootstrap files, and cached release wheels.
+
+Keep `~/.mnemoai` to preserve configuration, memory, and conversations.
+For a manual pip/pipx/uv installation, use that package manager's uninstall
+command in the original environment instead.
 
 ## 3. First run setup
 

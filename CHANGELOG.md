@@ -9,6 +9,14 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolve the installer's default version from the latest stable GitHub release,
+  pin its wheel by SHA-256, and verify the installed version. A lagging PyPI index
+  can no longer silently select an older release.
+- Show the installed version and document shell-cache/PATH troubleshooting and
+  uninstalling the private runtime without deleting user data.
+
 ## [1.29.0] — 2026-10-08
 
 ### Added

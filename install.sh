@@ -6,14 +6,103 @@ fail() { printf 'mnemoai installer: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' \
         'Usage: sh install.sh [--version VERSION | --wheel /absolute/package.whl]' \
-        'Install or update mnemoai-assistant (latest stable by default).' \
+        'Install/update the latest stable GitHub release; --version selects a PyPI version.' \
         'MNEMOAI_INSTALL_DIR: runtime directory (default ~/.local/share/mnemoai-runtime)' \
         'MNEMOAI_BIN_DIR: command directory (default ~/.local/bin)' \
         'Existing config, memory, sessions and shell profiles are not modified.'
 }
 
+make_temp() {
+    if [ -z "${installer_tmp:-}" ]; then
+        installer_tmp=$(mktemp -d "${TMPDIR:-/tmp}/mnemoai-install.XXXXXXXX") || fail 'cannot create temporary directory'
+        trap 'rm -rf -- "$installer_tmp"; if [ -n "${release_stage:-}" ]; then rm -f -- "$release_stage"; fi' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM HUP
+    fi
+}
+
+verify_checksum() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual=$(sha256sum "$1")
+    elif command -v shasum >/dev/null 2>&1; then
+        actual=$(shasum -a 256 "$1")
+    else
+        fail 'sha256sum or shasum is required to verify the download'
+    fi
+    actual=${actual%% *}
+    [ "$actual" = "$2" ] || fail 'checksum mismatch; refusing an unverified download'
+}
+
+latest_release() {
+    command -v curl >/dev/null 2>&1 || fail 'curl is required to resolve the latest release'
+    make_temp
+    printf 'Checking the latest stable MnemoAI release…\n'
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 --max-time 60 --retry 2 \
+        --header 'Accept: application/vnd.github+json' --header 'Cache-Control: no-cache' \
+        'https://api.github.com/repos/brunopistone/mnemoai/releases/latest' \
+        --output "$installer_tmp/release.json" ||
+        fail 'cannot determine the latest release; no older version was selected'
+
+    # Python is required by the app anyway. Resolve it privately before parsing
+    # JSON; no jq dependency, system Python, project environment or .env file.
+    release_info=$(
+        UV_PYTHON_INSTALL_DIR="$runtime/python" \
+        "$uv_command" --no-config run --no-project --isolated --no-env-file \
+            --python 3.12 --managed-python python -I -c '
+import json
+import re
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        release = json.load(stream)
+    tag = release["tag_name"]
+    if release.get("draft") is not False or release.get("prerelease") is not False:
+        raise ValueError("expected a published stable release")
+    if not isinstance(tag, str) or not re.fullmatch(r"v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)", tag, re.ASCII):
+        raise ValueError("unexpected stable release tag")
+    version = tag[1:]
+    name = f"mnemoai_assistant-{version}-py3-none-any.whl"
+    url = f"https://github.com/brunopistone/mnemoai/releases/download/{tag}/{name}"
+    assets = [asset for asset in release["assets"] if asset.get("name") == name]
+    if len(assets) != 1 or assets[0].get("browser_download_url") != url:
+        raise ValueError("release has no unique wheel at the expected repository URL")
+    digest = assets[0].get("digest", "")
+    if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("release wheel has no valid SHA-256 digest")
+    print(version, digest.removeprefix("sha256:"))
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    sys.exit("Invalid or incomplete GitHub release metadata; refusing an unverified install")
+' "$installer_tmp/release.json") ||
+        fail 'cannot verify the latest release; existing installation was not updated'
+    expected_version=${release_info%% *}
+    release_digest=${release_info#* }
+    printf 'Selected MnemoAI %s from GitHub Releases.\n' "$expected_version"
+    wheel_name="mnemoai_assistant-$expected_version-py3-none-any.whl"
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 --max-time 180 --retry 2 \
+        "https://github.com/brunopistone/mnemoai/releases/download/v$expected_version/$wheel_name" \
+        --output "$installer_tmp/$wheel_name" || fail 'cannot download the selected release'
+    verify_checksum "$installer_tmp/$wheel_name" "$release_digest"
+
+    # Keep the verified source for uv's receipt; publish atomically even when
+    # TMPDIR and the installation directory live on different filesystems.
+    release_dir="$runtime/releases/$expected_version"
+    mkdir -p "$release_dir"
+    release_stage=$(mktemp "$release_dir/.wheel.XXXXXXXX") || fail 'cannot stage the verified wheel'
+    cp "$installer_tmp/$wheel_name" "$release_stage"
+    package="$release_dir/$wheel_name"
+    mv -f "$release_stage" "$package"
+    release_stage=
+}
+
 main() {
     package=mnemoai-assistant
+    use_latest=true
+    expected_version=
+    installer_tmp=
+    release_stage=
     case "${1:-}" in
         --help|-h) usage; return ;;
         --version)
@@ -22,6 +111,7 @@ main() {
                 ''|*[!0-9a-zA-Z.+-]*|[!0-9]*) fail 'invalid version' ;;
             esac
             package="mnemoai-assistant==$2"
+            use_latest=false
             ;;
         --wheel)
             [ "$#" -eq 2 ] || fail '--wheel needs exactly one absolute wheel path'
@@ -30,6 +120,7 @@ main() {
                 *) fail 'expected an absolute mnemoai_assistant wheel path' ;;
             esac
             package=$2
+            use_latest=false
             ;;
         '') [ "$#" -eq 0 ] || fail 'unexpected arguments' ;;
         *) usage >&2; fail 'unknown option' ;;
@@ -83,30 +174,14 @@ main() {
         if [ ! -x "$uv_command" ]; then
             command -v curl >/dev/null 2>&1 || fail 'curl is required'
             command -v tar >/dev/null 2>&1 || fail 'tar is required'
-            if command -v sha256sum >/dev/null 2>&1; then
-                hash_command=sha256sum
-            elif command -v shasum >/dev/null 2>&1; then
-                hash_command=shasum
-            else
-                fail 'sha256sum or shasum is required to verify the download'
-            fi
             # Only this validated mktemp directory is ever removed.
-            installer_tmp=$(mktemp -d "${TMPDIR:-/tmp}/mnemoai-install.XXXXXXXX") || fail 'cannot create temporary directory'
-            trap 'rm -rf -- "$installer_tmp"' EXIT
-            trap 'exit 130' INT
-            trap 'exit 143' TERM HUP
+            make_temp
             printf 'Downloading the isolated-runtime installer (uv 0.12.23)…\n'
             curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
                 --connect-timeout 15 --max-time 180 --retry 2 \
                 "https://github.com/astral-sh/uv/releases/download/0.12.23/uv-$target.tar.gz" \
                 --output "$installer_tmp/uv.tar.gz"
-            if [ "$hash_command" = shasum ]; then
-                actual=$("$hash_command" -a 256 "$installer_tmp/uv.tar.gz")
-            else
-                actual=$("$hash_command" "$installer_tmp/uv.tar.gz")
-            fi
-            actual=${actual%% *}
-            [ "$actual" = "$checksum" ] || fail 'uv checksum mismatch; nothing was installed'
+            verify_checksum "$installer_tmp/uv.tar.gz" "$checksum"
             tar -xzf "$installer_tmp/uv.tar.gz" -C "$installer_tmp" "uv-$target/uv"
             mkdir -p "$runtime/bootstrap/0.12.23"
             # Atomic publication; an interrupted download never becomes executable.
@@ -116,6 +191,9 @@ main() {
         fi
     fi
 
+    if [ "$use_latest" = true ]; then
+        latest_release
+    fi
     printf 'Installing MnemoAI with a managed Python 3.12 runtime…\n'
     # Isolate both tool and interpreter storage. Do not import packages from the
     # developer's global Python or write to the user's existing uv tool installs.
@@ -125,7 +203,13 @@ main() {
         --python 3.12 --managed-python "$package"
 
     [ -x "$bin_dir/mnemoai" ] || fail 'installation did not produce the mnemoai command'
-    printf '\nInstalled: %s/mnemoai\n' "$bin_dir"
+    installed_version=$("$runtime/tools/mnemoai-assistant/bin/python" -I -c \
+        'from importlib.metadata import version; print(version("mnemoai-assistant"))') ||
+        fail 'cannot verify the installed package version'
+    if [ -n "$expected_version" ] && [ "$installed_version" != "$expected_version" ]; then
+        fail "expected $expected_version but installed $installed_version; installation is not verified"
+    fi
+    printf '\nInstalled MnemoAI %s: %s/mnemoai\n' "$installed_version" "$bin_dir"
     printf 'Your configuration and conversations were left unchanged.\n'
     active=$(command -v mnemoai || true)
     if [ -z "$active" ] || [ ! "$active" -ef "$bin_dir/mnemoai" ]; then
@@ -133,6 +217,7 @@ main() {
             printf 'Note: your PATH still selects the older command: %s\n' "$active"
         fi
         printf 'Add %s to the FRONT of PATH, or launch the Installed path above.\n' "$bin_dir"
+        printf 'After changing PATH, restart your shell or run hash -r (bash) / rehash (zsh).\n'
         printf 'Shell profiles were not edited. Re-run this installer to update.\n'
     else
         printf 'Run mnemoai to start. Re-run this installer to update.\n'
