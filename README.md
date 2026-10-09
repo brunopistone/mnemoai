@@ -38,7 +38,9 @@ curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.s
 mnemoai                          # verbose (shows thinking); --no-verbose to hide
 ```
 
-macOS/Linux: the installer manages an isolated Python runtime; re-run it to update.
+macOS/Linux: the installer selects the latest stable **GitHub release**, verifies
+its wheel checksum and installed version, and manages an isolated Python runtime.
+Re-run the same command to update, even if PyPI publication is still pending.
 Follow its PATH hint if needed. Existing configuration and conversations stay in
 `~/.mnemoai`. Prefer managing Python yourself? `uv tool install mnemoai-assistant`,
 `pipx install mnemoai-assistant`, and `pip install mnemoai-assistant` still work.
@@ -46,6 +48,33 @@ Follow its PATH hint if needed. Existing configuration and conversations stay in
 On first run, if no config is found, an interactive configurator launches and walks you through picking a provider, model, and feature toggles — then writes `~/.mnemoai/config/config.yaml`.
 
 → See the [Getting Started guide](https://brunopistone.github.io/mnemoai/getting-started/) for full setup.
+
+If `mnemoai` still displays an older version, run `~/.local/bin/mnemoai` directly
+(or your custom installer's printed path). An older command or cached shell lookup
+may take precedence: put the new bin directory first on `PATH`, then restart the
+shell or run `hash -r` in bash / `rehash` in zsh.
+
+### Uninstall
+
+Close MnemoAI, then remove the installer-managed application and launcher:
+
+```bash
+mnemo_runtime="${MNEMOAI_INSTALL_DIR:-$HOME/.local/share/mnemoai-runtime}"
+mnemo_uv="$(command -v uv || printf '%s' "$mnemo_runtime/bootstrap/0.12.23/uv")"
+UV_TOOL_DIR="$mnemo_runtime/tools" \
+UV_TOOL_BIN_DIR="${MNEMOAI_BIN_DIR:-$HOME/.local/bin}" \
+"$mnemo_uv" --no-config tool uninstall mnemoai-assistant
+```
+
+If you installed into custom directories, set `MNEMOAI_INSTALL_DIR` and
+`MNEMOAI_BIN_DIR` to those paths first. After uninstalling, you may move the
+now-unused runtime directory (normally `~/.local/share/mnemoai-runtime`) to Trash
+to remove its private Python, bootstrap files, and cached release wheels.
+
+**Your settings, memory, and conversations remain in `~/.mnemoai`.**
+Other installations are separate: use `pip uninstall mnemoai-assistant`,
+`pipx uninstall mnemoai-assistant`, or `uv tool uninstall mnemoai-assistant`
+with the package manager/environment that installed them.
 
 ## ✨ Key Features
 
