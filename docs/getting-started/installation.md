@@ -6,7 +6,8 @@ This guide takes you from a fresh machine to a working `mnemoai` command.
 
 Required:
 
-- Python 3.11+
+- macOS or glibc-based Linux (arm64/x86_64), with `curl` and `tar`
+- Python 3.11+ only for manual installs; the one-command installer manages Python 3.12
 - Access to at least one chat model provider
 
 Choose one provider to start:
@@ -31,15 +32,58 @@ Optional, depending on features you enable:
 
 ## 2. Install Mnemo AI
 
-Recommended isolated install:
+Recommended one-command install (macOS/Linux):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh | sh
+```
+
+Re-run the same command to update to the latest stable PyPI release. The installer
+uses `uv` with an isolated, managed Python 3.12 runtime. If `uv` is missing, it
+downloads a pinned binary and verifies its SHA-256 checksum before executing it.
+Python bytecode is compiled during installation rather than on the first launch.
+This is still the Python application, not a native rewrite.
+
+It does **not** use `sudo`, modify shell profiles, remove an independently installed
+copy, or change `~/.mnemoai` configuration, credentials, memory, or conversations. The default
+command is `~/.local/bin/mnemoai`; the runtime lives in
+`~/.local/share/mnemoai-runtime`. If PATH selects an older installation, the installer
+warns you: put `~/.local/bin` **first** on PATH (and restart your shell), or run
+`~/.local/bin/mnemoai` directly. For example, in bash/zsh:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+If the destination already contains a command not owned by this installer, it
+refuses **before** updating the runtime or removing any old launcher. Choose a
+different `MNEMOAI_BIN_DIR`, or migrate that command yourself.
+
+Inspect the script before running it if you prefer:
+
+```bash
+curl -fsSLo install.sh https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh
+less install.sh
+sh install.sh
+sh install.sh --version 1.29.0  # optional explicit published version
+```
+
+`MNEMOAI_INSTALL_DIR` and `MNEMOAI_BIN_DIR` override the runtime and command
+directories (absolute paths). When piping, set overrides on the `sh` process:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh |
+  MNEMOAI_BIN_DIR="$HOME/bin" sh
+```
+
+From a checkout, `sh install.sh` runs the same installer. Release testing can use
+`sh install.sh --wheel /absolute/path/mnemoai_assistant-VERSION-py3-none-any.whl`.
+Windows and musl-based Linux are not supported by this installer.
+
+Alternatives with your own Python:
 
 ```bash
 uv tool install mnemoai-assistant
-```
-
-Alternatives:
-
-```bash
 pipx install mnemoai-assistant
 # or
 pip install mnemoai-assistant
@@ -47,10 +91,11 @@ pip install mnemoai-assistant
 
 The published package name is `mnemoai-assistant`; the terminal command and Python import package are both `mnemoai`.
 
-Upgrade later with:
+For a **manual** installation, upgrade with its original package manager:
 
 ```bash
 uv tool upgrade mnemoai-assistant
+# or: pipx upgrade mnemoai-assistant
 # or: pip install -U mnemoai-assistant
 ```
 

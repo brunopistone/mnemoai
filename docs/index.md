@@ -15,7 +15,7 @@ It supports local and hosted model providers: **Ollama**, **MLX** (Apple Silicon
 ## Quick start
 
 ```bash
-uv tool install mnemoai-assistant     # or: pip install mnemoai-assistant
+curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh | sh
 mnemoai
 ```
 
@@ -25,7 +25,9 @@ On first run, Mnemo AI launches an interactive setup wizard and writes your user
 ~/.mnemoai/config/config.yaml
 ```
 
-You only need Python 3.11+ and access to at least one model provider. For the easiest local setup, install [Ollama](https://ollama.ai) and pull a chat model before running Mnemo AI.
+On macOS/Linux, the installer manages Python for you; follow its PATH hint if needed.
+You need access to at least one model provider. For the easiest local setup, install
+[Ollama](https://ollama.ai) and pull a chat model before running Mnemo AI.
 
 ## What Mnemo AI can do
 

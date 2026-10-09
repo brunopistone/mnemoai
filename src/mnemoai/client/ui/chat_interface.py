@@ -24,7 +24,11 @@ from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.reflector import current_turn_messages
 from mnemoai.client.memory.skill_store import SkillStore
 from mnemoai.client.ui import notify, review_view, screen, status_bar, turn_view
-from mnemoai.client.ui.command_feedback import render_mcp_status, render_model_update
+from mnemoai.client.ui.command_feedback import (
+    mcp_startup_hint,
+    render_mcp_status,
+    render_model_update,
+)
 from mnemoai.client.ui.spinner import WRAP_UP_LABEL
 from mnemoai.client.ui.tui import (
     _DELETE,
@@ -556,12 +560,17 @@ class ChatInterface:
 
     def _print_mcp_status(self, verbose: bool = False) -> None:
         """Show compact cached status, with tools and setup details on request."""
+        refresh = getattr(self.client, "refresh_tools", None)
+        if refresh is not None:
+            refresh()
         members = getattr(getattr(self.client, "mcp_client", None), "_members", [])
+        snapshot = getattr(getattr(self.client, "mcp_client", None), "startup_status", None)
         tools = getattr(self.client, "tools", None) or []
         print("\n" + render_mcp_status(
             members, tools, verbose=verbose,
             config_path=mcp_config_path() if verbose else None,
             width=shutil.get_terminal_size((88, 24)).columns,
+            startup=snapshot() if snapshot is not None else (),
         ) + "\n")
 
     def _select_saved_conversation(self):
@@ -1084,12 +1093,17 @@ class ChatInterface:
             reviewer = getattr(self.client, "reviewer", None)
             return review_view.current_display(reviewer)
 
+        def _toolbar():
+            snapshot = getattr(getattr(self.client, "mcp_client", None), "startup_status", None)
+            hint = mcp_startup_hint(snapshot()) if snapshot is not None else ""
+            return spinner_toolbar_text(status) or hint
+
         reader = PinnedPromptReader(
             prompt_text=lambda: HTML(self._prompt_html()),
             commands=self._completion_commands,
             history=self.command_history,
             dispatch=_dispatch,
-            toolbar_text=lambda: spinner_toolbar_text(status),
+            toolbar_text=_toolbar,
             reasoning_text=lambda: reasoning.render(time.monotonic()),
             steps_text=steps.render,
             footer_text=_footer,

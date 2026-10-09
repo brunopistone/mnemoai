@@ -4,8 +4,12 @@ the pinned UI. The stderr still lands in ~/.mnemoai/logs/mcp.log for debugging.
 """
 
 import asyncio
+import sys
+import threading
+import time
 
 import anyio
+import psutil
 import pytest
 from mcp import StdioServerParameters
 
@@ -63,6 +67,190 @@ def test_connect_passes_errlog_to_stdio_client(tmp_home, monkeypatch):
     asyncio.run(w._disconnect())
     assert w._errlog is None
     assert errlog.closed
+
+
+def test_shutdown_during_handshake_exits_contexts_and_cannot_restart(tmp_home, monkeypatch):
+    entered = threading.Event()
+    exited = threading.Event()
+    failures = []
+
+    class PendingSession:
+        def __init__(self, *args):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            exited.set()
+
+        async def initialize(self):
+            entered.set()
+            await asyncio.Event().wait()
+
+    class Pipes:
+        async def __aenter__(self):
+            return None, None
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(mod, "ClientSession", PendingSession)
+    monkeypatch.setattr(mod, "stdio_client", lambda *a, **kw: Pipes())
+    wrapper = MCPClientWrapper(StdioServerParameters(command="unused"))
+
+    def connect():
+        try:
+            wrapper.__enter__()
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=connect, daemon=True)
+    thread.start()
+    try:
+        assert entered.wait(5)
+        loop = wrapper._loop
+        wrapper.shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert exited.is_set()
+        assert failures
+        assert loop.is_closed()
+        assert wrapper._session is None
+        with pytest.raises(RuntimeError, match="closed"):
+            wrapper.__enter__()
+        wrapper.shutdown()
+    finally:
+        wrapper.shutdown()
+
+
+def test_shutdown_before_discovery_cannot_launch_a_late_subprocess(tmp_home):
+    wrapper = MCPClientWrapper(StdioServerParameters(command="must-not-run"))
+    wrapper.shutdown()
+    with pytest.raises(RuntimeError, match="closed"):
+        wrapper.__enter__()
+    assert wrapper._loop is None
+
+
+def test_shutdown_reaps_a_real_server_that_never_initializes(tmp_home):
+    pid_file = tmp_home / "child.pid"
+    wrapper = MCPClientWrapper(StdioServerParameters(
+        command=sys.executable,
+        args=["-c", "import os,pathlib,sys,time; "
+              "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)",
+              str(pid_file)],
+        cwd=str(tmp_home),
+    ))
+    failures = []
+
+    def connect():
+        try:
+            wrapper.__enter__()
+        except BaseException as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=connect, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert pid_file.exists()
+        pid = int(pid_file.read_text())
+        assert psutil.pid_exists(pid)
+        wrapper.shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert not psutil.pid_exists(pid), "shutdown orphaned the pending MCP subprocess"
+        assert failures
+    finally:
+        wrapper.shutdown()
+
+
+def test_shutdown_can_precede_the_loop_start(tmp_home, monkeypatch):
+    release = threading.Event()
+    scheduled = threading.Event()
+    original = MCPClientWrapper._run_loop
+
+    def paused_loop(wrapper):
+        scheduled.set()
+        release.wait(5)
+        original(wrapper)
+
+    monkeypatch.setattr(MCPClientWrapper, "_run_loop", paused_loop)
+    wrapper = MCPClientWrapper(StdioServerParameters(command="must-not-run"))
+    wrapper._start_background_loop()
+    assert scheduled.wait(5)
+    loop = wrapper._loop
+    closer = threading.Thread(target=wrapper.shutdown, daemon=True)
+    closer.start()
+    try:
+        assert wrapper._shutdown_requested.wait(5)
+        release.set()
+        closer.join(timeout=5)
+        assert not closer.is_alive()
+        assert loop.is_closed()
+        assert not asyncio.all_tasks(loop)
+    finally:
+        release.set()
+        wrapper.shutdown()
+
+
+def test_shutdown_waits_for_teardown_already_started_by_a_timeout(tmp_home, monkeypatch):
+    exiting = threading.Event()
+    release = threading.Event()
+    exited = threading.Event()
+    closed = threading.Event()
+
+    class Session:
+        def __init__(self, *args):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def initialize(self):
+            await asyncio.Event().wait()
+
+        async def __aexit__(self, *args):
+            exiting.set()
+            # A second task.cancel() would interrupt this cleanup.
+            while not release.is_set():
+                await asyncio.sleep(0.01)
+            exited.set()
+
+    class Pipes:
+        async def __aenter__(self):
+            return None, None
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(mod, "ClientSession", Session)
+    monkeypatch.setattr(mod, "stdio_client", lambda *args, **kwargs: Pipes())
+    wrapper = MCPClientWrapper(StdioServerParameters(command="unused"))
+    wrapper._start_background_loop()
+    loop = wrapper._loop
+    with pytest.raises(mod.MCPCallTimeout):
+        wrapper._run_coroutine(wrapper._connect(), timeout=0.05)
+    assert exiting.wait(5)
+
+    def close():
+        wrapper.shutdown()
+        closed.set()
+
+    closer = threading.Thread(target=close, daemon=True)
+    closer.start()
+    try:
+        assert not closed.wait(0.2), "shutdown abandoned a still-running teardown"
+        release.set()
+        closer.join(timeout=5)
+        assert closed.is_set() and exited.is_set()
+        assert loop.is_closed() and not asyncio.all_tasks(loop)
+    finally:
+        release.set()
+        closer.join(timeout=5)
+        wrapper.shutdown()
 
 
 class TestSessionContextsAreTaskAffine:

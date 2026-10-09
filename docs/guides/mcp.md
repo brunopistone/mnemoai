@@ -33,6 +33,14 @@ Behavior:
 
 - **Additive** — the built-in server is always on; external servers run
   alongside it. Tools from all servers are merged into one list.
+- **Background startup** — the prompt and session picker open once the model and
+  built-in tools are ready; external servers continue connecting. The status line
+  and `/mcp` distinguish connecting, ready and failed servers. Before the first
+  model request, MnemoAI waits for discovery and activates the complete tool set,
+  in configuration order. Esc cancels that wait without cancelling discovery.
+  An immediately submitted request can therefore still wait for a slow server.
+  No cached/stale schemas are advertised as live, and background startup executes
+  no tools or approval prompts.
 - **Resilient** — if an external server fails to start (bad command, missing
   binary, crash), it's logged in red and skipped; the app still runs with the
   built-in server and any others that connected.
@@ -40,7 +48,7 @@ Behavior:
   the external tool is exposed as `servername__tool` so core tools are never
   overridden (the server is still called with the original tool name).
 - **Works with routing & orchestration** — external tools are appended to every
-  non-empty query route, and when orchestration is enabled the task decomposer
+  query route (including `simple_qa`), and when orchestration is enabled the task decomposer
   is told which external tools exist and steers subtasks that need them to the
   `full` category (which binds every tool). So external tools stay reachable
   whether routing/orchestration is on or off.

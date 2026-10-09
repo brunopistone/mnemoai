@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 from langchain_core.messages import AIMessage
 
+from mnemoai.client import client as client_mod
 from mnemoai.client import review
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.managers.agent_conversation_manager import CompactionError
@@ -41,6 +42,27 @@ def test_recall_outage_does_not_prevent_the_chat_call():
     client._inject_episodic_context = Mock(side_effect=RuntimeError("embedding outage"))
     assert client.query("question") == "the answer"
     client.agent.assert_called_once_with("question")
+
+
+def test_first_turn_activates_external_tools_before_calling_the_agent(monkeypatch):
+    client = _client()
+    # This fixture's stand-in represents the real agent lifecycle in query().
+    monkeypatch.setattr(client_mod, "LangGraphAgent", type(client.agent))
+    steps = []
+    client.refresh_tools = lambda **kwargs: steps.append(("tools", kwargs))
+    client.agent.side_effect = lambda prompt: steps.append(("model", prompt)) or "answer"
+    assert client.query("question") == "answer"
+    assert steps == [("tools", {"wait": True}), ("model", "question")]
+    client.agent._cancel_event.clear.assert_called_once()
+
+
+def test_cancel_during_discovery_does_not_call_model_or_change_history(monkeypatch):
+    client = _client()
+    monkeypatch.setattr(client_mod, "LangGraphAgent", type(client.agent))
+    client.refresh_tools = Mock(side_effect=KeyboardInterrupt)
+    client.query("question")
+    client.agent.assert_not_called()
+    assert client.agent.messages == []
 
 
 def test_incomplete_compaction_preserves_the_answer_already_produced():

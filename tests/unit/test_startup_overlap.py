@@ -18,6 +18,7 @@ import pytest
 
 import mnemoai.client.client as client_mod
 from mnemoai.client.client import LangGraphClient
+from mnemoai.client.mcp_tool_wrapper import MultiMCPClient
 
 _BARRIER_TIMEOUT = 5.0
 
@@ -163,6 +164,64 @@ def test_the_cancel_probe_is_still_installed(client):
     client.start()
 
     assert callable(client.mcp_client.probe)
+
+
+def test_interactive_start_uses_builtins_without_waiting_for_external_tools(client):
+    class BackgroundMCP(MultiMCPClient):
+        def __init__(self):
+            self.started = False
+
+        def start_background(self):
+            self.started = True
+            return ["builtin"]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def list_tools_sync(self):
+            pytest.fail("interactive start must not wait for external schemas")
+
+        def set_cancel_probe(self, probe):
+            self.probe = probe
+
+    client.mcp_client = BackgroundMCP()
+    client.llm_controller = _Controller()
+    client.start()
+    assert client.mcp_client.started
+    assert client.tools == ["builtin"]
+    assert client.agent.kwargs["tools"] == ["builtin"]
+
+
+def test_failed_tool_rebinding_can_be_retried_without_losing_the_snapshot(client):
+    class BackgroundMCP(MultiMCPClient):
+        def __init__(self):
+            self._startup = object()
+            self.complete = ["builtin", "external"]
+
+        def finish_startup(self, wait=False):
+            return self.complete
+
+    class Agent:
+        fail = True
+
+        def rebind_tools(self, tools):
+            if self.fail:
+                raise ValueError("binding failed")
+            self.tools = tools
+
+    client.mcp_client = BackgroundMCP()
+    client.agent = Agent()
+    client.tools = ["builtin"]
+    with pytest.raises(ValueError, match="binding failed"):
+        client.refresh_tools()
+    assert client.tools == ["builtin"]
+    client.agent.fail = False
+    client.refresh_tools()
+    assert client.tools is client.mcp_client.complete
+    assert client.agent.tools is client.tools
 
 
 def test_no_worker_thread_outlives_the_boot(client):

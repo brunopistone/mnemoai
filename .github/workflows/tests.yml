@@ -10,6 +10,37 @@ on:
   workflow_dispatch:
 
 jobs:
+  installer:
+    name: Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the checkout wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel --outdir "$RUNNER_TEMP/wheels"
+      - name: Install, update and smoke-test the isolated runtime
+        shell: bash
+        run: |
+          export MNEMOAI_INSTALL_DIR="$RUNNER_TEMP/mnemoai-runtime"
+          export MNEMOAI_BIN_DIR="$RUNNER_TEMP/mnemoai-bin"
+          export MNEMOAI_HOME="$RUNNER_TEMP/mnemoai-home"
+          wheels=("$RUNNER_TEMP"/wheels/*.whl)
+          test "${#wheels[@]}" -eq 1
+          # Also exercise the pinned uv bootstrap, not a preinstalled runner uv.
+          PATH=/usr/bin:/bin sh install.sh --wheel "${wheels[0]}"
+          PATH=/usr/bin:/bin sh install.sh --wheel "${wheels[0]}"
+          "$MNEMOAI_BIN_DIR/mnemoai" --help
+          "$MNEMOAI_INSTALL_DIR/tools/mnemoai-assistant/bin/python" -c \
+            'from mnemoai.client.client import LangGraphClient; from mnemoai.server.server import mcp'
+
   unit:
     runs-on: ubuntu-latest
     strategy:

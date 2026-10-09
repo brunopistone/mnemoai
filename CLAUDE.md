@@ -130,6 +130,16 @@ Two facts every shell tool needs and none should re-derive. **Which shell:** `su
 
 ### External MCP servers (`client/mcp_config.py`, `MultiMCPClient`) ★
 
+**Startup:** the interactive client explicitly uses `start_background()`:
+`mcp_startup.py` discovers external schemas on daemon threads while the built-in
+server is made ready synchronously. The prompt/resume picker need not wait for
+externals. `client.refresh_tools(wait=True)` is the first-model-request barrier;
+it publishes the complete toolset on the foreground worker, rebuilding every
+route binding without replacing the graph, history or permission state. Cancel
+ends the waiting turn, not discovery. `/mcp` can adopt a completed snapshot without
+waiting; paint callbacks only read cached status. Embedded callers retain the
+synchronous context-manager/list-tools API. Shutdown closes pending handshakes too.
+
 Built-in server always launched; extra stdio servers declared in `~/.mnemoai/mcp/mcp.json` (`load_external_servers()`, tolerant). `MultiMCPClient` merges tools — a colliding external tool is namespaced `servername__tool` (built-in names win). External tools are appended to **every** route (incl. `simple_qa`) so routing never hides them, and injected into the decomposition prompt when orchestration is on. `/mcp` lists status.
 
 ### Command feedback

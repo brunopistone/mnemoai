@@ -232,6 +232,19 @@ class TestToolChecks:
 
 
 class TestExternalMcpChecks:
+    def test_connecting_is_informational_not_a_false_failure(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from mnemoai.client.mcp_startup import ServerStatus
+
+        monkeypatch.setattr(doctor, "_declared_mcp_servers", lambda: ["browser"])
+        client = SimpleNamespace(mcp_client=SimpleNamespace(
+            startup_status=lambda: (ServerStatus("browser", "connecting"),),
+        ))
+        check = doctor._external_mcp_checks(client)[0]
+        assert check.status == INFO
+        assert "connecting: browser" in check.detail
+
     def _mcp_json(self, tmp_path, monkeypatch, servers):
         import json
 

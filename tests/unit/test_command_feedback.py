@@ -76,6 +76,20 @@ def test_external_labels_cannot_emit_terminal_control_sequences():
     assert "\033[2J" not in output
 
 
+def test_pending_mcp_is_not_presented_as_connected_or_as_failure():
+    from mnemoai.client.mcp_startup import ServerStatus
+    from mnemoai.client.ui.command_feedback import mcp_startup_hint
+
+    owner = SimpleNamespace(_connected=True)  # handshake done, list_tools still pending
+    states = [ServerStatus("browser", "connecting")]
+    output = plain(render_mcp_status([("browser", owner)], [], startup=states))
+    assert "browser: connecting" in output
+    assert "connected" not in output
+    assert mcp_startup_hint(states) == "Connecting tools: browser · /mcp"
+    assert mcp_startup_hint([ServerStatus("browser", "ready", 25)]) == ""
+    assert "unavailable" in mcp_startup_hint([ServerStatus("browser", "failed")])
+
+
 def test_verbose_tool_list_wraps_without_dropping_names():
     owner = SimpleNamespace(_connected=True)
     names = ["browser_navigate", "browser_snapshot", "browser_console_messages"]

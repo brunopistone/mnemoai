@@ -17,6 +17,52 @@ from mnemoai.client import session_log as slog
 from mnemoai.utils import paths
 
 
+@pytest.mark.parametrize("stage", ["exit", "resume-cancel", "resume-error", "startup-error"])
+def test_main_closes_pending_servers_on_every_exit(monkeypatch, stage):
+    from types import SimpleNamespace
+
+    closed = []
+    discarded = []
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.mcp_client = SimpleNamespace(shutdown=lambda: closed.append(True))
+            self.agent = SimpleNamespace(session_log=SimpleNamespace(
+                discard_if_empty=lambda: discarded.append(True),
+            ))
+
+        def start(self, *args):
+            if stage == "startup-error":
+                raise KeyboardInterrupt
+
+    class UI:
+        def __init__(self, *args):
+            pass
+
+        def run_chat_loop(self, **kwargs):
+            assert stage == "exit"
+
+    def resume(*args):
+        if stage == "resume-error":
+            raise ValueError("restore failed")
+        return "exit"
+
+    monkeypatch.setattr("mnemoai.client.client.LangGraphClient", Client)
+    monkeypatch.setattr("mnemoai.client.ui.chat_interface.ChatInterface", UI)
+    monkeypatch.setattr(main_mod, "_resume_session", resume)
+    if stage == "startup-error":
+        with pytest.raises(KeyboardInterrupt):
+            main_mod.main()
+    elif stage == "resume-error":
+        with pytest.raises(ValueError, match="restore failed"):
+            main_mod.main(resume="pick")
+    else:
+        main_mod.main(resume="pick" if stage == "resume-cancel" else None)
+    assert closed == [True]
+    if stage != "startup-error":
+        assert discarded == [True]
+
+
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))

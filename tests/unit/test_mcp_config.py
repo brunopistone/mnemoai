@@ -8,6 +8,8 @@ Covers the pure-logic parts — no real subprocesses are launched:
 
 import json
 
+import pytest
+
 from mnemoai.client.mcp_config import load_external_servers
 
 
@@ -209,6 +211,58 @@ def test_external_tools_appended_to_every_route():
     assert by_route["simple_qa"] == ["brave_search"]   # external reachable here too
     assert "brave_search" in by_route["full"]          # full binds everything
     assert agent.external_tools and agent.external_tools[0].name == "brave_search"
+
+
+def test_late_tools_preserve_history_permissions_and_reach_every_route():
+    from langchain_core.messages import HumanMessage
+
+    from mnemoai.client.agent.agent import LangGraphAgent
+
+    class Model:
+        def bind_tools(self, tools):
+            return tuple(t.name for t in tools)
+
+    agent = LangGraphAgent(
+        model=Model(), tools=[_FakeTool("read_file")], router=object(),
+        tool_routes={"simple_qa": [], "code": ["read_file"], "full": None},
+    )
+    message = HumanMessage(content="A restored conversation")
+    agent.messages = [message]
+    agent._trusted_confirm_categories.add("write")
+    agent._preapproved_bash = ["make test"]
+    graph, usage = agent.graph, agent.usage
+    agent.rebind_tools([*agent.tools, _FakeTool("browser")])
+    assert agent.messages == [message]
+    assert agent.graph is graph and agent.usage is usage
+    assert agent._trusted_confirm_categories == {"write"}
+    assert agent._preapproved_bash == ["make test"]
+    assert all("browser" in binding for binding in agent.models_by_route.values())
+    assert [t.name for t in agent.external_tools] == ["browser"]
+
+
+def test_late_tool_binding_failure_does_not_publish_partial_state():
+    from mnemoai.client.agent.agent import LangGraphAgent
+
+    class Model:
+        reject = False
+
+        def bind_tools(self, tools):
+            if self.reject and len(tools) == 1:
+                raise ValueError("schema rejected on a route")
+            return tuple(t.name for t in tools)
+
+    model = Model()
+    tools = [_FakeTool("read_file")]
+    agent = LangGraphAgent(
+        model=model, tools=tools, router=object(),
+        tool_routes={"full": None, "simple_qa": [], "code": ["read_file"]},
+    )
+    before = (agent.model_with_tools, agent.tools_by_route, agent.models_by_route)
+    model.reject = True
+    with pytest.raises(ValueError, match="schema rejected"):
+        agent.rebind_tools([*tools, _FakeTool("browser")])
+    assert agent.tools is tools
+    assert (agent.model_with_tools, agent.tools_by_route, agent.models_by_route) == before
 
 
 def test_memory_meta_tool_reachable_on_every_route():

@@ -37,6 +37,7 @@ def main(
         None
     """
     global _client
+    _client = None
 
     # Start on a blank screen: whatever the shell left behind is not part of this
     # session, and a banner appended under the previous run's output reads as a
@@ -51,12 +52,10 @@ def main(
         from mnemoai.client.client import LangGraphClient
         from mnemoai.client.ui.chat_interface import ChatInterface
 
-        # LangGraphClient() spawns the MCP server subprocess (its own cold import
-        # of the tool stack); start() connects it, builds the model, inits memory.
-        loader.set_phase("Starting tools server")
+        loader.set_phase("Initializing memory")
         _client = LangGraphClient(verbose=verbose)
 
-        loader.set_phase("Connecting model")
+        loader.set_phase("Connecting model and built-in tools")
         _client.start(verbose)
 
         if auto:
@@ -67,6 +66,9 @@ def main(
             _client.set_auto_approve_mode("all")
 
         chat_interface = ChatInterface(_client)
+    except BaseException:
+        _shutdown_client(_client)
+        raise
     finally:
         # Clear the spinner line before the welcome banner prints (or on error).
         loader.stop()
@@ -75,18 +77,14 @@ def main(
     # transcript prints to scrollback, neither of which can run under it.
     # Cancelling the picker exits instead of falling through to a fresh session —
     # `--resume` means "resume", so starting a new chat would be a surprise.
-    resumed = False
-    if resume:
-        outcome = _resume_session(_client, resume, chat_interface)
-        if outcome == "exit":
-            _discard_empty_session(_client)
-            return
-        resumed = outcome == "resumed"  # "fresh" → let the loop show the banner
-
-    # Register cleanup function using chat interface method. Enable if you need to save conversation automatically on closure
-    # atexit.register(lambda: chat_interface.client.save_conversation(chat_interface.chat_timestamp))
-
     try:
+        resumed = False
+        if resume:
+            outcome = _resume_session(_client, resume, chat_interface)
+            if outcome == "exit":
+                return
+            resumed = outcome == "resumed"
+
         # On a resume the banner was already printed before the transcript, so the
         # restored conversation ends up directly above the prompt.
         chat_interface.run_chat_loop(welcome=not resumed)
@@ -94,6 +92,17 @@ def main(
         # A launch nobody typed into leaves a turn-less transcript; drop it so
         # empty files don't accumulate until they age out.
         _discard_empty_session(_client)
+        _shutdown_client(_client)
+
+
+def _shutdown_client(client: Any) -> None:
+    """Close pending and connected servers on exit, including the resume picker."""
+    shutdown = getattr(getattr(client, "mcp_client", None), "shutdown", None)
+    if shutdown is not None:
+        try:
+            shutdown()
+        except Exception:
+            pass
 
 
 def _discard_empty_session(client: Any) -> None:

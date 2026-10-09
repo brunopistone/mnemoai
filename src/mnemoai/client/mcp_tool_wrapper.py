@@ -16,6 +16,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import Tool as MCPTool
 
+from mnemoai.client.mcp_startup import MCPStartup
 from mnemoai.utils.config import config
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import exception_line, log_file_hint, logger
@@ -196,10 +197,13 @@ class MCPClientWrapper:
         # touch them — see _serve_session.
         self._session_task: Optional[asyncio.Task] = None
         self._close: Optional[asyncio.Event] = None
+        self._ready: Optional[asyncio.Future] = None
         # Callable returning True when the UI has asked to cancel the turn. Set by
         # the client once the agent exists; without it a blocking tool call can
         # only end at its deadline (see _run_coroutine).
         self._cancel_probe = None
+        self._lifecycle_lock = threading.RLock()
+        self._shutdown_requested = threading.Event()
 
         atexit.register(self.shutdown)
 
@@ -216,11 +220,14 @@ class MCPClientWrapper:
 
     def _start_background_loop(self) -> None:
         """Start a background thread with its own event loop."""
-        if self._loop is not None:
-            return
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
+        with self._lifecycle_lock:
+            if self._shutdown_requested.is_set():
+                raise RuntimeError("MCP client is closed")
+            if self._loop is not None:
+                return
+            self._loop = asyncio.new_event_loop()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
 
     def _run_loop(self) -> None:
         """Run the event loop in the background thread."""
@@ -255,9 +262,14 @@ class MCPClientWrapper:
         Returns:
             Result of the coroutine
         """
-        if self._loop is None:
-            raise RuntimeError("Background loop not started")
-        future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        # Schedule atomically with shutdown: a late startup thread cannot submit
+        # work to an already-stopped loop or resurrect its subprocess.
+        with getattr(self, "_lifecycle_lock", contextlib.nullcontext()):
+            closing = getattr(self, "_shutdown_requested", None)
+            if self._loop is None or (cancellable and closing is not None and closing.is_set()):
+                coro.close()
+                raise RuntimeError("MCP client is closed or its background loop is not started")
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         deadline = time.monotonic() + timeout
         try:
             while True:
@@ -276,6 +288,8 @@ class MCPClientWrapper:
                     if cancellable and self._cancel_requested():
                         future.cancel()
                         raise KeyboardInterrupt from None
+                    if cancellable and closing is not None and closing.is_set():
+                        raise RuntimeError("MCP client is closed")
         except TimeoutError:
             # Cancel the orphaned coroutine on the background loop so it can't
             # keep mutating session state after we've given up on it.
@@ -382,10 +396,16 @@ class MCPClientWrapper:
         loop = asyncio.get_running_loop()
         self._close = asyncio.Event()
         ready: asyncio.Future = loop.create_future()
+        self._ready = ready
         # Strong reference: a bare create_task() can be garbage-collected
         # mid-flight, which would tear down the connection at random.
         self._session_task = loop.create_task(self._serve_session(ready))
-        await ready  # raises whatever the task failed with
+        try:
+            await ready  # raises whatever the task failed with
+        except BaseException:
+            # A timed-out/cancelled handshake still owns a subprocess.
+            await self._disconnect()
+            raise
 
     async def _disconnect(self) -> None:
         """Ask the session task to exit its contexts, and wait for it to finish.
@@ -394,13 +414,15 @@ class MCPClientWrapper:
         ``_serve_session`` (see that method for why that distinction matters).
         """
         task = self._session_task
-        self._session_task = None
+        ready = self._ready
         if task is None:
             self._connected = False
             self._session = None
             return
         if self._close is not None:
             self._close.set()
+        if not self._connected and not task.cancelling():
+            task.cancel()  # initialize() may never answer; do not wait ten seconds
         try:
             # Bounded: a wedged server must not hang shutdown forever. Cancelling
             # is safe here — the cancellation is delivered to the task that owns
@@ -414,8 +436,15 @@ class MCPClientWrapper:
         except BaseException as e:  # noqa: BLE001 — teardown must not propagate
             logger.debug(f"MCP session task teardown error (ignored): {e}")
         finally:
-            self._connected = False
-            self._session = None
+            # Keep the owner visible until teardown actually finishes. A timeout
+            # may already be disconnecting when shutdown arrives on another task.
+            if self._session_task is task:
+                self._connected = False
+                self._session = None
+                if task.done():
+                    self._session_task = None
+            if ready is not None and not ready.done():
+                ready.cancel()
 
     def list_tools_sync(self) -> List[MCPToolWrapper]:
         """Synchronously list available tools from the MCP server.
@@ -572,8 +601,12 @@ class MCPClientWrapper:
         without the explicit disconnect the server subprocess would be
         orphaned.
         """
+        with self._lifecycle_lock:
+            if self._shutdown_requested.is_set():
+                return
+            self._shutdown_requested.set()
         if self._loop:
-            if self._connected:
+            if not self._loop.is_closed():
                 try:
                     # 15s: _disconnect itself waits up to 10s for the session
                     # task to unwind before cancelling it, so a shorter budget
@@ -589,6 +622,8 @@ class MCPClientWrapper:
             self._loop.call_soon_threadsafe(self._loop.stop)
             if self._thread:
                 self._thread.join(timeout=5)
+            if not self._loop.is_running():
+                self._loop.close()
             self._loop = None
             self._thread = None
             self._connected = False
@@ -664,6 +699,45 @@ class MultiMCPClient:
             self._members.append((server.name, MCPClientWrapper(server.params)))
         self._tools: List[MCPToolWrapper] = []
         self._cancel_probe = None
+        self._startup = None
+        self._startup_merged = False
+
+    def start_background(self):
+        """Make built-ins ready now; discover external schemas in the background."""
+        if self._startup is None:
+            self._startup = MCPStartup(self._members)
+            try:
+                self._tools = self._startup.start()
+            except BaseException:
+                self.shutdown()
+                raise
+        return self._tools
+
+    def startup_status(self):
+        """A cached snapshot, safe to read from the terminal's paint callback."""
+        startup = getattr(self, "_startup", None)
+        return startup.snapshot() if startup is not None else ()
+
+    def finish_startup(self, *, wait=True):
+        """Publish all schemas together, in declaration order, on the caller."""
+        startup = self._startup
+        if startup.closed.is_set():
+            raise RuntimeError("MCP startup was closed")
+        if self._startup_merged:
+            return self._tools
+        if not wait and any(not f.done() for f in startup.results):
+            return self._tools
+        startup.wait(self._cancel_probe)
+        results = []
+        for member, future in zip(startup.members, startup.results):
+            exc = future.exception()
+            if exc is not None and not isinstance(exc, Exception):
+                raise exc
+            results.append((member, None if exc else future.result(), exc))
+        self._tools = self._merge_tools(results)
+        self._startup_merged = True
+        self.set_cancel_probe(self._cancel_probe)
+        return self._tools
 
     def set_cancel_probe(self, probe) -> None:
         """Route the UI's cancel signal to every member wrapper.
@@ -673,7 +747,12 @@ class MultiMCPClient:
         """
         self._cancel_probe = probe
         for _, wrapper in self._members:
-            wrapper._cancel_probe = probe
+            # Discovery outlives a cancelled first turn; tool calls become
+            # cancellable once the schemas have been published.
+            wrapper._cancel_probe = (
+                None if getattr(self, "_startup", None) is not None
+                and not self._startup_merged else probe
+            )
 
     def __enter__(self):
         """Connect every server AT ONCE; skip (with a warning) any that fail.
@@ -690,6 +769,8 @@ class MultiMCPClient:
         the process is about to have regardless — a cap would only make the boot
         longer without making it smaller.
         """
+        if getattr(self, "_startup", None) is not None:
+            return self
         results = _in_parallel(self._members, lambda wrapper: wrapper.__enter__())
 
         # Decided on THIS thread, in member order: which servers stay, what the
@@ -735,9 +816,16 @@ class MultiMCPClient:
         it decides which name wins a collision, and that must not depend on which
         server happened to answer first.
         """
+        if getattr(self, "_startup", None) is not None:
+            return self.finish_startup()
         results = _in_parallel(
             self._members, lambda wrapper: wrapper.list_tools_sync()
         )
+        self._tools = self._merge_tools(results)
+        return self._tools
+
+    def _merge_tools(self, results):
+        """Keep provider definitions immutable and resolve even prefixed collisions."""
         merged: List[MCPToolWrapper] = []
         seen = set()
         for (name, _wrapper), tools, exc in results:
@@ -747,21 +835,29 @@ class MultiMCPClient:
                 )
                 continue
             for tool in tools:
-                display = tool.name
+                original = getattr(getattr(tool, "mcp_tool", None), "name", tool.name)
+                display = original
                 if display in seen:
-                    display = f"{name}__{tool.name}"
+                    display = f"{name}__{original}"
+                    suffix = 2
+                    while display in seen:
+                        display = f"{name}__{original}_{suffix}"
+                        suffix += 1
                     logger.info(
                         "Tool name collision: '%s' from '%s' exposed as '%s'.",
                         tool.name, name, display,
                     )
+                tool = copy.copy(tool)
                 tool.name = display
                 seen.add(display)
                 merged.append(tool)
-        self._tools = merged
-        return self._tools
+        return merged
 
     def shutdown(self) -> None:
         """Shut down every server's background loop."""
+        startup = getattr(self, "_startup", None)
+        if startup is not None:
+            startup.close()
         for _, wrapper in self._members:
             try:
                 wrapper.shutdown()
@@ -784,7 +880,8 @@ class MultiMCPClient:
         One report: the record is file-only (``console: False``) and the red line
         below IS the user-facing error, with the pointer to the rest of it.
         """
-        logger.error("%s: %s", what, exception_line(exc), exc_info=True,
+        logger.error("%s: %s", what, exception_line(exc),
+                     exc_info=(type(exc), exc, exc.__traceback__),
                      extra={"console": False})
         details = log_file_hint()
         print_error(
