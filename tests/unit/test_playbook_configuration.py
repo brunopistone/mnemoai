@@ -175,7 +175,8 @@ def test_params_dialog_tunes_reflector_not_chat(config_file, monkeypatch):
     monkeypatch.setattr(C, "_ask_choice", lambda *a, **kw: "7")
     monkeypatch.setattr(C, "_prompt_one_param", lambda text, section, key, *args:
                         C._set_field(text, section, key, "0.25") if key == "TEMPERATURE" else text)
-    assert C.run_params_override() == config_file
+    written = C.run_params_override()
+    assert written.path == config_file and written.section == "REFLECTOR"
     data = yaml.safe_load(config_file.read_text())
     assert data["AREA_MODELS"]["REFLECTOR"]["TEMPERATURE"] == 0.25
     assert "TEMPERATURE" not in data["MODEL_ID"]

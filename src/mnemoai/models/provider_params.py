@@ -305,6 +305,11 @@ def providers(section: str) -> Tuple[str, ...]:
     return tuple(_TABLES.get(section, {}).keys())
 
 
+def connection_keys(section: str) -> set:
+    """All transport/auth keys; they must not leak across provider changes."""
+    return set().union(*(entry["connection"] for entry in _TABLES.get(section, {}).values()))
+
+
 def supported_keys(section: str, provider: str) -> Optional[set]:
     """All config keys ``provider`` accepts for ``section`` (excl. NAME/TYPE);
     None for an unknown section/provider (so callers can skip pruning)."""

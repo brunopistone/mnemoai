@@ -145,3 +145,31 @@ def test_fully_poisoned_store_can_be_rebuilt_at_a_new_real_dimension(
     reopened.ingest("real.md", "real document")
     assert [meta["doc_id"] for meta in reopened.store.metadatas] == ["real.md"]
     assert reopened.store.dim == 1024
+@pytest.mark.parametrize("backend", ["faiss", "chromadb"])
+@pytest.mark.parametrize("changed", ["NAME", "API_BASE", "missing_stamp"])
+def test_persisted_rag_rejects_mixed_embedding_identity_but_keeps_keyword_reads(
+    tmp_path, monkeypatch, backend, changed,
+):
+    monkeypatch.setattr(session.config, "get", lambda key, default=None: (
+        {"VECTOR_STORE": {"TYPE": backend}} if key == "RAG" else default
+    ))
+    model = {"TYPE": "openai", "NAME": "first", "DIMENSION": 3, "API_BASE": "https://first.example"}
+    options = {"session_id": "identity", "rag_dir": str(tmp_path)}
+    rag = session.SessionRAG(embed_model_config=model, **options)
+    monkeypatch.setattr(rag, "_embed_batch", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
+    rag.ingest("database.md", "postgres connection")
+    if changed == "missing_stamp":
+        rag.store._identity_path.unlink()
+    else:
+        model = {**model, changed: "second" if changed == "NAME" else "https://second.example"}
+    reopened = session.SessionRAG(embed_model_config=model, **options)
+    monkeypatch.setattr(reopened, "_embed_batch", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
+    _, hits = reopened.query("postgres")
+    assert hits[0]["retrieval_method"] == "bm25"
+    assert hits[0]["doc_id"] == "database.md"
+    with pytest.raises((ValueError, RuntimeError), match="identity"):
+        reopened.ingest("new.md", "new content")
+    assert len(reopened.store.metadatas) == 1
+    reopened.clear()
+    reopened.ingest("replacement.md", "postgres replacement")
+    assert not reopened.store.integrity_error

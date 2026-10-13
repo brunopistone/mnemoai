@@ -596,3 +596,19 @@ class TestToolInterceptionCoverage:
 
     def test_resume_agent_in_always_available_tools(self):
         assert "resume_agent" in LangGraphAgent._ALWAYS_AVAILABLE_TOOLS
+def test_reset_stops_old_generation_without_delivering_late_completion(tmp_path, monkeypatch):
+    from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    registry = BackgroundAgentRegistry()
+    old = registry.register("explore", "old conversation", "old task")
+    registry.reset_delivery()
+    assert old.cancel.is_set()
+    registry.complete(old.agent_id, "late result")
+    assert not registry.any_undelivered()
+    assert registry.drain_completed_unnotified() == []
+    assert registry.get(old.agent_id).result == "late result"  # explicit resume remains possible
+    new = registry.register("explore", "new conversation", "new task")
+    assert not new.cancel.is_set()
+    registry.complete(new.agent_id, "new result")
+    assert registry.drain_completed_unnotified() == [new]

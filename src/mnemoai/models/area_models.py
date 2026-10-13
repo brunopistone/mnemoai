@@ -36,6 +36,7 @@ client owns that (and the caching), because building one needs a live controller
 
 from typing import Any, Dict, Tuple
 
+from mnemoai.models.provider_params import connection_keys
 from mnemoai.utils.config import config
 
 CONFIG_SECTION = "AREA_MODELS"
@@ -105,8 +106,10 @@ def overrides_for(area: str) -> Dict[str, Any]:
         return {"NAME": name} if name else {}
     if not isinstance(raw, dict):
         return {}
-    # Drop empty values so a commented-out key can't blank a real MODEL_ID entry.
-    return {k: v for k, v in raw.items() if v is not None and v != ""}
+    # Empty identity/generation entries retain the historical tolerant behavior.
+    # Transport keys can explicitly clear an inherited destination/credential.
+    clearable = connection_keys("MODEL_ID") | {"EXTRA_PARAMS"}
+    return {k: v for k, v in raw.items() if (v is not None and v != "") or k in clearable}
 
 
 def configured() -> Dict[str, Dict[str, Any]]:

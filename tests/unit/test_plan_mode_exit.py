@@ -57,6 +57,26 @@ class TestExitPlanModeVerdict:
 
 
 class TestPreApprovedBash:
+    def test_permissions_are_displayed_and_edits_revoke_them(self):
+        a = _agent()
+        shown = []
+        a._preapproved_bash = ["obsolete"]
+        a._plan_approval_ui = lambda plan: (
+            shown.append(plan) or "approve", "Only inspect source. Do not run tests."
+        )
+        a._handle_exit_plan_mode("Run tests", ["pytest"])
+        assert "Shell command permissions" in shown[0] and "`pytest`" in shown[0]
+        assert not a._is_preapproved_bash("pytest tests/unit")
+        assert not a._is_preapproved_bash("obsolete")
+
+    def test_unchanged_permission_display_can_be_approved(self):
+        a = _agent()
+        a._plan_approval_ui = lambda plan: ("approve", plan)
+        a._handle_exit_plan_mode("Run tests", ["pytest"])
+        assert a._is_preapproved_bash("pytest tests/unit")
+        a._handle_exit_plan_mode("Inspect only", [])
+        assert a._preapproved_bash == []
+
     def test_allowed_bash_registered_on_approve(self):
         a = _agent()
         out = a._handle_exit_plan_mode("plan", ["pytest", "npm run build"])

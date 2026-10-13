@@ -61,3 +61,22 @@ def test_offline_reopen_repairs_legacy_vectors_before_recall(tmp_path, backend):
     assert hits[0]["retrieval_method"] == "bm25"
     embedder.online = True
     assert all("retrieval_method" not in hit for hit in reopened.search("postgres"))
+@pytest.mark.parametrize("backend", [FAISSEpisodicStore, ChromaEpisodicStore])
+def test_unknown_legacy_provenance_is_not_adopted_from_dimension(tmp_path, backend):
+    from pathlib import Path
+
+    embedder = Embedder()
+    store = backend(str(tmp_path), embedder)
+    store.add("database", {"task": "postgres connection", "tools": ""})
+    if backend is FAISSEpisodicStore:
+        Path(store.fingerprint_path).unlink()
+    else:
+        metadata = dict(store.collection.metadata)
+        metadata.pop("embed_fingerprint")
+        store.collection.modify(metadata=metadata)
+    reopened = backend(str(tmp_path), embedder)
+    hits = reopened.search("postgres")
+    assert hits[0]["retrieval_method"] == "bm25"
+    assert hits[0]["task"] == "postgres connection"
+    with pytest.raises(RuntimeError, match="identity"):
+        reopened.add("new", {"task": "new episode"})

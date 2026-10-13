@@ -328,3 +328,16 @@ class TestErroredTurnIsStillRecorded:
         with pytest.raises(RuntimeError):
             a.invoke("q")
         assert a._last_input_tokens is None
+@pytest.mark.parametrize("prompt", ["", "new question"])
+def test_drained_background_inputs_are_logged_in_the_same_turn(tmp_path, monkeypatch, prompt):
+    from mnemoai.client.agent.message_codec import convert_strands_messages_to_langchain
+    from mnemoai.client.session_log import SessionLog, read_session
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    agent = _agent(_OkGraph())
+    agent.session_log = SessionLog()
+    agent.drain_background_completions = lambda: [HumanMessage(content="unique background report")]
+    agent.invoke(prompt)
+    restored = convert_strands_messages_to_langchain(read_session(agent.session_log.path)["messages"])
+    assert [m.content for m in restored] == [m.content for m in agent.messages]
+    assert sum(m.content == "unique background report" for m in restored) == 1

@@ -1,16 +1,20 @@
+import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from mnemoai.utils.atomic_write import atomic_write_json
 from mnemoai.utils.config import config
+from mnemoai.utils.embedding_integrity import require_clean_vectors
 from mnemoai.utils.logger import logger
 
 
 class VectorStoreController:
     """Controller for vector store operations across different providers."""
 
-    def __init__(self, dim: int, session_id: str = None, rag_dir: str = None) -> None:
+    def __init__(self, dim: int, session_id: str = None, rag_dir: str = None, embedding_identity=None) -> None:
         """Initialize vector store controller.
 
         Args:
@@ -21,6 +25,8 @@ class VectorStoreController:
         self.dim = dim
         self.session_id = session_id
         self.rag_dir = rag_dir
+        self._embedding_identity = embedding_identity
+        self._identity_error = None
 
         # Get store type from config
         store_config = config.get("RAG", {}).get("VECTOR_STORE", {})
@@ -28,6 +34,29 @@ class VectorStoreController:
 
         self.store = self._initialize_store()
         self.dim = self.store.dim
+        self._identity_path = Path(str(self.store.persist_path) + ".embedding.json")
+
+    def _ensure_identity(self):
+        """Bind persistent vectors to their producer; dimension alone is insufficient."""
+        if self._embedding_identity is None:
+            return  # generic vector-only callers supply their own embedding contract
+        require_clean_vectors(self.store)
+        fingerprint = self._embedding_identity()
+        if not fingerprint:
+            raise ValueError("Embedding identity is unavailable")
+        try:
+            stored = json.loads(self._identity_path.read_text())["fingerprint"]
+        except (OSError, ValueError, KeyError, TypeError):
+            stored = None
+        if self.metadatas and stored != fingerprint:
+            self._identity_error = (
+                "Document embedding identity is unknown or changed. Existing text remains "
+                "available to BM25; clear and re-ingest to rebuild semantic search."
+            )
+            raise ValueError(self._identity_error)
+        if stored != fingerprint:
+            atomic_write_json(str(self._identity_path), {"fingerprint": fingerprint})
+        self._identity_error = None
 
     @staticmethod
     def detect_existing_store(session_id: str, rag_dir: str) -> Optional[int]:
@@ -114,6 +143,7 @@ class VectorStoreController:
             vectors: NumPy array of vectors with shape (n, dim)
             metadatas: List of metadata dictionaries, one per vector
         """
+        self._ensure_identity()
         return self.store.add(vectors, metadatas)
 
     def search(self, q: np.ndarray, top_k: int = 5) -> Tuple[List[float], List[Dict]]:
@@ -126,6 +156,7 @@ class VectorStoreController:
         Returns:
             Tuple of (scores, metadatas) where scores are similarity scores
         """
+        self._ensure_identity()
         return self.store.search(q, top_k)
 
     def clear(self, dim: int = None) -> None:
@@ -137,14 +168,17 @@ class VectorStoreController:
             self.dim = dim
         else:
             self.store.clear()
+        self._identity_error = None
+        self._identity_path.unlink(missing_ok=True)
 
     def replace_document(self, doc_id: str, vectors: np.ndarray, metadatas: List[Dict]) -> None:
         """Replace a document's chunks without changing other documents."""
+        self._ensure_identity()
         self.store.replace_document(doc_id, vectors, metadatas)
 
     @property
     def integrity_error(self):
-        return getattr(self.store, "integrity_error", None)
+        return getattr(self.store, "integrity_error", None) or self._identity_error
 
     @property
     def index(self) -> Any:

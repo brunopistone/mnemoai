@@ -71,6 +71,37 @@ class TestCurrentTurnMessages:
 
 
 class TestReflectOnTrajectory:
+    @pytest.mark.parametrize("outcome", ["blocked", "declined", "cancelled"])
+    def test_unexecuted_actions_never_count_as_successful_execution(self, tmp_path, outcome):
+        from langchain_core.messages import ToolMessage
+
+        from mnemoai.client.agent.message_codec import (
+            convert_langchain_messages_to_strands,
+            convert_strands_messages_to_langchain,
+        )
+
+        reflector = Reflector(persist_path=str(tmp_path))
+        result = ToolMessage(
+            content="Not performed.", tool_call_id="c1", name="fs_write", status="error",
+            additional_kwargs={"execution_outcome": outcome},
+        )
+        restored = convert_strands_messages_to_langchain(
+            convert_langchain_messages_to_strands([result]),
+        )
+        messages = [_human("work"), _ai_tool_call("fs_write", {}, "c1"), *restored]
+        assert reflector.reflect_on_trajectory(messages, "work") == []
+        assert reflector.metrics["total_tool_calls"] == 0
+        assert restored[0].additional_kwargs["execution_outcome"] == outcome
+
+    def test_legacy_plain_refusals_are_not_execution_metrics(self, tmp_path):
+        reflector = Reflector(persist_path=str(tmp_path))
+        for text in ("Blocked: no approval.", "User declined to run this command."):
+            reflector.reflect_on_trajectory([
+                _human("work"), _ai_tool_call("fs_write", {}, "c1"),
+                _tool_result("fs_write", "c1", text),
+            ], "work")
+        assert reflector.metrics["total_tool_calls"] == 0
+
     def test_only_current_turn_is_analyzed(self, tmp_path):
         reflector = Reflector(persist_path=str(tmp_path))
         history = _failing_turn(1) + _failing_turn(2) + _failing_turn(3)

@@ -57,6 +57,7 @@ from mnemoai.client.memory.playbook_context import (
 from mnemoai.client.ui import review_view, turn_view
 from mnemoai.client.usage_tracker import UsageTracker
 from mnemoai.models import prompt_cache
+from mnemoai.utils import execution_context
 from mnemoai.utils.config import config
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.logger import logger
@@ -241,6 +242,7 @@ class LangGraphAgent:
         # "agents" panel + detail view read it. Always created (writers open a run
         # regardless of TTY); the on_change repaint hook is wired only on a TTY.
         self._activity = AgentActivityStore()
+        self._workspace = execution_context.Workspace(os.getcwd())
         # Cooperative cancel: Esc/Ctrl+C sets this (via request_cancel) so the
         # blocking stream waits (idle-timeout queue get + network-retry backoff)
         # abort IMMEDIATELY, instead of waiting on an async KeyboardInterrupt that
@@ -303,6 +305,7 @@ class LangGraphAgent:
         # terminal messages, empty-final salvage) would otherwise be a silent turn.
         # invoke() checks this flag and emits the answer if nothing was shown.
         self._answer_displayed = False
+        self._last_turn_messages = []
         # Categories the user chose to trust this session (the "a = allow" option),
         # skipping re-prompts until restart.
         self._trusted_confirm_categories: set = set()
@@ -776,7 +779,12 @@ class LangGraphAgent:
 
         # Step 2: execute subtasks, scheduling by their ``depends_on`` graph —
         # independent subtasks run concurrently (bounded pool), dependents wait.
-        results_by_index = self._run_subtasks_scheduled(subtasks, history)
+        self._orchestration_journal = {}
+        try:
+            results_by_index = self._run_subtasks_scheduled(subtasks, history)
+        except BaseException:
+            self._retain_orchestration(state)
+            raise
         worker_results = [results_by_index[i] for i in range(len(subtasks))]
 
         # Collect all intermediate worker messages for conversation saving.
@@ -808,8 +816,18 @@ class LangGraphAgent:
                 final_content = "\n\n".join(
                     f"### {r['task']}\n{r['result']}" for r in worker_results
                 )
+            except BaseException:
+                self._retain_orchestration(state)
+                raise
 
         return {"messages": all_worker_messages + [AIMessage(content=final_content)]}
+
+    def _retain_orchestration(self, state):
+        """Publish completed worker evidence even if the scheduling node never returns."""
+        recovered = list(state["messages"])
+        for _, entry in sorted(getattr(self, "_orchestration_journal", {}).items()):
+            recovered.extend(entry.get("messages", [])[entry.get("seed", 0):])
+        self._interrupted_node_state = {**state, "messages": recovered}
 
     def _run_subtasks_scheduled(
         self,
@@ -847,6 +865,8 @@ class LangGraphAgent:
 
         try:
             while remaining:
+                if self._cancelled():
+                    raise KeyboardInterrupt
                 ready = [
                     i for i in sorted(remaining)
                     if all(d in results for d in subtasks[i].get("depends_on", []))
@@ -877,6 +897,8 @@ class LangGraphAgent:
                     # can prompt. Keep a spinner up while the quiet worker runs,
                     # without this the UI looks finished while the step is still going.
                     for i in ready:
+                        if self._cancelled():
+                            raise KeyboardInterrupt
                         desc = subtasks[i].get("description", "")
                         label = desc[:40] + ("…" if len(desc) > 40 else "")
                         if steps is not None:
@@ -1050,19 +1072,28 @@ class LangGraphAgent:
         # Live activity run for the agents panel (orchestrator path bypasses
         # _run_one_subagent, so open/close the run here).
         sink = self._activity.open_run(category, short_desc, "orchestrator")
+        journal = {}
+        owner = getattr(self, "_orchestration_journal", None)
+        if owner is not None:
+            owner[i] = journal
         try:
             # The real prior conversation (uncapped; only via this orchestrator
             # path) is inserted between the worker's system prompt and this
             # subtask, so a context-dependent subtask resolves its references.
-            result, worker_msgs = self._run_worker_loop(
-                worker_model, worker_tools, worker_prompt, quiet=True,
-                history=history, activity=sink,
-            )
+            with execution_context.fork(self):
+                result, worker_msgs = self._run_worker_loop(
+                    worker_model, worker_tools, worker_prompt, quiet=True,
+                    history=history, activity=sink, journal=journal,
+                )
             sink.finish_ok(result)
+        except KeyboardInterrupt:
+            sink.finish("stopped")
+            raise
         except Exception as e:
             logger.error(f"Worker for subtask {i + 1} failed: {e}")
             result = f"(This step could not be completed: {e})"
-            worker_msgs = []
+            worker_msgs = journal.get("messages", [])[journal.get("seed", 0):]
+            worker_msgs.append(AIMessage(content=result))
             sink.finish("failed")
         finally:
             # Backstop for a cancel (KeyboardInterrupt is BaseException, not
@@ -1178,6 +1209,7 @@ class LangGraphAgent:
         progress: Optional[Callable[[str], None]] = None,
         history: Optional[List[BaseMessage]] = None,
         activity: Optional[ActivitySink] = None,
+        journal: Optional[dict] = None,
     ) -> tuple:
         """Run a worker agent loop until completion.
 
@@ -1216,6 +1248,8 @@ class LangGraphAgent:
             worker_messages.extend(history)
         _seed_len = len(worker_messages)
         worker_messages.append(HumanMessage(content=prompt))
+        if journal is not None:
+            journal.update(messages=worker_messages, seed=_seed_len)
 
         # A quiet sub-agent must NOT pass the parent's callbacks: those drive the
         # shared spinner (on_llm_new_token/on_tool_start → spinner.stop), so a
@@ -1252,6 +1286,15 @@ class LangGraphAgent:
                 if activity is not None:
                     stream_options["stop_requested"] = activity.is_cancelled
                 response, _ = self._stream_response(worker_messages, config, **stream_options)
+            except KeyboardInterrupt:
+                if activity is not None and activity.is_cancelled() and not self._cancelled():
+                    # Stopping one worker must not interrupt its parent turn.
+                    if not quiet:
+                        self._stop_spinner()
+                    partial = self._last_visible_from(worker_messages)
+                    note = "(Worker stopped; preceding results are partial.)"
+                    return (f"{partial}\n\n{note}" if partial else note, worker_messages[_seed_len:])
+                raise
             except _ContextOverflow as overflow:
                 # A worker's own history overflowed. Workers run on a local
                 # message list (not self._messages), so end this worker with
@@ -2049,6 +2092,7 @@ class LangGraphAgent:
                 response, had_reasoning = self._stream_once(
                     active_model, messages, config, print_reasoning, mark_answer,
                     quiet=quiet,
+                    **({"stop_requested": stop_requested} if stop_requested is not None else {}),
                 )
             except ReviewStopped:
                 raise
@@ -2246,7 +2290,7 @@ class LangGraphAgent:
             return False
         return True
 
-    def _iter_stream_with_idle_timeout(self, active_model, messages, config):
+    def _iter_stream_with_idle_timeout(self, active_model, messages, config, stop_requested=None):
         """Yield stream chunks, but raise :class:`_StreamIdleTimeout` if no chunk
         arrives within ``self._stream_idle_timeout`` seconds.
 
@@ -2269,14 +2313,19 @@ class LangGraphAgent:
         if review_budget is not None:
             review_budget.check()
             idle = min(idle, review_budget.remaining()) if idle > 0 else review_budget.remaining()
-        if idle <= 0:
+        def cancelled():
+            return self._cancelled() or (stop_requested is not None and stop_requested())
+
+        if idle <= 0 and stop_requested is None and getattr(self, "_cancel_event", None) is None:
             messages = refresh_playbook_messages(
                 messages, getattr(self, "_playbook_context_provider", None)
             )
-            if self._cancelled():
+            if cancelled():
                 raise KeyboardInterrupt
             yield from active_model.stream(messages, config=config)
             return
+        if idle <= 0:
+            idle = float("inf")  # disabling timeouts must not disable cancellation
         # Falls back to `idle` when unset, so a hand-built agent (tests) behaves as
         # before rather than inheriting a 10-minute first-token wait.
         first_token = getattr(self, "_stream_first_token_timeout", 0) or idle
@@ -2295,9 +2344,11 @@ class LangGraphAgent:
                     return  # a slow refresh must not start an abandoned request
                 if review_budget is not None:
                     review_budget.check()
-                if self._cancelled():
+                if cancelled():
                     raise KeyboardInterrupt
                 for chunk in active_model.stream(fresh, config=config):
+                    if abandoned.is_set():
+                        return
                     q.put((None, chunk))
             except BaseException as e:  # propagate the stream's own error verbatim
                 q.put((e, None))
@@ -2322,7 +2373,7 @@ class LangGraphAgent:
             while True:
                 if review_budget is not None:
                     review_budget.check()
-                if self._cancelled():
+                if cancelled():
                     raise KeyboardInterrupt("cancelled while waiting for stream")
                 if time.monotonic() >= deadline:
                     # Nothing for `budget` seconds — the stream is wedged (likely a
@@ -2356,7 +2407,7 @@ class LangGraphAgent:
         finally:
             abandoned.set()
 
-    def _stream_once_quiet(self, active_model, messages: list, config: dict) -> tuple:
+    def _stream_once_quiet(self, active_model, messages: list, config: dict, stop_requested=None) -> tuple:
         """Stream a turn SILENTLY, accumulating the response with no display.
 
         Used by quiet (spawned) sub-agents: it drives the same idle-timeout stream
@@ -2368,7 +2419,8 @@ class LangGraphAgent:
         response = None
         try:
             for chunk in self._iter_stream_with_idle_timeout(
-                active_model, messages, config
+                active_model, messages, config,
+                **({"stop_requested": stop_requested} if stop_requested is not None else {}),
             ):
                 response = chunk if response is None else response + chunk
         except Exception as e:
@@ -2385,6 +2437,7 @@ class LangGraphAgent:
         print_reasoning: bool = True,
         mark_answer: bool = False,
         quiet: bool = False,
+        stop_requested=None,
     ) -> tuple:
         """Single streaming attempt (see _stream_response for the retry wrapper).
 
@@ -2396,7 +2449,10 @@ class LangGraphAgent:
         is safe to run several concurrently.
         """
         if quiet:
-            return self._stream_once_quiet(active_model, messages, config)
+            return self._stream_once_quiet(
+                active_model, messages, config,
+                **({"stop_requested": stop_requested} if stop_requested is not None else {}),
+            )
         self._code_formatter = CodeFormatter()
         first_token = True
         had_reasoning = False
@@ -2412,7 +2468,8 @@ class LangGraphAgent:
 
         try:
             for chunk in self._iter_stream_with_idle_timeout(
-                active_model, messages, config
+                active_model, messages, config,
+                **({"stop_requested": stop_requested} if stop_requested is not None else {}),
             ):
                 chunk_content, reasoning_content = self._extract_content(chunk)
 
@@ -2800,13 +2857,24 @@ class LangGraphAgent:
             return confirmation_gate.PLAN_APPROVAL_UNAVAILABLE
         plan = (plan or "").strip()
         allowed_bash = [str(c).strip() for c in (allowed_bash or []) if str(c).strip()]
+        presented = plan
+        if allowed_bash:
+            presented += (
+                "\n\n## Shell command permissions\n\n"
+                "Approving this unchanged plan also approves these command prefixes:\n"
+                + "\n".join(f"- `{command}`" for command in allowed_bash)
+                + "\n\nEditing the plan revokes these permissions; commands will ask separately."
+            )
         ui = getattr(self, "_plan_approval_ui", None)
         if ui is not None:
-            verdict, plan = ui(plan)  # UI may return an edited plan
+            verdict, edited = ui(presented)
+            if edited != presented:
+                allowed_bash = []
+                plan = edited
         else:
             verdict = "approve"  # non-TTY/tests: auto-approve
 
-        if verdict == "keep_planning":
+        if verdict != "approve":
             return (
                 "The user wants to keep planning — plan mode is still ON "
                 "(read-only). Refine the plan based on their feedback and call "
@@ -2819,13 +2887,13 @@ class LangGraphAgent:
                 provider(plan)
             except Exception as e:
                 logger.error(f"exit_plan_mode approval provider failed: {e}")
+                return "Blocked: the approved plan could not be applied. Plan permissions were not granted."
         # Pin the full toolset for the execution turns: routing must not narrow
         # tools now that the model may edit/run anything to carry out the plan.
         self._execute_plan_route = True
         # Pre-approved commands auto-confirm during execution (plan mode is now
         # off, so they'd otherwise hit the per-command Proceed? gate).
-        if allowed_bash:
-            self._preapproved_bash = list(allowed_bash)
+        self._preapproved_bash = list(allowed_bash)
         note = ""
         if allowed_bash:
             note = (
@@ -3088,27 +3156,19 @@ class LangGraphAgent:
                 tool_results,
                 spawn_results=spawn_results,
             )
-        except BaseException:
-            if review_budget is not None:
-                state["messages"].extend(tool_results)  # retain completed calls on interruption
-            raise
-
-        self._start_spinner()
-
-        # Fold in anything the user sent while these tools ran, so the model
-        # addresses it on the next call instead of when the whole turn is over.
-        # AFTER every ToolMessage, deliberately: an unanswered tool_call_id makes
-        # the provider reject the next call. The other drain point is turn end
-        # (the `deliver` node) — one without the other is what retired the first
-        # version of this in 1.8.0. See mid_turn.py.
-        tool_results.extend(mid_turn.drain(self))
-        work_review = getattr(self, "_work_review", None)
-        if work_review is not None:
-            tool_results.extend(work_review.after_batch(list(state["messages"]) + tool_results))
-            # A checkpoint is another model wait: deliver guidance accepted
-            # during it before the actor can start the next batch.
+            self._start_spinner()
+            # All tool replies precede mid-turn guidance; providers require
+            # every tool_call_id to be answered before the next human message.
             tool_results.extend(mid_turn.drain(self))
-        return {"messages": tool_results}
+            work_review = getattr(self, "_work_review", None)
+            if work_review is not None:
+                tool_results.extend(work_review.after_batch(list(state["messages"]) + tool_results))
+                tool_results.extend(mid_turn.drain(self))
+            return {"messages": tool_results}
+        except BaseException:
+            state["messages"].extend(tool_results)
+            self._interrupted_node_state = dict(state)
+            raise
 
     def _should_continue(self, state: AgentState) -> str:
         """"continue" if the last AI message has tool calls, "deliver" if the turn
@@ -3151,6 +3211,7 @@ class LangGraphAgent:
         turn's input and the model addresses them with no user message. This is
         how a background completion auto-triggers a turn while the user is idle.
         """
+        self._last_turn_messages = []
         # Fresh cancel token for this turn (see request_cancel): a stale set flag
         # from a prior cancelled turn must not abort this one.
         cancel_ev = getattr(self, "_cancel_event", None)
@@ -3179,16 +3240,18 @@ class LangGraphAgent:
         # call addresses it alongside the prompt (or on its own, if empty).
         bg = getattr(self, "drain_background_completions", None)
         delivered = 0
+        turn_log: List[BaseMessage] = []
         if bg is not None:
             for m in bg():
                 self._messages.append(m)
+                turn_log.append(m)
                 delivered += 1
 
         # Buffer this turn's messages for the session log and flush ONCE at the
         # end. Buffering (rather than slicing _messages by a start index) is what
         # makes the log survive compaction: compaction REPLACES _messages
         # mid-turn, which would invalidate any index taken here.
-        turn_log: List[BaseMessage] = []
+        self._interrupted_node_state = None
 
         stored_prompt = self._strip_ephemeral(prompt)
         # What the change index quotes as the cause of this turn's edits: the
@@ -3206,6 +3269,11 @@ class LangGraphAgent:
             user_msg = HumanMessage(content=stored_prompt)
             self._messages.append(user_msg)
             turn_log.append(user_msg)
+
+        log = getattr(self, "session_log", None)
+        begin_turn = getattr(log, "begin_turn", None)
+        if callable(begin_turn):
+            begin_turn(turn_log)
 
         # Pre-flight compaction: shrink the accumulated history before it seeds this 
         # turn's graph run if it's over the high-water mark. The client provider owns 
@@ -3286,6 +3354,7 @@ class LangGraphAgent:
             # User cancelled mid-turn (the UI injects KeyboardInterrupt into this
             # worker thread). CLOSE the turn out rather than deleting it: keep the
             # user message and append an explicit interrupted marker.
+            result = getattr(self, "_interrupted_node_state", None) or result
             if result:
                 self._commit_turn(result, turn_log, log=False)
             marker = AIMessage(content=INTERRUPTED_MARKER)
@@ -3358,6 +3427,7 @@ class LangGraphAgent:
             # prefix of the next one. Committed with `log=False` so the marker
             # lands in the SAME turn record as the work above it (a second record
             # would count as a second turn everything downstream reads).
+            result = getattr(self, "_interrupted_node_state", None) or result
             if result:
                 self._commit_turn(result, turn_log, log=False)
             marker = AIMessage(content=turn_failure.failure_marker(e))
@@ -3475,6 +3545,7 @@ class LangGraphAgent:
         The client sets ``session_log`` when session persistence is on; a plain
         agent (unit tests, embedded use) has none and this is a no-op.
         """
+        self._last_turn_messages = list(messages)
         log = getattr(self, "session_log", None)
         if log is None or not messages:
             return
@@ -3516,3 +3587,6 @@ class LangGraphAgent:
         self._preapproved_bash = []  # plan-scoped approvals don't outlive a clear
         self._execute_plan_route = False  # plan-execution route pin is plan-scoped
         self._activity.clear()  # drop the agents-panel feed for a fresh context
+        registry = getattr(self, "_bg_agents", None)
+        if registry is not None:
+            registry.reset_delivery()

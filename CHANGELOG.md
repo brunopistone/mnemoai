@@ -9,8 +9,36 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.29.1] — 2026-10-13
+
 ### Fixed
 
+- Stop repeated steering-file warnings from footer/context calculations. Share a
+  quiet, immutable instruction snapshot across request and reporting paths;
+  refresh changed sources between interactions and show one compact notice per
+  condition. Keep truncation markers, filename precedence, and the code default.
+- Treat example steering limits as explicit configuration rather than requiring
+  them to equal the fallback used when the setting is absent.
+- Gate Git mutations in unattended work; show plan shell permissions explicitly,
+  revoke them after plan edits, and resolve implicit protected-branch force pushes.
+- Preserve completed tool/orchestrator evidence on interruption, check stop
+  requests between calls and during streams, and prevent cleared conversations
+  from receiving old background completions.
+- Serialize file mutations and publish staged bytes atomically, preserving
+  permissions and symlink targets. Carry worker-local execution directories
+  through MCP so shell, Git and file tools agree. Bound reader allocations,
+  including oversized individual lines.
+- Bind checkpoints to unlogged turn inputs, clear obsolete summaries on load,
+  reduce summaries without dropping middle sections, and use the pending-request
+  estimate for preflight rather than the previous request's usage.
+- Validate document embedding provenance; unknown legacy episodic vectors remain
+  keyword-searchable without being silently adopted or overwritten.
+- Correct Claude date/version parsing, cross-provider endpoint inheritance,
+  non-reasoning overrides and SageMaker stops. Distinguish saved server-owned
+  `/params` edits from applied chat edits. Refresh generated Mantle credentials
+  per request and avoid hidden SDK retry multiplication in chat calls.
+- Keep refused calls out of successful learning evidence, retain evidence across
+  mid-turn guidance, and bind peer reviews to bounded untracked-artifact snapshots.
 - Resolve the installer's default version from the latest stable GitHub release,
   pin its wheel by SHA-256, and verify the installed version. A lagging PyPI index
   can no longer silently select an older release.

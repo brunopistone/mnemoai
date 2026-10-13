@@ -28,6 +28,7 @@ from mnemoai.utils.shell_syntax import simple_command_tokens
 CONFIRM_BASH_TOOLS = {"execute_bash", "start_background_task"}
 CONFIRM_WRITE_TOOLS = {"fs_write", "file_edit"}
 CONFIRM_MEMORY_TOOLS = {"memory"}
+CONFIRM_GIT_TOOLS = {"git_safe", "git_commit_safe"}
 
 # Some tools can only tell a call is dangerous once they inspect the world (is
 # this branch pushed? is this a protected branch?), so they refuse and answer
@@ -91,7 +92,19 @@ def confirm(agent, tool_name: str, tool_args: dict) -> bool:
         )
 
     target = None  # the path a write would touch, for auto-approve scoping
-    if tool_name in CONFIRM_BASH_TOOLS:
+    if tool_name in CONFIRM_GIT_TOOLS:
+        command = str(tool_args.get("command", "")).strip()
+        if command.startswith("git "):
+            command = command[4:].lstrip()
+        if tool_name == "git_safe" and plan_policy.is_readonly_bash(f"git {command}"):
+            return True
+        if tool_name == "git_safe" and agent._is_preapproved_bash(f"git {command}"):
+            return True
+        category, toggle, toggle_default, header, detail = (
+            "bash", "REQUIRE_BASH_CONFIRMATION", True, "▶ Run Git mutation?",
+            f"git {command}" if tool_name == "git_safe" else "git commit",
+        )
+    elif tool_name in CONFIRM_BASH_TOOLS:
         # A command the plan pre-declared (via exit_plan_mode allowed_bash)
         # runs without a prompt — approving the plan approved these.
         if agent._is_preapproved_bash(tool_args.get("command", "")):

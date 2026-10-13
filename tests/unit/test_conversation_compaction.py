@@ -742,3 +742,17 @@ class TestCompactEvictsFirst:
         msgs = [HumanMessage(f"m{i}") for i in range(6)]
         _run(mgr.compact(_FakeClient(), _FakeAsyncModel(), _FakeAgent(list(msgs))))
         assert called["evict"] is True  # eviction ran as the first compaction layer
+def test_reduce_passes_every_middle_partial_to_a_model_before_replacing_history():
+    manager = AgentConversationManager(max_tokens=100_000)
+    manager.previous_summary = ""
+    seen = []
+
+    class Model:
+        async def ainvoke(self, messages):
+            seen.extend(str(message.content) for message in messages)
+            return AIMessage(content="short consolidated summary")
+
+    partials = ["A " * 20_000, "MIDDLE_SENTINEL\n" + "B " * 20_000, "C " * 20_000]
+    assert _run(manager._reduce_summaries(partials, Model(), ""))
+    assert "MIDDLE_SENTINEL" in "\n".join(seen)
+    assert "chars elided" not in "\n".join(seen)

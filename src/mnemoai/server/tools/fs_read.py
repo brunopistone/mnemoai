@@ -5,7 +5,6 @@ import json
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
-from mnemoai.utils.path_utils import normalize_path
 
 from ..error_handler import tool_error_handler
 from .read_state import record_read
@@ -18,6 +17,7 @@ from .readers import (
     read_pdf,
     search_file,
 )
+from .shell_state import resolve_path as normalize_path
 
 
 def register_fs_read_tools(mcp: FastMCP) -> None:

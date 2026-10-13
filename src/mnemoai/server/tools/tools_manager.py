@@ -6,8 +6,8 @@ from typing import Any, Optional
 
 import tiktoken
 
+from mnemoai.server.tools.shell_state import resolve_path as normalize_path
 from mnemoai.utils.config import config
-from mnemoai.utils.path_utils import normalize_path
 from mnemoai.utils.tokenization import count_tokens
 
 # Load configuration from centralized config

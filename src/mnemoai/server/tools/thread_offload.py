@@ -41,6 +41,8 @@ from typing import Any, Callable
 
 import anyio.to_thread
 
+from mnemoai.utils import execution_context
+
 
 def offload_blocking(fn: Callable) -> Callable:
     """Wrap a SYNC ``fn`` so it runs on a worker thread; pass a coroutine fn through.
@@ -88,7 +90,24 @@ class ThreadedToolServer:
         decorate = self._mcp.tool(*args, **kwargs)
 
         def _register(fn: Callable) -> Callable:
-            decorate(offload_blocking(fn))
+            offloaded = offload_blocking(fn)
+
+            @functools.wraps(fn)
+            async def scoped(*args, **kwargs):
+                workspace = None
+                get_context = getattr(self._mcp, "get_context", None)
+                if get_context is not None:
+                    try:
+                        meta = get_context().request_context.meta
+                    except (LookupError, ValueError):
+                        meta = None
+                    raw = getattr(meta, execution_context.META_KEY, None)
+                    if isinstance(raw, dict) and isinstance(raw.get("cwd"), str):
+                        workspace = execution_context.Workspace(raw["cwd"])
+                with execution_context.use(workspace):
+                    return await offloaded(*args, **kwargs)
+
+            decorate(scoped)
             return fn
 
         return _register

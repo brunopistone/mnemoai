@@ -87,9 +87,10 @@ class ActivitySink:
     store is None (plain loop / tests / the main foreground turn), so the quiet
     loop is untouched when there's no UI listening."""
 
-    def __init__(self, store: Optional["AgentActivityStore"], run_id: str) -> None:
+    def __init__(self, store: Optional["AgentActivityStore"], run_id: str, cancel=None) -> None:
         self._store = store
         self._run_id = run_id
+        self._cancel = cancel if cancel is not None else threading.Event()
 
     def tool_call(self, name: str, args: Optional[dict]) -> None:
         if self._store is None:
@@ -155,9 +156,9 @@ class ActivitySink:
     def is_cancelled(self) -> bool:
         """True once the UI asked THIS run to stop (x / stop-all). Polled by the
         worker loop so any single agent can be stopped on demand."""
-        if self._store is None:
-            return False
-        return self._store.is_cancelled(self._run_id)
+        return self._cancel.is_set() or (
+            self._store is not None and self._store.is_cancelled(self._run_id)
+        )
 
 
 class AgentActivityStore:
@@ -190,22 +191,23 @@ class AgentActivityStore:
         with self._lock:
             return self._turn
 
-    def open_run(self, agent_type: str, description: str, origin: str) -> ActivitySink:
+    def open_run(self, agent_type: str, description: str, origin: str, cancel=None) -> ActivitySink:
         """Register a new running hidden agent and return its write sink."""
         with self._lock:
             self._counter += 1
             run_id = f"{origin}-{self._counter}"
-            self._runs[run_id] = ActivityRun(
+            run = self._runs[run_id] = ActivityRun(
                 run_id=run_id,
                 agent_type=agent_type,
                 description=description,
                 origin=origin,
                 start=time.monotonic(),
                 turn=self._turn,
+                cancel=cancel if cancel is not None else threading.Event(),
             )
             self._evict_locked()
         self._fire_change()
-        return ActivitySink(self, run_id)
+        return ActivitySink(self, run_id, run.cancel)
 
     def _record(self, run_id: str, event: ActivityEvent) -> None:
         with self._lock:
@@ -312,9 +314,14 @@ class AgentActivityStore:
         return n
 
     def clear(self) -> None:
-        """Drop all runs (used on /clear for a fresh context)."""
+        """Stop active runs and retain their controls until they actually terminate."""
         with self._lock:
-            self._runs.clear()
+            self._runs = OrderedDict(
+                (key, run) for key, run in self._runs.items() if run.status == "running"
+            )
+            for run in self._runs.values():
+                run.cancel.set()
+                run.turn = -1
             self._turn = 0
         self._fire_change()
 

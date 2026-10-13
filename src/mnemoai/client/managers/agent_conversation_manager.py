@@ -336,22 +336,49 @@ class AgentConversationManager:
         pass, so the reduce reuses the same summary prompt/system framing as the
         map — no second template to maintain.
         """
-        # Cap each partial so the concatenated reduce input can't itself overflow.
-        cap = max(1000, int(self.max_tokens * _ROLLING_SUMMARY_MAX_CHARS_FRACTION * 4))
+        # Keep every partial, including its middle. Combining them into one
+        # message used to trigger the generic head/tail clip before the model.
         pieces = []
         if self.previous_summary:
-            pieces.append(f"[Earlier session summary]\n{self.previous_summary[:cap]}")
+            pieces.append(f"[Earlier session summary]\n{self.previous_summary}")
         for i, p in enumerate(partials, 1):
-            pieces.append(f"[Summary of conversation part {i}]\n{p[:cap]}")
-        merged_context = "\n\n".join(pieces)
+            pieces.append(f"[Summary of conversation part {i}]\n{p}")
+        budget = max(1, int(self.max_tokens * _SUMMARY_CALL_FRACTION))
+        accounting = {"record_usage": record_usage} if record_usage is not None else {}
 
-        # Present the partials as the "messages" to summarize; the summary prompt
-        # then produces one consolidated summary over them.
-        reduce_input = [{"role": "user", "content": [{"text": merged_context}]}]
-        return await self._summarize_batch(
-            reduce_input, model, focus_instructions, prior_summary=None,
-            **({"record_usage": record_usage} if record_usage is not None else {}),
-        )
+        def bounded_messages(texts):
+            output = []
+            pending = list(reversed(texts))
+            while pending:
+                text = pending.pop()
+                message = {"role": "user", "content": [{"text": text}]}
+                if len(text) > 1 and (
+                    self.count_tokens([message]) > budget or self._truncate_msg_text(text) != text
+                ):
+                    half = len(text) // 2
+                    pending.extend([text[half:], text[:half]])
+                else:
+                    output.append(message)
+            return output
+
+        current = bounded_messages(pieces)
+        for _ in range(12):
+            batches = self._batch_messages(current, budget)
+            reduced = []
+            for batch in batches:
+                summary = await self._summarize_batch(
+                    batch, model, focus_instructions, prior_summary=None, **accounting,
+                )
+                if not summary:
+                    raise CompactionError("A summary reduction returned no content.")
+                reduced.append(summary)
+            if len(reduced) == 1:
+                return reduced[0]
+            next_messages = bounded_messages(reduced)
+            if self.count_tokens(next_messages) >= self.count_tokens(current):
+                raise CompactionError("Summary reduction did not shrink; retaining all partials.")
+            current = next_messages
+        raise CompactionError("Summary reduction limit reached; retaining all partials.")
 
     def _batch_messages(self, messages: List[Dict], budget: int) -> List[List[Dict]]:
         """Split messages into ordered batches each under ``budget`` tokens.
@@ -612,7 +639,9 @@ class AgentConversationManager:
         raw_messages = agent.messages.copy() if hasattr(agent, "messages") else []
         messages = messages_to_dict_list(raw_messages)
 
-        if self.count_tokens(messages) <= self.max_tokens:
+        estimate = getattr(client, "_estimate_context_tokens", None)
+        tokens = estimate() if callable(estimate) else self.count_tokens(messages)
+        if tokens <= self.max_tokens:
             return
 
         keep_recent = config.get("LLM", {}).get("KEEP_RECENT_MESSAGES", 6)

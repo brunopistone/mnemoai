@@ -276,7 +276,7 @@ class WorkReview:
             self._writes, self._shells = writes, shells
             if not changed:
                 now = self.capture._git()
-                changed = (now or {}).get("revision") != self._git_revision
+                changed = now is None or (now or {}).get("revision") != self._git_revision
             if not changed:
                 return []
             self.change_reviews += 1

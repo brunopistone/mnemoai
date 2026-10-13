@@ -137,17 +137,13 @@ class ChromaEpisodicStore:
             return
 
         stored_fp = (self.collection.metadata or {}).get("embed_fingerprint")
-        # An unstamped legacy collection: if it holds data at a DIFFERENT dimension
-        # than the current model, it can't be queried — reset. If empty or same
-        # dimension, adopt it (re-stamp on next create isn't needed — it works).
-        if stored_fp is None:
-            if self._legacy_dimension_mismatch():
-                self._reset_collection(current_fp, reason="dimension changed")
-            else:
-                logger.info(
-                    f"Loaded existing episodic memory collection from "
-                    f"{self.persist_path}"
-                )
+        # An unstamped nonempty store has no provable embedding provenance.
+        # Preserve its text for BM25; never adopt arbitrary same-dimension vectors.
+        if not isinstance(stored_fp, str) or not stored_fp:
+            if self.collection.count():
+                self.integrity_error = "Unknown legacy embedding identity; semantic operations require rebuilding the store."
+                require_clean_vectors(self)
+            self.collection.modify(metadata={**(self.collection.metadata or {}), "embed_fingerprint": current_fp})
             return
 
         if stored_fp == current_fp:
@@ -159,25 +155,6 @@ class ChromaEpisodicStore:
         self._reset_collection(
             current_fp, reason=f"embedding model changed ({stored_fp} → {current_fp})"
         )
-
-    def _legacy_dimension_mismatch(self) -> bool:
-        """For an unstamped collection: True if its stored dim differs from the
-        current embedding dim (so queries would crash). None/empty → False."""
-        try:
-            if self.collection.count() == 0:
-                return False
-            peek = self.collection.peek(1)
-            emb = peek.get("embeddings")
-            stored = len(emb[0]) if emb is not None and len(emb) > 0 else None
-        except Exception:
-            return False
-        if stored is None:
-            return False
-        current = None
-        rd = getattr(self.embeddings, "runtime_dimension", None)
-        if callable(rd):
-            current = rd()
-        return current is not None and current != stored
 
     def _reset_collection(self, current_fp: str, reason: str) -> None:
         """Drop and recreate the collection (re-stamped), logging why."""

@@ -158,6 +158,9 @@ class ChatSageMaker(BaseChatModel):
         **kwargs,
     ) -> Dict[str, Any]:
         """Build request payload based on input format."""
+        stop = kwargs.get("stop")
+        if stop is None:
+            stop = self.stop
         if self.input_format == "openai_chat":
             payload = {
                 "messages": self._convert_messages_to_openai(messages),
@@ -168,8 +171,8 @@ class ChatSageMaker(BaseChatModel):
                 payload["stream"] = True
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
-            if self.stop:
-                payload["stop"] = kwargs.get("stop", self.stop)
+            if stop is not None:
+                payload["stop"] = stop
         else:
             # text_generation format
             payload = {
@@ -183,8 +186,8 @@ class ChatSageMaker(BaseChatModel):
                 payload["parameters"]["top_p"] = self.top_p
             if self.top_k is not None:
                 payload["parameters"]["top_k"] = self.top_k
-            if self.stop:
-                payload["parameters"]["stop"] = kwargs.get("stop", self.stop)
+            if stop is not None:
+                payload["parameters"]["stop"] = stop
 
         return payload
 

@@ -86,6 +86,23 @@ def ci():
 
 
 class TestParamsDoesNotRestart:
+    @pytest.mark.parametrize("section", ["VISION_MODEL_ID", "EMBED_MODEL_ID"])
+    def test_server_owned_params_are_saved_not_falsely_reported_applied(self, ci, monkeypatch, capsys, section):
+        from pathlib import Path
+
+        from mnemoai.utils.configurator import ParamsOverride
+
+        monkeypatch.setattr(
+            "mnemoai.client.ui.chat_interface.run_params_override",
+            lambda: ParamsOverride(Path("/cfg.yaml"), section),
+        )
+        ci._dispatch("/params")
+        assert ci.client.reload_calls == 0
+        assert ci.restarts == 0  # do not discard a conversation to apply a knob
+        out = capsys.readouterr().out
+        assert "saved" in out and "Restart MnemoAI" in out
+        assert "New inference parameters applied" not in out
+
     def test_params_reloads_in_place_and_keeps_the_conversation(self, ci, monkeypatch):
         monkeypatch.setattr(
             "mnemoai.client.ui.chat_interface.run_params_override", lambda: "/cfg.yaml"

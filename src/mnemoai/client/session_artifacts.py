@@ -181,6 +181,8 @@ def flush_rag_store(client, session_id: str = None) -> None:
         for name in (
             f"rag_store_{session_id}.faiss",
             f"rag_store_{session_id}.faiss.meta.json",
+            f"rag_store_{session_id}.faiss.embedding.json",
+            f"rag_store_{session_id}.embedding.json",
             f"rag_store_{session_id}.faiss.synthetic-checked.json",
             f"rag_store_{session_id}.faiss.synthetic-repair.json",
             f"rag_store_{session_id}",

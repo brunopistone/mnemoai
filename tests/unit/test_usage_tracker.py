@@ -435,7 +435,11 @@ def test_compaction_records_real_summary_model_usage(agent):
 def test_parallel_summary_maps_reduce_and_retry_are_all_counted(monkeypatch):
     monkeypatch.setitem(config._config_data, "LLM", {"MAX_RETRIES": 2, "RETRY_DELAY": 0})
     manager = AgentConversationManager(max_tokens=100000)
-    manager._batch_messages = lambda messages, budget: [[{"content": "one"}], [{"content": "two"}]]
+    original_batch = manager._batch_messages
+    manager._batch_messages = lambda messages, budget: (
+        original_batch(messages, budget) if messages
+        else [[{"content": "one"}], [{"content": "two"}]]
+    )
     model = SimpleNamespace(model_name="summary", ainvoke=AsyncMock(side_effect=[
         RuntimeError("503 service unavailable"),
         AIMessage(content="summary A", usage_metadata=_usage(10, 2)),

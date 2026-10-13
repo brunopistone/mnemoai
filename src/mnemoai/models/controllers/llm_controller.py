@@ -1,5 +1,6 @@
 """LangChain-based LLM controller for multi-provider support."""
 
+from copy import deepcopy
 from typing import Optional
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -9,9 +10,30 @@ from mnemoai.models.chat_models.bedrock_stream_compat import harden_converse_str
 from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
 from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
 from mnemoai.models.controllers.base_model_controller import BaseModelController
-from mnemoai.models.provider_params import build_kwargs, extra_params
+from mnemoai.models.provider_params import build_kwargs, connection_keys, extra_params
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
+
+
+def _without_reasoning(params):
+    """Remove configured reasoning overrides on an independent auxiliary-model copy."""
+    cleaned = deepcopy(params)
+    for key in ("thinking", "reasoning", "reasoning_effort", "thinking_budget", "thinking_budget_tokens"):
+        cleaned.pop(key, None)
+    for key in ("think", "enable_thinking"):
+        if key in cleaned:
+            cleaned[key] = False
+    output = cleaned.get("output_config")
+    if isinstance(output, dict):
+        output.pop("effort", None)
+        if not output:
+            cleaned.pop("output_config")
+    for key in ("additional_model_request_fields", "extra_body", "model_kwargs", "chat_template_kwargs"):
+        if isinstance(cleaned.get(key), dict):
+            cleaned[key] = _without_reasoning(cleaned[key])
+            if not cleaned[key]:
+                cleaned.pop(key)
+    return cleaned
 
 
 class LangChainLLMController(BaseModelController):
@@ -162,6 +184,7 @@ class LangChainLLMController(BaseModelController):
             thinking_tokens=self.thinking_tokens,
             reasoning_model=self.reasoning_model,
             extra_params=extra_params(self.model_id),
+            max_retries=0,  # the agent/auxiliary loops own the retry budget
         )
 
     def _initialize_litellm_model(self, callbacks: list = None) -> None:
@@ -248,6 +271,7 @@ class LangChainLLMController(BaseModelController):
             "model": self.model_name,
             "callbacks": callbacks,
             "streaming": self.stream,
+            "max_retries": 0,
             **passthrough,
         }
 
@@ -315,6 +339,7 @@ class LangChainLLMController(BaseModelController):
             kwargs["api_key"] = "sk-local"
 
         extra = extra_params(self.model_id)
+        kwargs["max_retries"] = extra.pop("max_retries", 0)
         if protocol == "responses":
             kwargs["use_responses_api"] = True
             # Upgrade the bare reasoning_effort to a reasoning={effort, summary}
@@ -402,6 +427,7 @@ class LangChainLLMController(BaseModelController):
                 )
 
         # EXTRA_PARAMS applied last so an explicit override wins.
+        kwargs["max_retries"] = 0
         kwargs.update(extra_params(self.model_id))
 
         self.model = ChatAnthropic(**kwargs)
@@ -458,13 +484,21 @@ class LangChainLLMController(BaseModelController):
             A new model instance. Never mutates this controller or its model.
         """
         peer = LangChainLLMController(verbose=self.verbose_mode and not non_reasoning)
+        variant = deepcopy(peer.model_id)
         if overrides:
-            peer._apply_model_id(
-                {**peer.model_id, **overrides}, peer.max_conversation_tokens
-            )
+            connection = connection_keys("MODEL_ID") | {"EXTRA_PARAMS"}
+            if str(overrides.get("TYPE", peer.model_type)).lower() != peer.model_type.lower():
+                variant = {key: value for key, value in variant.items() if key not in connection}
+            for key, value in overrides.items():
+                if key in connection and (value is None or value == ""):
+                    variant.pop(key, None)
+                else:
+                    variant[key] = deepcopy(value)
         if non_reasoning:
-            peer.reasoning_effort = None
-            peer.reasoning_model = False
+            variant["REASONING_EFFORT"] = None
+            variant["REASONING"] = False
+            variant["EXTRA_PARAMS"] = _without_reasoning(extra_params(variant))
+        peer._apply_model_id(variant, peer.max_conversation_tokens)
         peer.initialize_model(callbacks=callbacks)
         return peer.get_model()
 

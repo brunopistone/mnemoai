@@ -51,6 +51,7 @@ from mnemoai.client.memory.model_dir_merge import unfork_model_dirs
 from mnemoai.client.memory.playbook_context import split_prompt
 from mnemoai.client.memory.playbook_store import PlaybookStore
 from mnemoai.client.memory.reflector import Reflector, current_turn_messages
+from mnemoai.client.memory.steering_store import SteeringState, state_for
 from mnemoai.client.session_log import (
     SessionLog,
     branch_session,
@@ -59,6 +60,7 @@ from mnemoai.client.session_log import (
     turn_summaries,
 )
 from mnemoai.client.ui import clipboard, review_view, turn_view
+from mnemoai.client.ui.command_feedback import render_steering_notices
 from mnemoai.client.ui.spinner import WRAP_UP_LABEL, Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models import area_models
@@ -90,6 +92,8 @@ class LangGraphClient:
         verbose: bool = False,
     ) -> None:
         self.verbose_mode = verbose
+        self._steering_state = SteeringState()
+        self._steering_revision = 0
 
         # The MCP server runs as a subprocess (`python -m mnemoai.server.server`).
         # Prepend the package's parent dir to PYTHONPATH so the child can import
@@ -345,6 +349,7 @@ class LangGraphClient:
         """Start the client and initialize the agent."""
         try:
             self.verbose_mode = verbose
+            self.refresh_steering()
 
             # Startup housekeeping: prune stale approved-plan files so the plans
             # dir doesn't grow without bound (best-effort, never blocks startup).
@@ -526,6 +531,7 @@ class LangGraphClient:
         review_context = []
 
         try:
+            self.refresh_steering(notify=True)
             if isinstance(self.agent, LangGraphAgent):
                 # invoke() normally resets this, but discovery precedes invoke.
                 self.agent._cancel_event.clear()
@@ -615,7 +621,11 @@ class LangGraphClient:
                     if review_work is not None:
                         review_capture = review_work.capture
                     if getattr(self, "reflector", None) and self.agent.messages != before:
-                        self._reflection_messages = current_turn_messages(self.agent.messages)
+                        turn = getattr(self.agent, "_last_turn_messages", None)
+                        self._reflection_messages = (
+                            list(turn) if isinstance(turn, list)
+                            else current_turn_messages(self.agent.messages)
+                        )
                 if review_capture is not None:
                     if review_work is not None:
                         review_work.finalize()
@@ -887,10 +897,9 @@ class LangGraphClient:
     def reload_inference_params(self) -> bool:
         """Re-read config and rebuild the model in place; True if it took effect.
 
-        Backs ``/params``, which edits ONLY inference knobs (temperature, top_p, …)
-        and leaves provider, model name, and connection alone — so nothing the MCP
-        subprocess fixed at boot can have changed, and re-exec'ing the process just
-        to apply a temperature would discard the conversation with it.
+        Backs ``/params`` for chat and auxiliary chat models only. Vision and
+        embeddings are owned/cached separately, including in the MCP process;
+        their saved changes require a restart and must not claim to apply here.
 
         A fresh controller is REQUIRED, not an ``initialize_model()`` on the
         existing one: ``LangChainLLMController.__init__`` snapshots every param off
@@ -1036,13 +1045,10 @@ class LangGraphClient:
             )
             if high_water <= 0:
                 return False
-            # Prefer the provider's EXACT input_tokens from the last turn (ground
-            # truth — the same number shown as [Context: N]). Our own estimate
-            # tiktoken-counts the serialized message JSON and applies a per-provider
-            # safety multiplier (e.g. 1.5x for mantle/anthropic), so it over-counts
-            # the real prompt ~2x and would fire compaction far too early. Use the
-            # estimate ONLY as a fallback before any turn has run (no actual yet).
-            current = self._count_context_tokens()
+            # Last response usage measures a PAST request. The pending input
+            # includes its answer, new user text and refreshed instructions.
+            # Use the complete next-input estimate, not historical usage.
+            current = self._estimate_context_tokens()
             if current <= high_water:
                 return False
             # Cheapest layer first: evict OLD tool-result bodies (no LLM call).
@@ -1111,7 +1117,7 @@ class LangGraphClient:
             scope = os.path.realpath(os.getcwd())
             entries = self.reflector.reflect_on_trajectory(
                 messages=messages, task=task, model=model, source=source,
-                scope=scope,
+                scope=scope, scope_to_last_turn=False,
                 evidence_filter=lambda evidence: self.playbook.filter_learning_evidence(evidence, scope),
                 timeout=max(1, min(120, float(config.get("PLAYBOOK", {}).get(
                     "REFLECTION_TIMEOUT", 30
@@ -1339,6 +1345,14 @@ class LangGraphClient:
     def _steering_reminder(self) -> str:
         """Delegates to :func:`context_injection.steering_reminder`."""
         return context_injection.steering_reminder(self)
+
+    def refresh_steering(self, *, notify: bool = False) -> None:
+        """Refresh at a foreground boundary; readers and painters never emit notices."""
+        context_injection.refresh_steering(self)
+        if notify:
+            notices = state_for(self).take_notices()
+            if notices:
+                print(render_steering_notices(notices), flush=True)
 
     def set_auto_approve_mode(self, mode: Optional[str]) -> str:
         """Set the session's auto-approve tier and return the mode now in force.

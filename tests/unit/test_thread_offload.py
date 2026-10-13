@@ -161,15 +161,17 @@ class TestThreadedToolServer:
         assert returned is blocking
         assert returned() == "sync result"
 
-    def test_an_async_tool_is_registered_as_is(self):
+    def test_an_async_tool_keeps_running_on_the_event_loop(self):
         mcp = _CapturingMCP()
+        thread = threading.get_ident()
 
         async def genuinely_async() -> str:
             await asyncio.sleep(0)
+            assert threading.get_ident() == thread
             return "ok"
 
         ThreadedToolServer(mcp).tool()(genuinely_async)
-        assert mcp.registered["genuinely_async"] is genuinely_async
+        assert asyncio.run(mcp.registered["genuinely_async"]()) == "ok"
 
     def test_tool_decorator_arguments_are_forwarded(self):
         mcp = _CapturingMCP()

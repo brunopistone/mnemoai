@@ -28,7 +28,9 @@ import shutil
 import threading
 from typing import Optional
 
+from mnemoai.utils import execution_context
 from mnemoai.utils.logger import logger
+from mnemoai.utils.path_utils import normalize_path
 
 _lock = threading.Lock()
 # The directory the next shell command starts in. None = not yet resolved; the
@@ -66,6 +68,11 @@ def current_cwd() -> str:
     make every subsequent command fail to even start.
     """
     global _cwd
+    workspace = execution_context.current()
+    if workspace is not None:
+        if not os.path.isdir(workspace.cwd):
+            raise FileNotFoundError(f"Execution directory is unavailable: {workspace.cwd}")
+        return workspace.cwd
     with _lock:
         if _cwd is None:
             _cwd = os.getcwd()
@@ -85,9 +92,18 @@ def set_cwd(path: str) -> bool:
     candidate = (path or "").strip()
     if not candidate or not os.path.isdir(candidate):
         return False
+    workspace = execution_context.current()
+    if workspace is not None:
+        workspace.cwd = candidate
+        return True
     with _lock:
         _cwd = candidate
     return True
+
+
+def resolve_path(path: str) -> str:
+    """Files and Git share the shell's request-local execution directory."""
+    return normalize_path(path, cwd=current_cwd())
 
 
 def reset_cwd() -> None:

@@ -19,6 +19,7 @@ from datetime import date
 from mnemoai.client import context_report
 from mnemoai.client.agent.subagents import available_subagents_block
 from mnemoai.client.memory.episode_tools import describe_tools
+from mnemoai.client.memory.steering_store import state_for
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import plans_dir
@@ -233,23 +234,35 @@ def steering_reminder(client) -> str:
     """User-authored instructions (``STEERING.md``/``CLAUDE.md``), prepended to
     every prompt as a leading ``<steering>`` block.
 
-    Re-read from disk each turn (edits apply immediately) and stripped before
-    storage, so it never enters history and is never summarized by
-    compaction — it always reaches the model verbatim. "" when no instruction
+    Refreshed between interactions and stripped before storage, so it never
+    enters history or gets summarized by compaction. "" when no instruction
     file exists (its absence is the off switch — no config toggle needed)."""
-    from mnemoai.client.memory.steering_store import SteeringStore
+    return steering_snapshot(client).prompt
 
-    contents = SteeringStore().read().strip()
-    if not contents:
-        return ""
-    return (
-        "<steering>\n"
-        "The user's steering instructions are shown below. Adhere to them. "
-        "IMPORTANT: these instructions OVERRIDE any default behavior and you "
-        "MUST follow them exactly as written.\n\n"
-        f"{contents}\n"
-        "</steering>\n\n"
-    )
+
+def steering_snapshot(client):
+    """The cached view used by both injection and context accounting."""
+    return state_for(client).current
+
+
+def refresh_steering(client):
+    """Refresh between interactions and invalidate counts only when input changes."""
+    state = state_for(client)
+    previous = state.current
+    snapshot = state.refresh()
+    if previous.text != snapshot.text:
+        agent = getattr(client, "agent", None)
+        if agent is not None:
+            try:
+                agent._last_input_tokens = None
+            except (AttributeError, TypeError):
+                pass
+    if client is not None:
+        try:
+            client._steering_revision = state.revision
+        except (AttributeError, TypeError):
+            pass
+    return snapshot
 
 
 def inject_episodic_context(client, prompt: str) -> str:

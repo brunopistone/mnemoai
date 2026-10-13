@@ -14,6 +14,7 @@ import pytest
 
 from mnemoai.client import doctor
 from mnemoai.client.doctor import FAIL, INFO, OK, WARN, Check
+from mnemoai.client.memory.steering_store import SteeringFile, SteeringSnapshot
 
 
 class FakeConfig:
@@ -323,7 +324,10 @@ class TestFeatureChecks:
 class TestSizeChecks:
     def _stub_stores(self, monkeypatch, memory_text, steering=()):
         monkeypatch.setattr(doctor, "MemoryStore", lambda: type("S", (), {"read": lambda _s: memory_text})())
-        monkeypatch.setattr(doctor, "SteeringStore", lambda: type("S", (), {"sizes": lambda _s: list(steering)})())
+        rows = tuple(SteeringFile(path, len(text), text, len(text)) for path, text in steering)
+        monkeypatch.setattr(doctor, "SteeringStore", lambda: type("S", (), {
+            "snapshot": lambda _s: SteeringSnapshot(files=rows),
+        })())
 
     def test_a_nearly_full_memory_file_warns(self, cfg, monkeypatch):
         # Silently trimming at the cap is the failure mode; 99% is one fact away.

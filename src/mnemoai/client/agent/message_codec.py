@@ -147,6 +147,12 @@ def convert_strands_messages_to_langchain(
                         ToolMessage(
                             content=_tool_result_text(result.get("content", "")),
                             tool_call_id=result.get("toolUseId", ""),
+                            name=result.get("name"),
+                            status="error" if result.get("status") == "error" else "success",
+                            additional_kwargs=(
+                                {"execution_outcome": result["executionOutcome"]}
+                                if result.get("executionOutcome") else {}
+                            ),
                         )
                     )
             else:
@@ -257,6 +263,10 @@ def convert_langchain_messages_to_strands(
                     "toolResult": {
                         "toolUseId": msg.tool_call_id,
                         "content": _tool_result_blocks(msg.content),
+                        **({"name": msg.name} if msg.name else {}),
+                        **({"status": "error"} if msg.status == "error" else {}),
+                        **({"executionOutcome": msg.additional_kwargs["execution_outcome"]}
+                           if msg.additional_kwargs.get("execution_outcome") else {}),
                     }
                 }
             )

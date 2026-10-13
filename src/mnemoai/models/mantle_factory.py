@@ -17,10 +17,12 @@ provider behaves identically for text and image inputs.
 
 import os
 import re
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from mnemoai.models.chat_models.mantle_auth import install_token_refresh
 from mnemoai.utils.logger import logger
 
 VALID_PROTOCOLS = ("chat_completions", "responses", "anthropic")
@@ -64,8 +66,12 @@ def _claude_version(name: str) -> Optional[Tuple[int, int]]:
     None here means "Claude of unknown version, assume current", never "not a
     Claude".
     """
-    m = re.search(r"(\d+)[.\-](\d+)", name or "")
-    return (int(m.group(1)), int(m.group(2))) if m else None
+    m = re.search(
+        r"claude-(?:(?:opus|sonnet|haiku)-)?(\d{1,2})"
+        r"(?:[.\-](\d{1,2})(?!\d))?(?!\d)",
+        (name or "").lower(),
+    )
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else None
 
 
 def _anthropic_thinking_kwargs(name: str, effort: Optional[str], budget: int) -> dict:
@@ -116,6 +122,7 @@ def build_mantle_model(
     thinking_tokens: Optional[int] = None,
     reasoning_model: bool = False,
     extra_params: Optional[Dict[str, Any]] = None,
+    max_retries: Optional[int] = None,
 ) -> BaseChatModel:
     """Build a LangChain chat model (ChatOpenAI or ChatAnthropic) for Mantle.
 
@@ -141,12 +148,14 @@ def build_mantle_model(
     # (API_KEY / BEDROCK_API_KEY) so it works without local AWS credentials;
     # else mint a short-lived (~12h) token from the SigV4 chain.
     token = model_id.get("API_KEY") or os.environ.get("BEDROCK_API_KEY")
+    token_provider = None
     if token:
         logger.info("Using Bedrock Mantle API key for authentication")
     else:
         from aws_bedrock_token_generator import provide_token
 
         token = provide_token(region=region)
+        token_provider = partial(provide_token, region=region)
 
     logger.info(f"Initializing Bedrock Mantle model '{name}' (protocol={protocol})")
 
@@ -160,6 +169,8 @@ def build_mantle_model(
             "anthropic_api_key": token,
             "max_tokens": max_tokens if max_tokens is not None else 4096,
         }
+        if max_retries is not None:
+            kwargs["max_retries"] = max_retries
         if temperature is not None:
             kwargs["temperature"] = temperature
         if top_p is not None:
@@ -196,7 +207,8 @@ def build_mantle_model(
                 kwargs.pop("top_p", None)
         # EXTRA_PARAMS applied last so an explicit override wins.
         kwargs.update(extra)
-        return ChatAnthropic(**kwargs)
+        model = ChatAnthropic(**kwargs)
+        return install_token_refresh(model, token_provider, protocol) if token_provider else model
 
     # OpenAI-compatible protocols (chat_completions / responses). The subclass
     # keeps a reasoning field the OpenAI schema has no room for (see
@@ -209,6 +221,8 @@ def build_mantle_model(
         "base_url": base_url,
         "api_key": token,
     }
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
     if protocol == "responses":
         kwargs["use_responses_api"] = True
     if callbacks is not None:
@@ -233,10 +247,13 @@ def build_mantle_model(
     # Merge EXTRA_PARAMS into the request body; lift the first-class `reasoning`/
     # `reasoning_effort` out of model_kwargs to avoid a "specified in both" error.
     if extra:
+        if "max_retries" in extra:
+            kwargs["max_retries"] = extra.pop("max_retries")
         if "reasoning" in extra:
             kwargs["reasoning"] = extra.pop("reasoning")
         if "reasoning_effort" in extra:
             kwargs["reasoning_effort"] = extra.pop("reasoning_effort")
         if extra:
             kwargs["model_kwargs"] = extra
-    return ChatOpenAIReasoning(**kwargs)
+    model = ChatOpenAIReasoning(**kwargs)
+    return install_token_refresh(model, token_provider, protocol) if token_provider else model

@@ -8,7 +8,7 @@ When enabled, the assistant classifies each query before processing it and route
 
 | Route       | Description                                 | Tools Available                                              |
 | ----------- | ------------------------------------------- | ------------------------------------------------------------ |
-| `simple_qa` | Greetings, explanations, general knowledge  | None (direct LLM answer)                                     |
+| `simple_qa` | Greetings, explanations, general knowledge  | Meta tools and configured external MCP tools |
 | `code`      | File ops, code editing, git, shell commands | fs_read, fs_write, file_edit, execute_bash, git, search, etc |
 | `research`  | Web search, URL fetching                    | web_search, web_crawler                                      |
 | `knowledge` | Document reading, indexing, RAG queries     | pdf/csv/docx/json readers, RAG tools, fs_read                |
@@ -130,10 +130,25 @@ to 6 attempts for one interrupted model request. `0` disables those retries.
 The existing delay/backoff and jitter apply. Restart the app after changing the
 retry count. Authentication/validation errors are not blindly retried.
 
+For chat calls through OpenAI, Anthropic, MLX and Mantle, automatic SDK retries
+are disabled so they do not multiply the application's attempts. An explicit
+supported SDK retry override remains an intentional configuration choice.
+
 Retries remain finite. If recovery is exhausted, the run is marked failed and
 its parent is notified; completed filesystem work is not rolled back. Cancelling
 during backoff stops further requests, and a stopped background run is finalized
 rather than left running. No background approval prompt is introduced.
+
+Stop is checked before each new tool dispatch and after hook/approval waits.
+Already completed results survive interruption. `/clear` requests stop for old
+workers and suppresses their automatic delivery into the new conversation;
+their retained records can still be resumed explicitly.
+
+Each worker owns its execution directory. A shell `cd` affects that worker's
+subsequent shell, Git and relative file calls, not a sibling or the parent.
+The directory travels as private metadata to the built-in MCP server; external
+servers do not receive it. Absolute paths retain their usual meaning, and file
+confirmation/plan checks see the resolved target before execution.
 
 ## Sub-agents (`spawn_agent`)
 

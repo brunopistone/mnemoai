@@ -902,6 +902,10 @@ class ChatInterface:
         if welcome:
             self.__welcome_message()
 
+        refresh = getattr(self.client, "refresh_steering", None)
+        if refresh is not None:
+            refresh(notify=True)
+
         # Same "real interactive terminal" predicate the dialogs use.
         if _dialog_is_tty():
             self._run_pinned_loop()
@@ -1314,6 +1318,10 @@ class ChatInterface:
         if query.lower() in ["/exit", "/quit"]:
             return self._EXIT
 
+        refresh = getattr(self.client, "refresh_steering", None)
+        if refresh is not None:
+            refresh(notify=True)
+
         if query.lower() == "/clear":
             self.client.clear_context()
             if config.get("ENABLE_RAG", False):
@@ -1444,12 +1452,18 @@ class ChatInterface:
                 self._restart_in_place(notice=render_model_update(written, applied=False))
             return None
 
-        # /params only edits inference knobs (temperature, top_p, …) — nothing the
-        # MCP subprocess fixed at boot — so it reloads in place and KEEPS the
-        # conversation. A restart here used to discard the chat (and, after a
-        # `--resume`, left the restored history only in an abandoned file).
+        # Chat/area models can reload in place. Vision and embedding controllers
+        # are also cached in the MCP server, so never claim their save applied.
         if query.lower() == "/params":
-            if run_params_override() is not None:
+            written = run_params_override()
+            if written is not None:
+                if getattr(written, "section", "MODEL_ID") in {"VISION_MODEL_ID", "EMBED_MODEL_ID"}:
+                    print(
+                        "\n\033[90mParameters saved. Restart MnemoAI to apply them to "
+                        "the vision/embedding controllers. This conversation continues "
+                        "with the current parameters.\033[0m\n"
+                    )
+                    return None
                 if self.client.reload_inference_params():
                     print(
                         "\n\033[92mNew inference parameters applied.\033[0m "

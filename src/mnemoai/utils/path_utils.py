@@ -58,7 +58,7 @@ def clean_path_syntax(path: str) -> str:
     return unquoted
 
 
-def normalize_path(path: str) -> str:
+def normalize_path(path: str, cwd: str = None) -> str:
     """Normalize a user-supplied path, tolerating shell escaping/quoting.
 
     Resolution order (first that exists on disk wins; otherwise the expanded
@@ -85,9 +85,11 @@ def normalize_path(path: str) -> str:
         os.path.expanduser(_shell_unescape(raw)),
         os.path.expanduser(_shell_unescape(_strip_surrounding_quotes(raw))),
     ]
+    if cwd is not None:
+        candidates = [os.path.join(cwd, candidate) for candidate in candidates]
     for candidate in candidates:
         if candidate and os.path.exists(candidate):
             return candidate
     # Nothing matched — return the plain expanded literal so the caller reports
     # a clean "not found" against what the user actually meant.
-    return literal
+    return os.path.join(cwd, literal) if cwd is not None else literal

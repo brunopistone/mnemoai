@@ -34,7 +34,6 @@ from typing import Any, List, NamedTuple, Tuple
 
 from mnemoai.client import context_injection
 from mnemoai.client.memory.playbook_store import PLAYBOOK_BLOCK_MARKER
-from mnemoai.client.memory.steering_store import SteeringStore
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.tokenization import count_tokens
@@ -204,21 +203,25 @@ def _steering_part(client: Any) -> List[Part]:
     the total without a row of their own.
     """
     try:
-        injected = context_injection.steering_reminder(client)
+        snapshot = context_injection.steering_snapshot(client)
+        injected = snapshot.prompt
     except Exception as e:  # noqa: BLE001 — a report never breaks on a file read
         logger.debug(f"/context: steering unavailable: {e}")
         return []
-    if not injected:
+    if not injected and not snapshot.notices:
         return []
-    try:
-        sizes = SteeringStore().sizes()
-    except Exception as e:  # noqa: BLE001
-        logger.debug(f"/context: steering file sizes unavailable: {e}")
-        sizes = []
-    files = len(sizes)
+    files = len(snapshot.files)
     label = f"Steering: {files} file{'s' if files != 1 else ''}" if files else "Steering"
-    detail = tuple((_short(str(path)), count_tokens(text)) for path, text in sizes)
-    return [Part(label, count_tokens(injected), detail=detail, group="steering")]
+    detail = []
+    for row in snapshot.files:
+        name = _short(str(row.path))
+        if row.loaded_chars < row.source_chars:
+            name += f" — {row.loaded_chars:,}/{row.source_chars:,} chars loaded"
+        detail.append((name, count_tokens(row.text)))
+    for notice in snapshot.notices:
+        if notice.kind != "truncated":
+            detail.append((f"{_short(str(notice.path))} — {notice.detail}", 0))
+    return [Part(label, count_tokens(injected), detail=tuple(detail), group="steering")]
 
 
 def _tools_part(client: Any) -> List[Part]:
@@ -327,6 +330,7 @@ def estimate_cache_key(client: Any) -> tuple:
         id(agent),
         getattr(agent, "system_prompt", "") or getattr(client, "system_prompt", ""),
         getattr(client, "plan_mode_active", False),
+        getattr(client, "_steering_revision", 0),
         freeze(config.get("MODEL_ID", {})),
         freeze((config.get("LLM", {}) or {}).get("TOKEN_COUNTING", {})),
         tuple((
@@ -462,6 +466,10 @@ def render(
 
 def report(client: Any) -> str:
     """The whole ``/context`` report for a live client."""
+    try:
+        context_injection.refresh_steering(client)
+    except Exception as exc:
+        logger.debug("/context: steering refresh unavailable: %s", exc)
     parts = collect(client)
     exact = reported_input_tokens(client)
     total = exact or sum(p.tokens for p in parts)

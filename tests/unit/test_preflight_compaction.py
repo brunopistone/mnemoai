@@ -223,25 +223,20 @@ class TestEvictionIsRecordedInTheTranscript:
         assert log.calls == []
 
 
-class TestTriggerPrefersGroundTruth:
-    """The trigger prefers the provider's exact input_tokens (_last_input_tokens,
-    ground truth) over the manager's estimate, which over-counts non-OpenAI
-    models ~2x and would fire compaction far too early."""
+class TestTriggerUsesPendingInput:
+    """Historical usage must not stand in for the next request's size."""
 
-    def test_uses_actual_not_inflated_estimate(self, monkeypatch):
+    def test_new_large_input_is_not_hidden_by_a_small_previous_request(self, monkeypatch):
         _patch_config(monkeypatch)
-        # Estimate says 5000 (>800 high-water) but the provider's real count is
-        # 100 (<800). Must NOT compact — trust the ground truth.
         c = _client(token_count=5000, last_input_tokens=100)
-        assert c._compact_now() is False
-        assert c.conversation_manager.compacted == []
-
-    def test_actual_over_high_water_compacts(self, monkeypatch):
-        _patch_config(monkeypatch)
-        # Real count 900 > 800 → compact, regardless of a low estimate.
-        c = _client(token_count=10, last_input_tokens=900)
         assert c._compact_now() is True
         assert c.conversation_manager.compacted == [6]
+
+    def test_small_current_input_is_not_overridden_by_historical_usage(self, monkeypatch):
+        _patch_config(monkeypatch)
+        c = _client(token_count=10, last_input_tokens=900)
+        assert c._compact_now() is False
+        assert c.conversation_manager.compacted == []
 
     def test_estimate_fallback_when_no_actual(self, monkeypatch):
         _patch_config(monkeypatch)

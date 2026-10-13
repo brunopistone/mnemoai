@@ -508,6 +508,25 @@ class TestQuietWorkerLoop:
         assert text == "(cancelled)"
         assert a._quiet_state["quiet_seen"] == []  # never streamed
 
+    def test_stop_during_a_stream_returns_to_parent_without_cancelling_its_turn(self):
+        import threading
+
+        from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+        agent = self._agent_for_quiet([])
+        agent._cancel_event = threading.Event()
+        store = AgentActivityStore()
+        sink = store.open_run("explore", "task", "spawn")
+
+        def stop(*args, **kwargs):
+            store.request_stop(sink._run_id)
+            raise KeyboardInterrupt
+
+        agent._stream_response = stop
+        text, _ = agent._run_worker_loop(object(), [], "task", quiet=True, activity=sink)
+        assert "Worker stopped" in text
+        assert not agent._cancel_event.is_set()
+
     def test_should_continue_ends_the_graph_when_cancelled(self):
         # "Stop all" cancels the turn; the graph must END even with pending tool
         # calls, else it loops into another model call after tools return and the

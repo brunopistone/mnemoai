@@ -1974,9 +1974,16 @@ def _prompt_inference_params(text: str, section: str) -> str:
     return _run_steps(text, steps)
 
 
-def run_params_override() -> Optional[Path]:
+class ParamsOverride(NamedTuple):
+    """The changed section identifies which process owns the cached model."""
+
+    path: Path
+    section: str
+
+
+def run_params_override() -> Optional[ParamsOverride]:
     """Tune a configured model's inference parameters (``/params``); edits only
-    those keys (use /model for provider/name/connection). Returns the Path, or
+    those keys (use /model for provider/name/connection). Returns change metadata, or
     None if cancelled or unchanged."""
     dest = _config_to_edit()
     if not dest.is_file():
@@ -2039,7 +2046,7 @@ def run_params_override() -> Optional[Path]:
     # place and says so, so telling the user to reload contradicts what happens
     # next. It was left behind when /params stopped restarting the app.
     print("=" * 64 + "\n")
-    return dest
+    return ParamsOverride(dest, section)
 
 
 def _prompt_enable_embedding_features(text: str) -> str:
