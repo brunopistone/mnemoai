@@ -179,6 +179,35 @@ class _FakeModel:
 
 
 class TestIdleTimeoutIterator:
+    @pytest.mark.parametrize("idle", [0, 60])
+    def test_individual_worker_stop_interrupts_active_polling(self, idle):
+        agent = _agent(idle=idle)
+        stopped, reader_started, release = threading.Event(), threading.Event(), threading.Event()
+
+        class Model:
+            def stream(self, messages, config=None):
+                reader_started.set()
+                release.wait(5)
+                yield AIMessageChunk(content="late")
+
+        def cancel():
+            assert reader_started.wait(5)
+            stopped.set()
+
+        worker = threading.Thread(target=cancel)
+        worker.start()
+        start = time.monotonic()
+        try:
+            with pytest.raises(KeyboardInterrupt):
+                agent._stream_response(
+                    [], {}, model=Model(), quiet=True, stop_requested=stopped.is_set,
+                )
+            assert time.monotonic() - start < 2
+            assert not agent._cancelled()
+        finally:
+            release.set()
+            worker.join(5)
+
     def test_yields_all_chunks_when_no_stall(self):
         a = _agent(idle=1.0)
         out = list(a._iter_stream_with_idle_timeout(_FakeModel(["a", "b", "c"]), [], {}))

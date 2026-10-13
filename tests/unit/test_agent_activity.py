@@ -229,11 +229,17 @@ class TestImmutabilityAndBounds:
         assert len(got.events) == n  # frozen copy unaffected
         assert store.get("nonexistent") is None
 
-    def test_clear_drops_all(self):
+    def test_clear_stops_but_retains_active_controls(self):
         store = AgentActivityStore()
-        store.open_run("a", "0", "spawn")
+        sink = store.open_run("a", "0", "spawn")
+        store.clear()
+        assert sink.is_cancelled()
+        assert len(store.snapshot()) == 1
+        sink.finish_ok("late result")
+        assert store.snapshot()[0].status == "stopped"
         store.clear()
         assert store.snapshot() == []
+        assert sink.is_cancelled()  # the token belongs to the worker, not the panel
 
 
 class TestTurnScoping:

@@ -117,14 +117,21 @@ def file_state(path, root):
 
 
 def git_state(root):
-    """A scoped diff vs HEAD, including staged edits; not a claim of authorship."""
+    """A bounded tracked diff plus untracked artifacts; not a claim of authorship."""
     try:
         head = subprocess.check_output(
             ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
             stderr=subprocess.DEVNULL, timeout=1,
         ).decode("ascii").strip()
     except subprocess.CalledProcessError:
-        return None
+        try:
+            subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+                stderr=subprocess.DEVNULL, timeout=1,
+            )
+        except subprocess.CalledProcessError:
+            return None
+        head = None  # unborn repositories still contain reviewable new files
     args = [
         "git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
         "-C", str(root), "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all",
@@ -134,6 +141,36 @@ def git_state(root):
         ":(exclude)**/.netrc", ":(exclude)**/id_rsa*", ":(exclude)**/id_ed25519*",
         ":(exclude)**/.aws/**", ":(exclude)**/.ssh/**",
     ]
+    raw = _git_bytes(args) if head else b""
+    names = _git_bytes([
+        "git", "-c", "core.fsmonitor=false", "-C", str(root),
+        "ls-files", "--others", "--exclude-standard", "-z", "--", ".",
+    ])
+    untracked, omitted = [], len(names) > _DIFF_BYTES
+    for raw_name in names.split(b"\0"):
+        if not raw_name:
+            continue
+        if len(untracked) >= _FILE_LIMIT:
+            omitted = True
+            break
+        path = Path(root) / os.fsdecode(raw_name)
+        try:
+            state = file_state(path, Path(root).resolve())
+            untracked.append({"path": os.path.relpath(path, root), **state})
+        except (OSError, ValueError):
+            omitted = True
+    return {
+        "revision": digest([head, raw.hex(), names.hex(),
+                            [(item["path"], item["revision"]) for item in untracked]]),
+        "head": head,
+        "content": redact(raw[:_DIFF_BYTES].decode("utf-8", "replace")),
+        "truncated": len(raw) > _DIFF_BYTES,
+        "untracked": untracked, "untracked_omitted": omitted,
+    }
+
+
+def _git_bytes(args):
+    """Bound subprocess output and duration before materializing it."""
     proc = subprocess.Popen(
         args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"},
@@ -162,9 +199,7 @@ def git_state(root):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
-    return {"revision": digest([head, raw.hex()]), "head": head,
-            "content": redact(raw[:_DIFF_BYTES].decode("utf-8", "replace")),
-            "truncated": len(raw) > _DIFF_BYTES}
+    return bytes(raw)
 
 
 class Capture:
@@ -312,13 +347,21 @@ class Capture:
             except (OSError, ValueError) as exc:
                 self.gaps.add(f"Named-file inspection incomplete ({type(exc).__name__}).")
         self.after = self._git()
+        if self.after is None and self.shell_serial and not self.paths:
+            self.gaps.add("Shell-created artifacts outside Git require explicit file reads for coverage.")
         if self.after is not None:
             for label, snapshot in (("before", self.before), ("after", self.after)):
                 if snapshot is not None:
                     items.append({"id": f"diff-{label}", "kind": "workspace_diff_vs_HEAD",
-                                  "phase": label, **snapshot})
+                                  "phase": label, **{k: v for k, v in snapshot.items() if k != "untracked"}})
                     if snapshot["truncated"]:
                         self.gaps.add("Workspace diff was truncated.")
+                    if snapshot.get("untracked_omitted"):
+                        self.gaps.add("Some untracked artifacts could not be inspected within the safety/size limits.")
+            for i, state in enumerate(self.after.get("untracked", [])):
+                items.append({"id": f"untracked-{i + 1}", "kind": "current_file", **state})
+                if state["truncated"]:
+                    self.gaps.add("Some current file content was truncated.")
         return items
 
     def stale(self):

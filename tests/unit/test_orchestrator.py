@@ -175,3 +175,37 @@ class TestDecomposeDoesNotMutateTheSharedModel:
         a._restore_reasoning = lambda saved, model=None: None
         assert a._decompose_task("do a thing", "decompose", VALID)
         assert disabled == [True]
+def test_real_scheduler_retains_worker_tools_if_later_step_is_interrupted():
+    import pytest
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    from mnemoai.client.agent.agent_activity import AgentActivityStore
+    from tests.unit.test_tool_chokepoints import _agent, _Tool
+
+    agent = _agent([_Tool("first")])
+    agent._activity = AgentActivityStore()
+    agent._max_subagent_concurrency = 1
+    agent.system_prompt = ""
+    agent.callbacks = []
+    agent._callback_free_model = lambda: object()
+    agent._bind_tools = lambda model, tools: model
+
+    def stream(messages, config, **kwargs):
+        last = messages[-1]
+        if isinstance(last, ToolMessage):
+            return AIMessage(content="first step done"), False
+        if "later interrupted step" in last.content:
+            raise KeyboardInterrupt
+        return AIMessage(content="", tool_calls=[{"name": "first", "args": {}, "id": "completed"}]), False
+
+    agent._stream_response = stream
+    state = {"messages": [HumanMessage(content="work")], "subtasks": [
+        {"description": "first step", "category": "full"},
+        {"description": "later interrupted step", "category": "full", "depends_on": [0]},
+    ]}
+    with pytest.raises(KeyboardInterrupt):
+        agent._orchestrate(state)
+    kept = agent._interrupted_node_state["messages"]
+    assert any(isinstance(m, ToolMessage) and m.content == "first-out" for m in kept)
+    assert any(m.content == "first step done" for m in kept)
+    assert [run.status for run in agent._activity.snapshot()] == ["done", "stopped"]

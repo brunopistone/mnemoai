@@ -11,6 +11,7 @@ from mnemoai.server.tools.git_safety import (
     build_git_argv,
     build_scan_string,
     check_dangerous_command,
+    check_push_destination,
 )
 
 
@@ -74,6 +75,13 @@ class TestBlockedCommands:
 
 
 class TestDangerousCommands:
+    def test_reported_discard_and_remote_mutations_are_not_classified_safe(self):
+        for command in (
+            "restore --worktree example.py", "checkout -- example.py",
+            "push --delete origin feature", "push --force-with-lease",
+        ):
+            assert check_dangerous_command(command)["dangerous"], command
+
     def test_hard_reset_flag_after_revision_is_dangerous(self):
         assert check_dangerous_command("reset HEAD --hard")["dangerous"]
 
@@ -120,12 +128,43 @@ class TestDangerousCommands:
         assert any(w["type"] == "amend" for w in result["warnings"])
 
     def test_force_with_lease_is_not_flagged_as_force_push(self):
-        # --force-with-lease is the safe variant and must NOT trip force_push.
+        # A lease has its own warning; it still requires confirmation.
         result = check_dangerous_command("push --force-with-lease origin feature")
         force_warnings = [
             w for w in result.get("warnings", []) if w["type"] == "force_push"
         ]
         assert force_warnings == []
+        assert result["dangerous"]
+
+
+def test_implicit_force_push_uses_local_config_without_executing_push(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from mnemoai.server.tools import git_safety
+
+    values = {
+        ("symbolic-ref", "--short", "HEAD"): "feature",
+        ("config", "--get", "push.default"): "upstream",
+        ("config", "--get", "branch.feature.merge"): "refs/heads/main",
+    }
+    calls = []
+
+    def read(argv, **kwargs):
+        calls.append(argv)
+        assert argv[1] != "push"
+        assert kwargs["cwd"] == str(tmp_path)
+        value = values.get(tuple(argv[1:]), "")
+        return SimpleNamespace(returncode=0 if value else 1, stdout=value)
+
+    monkeypatch.setattr(git_safety.subprocess, "run", read)
+    assert "blocked" in check_push_destination(["git", "push", "--force-with-lease"], str(tmp_path))
+    values[("config", "--get", "branch.feature.merge")] = "refs/heads/feature"
+    assert check_push_destination(["git", "push", "--force-with-lease"], str(tmp_path)) == ""
+    assert calls
+    values[("config", "--get-all", "remote.origin.push")] = "+HEAD:refs/heads/main"
+    assert "blocked" in check_push_destination(["git", "push"], str(tmp_path))
+    values[("config", "--get-all", "remote.origin.push")] = "+HEAD:refs/heads/feature"
+    assert check_push_destination(["git", "push"], str(tmp_path)) == ""
 
 
 class TestSafeCommands:

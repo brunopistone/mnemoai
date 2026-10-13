@@ -43,6 +43,15 @@ MEMORY:
 
 **Storage Location:** `~/.mnemoai/{profile}/MEMORY.md`
 
+## Embedding provenance
+
+Persistent document indexes bind vectors to the embedding model/endpoint
+fingerprint, not just their dimension. A changed or unknown identity disables
+semantic operations and new writes; stored text remains available for explicitly
+labelled BM25 keyword search. Unstamped legacy episodic vectors are likewise not
+silently adopted. Rebuild a document index by explicitly clearing and re-ingesting
+it; no automatic migration fabricates vectors or guesses the old model.
+
 ## 🧭 Steering (STEERING.md)
 
 `STEERING.md` is where **you** write always-on instructions for the assistant — conventions, commands, and "always do X" rules it should follow every turn. It's the user-authored counterpart to `MEMORY.md`: the assistant maintains `MEMORY.md` itself, but never writes `STEERING.md` — that file is yours.
@@ -64,8 +73,16 @@ Only the app home is searched for the global file — `~/.mnemoai/STEERING.md`, 
 **How it's applied:**
 
 - The content is **prepended to every prompt** as an authoritative instruction block, framed so it overrides default behavior.
-- It's **re-read from disk on every turn**, so editing `STEERING.md` takes effect immediately — no restart needed.
+- Instructions are loaded into a **session snapshot** at startup. Before a new
+  prompt or command, MnemoAI checks for changed sources, references, or limits and
+  refreshes the snapshot when needed. Edits apply on the next interaction without
+  a restart; unchanged files are not repeatedly read.
 - It is **never summarized by compaction**: unlike the conversation, the steering block is re-injected verbatim each turn, so long sessions never dilute or lose your instructions.
+
+The request, footer estimate, and context breakdown use the same snapshot.
+Reading or measuring it never prints warnings. Truncation and read problems get
+one compact grey notice per condition, with details in `/context` and `/doctor`.
+The notice is shown again only if the condition changes or returns after recovery.
 
 **What to put in it:** build/test commands, code-style rules, project layout notes, a commit-message format, "prefer X over Y" preferences — anything you'd tell a new collaborator. Keep it focused (a couple hundred lines at most); it's in context every turn, so brevity helps adherence.
 
@@ -86,14 +103,23 @@ A path is resolved relative to the file that mentions it (so a project file mean
 
 There's no config toggle: the file's presence is the switch. If no instruction file exists at either level, nothing is injected. It's distinct from `MEMORY.md` (facts the agent learns), skills (on-demand procedures), and the base system prompt.
 
-One consequence worth knowing: because the content is applied verbatim every turn, a large instructions file costs its full size in context on **every** turn. A 50 KB file is roughly 13k tokens per turn, and compaction can never reclaim it. So each file's contribution is capped at `STEERING.MAX_CHARS` (default 45000 characters, per file; `0` disables the cap):
+The snapshot avoids repeated file reads, not context usage: instructions still
+accompany model requests. Each file's contribution is capped at
+`STEERING.MAX_CHARS`. When the setting is absent, the code default is **45000
+characters per file**; `0` disables the cap. Configuration examples may choose
+a different explicit limit, which takes precedence over the fallback:
 
 ```yaml
 STEERING:
   MAX_CHARS: 45000 # Per file; content past this is dropped with a visible note
 ```
 
-The cut is never silent — the injected block says the file was truncated and names it, so the assistant reads the rest with its file tools instead of assuming the omitted part was empty. If a repo's file is that big, the better fix is to trim it, or to put the parts you want this assistant to follow in a `STEERING.md`, which takes precedence in that directory.
+The injected block still tells the model what was truncated and names the file,
+so it can read the rest with its file tools. No instruction file is modified.
+`/context` and `/doctor` show how much source text was loaded. A compact,
+always-on ruleset with longer reference material read on demand can reduce
+context use; increasing the cap is a separate choice from suppressing duplicate
+terminal notices.
 
 **Storage Location:** `~/.mnemoai/STEERING.md` (global) and/or `./STEERING.md` (per project) — `CLAUDE.md` accepted at either level
 

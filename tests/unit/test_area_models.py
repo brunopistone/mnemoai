@@ -117,6 +117,65 @@ class TestBuildingTheVariant:
         monkeypatch.setattr(LangChainLLMController, "_dispatch_provider", _fake)
         return seen
 
+    def test_provider_change_cannot_inherit_main_endpoint_or_credentials(self, monkeypatch):
+        from mnemoai.models.chat_models import chat_openai_reasoning
+
+        main = {
+            "NAME": "remote", "TYPE": "openai", "API_BASE": "https://wrong.example/v1",
+            "API_KEY": "remote-key", "API_PROTOCOL": "responses",
+            "EXTRA_PARAMS": {"base_url": "https://also-wrong.example"},
+        }
+        ctrl = self._controller(monkeypatch, main)
+        seen = {}
+        monkeypatch.setattr(chat_openai_reasoning, "ChatOpenAIReasoning", lambda **kw: seen.update(kw) or "MODEL")
+        assert ctrl.build_model_variant(
+            {"TYPE": "mlx", "NAME": "local", "HOST": "127.0.0.1", "PORT": 8000},
+        ) == "MODEL"
+        assert seen["base_url"] == "http://127.0.0.1:8000/v1"
+        assert seen["api_key"] == "sk-local"
+        assert "extra_body" not in seen
+        assert ctrl.model_id == main
+
+    def test_same_provider_endpoint_can_be_explicitly_cleared(self, monkeypatch):
+        from mnemoai.models.chat_models import chat_openai_reasoning
+
+        ctrl = self._controller(monkeypatch, {
+            "TYPE": "openai", "NAME": "main", "API_BASE": "https://old.example",
+        })
+        monkeypatch.setattr(area_models.config, "get", lambda k, d=None: (
+            {"ROUTER": {"API_BASE": None}} if k == "AREA_MODELS"
+            else ctrl.model_id if k == "MODEL_ID" else d
+        ))
+        seen = {}
+        monkeypatch.setattr(chat_openai_reasoning, "ChatOpenAIReasoning", lambda **kw: seen.update(kw) or "MODEL")
+        ctrl.build_model_variant(area_models.overrides_for("ROUTER"))
+        assert "base_url" not in seen
+
+    @pytest.mark.parametrize("provider,extra", [
+        ("anthropic", {"thinking": {"type": "enabled", "budget_tokens": 4096}}),
+        ("bedrock", {"additional_model_request_fields": {
+            "thinking": {"type": "enabled", "budget_tokens": 4096}, "unrelated": 7,
+        }}),
+    ])
+    def test_non_reasoning_is_authoritative_over_nested_extra_params(self, monkeypatch, provider, extra):
+        main = {
+            "TYPE": provider, "NAME": "claude-sonnet-4-5", "REASONING": True,
+            "EXTRA_PARAMS": extra,
+        }
+        ctrl = self._controller(monkeypatch, main)
+        seen = {}
+
+        def initialize(peer, callbacks=None):
+            seen.update(peer.model_id)
+            peer.model = "MODEL"
+
+        monkeypatch.setattr(LangChainLLMController, "initialize_model", initialize)
+        ctrl.build_non_reasoning_model()
+        assert "thinking" not in str(seen["EXTRA_PARAMS"])
+        assert "thinking" in str(main["EXTRA_PARAMS"])
+        if provider == "bedrock":
+            assert seen["EXTRA_PARAMS"]["additional_model_request_fields"]["unrelated"] == 7
+
     def test_no_overrides_builds_the_configured_model(self, monkeypatch):
         ctrl = self._controller(monkeypatch, {"NAME": "big", "TYPE": "ollama"})
         seen = self._capture(monkeypatch)

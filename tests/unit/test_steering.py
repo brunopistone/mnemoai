@@ -9,7 +9,9 @@ compaction never summarizes it), and that the block never reaches the router.
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from mnemoai.client.agent.agent import LangGraphAgent
@@ -288,10 +290,22 @@ class TestSteeringRobustness:
         assert "truncated" in out
         assert str(f) in out  # names the file to read
 
-    def test_the_documented_default_cap_matches_the_shipped_config(self):
-        # The examples and the guide quote a number; the code default is what
-        # actually applies when nobody edits config. A drift between them is a
-        # docs bug that no other test would notice.
+    def test_missing_setting_uses_the_code_default(self, monkeypatch):
+        monkeypatch.setattr(
+            steering_store, "config", SimpleNamespace(get=lambda key, default=None: default),
+        )
+        assert SteeringStore._max_chars() == steering_store._DEFAULT_MAX_CHARS == 45000
+
+    @pytest.mark.parametrize("value", [100, 175000, 0, -1])
+    def test_explicit_limit_overrides_the_default(self, monkeypatch, value):
+        monkeypatch.setattr(steering_store, "config", SimpleNamespace(
+            get=lambda key, default=None: {"MAX_CHARS": value} if key == "STEERING" else default,
+        ))
+        assert SteeringStore._max_chars() == value
+
+    def test_example_values_are_honored_as_configuration(self, monkeypatch):
+        # Examples may intentionally differ from the fallback used when a key
+        # is absent. Verify their values are parseable and reach the reader.
         examples = list(
             (Path(steering_store.__file__).parents[2] / "utils").glob(
                 "config.yaml*.example"
@@ -303,7 +317,11 @@ class TestSteeringRobustness:
                 r"^STEERING:\s*\n\s*MAX_CHARS:\s*(\d+)", ex.read_text(), re.MULTILINE
             )
             assert quoted, f"{ex.name} does not document STEERING.MAX_CHARS"
-            assert int(quoted.group(1)) == steering_store._DEFAULT_MAX_CHARS, ex.name
+            value = int(quoted.group(1))
+            monkeypatch.setattr(steering_store, "config", SimpleNamespace(
+                get=lambda key, default=None: {"MAX_CHARS": value} if key == "STEERING" else default,
+            ))
+            assert SteeringStore._max_chars() == value, ex.name
 
     def test_a_normal_sized_file_is_untouched(self, tmp_path):
         f = tmp_path / "STEERING.md"

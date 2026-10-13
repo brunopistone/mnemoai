@@ -127,7 +127,8 @@ def test_params_changes_only_the_reviewer(config_file, monkeypatch):
     monkeypatch.setattr(C, "_ask_choice", lambda *a, **kw: "8")
     monkeypatch.setattr(C, "_prompt_one_param", lambda text, section, key, *args:
                         C._set_field(text, section, key, "0.2") if key == "TEMPERATURE" else text)
-    assert C.run_params_override() == config_file
+    written = C.run_params_override()
+    assert written.path == config_file and written.section == "REVIEWER"
     data = yaml.safe_load(config_file.read_text())
     assert data["AREA_MODELS"]["REVIEWER"]["TEMPERATURE"] == 0.2
     assert "TEMPERATURE" not in data["MODEL_ID"]

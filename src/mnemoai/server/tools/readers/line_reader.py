@@ -7,6 +7,7 @@ from mnemoai.utils.logger import logger
 
 from .. import binary_file_error, count_tokens, looks_like_binary, validate_file_path
 from ..file_encoding import bom_encoding
+from .bounded_lines import count_lines, selected_lines
 
 
 def read_lines(path: str, start_line: int, end_line: int) -> str:
@@ -42,7 +43,7 @@ def read_lines(path: str, start_line: int, end_line: int) -> str:
         # negative-index (from-EOF) resolution; a binary file that slipped past
         # looks_like_binary raises UnicodeDecodeError here and is steered below.
         with open(normalized_path, "r", encoding=encoding) as file:
-            total_lines = sum(1 for _ in file)
+            total_lines = count_lines(file)
 
         if total_lines == 0:
             # An empty file is a successful read of NOTHING, not an invalid range:
@@ -87,15 +88,6 @@ def read_lines(path: str, start_line: int, end_line: int) -> str:
         # Pass 2: materialize ONLY the requested [start_line, end_line] slice,
         # streamed — stop once past end_line so trailing lines are never buffered.
         # Byte-identical to lines[start_line - 1 : end_line] from readlines().
-        selected_lines = []
-        with open(normalized_path, "r", encoding=encoding) as file:
-            for line_no, line in enumerate(file, start=1):
-                if line_no < start_line:
-                    continue
-                if line_no > end_line:
-                    break
-                selected_lines.append(line)
-
         # Token accounting is INCREMENTAL: a running total plus the cost of the
         # line being added. Re-counting `full_content + line` on every line made
         # the read quadratic in tokenizer work — measured 9.8s for a 2839-line
@@ -108,8 +100,12 @@ def read_lines(path: str, start_line: int, end_line: int) -> str:
         pieces = []
         used_tokens = 0
         lines_processed = 0
+        lines_requested = end_line - start_line + 1
+        clipped_line = False
 
-        for i, line in enumerate(selected_lines):
+        for i, (line, clipped_line) in enumerate(selected_lines(
+            normalized_path, encoding, start_line, end_line, max(4096, max_tokens * 16),
+        )):
             # cat -n style gutter: right-aligned file line number + TAB, so the
             # model can cite lines precisely. file_edit strips a matching gutter
             # from old_string before its exact match, so a pasted numbered block
@@ -146,12 +142,15 @@ def read_lines(path: str, start_line: int, end_line: int) -> str:
                 break
 
             pieces.append(line_content)
+            if clipped_line:
+                pieces.append("[TRUNCATED - Line exceeds bounded read limit]")
+                break
             used_tokens += line_tokens
             lines_processed = i + 1
 
         full_content = "".join(pieces)
         was_truncated = (
-            lines_processed < len(selected_lines) or "[TRUNCATED" in full_content
+            lines_processed < lines_requested or "[TRUNCATED" in full_content
         )
         # One exact count of the final content — the running total above is only
         # the budget guard, and summed per line it reads a little high.
@@ -165,11 +164,11 @@ def read_lines(path: str, start_line: int, end_line: int) -> str:
                 "end_line": end_line,
                 "total_lines": total_lines,
                 "lines_processed": lines_processed,
-                "lines_requested": len(selected_lines),
+                "lines_requested": lines_requested,
                 "tokens": final_tokens,
                 "max_tokens": max_tokens,
                 "truncated": was_truncated,
-                "message": f"Read {lines_processed}/{len(selected_lines)} lines ({final_tokens} tokens)"
+                "message": f"Read {lines_processed}/{lines_requested} lines ({final_tokens} tokens)"
                 + (" - truncated due to token limit" if was_truncated else ""),
             }
         )

@@ -94,6 +94,111 @@ def _run(agent, name="grep_search", args=None, tool_id="t1"):
     return agent._execute_tools({"messages": [ai]})["messages"]
 
 
+@pytest.mark.parametrize("stop_at", ["first", "hook", "approval"])
+def test_stop_prevents_each_subsequent_dispatch(stop_at):
+    from mnemoai.client.agent.agent_activity import AgentActivityStore
+
+    store = AgentActivityStore()
+    sink = store.open_run("general-purpose", "task", "spawn")
+    ran = []
+
+    def first(args):
+        ran.append("first")
+        if stop_at == "first":
+            store.request_stop_all()
+        return "done"
+
+    tools = [_Tool("first", first), _Tool("second", lambda _: ran.append("second"))]
+    agent = _agent(tools)
+    agent._run_hooks = lambda *args, **kwargs: (
+        store.request_stop_all() if stop_at == "hook" else None
+    ) or hooks.Outcome()
+    if stop_at == "approval":
+        agent._confirm_tool = lambda *args: store.request_stop_all() or True
+    messages = []
+    tool_loop.run_tool_calls(
+        agent, [{"name": t.name, "args": {}, "id": t.name} for t in tools],
+        tools, messages, activity=sink,
+    )
+    assert ran == (["first"] if stop_at == "first" else [])
+    assert len(messages) == 2
+    assert messages[-1].additional_kwargs["execution_outcome"] == "cancelled"
+
+
+def test_actual_tools_node_retains_completed_results_on_interrupt():
+    def interrupt(args):
+        raise KeyboardInterrupt
+
+    tools = [_Tool("first"), _Tool("second", interrupt)]
+    agent = _agent(tools)
+    state = {"messages": [AIMessage(content="", tool_calls=[
+        {"name": t.name, "args": {}, "id": t.name} for t in tools
+    ])]}
+    with pytest.raises(KeyboardInterrupt):
+        agent._execute_tools(state)
+    assert state["messages"][-1].content == "first-out"
+    assert agent._interrupted_node_state["messages"][-1].tool_call_id == "first"
+
+
+def test_shell_cwd_change_reaches_file_permission_gate_and_execution(tmp_path):
+    from mnemoai.utils.execution_context import Workspace
+
+    child = tmp_path / "child"
+    child.mkdir()
+    seen = []
+    tools = [
+        _Tool("execute_bash", lambda _: '{"cwd": "' + str(child) + '", "exit_code": 0}'),
+        _Tool("fs_write", lambda args: seen.append(("write", args["path"])) or "done"),
+    ]
+    agent = _agent(tools)
+    agent._workspace = Workspace(str(tmp_path))
+    agent._confirm_tool = lambda name, args: seen.append(("gate", args.get("path"))) or True
+    tool_loop.run_tool_calls(agent, [
+        {"name": "execute_bash", "id": "cd", "args": {"command": "cd child"}},
+        {"name": "fs_write", "id": "write", "args": {"path": "notes.txt", "command": "create"}},
+    ], tools, [])
+    assert seen[-2:] == [("gate", str(child / "notes.txt")), ("write", str(child / "notes.txt"))]
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])
+def test_real_graph_interrupted_tools_survive_in_live_history_and_transcript(tmp_path, monkeypatch, error):
+    from langgraph.graph import END, StateGraph
+
+    from mnemoai.client.agent.agent import AgentState
+    from mnemoai.client.session_log import SessionLog, read_session
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+
+    def interrupt(args):
+        raise error("injected interruption")
+
+    tools = [_Tool("first"), _Tool("second", interrupt)]
+    agent = _agent(tools)
+    agent._messages = []
+    agent.system_prompt = ""
+    agent.recursion_limit = 10
+    agent.session_log = SessionLog()
+    call = AIMessage(content="", tool_calls=[
+        {"name": t.name, "args": {}, "id": t.name} for t in tools
+    ])
+    graph = StateGraph(AgentState)
+    graph.add_node("model", lambda state: {"messages": [call]})
+    graph.add_node("tools", agent._execute_tools)
+    graph.set_entry_point("model")
+    graph.add_edge("model", "tools")
+    graph.add_edge("tools", END)
+    agent.graph = graph.compile()
+    # RuntimeError from an ordinary tool is normally converted into an error
+    # result, so inject that failure after the completed tool batch instead.
+    if error is RuntimeError:
+        agent._start_spinner = lambda *a, **kw: (_ for _ in ()).throw(error("after tools"))
+    with pytest.raises(error):
+        agent.invoke("do the work")
+    assert any(isinstance(m, ToolMessage) and m.content == "first-out" for m in agent.messages)
+    replay = read_session(agent.session_log.path)
+    assert "first-out" in str(replay["messages"])
+
+
 @pytest.mark.parametrize("allowed", [False, True])
 def test_review_observes_but_never_answers_the_confirmation_gate(tmp_path, allowed):
     ran = []

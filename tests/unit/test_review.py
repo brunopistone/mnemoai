@@ -108,6 +108,56 @@ def test_actual_file_content_and_stale_report_detection(state):
     assert "historical" in reviewer.current_report()["summary"]
 
 
+def test_named_artifact_plus_shell_verification_is_reviewable_without_git(state):
+    reviewer, capture, root = state
+    path = root / "document.md"
+    path.write_text("A complete document.")
+    capture.record("fs_read", {"path": str(path)}, path.read_text(), "completed")
+    capture.record("execute_bash", {"command": "verify document"}, {"exit_code": 0}, "completed")
+    assert finish(reviewer, capture)["verdict"] == "pass"
+
+
+def test_shell_only_artifacts_without_git_have_explicitly_incomplete_coverage(state):
+    reviewer, capture, root = state
+    (root / "unobserved.md").write_text("Written only by shell.")
+    capture.record("execute_bash", {"command": "create document"}, {"exit_code": 0}, "completed")
+    report = finish(reviewer, capture)
+    assert report["verdict"] == "inconclusive"
+    assert any("Shell-created artifacts" in gap for gap in report["coverage_gaps"])
+
+
+def test_shell_created_untracked_artifact_is_reviewed_and_bound_to_its_version(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init", "-q"], check=True)
+    reviewer = review.Reviewer(enabled=True)
+    capture = reviewer.begin("Create a document.")
+    path = tmp_path / "new-document.md"
+    path.write_text("Draft document")
+    capture.record("execute_bash", {"command": "create document"}, {"exit_code": 0}, "completed")
+    model = Model()
+    report = finish(reviewer, capture, model)
+    assert report["verdict"] == "pass", report
+    packet = json.loads(model.calls[0][0][1].content)
+    assert any(
+        item["kind"] == "current_file" and item["content"] == "Draft document"
+        for item in packet["evidence"]
+    )
+    path.write_text("Unreviewed change")
+    assert reviewer.current_report()["verdict"] == "inconclusive"
+
+
+def test_untracked_inventory_over_limit_cannot_receive_a_passing_review(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init", "-q"], check=True)
+    reviewer = review.Reviewer(enabled=True)
+    capture = reviewer.begin("Inspect documents.")
+    for i in range(14):
+        (tmp_path / f"document-{i}.txt").write_text("small")
+    report = finish(reviewer, capture)
+    assert report["verdict"] == "inconclusive"
+    assert any("untracked" in gap for gap in report["coverage_gaps"])
+
+
 def test_changes_during_review_invalidate_the_verdict(state):
     reviewer, capture, root = state
     path = root / "code.py"
@@ -130,7 +180,8 @@ def test_failed_shell_check_cannot_be_voted_into_success(state):
 
 @pytest.mark.parametrize("field", ["exit_status", "exit_code", "return_code", "returncode"])
 def test_observed_successful_rerun_resolves_that_command_only(state, field):
-    reviewer, capture, _ = state
+    reviewer, capture, root = state
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
     capture.record("execute_bash", {"command": "pytest"}, {field: 1}, "failed")
     capture.record("execute_bash", {"command": "pytest"}, {field: 0}, "completed")
     assert finish(reviewer, capture)["verdict"] == "pass"

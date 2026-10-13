@@ -1,8 +1,7 @@
 """Path classifiers for file tools.
 
-Shared by ``fs_write``/``file_edit`` (write side) and ``fs_read`` (read side) so
-the "don't write over the operating system" and "don't read the user's secrets"
-rules are enforced server-side, in one place.
+Shared by ``fs_write``/``file_edit`` to enforce the server-side floor against
+overwriting critical operating-system paths.
 
 Write scope (intentional): this blocks writes *into* critical system directories
 (``/etc``, ``/bin``, ``/usr``, ``/boot``, ``/System``, ``/dev``, the root of the
@@ -11,13 +10,10 @@ restrict writes to the user's home, project trees, temp dirs, or the app home â€
 those remain allowed and gated by the client's write-confirmation prompt. The
 goal is a hard floor against system corruption, not a workspace jail.
 
-Read scope (intentional): this blocks the handful of files that are *only* ever
-secrets â€” cloud credentials, private keys, ``.env`` files. The motivation is
-specific to an LLM tool: anything read here is pasted into a prompt and shipped
-to a model provider, so a single incurious ``fs_read`` exfiltrates a long-lived
-credential. Everything else is readable.
+There is no read-side secret denylist. File tools may read user-authorized
+paths; review evidence separately excludes credential-like files.
 
-Both classifiers resolve symlinks (``realpath``), because a symlink is the
+The classifier resolves symlinks (``realpath``), because a symlink is the
 cheapest way around a prefix check: ``ln -s /etc ~/tmp/etc`` would otherwise
 turn a "home" write into an ``/etc`` write.
 """

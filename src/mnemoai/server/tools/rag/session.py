@@ -167,7 +167,8 @@ class SessionRAG:
                 self.dim = detected_dim
                 self.embeddings_controller.dim = self.dim
                 self.store = VectorStoreController(
-                    self.dim, session_id=session_id, rag_dir=rag_dir
+                    self.dim, session_id=session_id, rag_dir=rag_dir,
+                    embedding_identity=lambda: self.embeddings_controller.fingerprint(),
                 )
                 logger.debug(f"Loaded existing vector store with dim={self.dim}")
                 self._rebuild_bm25()
@@ -287,7 +288,8 @@ class SessionRAG:
             if self.store is None:
                 self.dim = batch_dim
                 self.store = VectorStoreController(
-                    batch_dim, session_id=self.session_id, rag_dir=self.rag_dir
+                    batch_dim, session_id=self.session_id, rag_dir=self.rag_dir,
+                    embedding_identity=lambda: self.embeddings_controller.fingerprint(),
                 )
                 logger.debug(
                     f"Created vector store with dim={batch_dim}, session_id={self.session_id}"

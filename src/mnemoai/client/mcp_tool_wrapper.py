@@ -17,6 +17,7 @@ from mcp.client.stdio import stdio_client
 from mcp.types import Tool as MCPTool
 
 from mnemoai.client.mcp_startup import MCPStartup
+from mnemoai.utils import execution_context
 from mnemoai.utils.config import config
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import exception_line, log_file_hint, logger
@@ -541,7 +542,12 @@ class MCPClientWrapper:
         logger.debug(f"Executing MCP tool: {name} with args: {arguments}")
         session = self._session
         try:
-            result = await session.call_tool(name, arguments)
+            workspace = execution_context.current()
+            metadata = (
+                {"meta": {execution_context.META_KEY: {"cwd": workspace.cwd}}}
+                if getattr(self, "_builtin", False) and workspace is not None else {}
+            )
+            result = await session.call_tool(name, arguments, **metadata)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as e:
@@ -695,6 +701,7 @@ class MultiMCPClient:
         """
         # (display_name, wrapper). The built-in server has no namespace prefix.
         self._members = [("builtin", MCPClientWrapper(builtin_params))]
+        self._members[0][1]._builtin = True
         for server in external_servers or []:
             self._members.append((server.name, MCPClientWrapper(server.params)))
         self._tools: List[MCPToolWrapper] = []

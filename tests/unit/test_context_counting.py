@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from mnemoai.client import context_injection, context_report
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
+from mnemoai.client.memory.steering_store import SteeringSnapshot
 from mnemoai.client.session_log import SessionLog, read_session
 from mnemoai.client.ui import chat_interface
 from mnemoai.client.usage_tracker import UsageTracker
@@ -23,7 +24,7 @@ def make_client(tmp_path, monkeypatch):
     monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path / "home"))
     monkeypatch.setitem(config._config_data, "MODEL_ID", {"TYPE": "bedrock"})
     monkeypatch.setitem(config._config_data, "LLM", {})
-    monkeypatch.setattr(context_injection, "steering_reminder", lambda client: "")
+    monkeypatch.setattr(context_injection, "steering_snapshot", lambda client: SteeringSnapshot())
 
     def create(messages=()):
         client = LangGraphClient.__new__(LangGraphClient)
@@ -61,7 +62,7 @@ def test_fallback_counts_every_input_component(make_client, monkeypatch, compone
     elif component == "system":
         client.agent.system_prompt += large
     elif component == "steering":
-        monkeypatch.setattr(context_injection, "steering_reminder", lambda client: large)
+        monkeypatch.setattr(context_injection, "steering_snapshot", lambda client: SteeringSnapshot(large))
     else:
         client.plan_mode_active = True
     after = client._count_context_tokens()

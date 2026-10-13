@@ -15,6 +15,15 @@ def _inline(value) -> str:
     return " ".join(printable.split())
 
 
+def render_steering_notices(notices) -> str:
+    """Compact informational lines; full paths and current state live in reports."""
+    return "\n".join(
+        f"{_DIM}Steering: {_inline(notice.path.name)} {_inline(notice.detail)}"
+        f" · /context or /doctor{_RESET}"
+        for notice in notices
+    )
+
+
 def render_mcp_status(
     members, tools, *, verbose=False, config_path=None, width=88, startup=()
 ) -> str:

@@ -38,6 +38,7 @@ class BackgroundAgent:
     # True once a completion notification has been surfaced to the parent, so it
     # isn't injected twice.
     notified: bool = False
+    cancel: threading.Event = field(default_factory=threading.Event, repr=False)
 
 
 class BackgroundAgentRegistry:
@@ -120,6 +121,14 @@ class BackgroundAgentRegistry:
                 r.status in ("done", "failed") and not r.notified
                 for r in self._agents.values()
             )
+
+    def reset_delivery(self) -> None:
+        """Detach old conversation results without deleting resumable records."""
+        with self._lock:
+            for rec in self._agents.values():
+                rec.notified = True
+                if rec.status == "running":
+                    rec.cancel.set()
 
     def _persist(self, rec: BackgroundAgent) -> None:
         """Best-effort JSON snapshot under tasks_dir (never fatal). Includes the

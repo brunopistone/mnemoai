@@ -1222,3 +1222,80 @@ class TestAnExplicitIdStillReachesACollapsedLink:
 
         src = inspect.getsource(m._resume_session)
         assert "collapse_chains=False" in src
+def test_checkpoint_explicitly_excludes_already_included_next_turn_prefix(tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from mnemoai.client.session_log import SessionLog, read_session
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    log = SessionLog()
+    question = HumanMessage(content="question")
+    log.begin_turn([question])
+    log.log_compaction(summary="older context", kept=[question])
+    log.log_turn([question, AIMessage(content="answer")])
+    replay = read_session(log.path)
+    assert len(replay["messages"]) == 2
+    assert len(replay["all_messages"]) == 2
+    # Equal text on the following turn is a REAL repetition, never deduplicate it.
+    log.begin_turn([question])
+    log.log_turn([question, AIMessage(content="another answer")])
+    assert len(read_session(log.path)["messages"]) == 4
+
+
+def test_uncompacted_restore_replaces_old_summary_and_display_history(tmp_path, monkeypatch):
+    from langchain_core.messages import HumanMessage
+
+    from mnemoai.client.session_log import SessionLog, read_session
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    log = SessionLog()
+    log.log_turn([HumanMessage(content="conversation A")])
+    log.log_compaction(summary="SUMMARY A", kept=[])
+    replacement = [HumanMessage(content="conversation B")]
+    log.seed_history(replacement, source="B", summary="", kept=replacement)
+    replay = read_session(log.path)
+    assert replay["summary"] == ""
+    assert len(replay["messages"]) == len(replay["all_messages"]) == 1
+    assert "conversation A" not in str(replay["all_messages"])
+
+
+def test_branch_and_rewind_targets_follow_the_loaded_conversation(tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from mnemoai.client.session_log import (
+        SessionLog,
+        branch_session,
+        last_live_turn,
+        read_session,
+        turn_summaries,
+    )
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    log = SessionLog()
+    log.log_turn([HumanMessage(content="A"), AIMessage(content="answer A")])
+    log.log_compaction(summary="SUMMARY A", kept=[])
+    log.seed_history([HumanMessage(content="B"), AIMessage(content="answer B")])
+    assert last_live_turn(log.path) is None  # B is inherited, not the old A turn
+    assert turn_summaries(log.path) == []
+    branch = read_session(branch_session(log.path))
+    assert branch["summary"] == ""
+    assert "answer A" not in str(branch["all_messages"])
+    assert "answer B" in str(branch["messages"])
+    log.seed_history([], source="empty.json")
+    assert read_session(log.path)["messages"] == []
+
+
+def test_branch_preserves_preflight_checkpoint_boundary_without_duplicate_input(tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from mnemoai.client.session_log import SessionLog, branch_session, read_session
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    log = SessionLog()
+    question = HumanMessage(content="unique question")
+    log.begin_turn([question])
+    log.log_compaction(summary="previous context", kept=[question])
+    log.log_turn([question, AIMessage(content="answer")])
+    branch = read_session(branch_session(log.path))
+    assert len(branch["messages"]) == 2
+    assert branch["summary"] == "previous context"

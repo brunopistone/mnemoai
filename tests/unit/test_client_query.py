@@ -44,6 +44,29 @@ def test_recall_outage_does_not_prevent_the_chat_call():
     client.agent.assert_called_once_with("question")
 
 
+def test_reflection_uses_whole_turn_buffer_across_mid_turn_guidance():
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    client = _client()
+    client.reflector = object()
+    turn = [
+        HumanMessage(content="task"),
+        AIMessage(content="", tool_calls=[{"name": "fs_read", "args": {}, "id": "one"}]),
+        ToolMessage(content="Error: missing", tool_call_id="one"),
+        HumanMessage(content="Try the other path"),
+        AIMessage(content="recovered"),
+    ]
+
+    def work(prompt):
+        client.agent.messages = list(turn)
+        client.agent._last_turn_messages = list(turn)
+        return "recovered"
+
+    client.agent.side_effect = work
+    assert client.query("task") == "recovered"
+    assert client._reflection_messages == turn
+
+
 def test_first_turn_activates_external_tools_before_calling_the_agent(monkeypatch):
     client = _client()
     # This fixture's stand-in represents the real agent lifecycle in query().
@@ -145,7 +168,10 @@ def test_playbook_directory_error_does_not_escape_optional_initialization():
 
 @pytest.mark.parametrize("actor_path", ["direct", "orchestrated", "single_worker"])
 def test_every_parent_result_reaches_the_same_review_checkpoint(actor_path, tmp_path, monkeypatch):
+    import subprocess
+
     monkeypatch.chdir(tmp_path)
+    subprocess.run(["git", "init", "-q"], check=True)
     client = _client()
     client.reviewer = review.Reviewer(enabled=True)
     client.llm_controller = SimpleNamespace(model_name="fixture", model_type="ollama")

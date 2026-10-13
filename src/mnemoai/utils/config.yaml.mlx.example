@@ -191,7 +191,7 @@ ENABLE_MEMORY_AUTO_EXTRACTION: false
 # deliberately never summarized by compaction, a very large file is a permanent
 # per-turn cost, so each file's contribution is capped:
 STEERING:
-  MAX_CHARS: 45000  # per file; content past this is dropped with a visible note (0 = no cap)
+  MAX_CHARS: 175000  # per file; content past this is dropped with a visible note (0 = no cap)
 # `@path` mentions: a file named with @ in your prompt is read and attached to it.
 # The content rides in your own message, so compaction can summarize it but the
 # cheaper tool-result eviction can never shrink it — hence a per-file cap (a line

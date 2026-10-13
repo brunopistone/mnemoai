@@ -10,8 +10,9 @@ import time
 
 from mcp.server.fastmcp import FastMCP
 
+from mnemoai.server.tools.shell_state import current_cwd
+from mnemoai.server.tools.shell_state import resolve_path as normalize_path
 from mnemoai.utils.logger import logger
-from mnemoai.utils.path_utils import normalize_path
 
 # ripgrep's --max-columns is a no-op in --json mode (it emits the full line
 # regardless), so we cap long lines here to stop minified/base64 lines from
@@ -198,7 +199,7 @@ def register_search_tools(mcp: FastMCP) -> None:
             find /path -name "*.py" -type f -print | head -1000  # First 1000
         """
         if path is None:
-            path = os.getcwd()
+            path = current_cwd()
 
         # Expand ~ and tolerate shell escaping/quoting in the path.
         path = normalize_path(path)
@@ -346,7 +347,7 @@ def register_search_tools(mcp: FastMCP) -> None:
             grep_search(pattern="import React", file_pattern="*.{ts,tsx}", output_mode="content")
         """
         if path is None:
-            path = os.getcwd()
+            path = current_cwd()
 
         # Expand ~ and tolerate shell escaping/quoting in the path.
         path = normalize_path(path)

@@ -231,14 +231,14 @@ class SessionLog:
         carry — an eviction one has no summary, so a caller that always passed the
         live history would duplicate the whole conversation in every restore.
         """
-        if self.path is None or not messages:
+        if self.path is None:
             return
         try:
             payload = convert_langchain_messages_to_strands(list(messages))
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Session log seed encode failed: {e}")
             return
-        if not payload:
+        if messages and not payload:
             # The encoder silently yields nothing for input that isn't LangChain
             # messages (e.g. already-encoded strands dicts), which would drop the
             # restored history and resume a stump. Loud enough to diagnose.
@@ -278,6 +278,11 @@ class SessionLog:
         self._append(
             {"t": "turn", "n": self._turn, "ts": time.time(), "messages": payload}
         )
+        self._pending_input = None
+
+    def begin_turn(self, messages: List[Any]) -> None:
+        """Bind unlogged inputs to the next turn's checkpoint boundary."""
+        self._pending_input = list(messages)
 
     def log_review(self, record) -> None:
         """Keep a bounded advisory record, never replay it as chat instructions."""
@@ -316,6 +321,12 @@ class SessionLog:
                 )
                 if summary:
                     record["summary"] = str(summary)
+                pending = getattr(self, "_pending_input", None)
+                if pending:
+                    record["included_turn"] = {
+                        "n": self.next_turn,
+                        "prefix": convert_langchain_messages_to_strands(pending),
+                    }
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"Compaction checkpoint encode failed: {e}")
                 record.pop("messages", None)
@@ -468,6 +479,28 @@ def _checkpoint_indices(records: List[Dict[str, Any]]) -> set:
     }
 
 
+def _active_conversation_records(records):
+    """A load replaces the active conversation; older records remain an audit trail."""
+    start = next(
+        (i for i in range(len(records) - 1, -1, -1) if records[i].get("t") == "restore"),
+        0,
+    )
+    if start:
+        return [record for record in records[:start] if record.get("t") == "meta"] + records[start:]
+    return records
+
+
+def _after_checkpoint_prefix(messages, included_turn, number):
+    if isinstance(included_turn, dict):
+        prefix = included_turn.get("prefix")
+        if (
+            included_turn.get("n") == number and isinstance(prefix, list)
+            and messages[:len(prefix)] == prefix
+        ):
+            return messages[len(prefix):]
+    return messages
+
+
 def last_live_turn(path) -> Optional[Dict[str, Any]]:
     """The most recent turn a ``rewind`` record could still withdraw.
 
@@ -481,7 +514,7 @@ def last_live_turn(path) -> Optional[Dict[str, Any]]:
     restorable state describing a conversation that never happened is worse than
     one the user is told to skip.
     """
-    records = list(_iter_records(Path(path)))
+    records = _active_conversation_records(list(_iter_records(Path(path))))
     withdrawn = _withdrawn_turns(records)
     turns = [
         i for i, r in enumerate(records) if r.get("t") == "turn" and i not in withdrawn
@@ -516,7 +549,7 @@ def turn_summaries(path) -> List[Dict[str, Any]]:
     numbering here counts SURVIVORS, so it stays the numbering every other reader
     uses.
     """
-    records = list(_iter_records(Path(path)))
+    records = _active_conversation_records(list(_iter_records(Path(path))))
     withdrawn = _withdrawn_turns(records)
     out: List[Dict[str, Any]] = []
     n = 0
@@ -563,9 +596,10 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
     live: List[Dict[str, Any]] = []
     summary = ""
     checkpoint = False
+    included_turn = None
     kept = 0
     limit = through_turn if (through_turn and through_turn > 0) else None
-    records = list(_iter_records(src))
+    records = _active_conversation_records(list(_iter_records(src)))
     withdrawn = _withdrawn_turns(records)
     for i, rec in enumerate(records):
         kind = rec.get("t")
@@ -579,12 +613,15 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
             # window restarts from what it pinned.
             window = rec.get("messages")
             live = list(window) if isinstance(window, list) else []
+            messages = list(live)
             checkpoint = True
+            included_turn = rec.get("included_turn")
             continue
         if kind == "compact" and "messages" in rec:
             window = rec.get("messages")
             live = list(window) if isinstance(window, list) else []
             checkpoint = True
+            included_turn = rec.get("included_turn")
             if "summary" in rec:
                 summary = str(rec.get("summary") or "")
             continue
@@ -598,7 +635,8 @@ def branch_session(path, through_turn: int = None, cwd=None, profile: str = None
                 break  # records are in order, so the rest is past the branch point
             kept += 1
         messages.extend(msgs)
-        live.extend(msgs)
+        live.extend(_after_checkpoint_prefix(msgs, included_turn, rec.get("n")))
+        included_turn = None
     if not messages:
         return None
 
@@ -713,6 +751,7 @@ def read_session(path) -> Dict[str, Any]:
     checkpoint = False
     compacted_away = 0
     turns = 0
+    included_turn = None
     records = list(_iter_records(p))
     withdrawn = _withdrawn_turns(records)
     for i, rec in enumerate(records):
@@ -735,6 +774,7 @@ def read_session(path) -> Dict[str, Any]:
             compacted_away += max(0, len(messages) - len(kept))
             messages = list(kept)
             checkpoint = True
+            included_turn = rec.get("included_turn")
             if "summary" in rec:
                 summary = str(rec.get("summary") or "")
         elif kind == "rewind" and "messages" in rec:
@@ -753,6 +793,11 @@ def read_session(path) -> Dict[str, Any]:
             checkpoint = True
         elif kind in ("turn", "restore"):
             if kind == "restore":
+                # A load replaces the conversation, including its summary and
+                # display history. Empty summary is a reset, not an eviction.
+                messages, all_messages = [], []
+                summary, checkpoint, compacted_away = "", False, 0
+                included_turn = None
                 if isinstance(rec.get("branched_from"), dict):
                     branched_from = rec["branched_from"]
                 else:
@@ -760,7 +805,11 @@ def read_session(path) -> Dict[str, Any]:
                     resumed_from = str(rec.get("source") or "")
             msgs = rec.get("messages")
             if isinstance(msgs, list):
-                messages.extend(msgs)
+                additions = msgs
+                if kind == "turn":
+                    additions = _after_checkpoint_prefix(msgs, included_turn, rec.get("n"))
+                    included_turn = None
+                messages.extend(additions)
                 all_messages.extend(msgs)
                 # A `restore` record is inherited history, not a turn the user
                 # took here — it must not inflate the turn count the picker

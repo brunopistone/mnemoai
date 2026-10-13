@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any, List, NamedTuple, Optional, Tuple
 
 from mnemoai import app_version
-from mnemoai.client import hooks, review
+from mnemoai.client import context_injection, hooks, review
 from mnemoai.client.memory.memory_store import MemoryStore
 from mnemoai.client.memory.steering_store import SteeringStore
 from mnemoai.client.user_commands import UserCommandStore
@@ -580,7 +580,7 @@ def _state_checks(client: Any) -> List[Check]:
 
     out.extend(_command_checks())
     out.append(_log_check())
-    out.extend(_size_checks())
+    out.extend(_size_checks(client))
     return out
 
 
@@ -640,7 +640,7 @@ def _log_check() -> Check:
     return Check("State", "logs", INFO, where)
 
 
-def _size_checks() -> List[Check]:
+def _size_checks(client=None) -> List[Check]:
     """MEMORY.md and the steering files against their caps.
 
     Both are re-sent in full every turn and compaction can never reclaim either,
@@ -673,22 +673,32 @@ def _size_checks() -> List[Check]:
         logger.debug(f"/doctor could not size MEMORY.md: {e}")
 
     try:
-        sizes = SteeringStore().sizes()
+        snapshot = (
+            context_injection.steering_snapshot(client) if client is not None
+            else SteeringStore().snapshot()
+        )
     except Exception as e:  # noqa: BLE001
         logger.debug(f"/doctor could not size steering files: {e}")
-        sizes = []
-    for entry in sizes:
-        path, chars = _steering_entry(entry)
+        snapshot = None
+    for row in snapshot.files if snapshot is not None else ():
+        path, chars = _steering_entry((row.path, row.text))
         if path is None:
             continue
         out.append(
             Check(
                 "State",
                 "steering",
-                INFO,
-                f"{_short(path)} — {chars} chars, injected every turn",
+                WARN if row.loaded_chars < row.source_chars else INFO,
+                (
+                    f"{_short(path)} — {row.loaded_chars:,}/{row.source_chars:,} source chars loaded"
+                    if row.loaded_chars < row.source_chars
+                    else f"{_short(path)} — {chars} chars, injected every turn"
+                ),
             )
         )
+    for notice in snapshot.notices if snapshot is not None else ():
+        if notice.kind != "truncated":
+            out.append(Check("State", "steering", WARN, f"{_short(notice.path)} — {notice.detail}"))
     return out
 
 
@@ -702,6 +712,11 @@ def _steering_entry(entry: Any) -> Tuple[Optional[str], int]:
 
 def collect(client: Any = None) -> List[Check]:
     """Run every check. ``client`` may be None (the live-state ones are skipped)."""
+    if client is not None:
+        try:
+            context_injection.refresh_steering(client)
+        except Exception as exc:
+            logger.debug("/doctor: steering refresh unavailable: %s", exc)
     checks: List[Check] = []
     checks.extend(_install_checks())
     checks.extend(_config_checks())

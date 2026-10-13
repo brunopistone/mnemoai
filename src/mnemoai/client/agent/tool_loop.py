@@ -44,6 +44,7 @@ from langchain_core.messages import BaseMessage, ToolMessage
 from mnemoai.client import hooks
 from mnemoai.client.agent import ask_user, confirmation_gate, supervised_turn
 from mnemoai.client.agent.agent_activity import ActivitySink
+from mnemoai.utils import execution_context
 from mnemoai.utils.logger import logger
 from mnemoai.utils.review_protocol import ReviewStopped
 from mnemoai.utils.tool_results import is_error_result
@@ -68,11 +69,26 @@ def run_tool_calls(
         name = call["name"]
         tool_id = call["id"]
         args = agent._normalize_tool_args(call["args"])
+        workspace = execution_context.for_agent(agent)
+        if workspace is not None and name in {"fs_read", "fs_write", "file_edit", "glob_search", "grep_search"}:
+            key = "file_path" if name == "file_edit" else "path"
+            if isinstance(args.get(key), str):
+                args = {**args, key: workspace.resolve(args[key])}
 
         def reply(content, status="blocked", evidence=None):
-            _reply(messages, tool_id, name, content)
+            _reply(messages, tool_id, name, content, status)
             if capture is not None:
                 capture.record(name, args, content if evidence is None else evidence, status)
+
+        def stopped():
+            return (
+                getattr(agent, "_cancelled", lambda: False)()
+                or (activity is not None and activity.is_cancelled())
+            )
+
+        if stopped():
+            reply("Cancelled: this tool was not started.", "cancelled")
+            continue
 
         budget = supervised_turn.budget_for(agent)
         if budget is not None:
@@ -134,6 +150,9 @@ def run_tool_calls(
         # allow only satisfies the confirmation gate — it can't reach past the
         # block above it or the server-side floors.
         pre = agent._run_hooks(hooks.PRE_TOOL_USE, name, args, quiet=quiet)
+        if stopped():
+            reply("Cancelled: this tool was not started.", "cancelled")
+            continue
         if pre.denied:
             reply(agent._hook_deny_message(name, pre.reason))
             continue
@@ -154,10 +173,16 @@ def run_tool_calls(
             continue
 
         try:
+            if stopped():
+                reply("Cancelled: this tool was not started.", "cancelled")
+                continue
             if budget is not None:
                 budget.check()  # approval/hook waits do not extend the shared deadline
             logger.debug(f"{log_label}: {name} with args: {args}")
-            result = agent._invoke_tool(tool, name, args, quiet=quiet)
+            with execution_context.use(workspace):
+                result = agent._invoke_tool(tool, name, args, quiet=quiet)
+            if workspace is not None and name == "execute_bash":
+                workspace.observe(result)
             # Note the file this call touched, for /files and /diff. AFTER the
             # call, so a refused or failed one leaves no trace.
             failed_result = is_error_result(result)
@@ -192,7 +217,13 @@ def _with_context(content: str, outcome) -> str:
     return f"{content}\n\n[Hook] {outcome.context}" if outcome.context else content
 
 
-def _reply(messages: List[BaseMessage], tool_id: str, name: str, content: str) -> None:
+def _reply(
+    messages: List[BaseMessage], tool_id: str, name: str, content: str, outcome: str = "completed"
+) -> None:
     """Answer one tool call. Every branch above goes through here — an
     unanswered tool_call_id makes the provider reject the next turn."""
-    messages.append(ToolMessage(content=content, tool_call_id=tool_id, name=name))
+    messages.append(ToolMessage(
+        content=content, tool_call_id=tool_id, name=name,
+        status="success" if outcome == "completed" else "error",
+        additional_kwargs={"execution_outcome": outcome},
+    ))

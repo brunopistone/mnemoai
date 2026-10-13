@@ -38,6 +38,23 @@ def test_non_bash_tool_never_prompts(agent, monkeypatch):
     assert _run(agent, monkeypatch, "read_file", {}, "n") is True
 
 
+@pytest.mark.parametrize("command", [
+    "restore --worktree example.py", "checkout -- example.py",
+    "push --delete origin feature", "push --force-with-lease", "add example.py",
+])
+def test_git_mutations_require_permission_even_when_unattended(agent, monkeypatch, command):
+    agent._is_headless = lambda: True
+    assert not _run(agent, monkeypatch, "git_safe", {"command": command}, "n")
+    agent._trusted_confirm_categories = {"bash"}
+    assert _run(agent, monkeypatch, "git_safe", {"command": command}, "n")
+
+
+@pytest.mark.parametrize("command", ["status", "diff", "log -5"])
+def test_readonly_git_remains_available_to_workers(agent, monkeypatch, command):
+    agent._is_headless = lambda: True
+    assert _run(agent, monkeypatch, "git_safe", {"command": command}, "n")
+
+
 @pytest.mark.parametrize("answer", ["y", "yes", "Y", "YES"])
 def test_bash_yes_proceeds(agent, monkeypatch, answer):
     assert _run(agent, monkeypatch, "execute_bash", {"command": "ls"}, answer) is True

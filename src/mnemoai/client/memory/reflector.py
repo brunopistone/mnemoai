@@ -165,6 +165,10 @@ class Reflector:
 
     # Patterns that indicate actual tool errors (not content)
     ERROR_INDICATORS = [
+        "blocked:",
+        "cancelled:",
+        "user declined",
+        "tool not found:",
         "error:",
         "failed:",
         "exception:",
@@ -283,12 +287,26 @@ class Reflector:
                 tool_call_id = call.get("id", "")
 
                 # Find corresponding result
-                result = self._find_tool_result(tool_call_id, tool_name, messages)
+                message = self._find_tool_message(tool_call_id, tool_name, messages)
+                result = getattr(message, "content", "")
+                outcome = (getattr(message, "additional_kwargs", {}) or {}).get("execution_outcome")
+                # A refused/unstarted action is neither successful execution nor
+                # a failed execution to learn from. Legacy short refusals stay
+                # excluded when their structured outcome was not recorded.
+                if outcome in {"blocked", "declined", "cancelled"} or (
+                    not outcome and str(result).strip().lower().startswith(
+                        ("blocked:", "cancelled:", "user declined", "tool not found:")
+                    )
+                ):
+                    continue
 
                 if not result:
                     continue
                 result = result if isinstance(result, str) else json.dumps(result)
-                failed = self._is_actual_error(result.lower(), result)
+                failed = (
+                    outcome == "failed" or getattr(message, "status", None) == "error"
+                    or self._is_actual_error(result.lower(), result)
+                )
                 failure_type = next((
                     kind for kind, patterns in self.FAILURE_PATTERNS.items()
                     if failed and any(p in result.lower() for p in patterns)
@@ -343,18 +361,23 @@ class Reflector:
         the name would attribute the FIRST result of a repeated tool to every
         later call of it.
         """
+        return getattr(self._find_tool_message(tool_call_id, tool_name, messages), "content", "")
+
+    @staticmethod
+    def _find_tool_message(tool_call_id, tool_name, messages):
+        """Match the complete outcome envelope, not just its presentation text."""
         for msg in messages:
             if hasattr(msg, "type") and msg.type == "tool":
                 # Match by tool_call_id if available
                 msg_tool_call_id = getattr(msg, "tool_call_id", "")
                 if msg_tool_call_id and msg_tool_call_id == tool_call_id:
-                    return getattr(msg, "content", "")
+                    return msg
 
         if tool_call_id:
-            return ""
+            return None
 
         for msg in messages:
             if hasattr(msg, "type") and msg.type == "tool":
                 if hasattr(msg, "name") and msg.name == tool_name:
-                    return getattr(msg, "content", "")
-        return ""
+                    return msg
+        return None

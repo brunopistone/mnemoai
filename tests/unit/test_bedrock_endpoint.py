@@ -48,8 +48,12 @@ def patch_mantle(monkeypatch):
     import langchain_openai
 
     import mnemoai.models.chat_models.chat_openai_reasoning as reasoning_mod
+    import mnemoai.models.mantle_factory as factory
 
     captured = {}
+    # Constructor fakes have no SDK transports. Auth rotation is exercised
+    # against real SDKs/MockTransport in test_mantle_auth.py.
+    monkeypatch.setattr(factory, "install_token_refresh", lambda model, *args: model)
 
     def make_recorder(cls_name):
         def _recorder(**kwargs):
@@ -1515,3 +1519,20 @@ class TestOpenAICompatibleLocalEndpoint:
         ctrl.initialize_model()
         assert "base_url" not in patch_mantle
         assert "api_key" not in patch_mantle
+def test_dated_major_only_claude_ids_do_not_treat_dates_as_minor_versions():
+    from mnemoai.models.mantle_factory import (
+        _anthropic_thinking_kwargs,
+        _claude_version,
+    )
+
+    for name, version in (
+        ("claude-opus-4-20250514", (4, 0)),
+        ("anthropic.claude-sonnet-4-20250514-v1:0", (4, 0)),
+        ("claude-3-7-sonnet-20250219", (3, 7)),
+        ("claude-sonnet-4-5-20250929", (4, 5)),
+        ("claude-opus-4.6", (4, 6)),
+        ("global.anthropic.claude-opus-5", (5, 0)),
+    ):
+        assert _claude_version(name) == version
+        thinking = _anthropic_thinking_kwargs(name, "high", 2048)
+        assert thinking["thinking"]["type"] == ("enabled" if version < (4, 6) else "adaptive")

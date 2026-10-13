@@ -6,6 +6,7 @@ from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
 from .. import count_tokens, validate_file_path
+from .bounded_lines import count_lines, selected_lines
 
 
 def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
@@ -27,69 +28,31 @@ def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
     is_jsonl = normalized_path.endswith(".jsonl")
 
     try:
-        if is_jsonl:
-            # Efficient line-by-line reading for JSONL
-            with open(normalized_path, "r", encoding="utf-8") as file:
-                # First pass: count total lines
-                total_lines = sum(1 for _ in file)
-
-                # Handle negative indices
-                if start_line < 0:
-                    start_line = total_lines + start_line + 1
-                if end_line < 0:
-                    end_line = total_lines + end_line + 1
-
-                # Validate line numbers
-                start_line = max(1, start_line)
-                end_line = min(total_lines, end_line) if end_line > 0 else total_lines
-
-                if start_line > end_line:
-                    return json.dumps(
-                        {
-                            "error": True,
-                            "message": f"Invalid line range: {start_line}-{end_line}. File has {total_lines} lines.",
-                        }
-                    )
-
-                # Second pass: read only requested lines
-                file.seek(0)
-                selected_lines = []
-                for i, line in enumerate(file, 1):
-                    if i < start_line:
-                        continue
-                    if i > end_line:
-                        break
-                    selected_lines.append(line)
-
-                content = "".join(selected_lines).strip()
-        else:
-            # For regular JSON, must read entire file
-            with open(normalized_path, "r", encoding="utf-8") as file:
-                lines = file.readlines()
-
-            total_lines = len(lines)
-
-            # Handle negative indices (from end of file)
-            if start_line < 0:
-                start_line = total_lines + start_line + 1
-            if end_line < 0:
-                end_line = total_lines + end_line + 1
-
-            # Validate line numbers
-            start_line = max(1, start_line)
-            end_line = min(total_lines, end_line) if end_line > 0 else total_lines
-
-            if start_line > end_line:
-                return json.dumps(
-                    {
-                        "error": True,
-                        "message": f"Invalid line range: {start_line}-{end_line}. File has {total_lines} lines.",
-                    }
-                )
-
-            # Extract requested lines (convert to 0-indexed)
-            selected_lines = lines[start_line - 1 : end_line]
-            content = "".join(selected_lines).strip()
+        with open(normalized_path, "r", encoding="utf-8") as file:
+            total_lines = count_lines(file)
+        if start_line < 0:
+            start_line = total_lines + start_line + 1
+        if end_line < 0:
+            end_line = total_lines + end_line + 1
+        start_line = max(1, start_line)
+        end_line = min(total_lines, end_line) if end_line > 0 else total_lines
+        if start_line > end_line:
+            return json.dumps({
+                "error": True,
+                "message": f"Invalid line range: {start_line}-{end_line}. File has {total_lines} lines.",
+            })
+        max_tokens = config.get("DOC_MAX_TOKENS", 1024 * 8)
+        remaining = max(4096, max_tokens * 16)
+        lines_requested = end_line - start_line + 1
+        lines, bounded = [], False
+        for line, clipped in selected_lines(normalized_path, "utf-8", start_line, end_line, remaining):
+            fragment = line[:remaining]
+            lines.append(fragment)
+            remaining -= len(fragment)
+            if clipped or len(fragment) < len(line) or remaining <= 0:
+                bounded = clipped or len(fragment) < len(line) or len(lines) < lines_requested
+                break
+        content = "".join(lines).strip()
 
         if not content:
             return json.dumps(
@@ -106,7 +69,9 @@ def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
 
         # Validate JSON syntax
         try:
-            if is_jsonl:
+            if bounded:
+                pass  # A bounded prefix is not a complete JSON document.
+            elif is_jsonl:
                 # Validate each line separately for JSONL
                 for line in content.split("\n"):
                     if line.strip():
@@ -120,9 +85,8 @@ def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
 
         # Check token count and truncate if needed
         content_tokens = count_tokens(content)
-        max_tokens = config.get("DOC_MAX_TOKENS", 1024 * 8)
-        was_truncated = False
-        lines_included = len(selected_lines)
+        was_truncated = bounded
+        lines_included = len(lines)
 
         if content_tokens > max_tokens:
             # Truncate content to fit token limit. Counted INCREMENTALLY (a
@@ -148,6 +112,9 @@ def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
             )
             was_truncated = True
             content_tokens = count_tokens(content)
+        elif bounded:
+            content += "\n... [TRUNCATED - Content exceeds bounded read limit]"
+            content_tokens = count_tokens(content)
 
         return json.dumps(
             {
@@ -157,11 +124,12 @@ def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
                 "start_line": start_line,
                 "end_line": end_line,
                 "total_lines": total_lines,
-                "lines_requested": len(selected_lines),
+                "lines_requested": lines_requested,
                 "lines_included": lines_included,
                 "tokens": content_tokens,
                 "max_tokens": max_tokens,
                 "truncated": was_truncated,
+                "syntax_validated": not bounded,
                 "message": f"""
                     Read {'JSONL' if is_jsonl else 'JSON'} file lines {start_line}-{end_line} ({content_tokens} tokens).
                     TRUNCATED at token limit {max_tokens}. File has {total_lines} total lines.

@@ -56,6 +56,11 @@ MODEL_ID:
 
 Bedrock Mantle is an **OpenAI-compatible** API (not the Bedrock Converse API). By default it authenticates with a short-lived bearer token minted from your standard AWS credentials via [`aws-bedrock-token-generator`](https://pypi.org/project/aws-bedrock-token-generator/), so your normal `aws configure` / SSO setup works — no extra keys to manage. Use `TYPE: mantle` and a bare model ID from the Mantle catalog.
 
+Generated tokens are refreshed for each HTTP request, including async requests;
+cached models do not retain an expired generated token indefinitely. This does
+not extend an expired SSO login or other underlying AWS credentials. Explicit
+API keys remain user-managed and are used as supplied.
+
 ```yaml
 MODEL_ID:
   NAME: qwen.qwen3-32b # bare Mantle model id (e.g. anthropic.claude-opus-4-8)
@@ -409,6 +414,14 @@ that writes the answer.
 `AREA_MODELS` gives each of them its own model. Nothing here is required: an area
 you don't list uses `MODEL_ID`, which is what happens today.
 
+When an override changes provider, inherited connection/authentication fields
+and `EXTRA_PARAMS` are cleared before applying the override. A local auxiliary
+model therefore cannot inherit the chat model's remote endpoint or API key.
+Set connection fields explicitly for the new provider. Within one provider,
+`null` or `""` on a connection field clears its inherited value.
+Internal non-reasoning variants also remove reasoning overrides from nested
+`EXTRA_PARAMS`; the original model configuration is not mutated.
+
 ```yaml
 AREA_MODELS:
   ROUTER: qwen3.5:1.7b # shorthand — just a model name
@@ -487,6 +500,11 @@ inference parameters were reset. Switching an area back to the chat model is
 reported as “now follows Chat”. These messages do not change which edits require
 a restart or preserve the current conversation. `/doctor` and the application
 log retain configuration-path diagnostics.
+
+`/params` applies chat and auxiliary-chat changes in place. Vision and embedding
+models are also cached by the MCP server: their edits are saved, and the command
+explicitly asks you to restart to apply them. It does not silently restart and
+discard your current conversation, or claim those saved values are already live.
 
 This is the full reference for what you can put under `MODEL_ID`,
 `VISION_MODEL_ID`, and `RAG.EMBED_MODEL_ID`. Only `NAME` and `TYPE` are

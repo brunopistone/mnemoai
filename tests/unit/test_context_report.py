@@ -12,6 +12,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from mnemoai.client import context_injection, context_report
 from mnemoai.client.context_report import Part
 from mnemoai.client.memory.playbook_store import PLAYBOOK_BLOCK_MARKER
+from mnemoai.client.memory.steering_store import SteeringFile, SteeringSnapshot
 
 
 class TestSplitSystemPrompt:
@@ -247,7 +248,7 @@ class TestCollect:
     @pytest.fixture(autouse=True)
     def _no_real_steering(self, monkeypatch):
         # collect() would otherwise read the developer's own STEERING.md/CLAUDE.md.
-        monkeypatch.setattr(context_injection, "steering_reminder", lambda client: "")
+        monkeypatch.setattr(context_injection, "steering_snapshot", lambda client: SteeringSnapshot())
 
     def _client(self, **kwargs):
         base = dict(
@@ -343,19 +344,11 @@ class TestCollect:
         project_file.parent.mkdir()
         global_file.write_text("global rules " * 50)
         project_file.write_text("project rules " * 200)
-        monkeypatch.setattr(
-            context_injection, "steering_reminder", lambda client: "<steering>\nx\n</steering>"
+        rows = tuple(
+            SteeringFile(path, len(path.read_text()), path.read_text(), len(path.read_text()))
+            for path in (global_file, project_file)
         )
-        monkeypatch.setattr(
-            context_report,
-            "SteeringStore",
-            lambda: SimpleNamespace(
-                sizes=lambda: [
-                    (global_file, global_file.read_text()),
-                    (project_file, project_file.read_text()),
-                ]
-            ),
-        )
+        monkeypatch.setattr(context_injection, "steering_snapshot", lambda client: SteeringSnapshot("x", rows))
         row = next(
             p for p in context_report.collect(self._client()) if p.label.startswith("Steering")
         )
@@ -372,7 +365,7 @@ class TestCollect:
         def boom(client):
             raise OSError("disk gone")
 
-        monkeypatch.setattr(context_injection, "steering_reminder", boom)
+        monkeypatch.setattr(context_injection, "steering_snapshot", boom)
         parts = context_report.collect(self._client())
         assert [p.label for p in parts][0] == "System prompt"
 
@@ -382,7 +375,7 @@ class TestReport:
 
     @pytest.fixture(autouse=True)
     def _no_real_steering(self, monkeypatch):
-        monkeypatch.setattr(context_injection, "steering_reminder", lambda client: "")
+        monkeypatch.setattr(context_injection, "steering_snapshot", lambda client: SteeringSnapshot())
 
     def _client(self, last_input=None, max_tokens=100000):
         prompt = "BASE PROMPT " * 200

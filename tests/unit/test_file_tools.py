@@ -11,7 +11,7 @@ import shutil
 
 import pytest
 
-from mnemoai.server.tools import read_state
+from mnemoai.server.tools import read_state, shell_state
 from mnemoai.server.tools.file_edit import register_edit_tools
 from mnemoai.server.tools.file_search import _split_glob_pattern, register_search_tools
 from mnemoai.server.tools.fs_write import _resolve_path
@@ -28,8 +28,10 @@ _needs_rg = pytest.mark.skipif(
 def _reset_read_state():
     # The read-before-write gate keeps process-global state; isolate each test.
     read_state.reset()
+    shell_state.reset_cwd()
     yield
     read_state.reset()
+    shell_state.reset_cwd()
 
 
 class _CapturingMCP:

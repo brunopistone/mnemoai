@@ -9,15 +9,22 @@ This tool wraps git commands with safety checks to prevent:
 """
 
 import json
-import os
 import re
 import shlex
 import subprocess
 
 from mcp.server.fastmcp import FastMCP
 
+from mnemoai.server.tools.shell_state import current_cwd
+
 # Protected branches that should never receive force pushes
 PROTECTED_BRANCHES = ["main", "master", "develop", "production", "release"]
+
+
+def _run_git(*args, **kwargs):
+    kwargs.setdefault("cwd", current_cwd())
+    kwargs.setdefault("stdin", subprocess.DEVNULL)
+    return subprocess.run(*args, **kwargs)
 
 # Git options that are refused outright, because they make git run arbitrary
 # programs and therefore route around every pattern check below:
@@ -281,6 +288,24 @@ def check_dangerous_command(command: str) -> dict:
 
     # Check for dangerous patterns that need warnings
     warnings = []
+    if tokens:
+        verb, args = tokens[0].lower(), tokens[1:]
+        if (verb == "restore" and ("--staged" not in args or "--worktree" in args or "-W" in args)) or (
+            verb == "checkout" and "--" in args
+        ):
+            warnings.append({
+                "type": "discard_worktree", "message": "This can discard uncommitted file contents.",
+            })
+        if verb == "push":
+            if any(arg.startswith("--force-with-lease") for arg in args):
+                warnings.append({
+                    "type": "force_with_lease",
+                    "message": "A lease checks remote movement; this still rewrites remote history.",
+                })
+            if "--delete" in args or "-d" in args:
+                warnings.append({"type": "delete_remote_branch", "message": "This deletes remote refs."})
+            if any(arg.startswith("+") for arg in args) or "--mirror" in args:
+                warnings.append({"type": "force_push", "message": "This can overwrite remote history."})
     if tokens and tokens[0].lower() == "reset" and "--hard" in tokens[1:]:
         warnings.append({
             "type": "hard_reset",
@@ -302,10 +327,91 @@ def check_dangerous_command(command: str) -> dict:
     return {"blocked": False, "dangerous": False, "command": command}
 
 
+def check_push_destination(argv, cwd):
+    """Resolve implicit force-push destinations locally; never probe by pushing."""
+    if argv[1:2] != ["push"]:
+        return ""
+    args = argv[2:]
+    forced = any(
+        arg in ("-f", "--force", "--mirror") or arg.startswith(("--force-with-lease", "+"))
+        for arg in args
+    )
+    if forced and ("--all" in args or "--mirror" in args):
+        return "A force push of all refs may overwrite main/master; specify an unprotected destination."
+    positional = []
+    skip = False
+    remote_override = None
+    repo_value = False
+    for arg in args:
+        if repo_value:
+            remote_override, repo_value = arg, False
+        elif arg.startswith("--repo="):
+            remote_override = arg.split("=", 1)[1]
+        elif skip:
+            skip = False
+        elif arg in ("-o", "--push-option", "--repo"):
+            if arg == "--repo":
+                repo_value = True
+            else:
+                skip = True
+        elif not arg.startswith("-"):
+            positional.append(arg)
+    # Remote + explicit non-HEAD refspecs were checked by the pure classifier.
+    refs = positional if remote_override is not None else positional[1:]
+    if refs and all(ref.lstrip("+") != "HEAD" and "*" not in ref and ref != ":" for ref in refs):
+        return ""
+
+    def read(*command):
+        result = _run_git(
+            ["git", *command], cwd=cwd, capture_output=True, text=True, timeout=10,
+            stdin=subprocess.DEVNULL,
+        )
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    try:
+        branch = read("symbolic-ref", "--short", "HEAD")
+        remote = remote_override or (positional[0] if positional else (
+            read("config", "--get", f"branch.{branch}.pushRemote")
+            or read("config", "--get", "remote.pushDefault")
+            or read("config", "--get", f"branch.{branch}.remote") or "origin"
+        ))
+        if read("config", "--get", f"remote.{remote}.mirror").lower() in {"true", "yes", "1", "on"}:
+            return "A configured mirror push may overwrite main/master; use a non-mirror remote."
+        if "--all" in args and not forced:
+            return ""  # --all replaces configured refspecs; it does not force updates
+        if refs:
+            destinations = [branch if ref.lstrip("+") == "HEAD" else ref for ref in refs]
+        else:
+            configured = read("config", "--get-all", f"remote.{remote}.push")
+            if configured:
+                destinations = configured.splitlines()
+            else:
+                mode = read("config", "--get", "push.default") or "simple"
+                if mode in ("current", "simple"):
+                    destinations = [branch]
+                elif mode == "upstream":
+                    destinations = [read("config", "--get", f"branch.{branch}.merge")]
+                elif mode == "nothing":
+                    return ""  # Git refuses this command itself
+                else:
+                    destinations = ["*"]  # matching/all refs cannot be proved unprotected
+        for ref in destinations:
+            if not forced and not ref.startswith("+"):
+                continue
+            dest = ref.lstrip("+").rsplit(":", 1)[-1].removeprefix("refs/heads/")
+            if not dest or "*" in dest or dest == ":":
+                return "Cannot prove the force-push destination is unprotected; specify an explicit refspec."
+            if dest in ("main", "master"):
+                return "Force push to main/master is blocked (resolved from repository configuration)."
+    except (OSError, subprocess.SubprocessError):
+        return "Cannot resolve the force-push destination; specify an explicit unprotected refspec."
+    return ""
+
+
 def get_current_branch() -> str:
     """Get the current git branch name."""
     try:
-        result = subprocess.run(
+        result = _run_git(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
@@ -321,7 +427,7 @@ def get_current_branch() -> str:
 def is_branch_pushed() -> bool:
     """Check if current branch has been pushed to remote."""
     try:
-        result = subprocess.run(
+        result = _run_git(
             ["git", "status", "-sb"], capture_output=True, text=True, timeout=10
         )
         if result.returncode == 0:
@@ -336,7 +442,7 @@ def is_branch_pushed() -> bool:
 def get_last_commit_author() -> tuple:
     """Get the author name and email of the last commit."""
     try:
-        result = subprocess.run(
+        result = _run_git(
             ["git", "log", "-1", "--format=%an %ae"],
             capture_output=True,
             text=True,
@@ -447,6 +553,9 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
 
         # Check for dangerous commands
         safety_check = check_dangerous_command(command)
+        destination_error = check_push_destination(argv, current_cwd())
+        if destination_error:
+            safety_check = {"blocked": True, "reason": destination_error}
 
         # Blocked commands cannot be overridden
         if safety_check.get("blocked"):
@@ -502,12 +611,12 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
 
         # Execute the command
         try:
-            result = subprocess.run(
+            result = _run_git(
                 argv,
                 capture_output=True,
                 text=True,
                 timeout=60,
-                cwd=os.getcwd(),
+                cwd=current_cwd(),
             )
 
             output = {
@@ -567,7 +676,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
             status_info = {}
 
             # Get current branch
-            branch_result = subprocess.run(
+            branch_result = _run_git(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 capture_output=True,
                 text=True,
@@ -580,7 +689,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
                 )
 
             # Get status
-            status_result = subprocess.run(
+            status_result = _run_git(
                 ["git", "status", "--porcelain"],
                 capture_output=True,
                 text=True,
@@ -600,7 +709,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
                         status_info["more_files"] = len(changes) - 10
 
             # Get ahead/behind status
-            tracking_result = subprocess.run(
+            tracking_result = _run_git(
                 ["git", "status", "-sb"], capture_output=True, text=True, timeout=10
             )
             if tracking_result.returncode == 0:
@@ -618,7 +727,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
                 )
 
             # Get last commit info
-            log_result = subprocess.run(
+            log_result = _run_git(
                 ["git", "log", "-1", "--format=%h %s (%an, %ar)"],
                 capture_output=True,
                 text=True,
@@ -735,7 +844,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
 
             # Handle file staging
             if add_all:
-                add_result = subprocess.run(
+                add_result = _run_git(
                     ["git", "add", "-A"], capture_output=True, text=True, timeout=30
                 )
                 results.append(
@@ -762,7 +871,7 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
                         },
                         indent=2,
                     )
-                add_result = subprocess.run(
+                add_result = _run_git(
                     ["git", "add"] + files, capture_output=True, text=True, timeout=30
                 )
                 results.append(
@@ -786,13 +895,13 @@ def register_git_safety_tools(mcp: FastMCP) -> None:
                 commit_cmd.append("--allow-empty")
 
             # Execute commit
-            commit_result = subprocess.run(
+            commit_result = _run_git(
                 commit_cmd, capture_output=True, text=True, timeout=30
             )
 
             if commit_result.returncode == 0:
                 # Get the new commit hash
-                hash_result = subprocess.run(
+                hash_result = _run_git(
                     ["git", "rev-parse", "--short", "HEAD"],
                     capture_output=True,
                     text=True,

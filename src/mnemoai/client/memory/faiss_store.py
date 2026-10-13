@@ -10,6 +10,7 @@ from mnemoai.client.memory.similarity import (
     cosine_to_unit,
     l2_normalize,
 )
+from mnemoai.utils.atomic_write import atomic_write_text
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
 from mnemoai.utils.embedding_integrity import (
@@ -114,35 +115,18 @@ class FAISSEpisodicStore:
             self._write_fingerprint(current_fp)
             return
 
-        # A pre-fingerprint (legacy) store: only force a reset if the dimension is
-        # actually incompatible; otherwise adopt it and stamp going forward.
-        if stored_fp is None:
-            if self._legacy_dimension_mismatch(current_fp):
-                self._reset(current_fp, "dimension changed")
-            else:
-                self._write_fingerprint(current_fp)
+        # Equal dimensions do not establish provenance. Unknown vectors remain
+        # read-only lexical evidence until explicitly rebuilt.
+        if not isinstance(stored_fp, str) or not stored_fp:
+            self.integrity_error = "Unknown legacy embedding identity; semantic operations require rebuilding the store."
+            require_clean_vectors(self)
             return
 
         if stored_fp != current_fp:
             self._reset(current_fp, f"embedding model changed ({stored_fp} → {current_fp})")
 
-    def _legacy_dimension_mismatch(self, current_fp: str) -> bool:
-        """True if an unstamped index's dim differs from the current model's dim."""
-        stored = getattr(self.index, "d", None) if self.index is not None else None
-        if not stored:
-            return False
-        current = None
-        rd = getattr(self.embeddings, "runtime_dimension", None)
-        if callable(rd):
-            current = rd()
-        return current is not None and current != stored
-
     def _write_fingerprint(self, fp: str) -> None:
-        try:
-            with open(self.fingerprint_path, "w") as f:
-                f.write(fp)
-        except OSError as e:
-            logger.debug(f"Failed to write episodic fingerprint: {e}")
+        atomic_write_text(self.fingerprint_path, fp)
 
     def _reset(self, current_fp: str, reason: str) -> None:
         """Drop the index+metadata and re-stamp the fingerprint, logging why."""

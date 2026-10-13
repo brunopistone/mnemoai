@@ -199,6 +199,7 @@ class TestClearingTheStore:
 
         c = VectorStoreController.__new__(VectorStoreController)
         c.store = store
+        c._identity_path = tmp_path / "fixture.embedding.json"
         c.clear()
 
         assert store.metadatas == []

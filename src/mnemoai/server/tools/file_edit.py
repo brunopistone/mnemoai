@@ -7,11 +7,12 @@ import re
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
-from mnemoai.utils.path_utils import normalize_path
 
 from .file_encoding import decode_to_lf, encode_from_lf
+from .file_transaction import serialized_mutation, write_bytes
 from .read_state import check_write_allowed, record_read
 from .safety import classify_write_path
+from .shell_state import resolve_path as normalize_path
 
 # A cat -n style line-number gutter ("    12\tcode"). fs_read (Line mode)
 # prefixes these; if the model copies a numbered block verbatim into old_string,
@@ -32,6 +33,7 @@ def register_edit_tools(mcp: FastMCP) -> None:
     """
 
     @mcp.tool()
+    @serialized_mutation("file_path", normalize_path)
     def file_edit(
         file_path: str, old_string: str, new_string: str, replace_all: bool = False
     ) -> str:
@@ -240,8 +242,7 @@ def register_edit_tools(mcp: FastMCP) -> None:
         # Write back to file, restoring the original encoding, BOM, and line
         # ending (new_content is LF; encode_from_lf re-applies the file's shape).
         try:
-            with open(file_path, "wb") as f:
-                f.write(encode_from_lf(new_content, file_shape))
+            write_bytes(file_path, encode_from_lf(new_content, file_shape))
             record_read(file_path)  # our write is the new read baseline
         except Exception as e:
             logger.error(f"Error writing file {file_path}: {str(e)}", exc_info=True)

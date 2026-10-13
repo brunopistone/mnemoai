@@ -11,8 +11,10 @@ from mnemoai.utils.path_utils import clean_path_syntax
 
 from ..error_handler import tool_error_handler
 from .file_encoding import decode_to_lf, encode_from_lf
+from .file_transaction import serialized_mutation, write_bytes
 from .read_state import check_write_allowed, record_read
 from .safety import classify_write_path
+from .shell_state import current_cwd
 
 
 def _resolve_path(path: str) -> str:
@@ -45,7 +47,7 @@ def _resolve_path(path: str) -> str:
         return os.path.expanduser(path)
 
     # Relative → resolve against the working directory.
-    return os.path.abspath(os.path.join(os.getcwd(), path))
+    return os.path.abspath(os.path.join(current_cwd(), path))
 
 
 def register_fs_write_tools(mcp: FastMCP) -> None:
@@ -57,6 +59,7 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
+    @serialized_mutation("path", _resolve_path)
     def fs_write(
         path: str,
         command: str,
@@ -183,8 +186,7 @@ def _create_file(path: str, content: str, summary: str) -> str:
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        with open(path, "w", encoding="utf-8") as file:
-            file.write(content)
+        write_bytes(path, content.encode("utf-8"))
 
         return json.dumps(
             {
@@ -244,8 +246,7 @@ def _str_replace(path: str, old_str: str, new_str: str, summary: str) -> str:
         # Perform replacement
         new_content = content.replace(old_str, new_str)
 
-        with open(path, "wb") as file:
-            file.write(encode_from_lf(new_content, shape))
+        write_bytes(path, encode_from_lf(new_content, shape))
 
         return json.dumps(
             {
@@ -304,8 +305,7 @@ def _insert_line(path: str, line_number: int, content: str, summary: str) -> str
 
         lines.insert(line_number, content)
 
-        with open(path, "wb") as file:
-            file.write(encode_from_lf("".join(lines), shape))
+        write_bytes(path, encode_from_lf("".join(lines), shape))
 
         return json.dumps(
             {
@@ -349,8 +349,7 @@ def _append_file(path: str, content: str, summary: str) -> str:
         if existing_content and not existing_content.endswith("\n"):
             content = "\n" + content
 
-        with open(path, "wb") as file:
-            file.write(encode_from_lf(existing_content + content, shape))
+        write_bytes(path, encode_from_lf(existing_content + content, shape))
 
         return json.dumps(
             {

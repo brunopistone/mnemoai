@@ -23,13 +23,17 @@ unchanged.
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import ContextVar
 from typing import Dict, List
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
 from mnemoai.client.agent import subagents
+from mnemoai.utils import execution_context
 from mnemoai.utils.logger import logger
+
+_background_cancel = ContextVar("background_cancel", default=None)
 
 
 def subagent_tools(agent, subagent) -> List[BaseTool]:
@@ -176,17 +180,21 @@ def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
     on completion, and never raises into the parent. Returns an ack string
     with the agent id the parent can reference."""
     rec = agent._bg_agents.register(subagent.name, label, prompt)
+    parent_workspace = execution_context.for_agent(agent)
+    workspace = execution_context.Workspace(parent_workspace.cwd) if parent_workspace else None
 
     def _run() -> None:
+        _background_cancel.set(rec.cancel)
         agent._set_headless(True)
         # Detached work must never be attributed to a later foreground review.
         excluded = getattr(agent, "_review_excluded", None)
         if excluded is not None:
             excluded.value = True
         try:
-            result = agent._run_one_subagent(
-                subagent, prompt, label, drive_spinner=False, kind="background"
-            )
+            with execution_context.use(workspace):
+                result = agent._run_one_subagent(
+                    subagent, prompt, label, drive_spinner=False, kind="background"
+                )
             agent._bg_agents.complete(rec.agent_id, result)
         except KeyboardInterrupt:
             agent._bg_agents.complete(
@@ -203,7 +211,7 @@ def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
         # let a running turn pick it up at its next boundary). Best-effort:
         # absent hook (plain loop/tests) → delivered on the user's next turn.
         hook = getattr(agent, "_on_background_complete", None)
-        if hook is not None:
+        if hook is not None and not rec.notified:
             try:
                 hook(rec.agent_id)
             except Exception as e:
@@ -388,20 +396,23 @@ def run_one_subagent(
 
     # Live activity run for the agents panel/detail view (covers foreground
     # solo + batch spawns, background spawns, and inline resume).
-    sink = agent._activity.open_run(subagent.name, label, kind)
+    sink = agent._activity.open_run(
+        subagent.name, label, kind, cancel=_background_cancel.get(),
+    )
 
     agent._spawn_depth += 1
     try:
-        result, _ = agent._run_worker_loop(
-            sub_model,
-            sub_tools,
-            prompt,
-            max_iterations=sub_max_iterations,
-            system_prompt=sys_prompt,
-            quiet=True,
-            progress=_progress,
-            activity=sink,
-        )
+        with execution_context.fork(agent):
+            result, _ = agent._run_worker_loop(
+                sub_model,
+                sub_tools,
+                prompt,
+                max_iterations=sub_max_iterations,
+                system_prompt=sys_prompt,
+                quiet=True,
+                progress=_progress,
+                activity=sink,
+            )
         if kind == "background" and (sink.is_cancelled() or agent._cancelled()):
             raise KeyboardInterrupt
         # A stopped agent returns cleanly via the loop's cancel path; finish_ok

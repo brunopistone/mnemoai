@@ -2121,6 +2121,7 @@ def test_params_edit_the_config_selected_by_environment(tmp_path, monkeypatch):
         configurator, "_prompt_inference_params",
         lambda text, section: text.replace("TEMPERATURE: 0.1", "TEMPERATURE: 0.2"),
     )
-    assert configurator.run_params_override() == selected
+    written = configurator.run_params_override()
+    assert written.path == selected and written.section == "MODEL_ID"
     assert "TEMPERATURE: 0.2" in selected.read_text()
     assert not default.exists()

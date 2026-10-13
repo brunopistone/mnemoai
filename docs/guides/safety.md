@@ -230,12 +230,18 @@ validation require network-level controls for complete isolation.
 Use `git_safe`, `git_status_safe`, and `git_commit_safe` rather than driving git
 through `execute_bash` — they add checks that plain git has no reason to.
 
+Ordinary Git mutations use the shell confirmation category too: `/auto off`
+does not grant a worker permission to stage, commit, restore or push. Read-only
+Git calls remain available. Dangerous operations additionally use the Git
+safety-override gate, which no `/auto` tier grants.
+
 | Operation                                                  | Protection                                              |
 | ---------------------------------------------------------- | ------------------------------------------------------- |
 | Force push to `main`/`master`                              | **Blocked** — cannot be overridden                      |
 | Option injection (`-c`, `--exec-path`, `--upload-pack`, …) | **Blocked** — these make git run arbitrary commands     |
 | `git reset --hard`                                         | Asks first                                              |
-| `git push --force`                                         | Asks first (prefer `--force-with-lease`)                |
+| `git push --force` / `--force-with-lease`                  | Asks first; a lease does not authorize rewriting history |
+| `git restore --worktree`, `checkout --`, remote deletion   | Asks before discarding content or remote refs |
 | `git commit --amend`                                       | Checks whether the commit was already pushed, then asks |
 | `git clean -f` / `-fd`                                     | Asks first                                              |
 | Force-delete branch (`-D`)                                 | Asks first                                              |

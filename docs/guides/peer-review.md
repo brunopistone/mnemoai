@@ -182,6 +182,13 @@ Reports are tied to the inspected file/diff revisions. `/review last` marks a
 changed artifact as historical/inconclusive. A new reviewed task, model/settings
 reload, clear, rewind, load, branch or resume clears the current review state.
 
+Git-backed review also captures bounded, non-ignored untracked files, including
+files created through shell commands. Their revisions participate in change
+checkpoints and stale-report detection. Excluded, unreadable or oversized
+artifacts make coverage incomplete. Outside Git, shell-only work needs explicit
+file reads to establish artifact coverage; otherwise a reviewer cannot return
+a verified pass from shell output alone.
+
 Bounded round reports and evidence fingerprints are recorded alongside the session
 when session recording is enabled. The separate audit record is not replayed as
 instructions. Explicitly labelled automated feedback in the conversation is
