@@ -36,7 +36,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 - Correct Claude date/version parsing, cross-provider endpoint inheritance,
   non-reasoning overrides and SageMaker stops. Distinguish saved server-owned
   `/params` edits from applied chat edits. Refresh generated Mantle credentials
-  per request and avoid hidden SDK retry multiplication in chat calls.
+  per request across both supported SDK HTTP transport families, prevent
+  credential forwarding to another origin, and avoid hidden SDK retry
+  multiplication in chat calls.
 - Keep refused calls out of successful learning evidence, retain evidence across
   mid-turn guidance, and bind peer reviews to bounded untracked-artifact snapshots.
 - Resolve the installer's default version from the latest stable GitHub release,
