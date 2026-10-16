@@ -1477,8 +1477,15 @@ class ChatInterface:
             return None
 
         if query.lower() == "/features":
-            if run_features_override() is not None:
-                self._restart_in_place()
+            written = run_features_override()
+            if written is not None:
+                if getattr(written, "changed_features", None) == frozenset({"ENABLE_PLAYBOOK"}):
+                    if self.client.reload_playbook_settings():
+                        print("\nLocal learning settings applied. This conversation continues.\n")
+                    else:
+                        print_error("Settings saved, but local learning could not be applied; see /doctor.")
+                else:
+                    self._restart_in_place()
             return None
 
         if query.lower() == "/mcp" or query.lower().startswith("/mcp "):
@@ -1633,7 +1640,7 @@ class ChatInterface:
                     try:
                         self.client.reflect_and_learn(query)
                     except Exception as e:
-                        logger.warning(f"Reflection failed (non-fatal): {e}")
+                        logger.warning("Local learning failed (non-fatal): %s", e, exc_info=True, extra={"console": False})
 
                 # Auto-distill durable facts into MEMORY.md (opt-in; runs in the
                 # background so it never blocks the turn). getattr-guarded so a

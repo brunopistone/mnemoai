@@ -540,6 +540,18 @@ def _import_check(section: str, label: str, module: str) -> Check:
 def _state_checks(client: Any) -> List[Check]:
     """The per-session state files: sessions, hooks, memory, steering."""
     out: List[Check] = []
+    enabled = bool(config.get("ENABLE_PLAYBOOK", True))
+    learning_error = (
+        getattr(client, "_playbook_error", None)
+        or getattr(getattr(client, "reflector", None), "last_error", None)
+        or getattr(getattr(client, "playbook", None), "error", None)
+    )
+    out.append(Check(
+        "State", "local learning", WARN if enabled and learning_error else INFO,
+        str(learning_error) if enabled and learning_error else (
+            "enabled; local tool observations, no model or embedding calls" if enabled else "disabled"
+        ),
+    ))
 
     days = config.get("SESSION_MAX_AGE_DAYS", 30)
     try:

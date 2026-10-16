@@ -1,4 +1,4 @@
-"""Real MCP failure/recovery evidence, real model extraction, isolated persistence."""
+"""Real MCP failure/recovery evidence, local learning, and isolated persistence."""
 
 import json
 
@@ -15,7 +15,7 @@ from mnemoai.utils.config import config
 pytestmark = pytest.mark.integration
 
 
-def test_live_reflection_and_disable_restore(live_client, tmp_path, monkeypatch,
+def test_local_learning_from_live_tools_and_disable_restore(live_client, tmp_path, monkeypatch,
                                            record_testsuite_property):
     target = tmp_path / "settings.py"
     target.write_text("# first section\nVALUE = 1\n# second section\nVALUE = 1\n")
@@ -55,16 +55,18 @@ def test_live_reflection_and_disable_restore(live_client, tmp_path, monkeypatch,
     monkeypatch.setattr(live_client, "_last_reflected_source", None, raising=False)
     monkeypatch.setattr(live_client, "system_prompt", "Live reflection verification.")
     monkeypatch.setattr(live_client.agent, "system_prompt", "Live reflection verification.")
-    monkeypatch.setitem(config._config_data, "PLAYBOOK",
-                        {**config.get("PLAYBOOK", {}), "REFLECTION_TIMEOUT": 120})
-    record_testsuite_property("reflector_model", live_client._area_usage_name("REFLECTOR"))
+    monkeypatch.setitem(config._config_data, "ENABLE_PLAYBOOK", True)
+    monkeypatch.setattr(live_client, "_area_model", lambda *a, **kw: pytest.fail("Local learning must not request a model"))
+    before_usage = live_client.agent.usage.totals()
     live_client.reflect_and_learn(
         "Update only the first section's VALUE. The ambiguous edit failed; retrying "
         "with the section header succeeded. Extract the supported editing lesson."
     )
     entries = store.snapshot()
-    assert entries, live_client.reflector.last_error or "Model extracted no lesson"
-    assert all(e["provenance"] == "model" and e["source_refs"] for e in entries)
+    assert entries, live_client.reflector.last_error or "No local observation recorded"
+    assert all(e["provenance"] == "observed" and e["source_refs"] for e in entries)
+    assert live_client.agent.usage.totals() == before_usage
+    record_testsuite_property("learning_mode", "local-only; no model invocation")
     chosen = entries[0]
     live_client.refresh_playbook_context()
     assert chosen["strategy"] in live_client.agent.system_prompt
@@ -119,8 +121,6 @@ def test_live_retraction_filters_next_request_and_replayed_evidence(
     assert "F4_WITHDRAWN_FIXTURE_49391" not in json.dumps([m.content for m in observed])
     assert "F4_WITHDRAWN_FIXTURE_49391" in str(stale.content)  # history wasn't rewritten
 
-    def forbidden(*args, **kwargs):
-        pytest.fail("Quarantined evidence must not make another provider request")
     replay = [
         HumanMessage(content="A repeated old source"),
         AIMessage(content="", tool_calls=[{"name": "fs_read", "args": {}, "id": "withdrawn-call"}]),
@@ -128,7 +128,7 @@ def test_live_retraction_filters_next_request_and_replayed_evidence(
     ]
     reflector = Reflector()
     assert reflector.reflect_on_trajectory(
-        replay, "task", model=type("NoCall", (), {"invoke": forbidden})(),
+        replay, "task",
         source={"session_id": "f4-live", "turn": 1}, scope=str(tmp_path),
         evidence_filter=lambda evidence: store.filter_learning_evidence(evidence, str(tmp_path)),
     ) == []

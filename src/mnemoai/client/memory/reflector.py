@@ -1,8 +1,7 @@
-"""ACE Reflector - Analyzes tool executions and extracts actionable strategies."""
+"""Local playbook learning from observed tool outcomes; never calls a model."""
 
 import json
 import os
-import threading
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -70,11 +69,10 @@ def _is_prompt_dict(msg: dict) -> bool:
 
 
 class Reflector:
-    """Analyzes execution trajectories and extracts strategies."""
+    """Records local tool observations; the internal class name is retained."""
 
     def __init__(self, persist_path: str = None):
         self.last_error = None
-        self._in_flight = threading.Event()
         self.persist_path = persist_path
         self.metrics_file = (
             os.path.join(persist_path, "metrics.json") if persist_path else None
@@ -106,7 +104,8 @@ class Reflector:
                 os.makedirs(os.path.dirname(self.metrics_file), exist_ok=True)
                 atomic_write_json(self.metrics_file, self.metrics)
             except Exception as e:
-                logger.error(f"Failed to save metrics: {e}")
+                self.last_error = f"Could not save learning metrics: {e}"
+                logger.error(self.last_error, extra={"console": False})
 
     # Patterns that indicate specific failure types
     FAILURE_PATTERNS = {
@@ -114,8 +113,8 @@ class Reflector:
             "no occurrences of",
             "string not found",
             "could not find",
-            "not unique",
         ],
+        "ambiguous_match": ["occurrences of old_string", "occurrences of old_str", "not unique"],
         "file_not_found": [
             "file not found",
             "no such file",
@@ -228,7 +227,7 @@ class Reflector:
         head = result_lower.lstrip().lstrip("!*#-[( \t")
         return any(head.startswith(ind) for ind in self.ERROR_INDICATORS)
 
-    def _track_metric(self, success: bool, failure_type: str = None) -> None:
+    def _track_metric(self, success: bool, failure_type: str = None, *, persist=True) -> None:
         """Track a tool execution metric and persist."""
         today = datetime.now().strftime("%Y-%m-%d")
 
@@ -250,14 +249,14 @@ class Reflector:
         else:
             self.metrics["daily_stats"][today]["failure"] += 1
 
-        self._save_metrics()
+        if persist:
+            self._save_metrics()
 
     def reflect_on_trajectory(
         self, messages: List[Any], task: str, scope_to_last_turn: bool = True,
-        *, model=None, source=None, scope="", timeout=30, cancel=None, record_usage=None,
-        evidence_filter=None,
+        *, source=None, scope="", evidence_filter=None,
     ) -> List[PlaybookEntry]:
-        """Analyze an execution trajectory and extract all strategies.
+        """Record a bounded set of local observations from completed tool results.
 
         Args:
             messages: Conversation messages including tool calls/results
@@ -311,11 +310,13 @@ class Reflector:
                     kind for kind, patterns in self.FAILURE_PATTERNS.items()
                     if failed and any(p in result.lower() for p in patterns)
                 ), None)
-                self._track_metric(not failed, failure_type)
-                evidence.append(reflection.evidence_item(
+                self._track_metric(not failed, failure_type, persist=False)
+                item = reflection.evidence_item(
                     tool_name, tool_args, result, tool_call_id,
                     "failure" if failed else "success", source or {},
-                ))
+                )
+                item["failure_type"] = failure_type
+                evidence.append(item)
         if not evidence:
             return []
         try:
@@ -323,20 +324,15 @@ class Reflector:
                 evidence = evidence_filter(evidence)
             if not evidence:
                 return []
-            if model is None or self._in_flight.is_set():
-                self.last_error = "Reflection model unavailable or a prior request is still running"
-                return []
-            entries = reflection.extract(
-                evidence, task, model, scope=scope, timeout=timeout, cancel=cancel,
-                record_usage=record_usage, in_flight=self._in_flight,
-            )
+            entries = reflection.extract_local(evidence, task, scope=scope)
             self.metrics["strategies_extracted"] += len(entries)
-            self._save_metrics()
             return entries
         except Exception as e:
-            self.last_error = f"{type(e).__name__}: reflection skipped; no new lessons stored"
-            logger.warning(self.last_error)
+            self.last_error = f"Local learning unavailable ({type(e).__name__})"
+            logger.warning(self.last_error, exc_info=True, extra={"console": False})
             return []
+        finally:
+            self._save_metrics()
 
     def _extract_tool_calls(self, msg: Any) -> List[Dict[str, Any]]:
         """Extract tool calls from a message."""

@@ -133,14 +133,16 @@ class TestReflectOnTrajectory:
 
         assert reflector.metrics["total_tool_calls"] == 2
 
-    def test_failure_without_extraction_model_never_fabricates_a_lesson(self, tmp_path):
+    def test_failure_is_recorded_locally_without_fabricating_a_rule(self, tmp_path):
         reflector = Reflector(persist_path=str(tmp_path))
         entries = reflector.reflect_on_trajectory(
             messages=_failing_turn(1), task="do thing 1"
         )
-        assert entries == []
+        assert len(entries) == 1
+        assert entries[0].provenance == "observed"
+        assert "Historical tool outcome" in entries[0].strategy
         assert reflector.metrics["failed_calls"] == 1
-        assert reflector.last_error
+        assert reflector.last_error is None
 
 
 class TestFindToolResult:

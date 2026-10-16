@@ -7,7 +7,19 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
-## [Unreleased]
+## [1.29.2] — 2026-10-16
+
+### Changed
+
+- Playbook learning is local-only and enabled by default. It records observed
+  tool failures, recoveries and check results without LLM or embedding calls.
+  Existing notes, feedback and retractions are preserved.
+- Remove reflector model/timeout/similarity controls. Old keys remain accepted
+  but cannot enable model reflection. YAML, `/config playbook`, and `/features`
+  can disable learning; playbook-only UI changes apply without restarting.
+- Rank notes against the actual task so relevant new observations are not
+  permanently crowded out by generic legacy confidence scores. Keep optional
+  learning failures in logs and on-demand diagnostics, not routine chat warnings.
 
 ## [1.29.1] — 2026-10-13
 

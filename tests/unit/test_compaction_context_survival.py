@@ -57,7 +57,7 @@ def wired(tmp_path, monkeypatch):
     )
 
     playbook = SimpleNamespace(
-        prepare_prompt=lambda top_k: (PLAYBOOK_TEXT, ["entry"]),
+        prepare_prompt=lambda top_k, task="": (PLAYBOOK_TEXT, ["entry"]),
     )
     return SimpleNamespace(
         profile_manager=SimpleNamespace(get_profile_summary=lambda: PROFILE_TEXT),

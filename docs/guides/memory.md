@@ -170,28 +170,30 @@ cleanup limits) see [Episodic Memory Configuration](../configuration.md#episodic
 
 ## ACE Playbook (Agentic Context Engineering)
 
-The playbook stores scoped, model-inferred lessons alongside legacy tool-use
-notes. These are suggestions with evidence, not proven rules or permissions.
+The playbook records scoped tool observations locally and preserves existing
+model-inferred and legacy notes. These are historical evidence, not proven rules
+or permissions. Local learning is enabled by default and makes **no extra LLM
+or embedding calls**. There is no model-reflection option.
 
 **How it works:**
 
-1. **Reflector:** after a tool-using turn, one tool-free model call receives the
-   task and bounded tool evidence. It may return up to three lessons or none.
-   Invalid output, cancellation, timeouts, and provider errors store nothing.
-   The existing `ENABLE_PLAYBOOK` toggle controls this feature; enabling it now
-   incurs an additional model call on tool-using turns. Obvious named credential
-   fields are redacted, but this is not a comprehensive secret-detection system.
+1. **Local observation:** after a tool-using turn, record up to three failures,
+   later successes on the same tool/target, or successful check commands.
+   Ordinary successful reads do not generate generic advice. Blocked/declined
+   calls and calls without results are excluded. No model is built or called.
+   Credential-like fields are redacted; file bodies and arbitrary stdout are not
+   stored as advice. Redaction is not a comprehensive secret detector.
 
 2. **Playbook Store**: Maintains structured strategy entries:
 
    ```json
    {
      "context": "editing python files",
-     "strategy": "Read the file first to get exact string including whitespace before using str_replace",
+     "strategy": "Observed file_edit failed (string_not_found). A later edit of the same target succeeded. Historical outcome, not proof of cause.",
      "id": "mem-example",
      "revision": 1,
      "status": "active",
-     "provenance": "model",
+     "provenance": "observed",
      "scope": "/path/to/project",
      "source_refs": [
        { "session_id": "session-id", "turn": 4, "tool_call_id": "call-id" }
@@ -202,9 +204,11 @@ notes. These are suggestions with evidence, not proven rules or permissions.
    }
    ```
 
-3. **Context injection:** refreshes eligible notes for each turn and after
-   `/learned` changes. New lessons apply to the project directory where they
-   were recorded; legacy scope remains unknown rather than being invented.
+3. **Context injection:** ranks eligible notes against the current task, before
+   using confidence/recency as small tie-breakers. High-confidence generic legacy
+   notes cannot displace more relevant newer observations. Notes refresh each
+   turn and after `/learned` changes. New observations apply to the directory
+   where they were recorded; legacy scope is not invented.
 
    ```
    [Tool-use notes from past sessions]
@@ -224,21 +228,20 @@ The feature is not YAML-only:
 | Change                                                   | Interactive path               | When it applies                                  |
 | -------------------------------------------------------- | ------------------------------ | ------------------------------------------------ |
 | Initial setup                                            | `/config`                      | Full configuration restart                       |
-| Enable/disable learning                                  | `/features`                    | Restart; enabling offers model and timeout setup |
-| Reflector provider/model                                 | `/model` → Reflector           | In place if learning is already enabled          |
-| Reflector inference parameters                           | `/params` → Reflector          | In place; select an override with `/model` first |
-| Timeout, capacity, candidate count, similarity threshold | `/config playbook`             | In place; no model rebuild or conversation reset |
+| Enable/disable learning                                  | `/features`                    | In place when only local learning changes |
+| Enable/disable, capacity and candidate count             | `/config playbook`             | In place; no model rebuild or conversation reset |
 | Inspect/edit/disable notes and give feedback             | `/learned`                     | Next memory injection; revisions persist         |
-| Suppress injection for this session                      | `/learned off` / `/learned on` | Immediate; extraction still runs                 |
+| Suppress injection for this session                      | `/learned off` / `/learned on` | Immediate; local recording still runs |
 
-`/config playbook` changes only `PLAYBOOK`, preserves other configuration, and
+`/config playbook` changes only `ENABLE_PLAYBOOK` and `PLAYBOOK`, preserves other configuration, and
 supports cancelling or stepping back without a partial save. Capacity changes
 take effect at the next refinement. The candidate-count setting is still subject
-to the two-notes-per-outcome injection cap. Similarity tuning applies when
-embeddings are available. YAML remains an alternative, not a requirement.
+to the two-notes-per-outcome injection cap. Deduplication is local and exact;
+no embedding service is used. YAML remains an alternative, not a requirement.
 
 `/learned` shows the current model's store path, injection state, entries, and
-the most recent reflection error, if any. These commands are user-only:
+any local storage/learning error. Optional-learning failures stay in logs and
+on-demand diagnostics, not routine yellow chat warnings. These commands are user-only:
 
 - `/learned inspect <id>`: evidence references, scope, counters, and edit history.
 - `/learned edit <id>`: edit `context` and `strategy` as JSON in `$EDITOR`, then
@@ -281,9 +284,9 @@ reason, actor, time, prior state, and revisions remain inspectable.
 The first stage has deliberately narrow semantics:
 
 - The selected record stops being injected. Known observation IDs are quarantined
-  from automatic reflection in that model/project scope. Filtering happens before
-  the model call and again when committing its output, including late responses.
-- A model cannot re-enable the exact withdrawn record by proposing it again.
+  from automatic local learning in that model/project scope. Filtering happens before
+  local extraction and again when committing observations, including concurrent learning.
+- Automatic learning cannot re-enable the exact withdrawn record by recording it again.
   Unknown evidence is not treated as independent evidence when the scope has
   an active quarantine. Fresh, independently identified observations can support
   new lessons; this is not a semantic ban on every future paraphrase.
@@ -312,16 +315,16 @@ reverse active retractions or restore an appropriate pre-retraction backup;
 older versions may refuse the new lifecycle state rather than silently trust it.
 
 Source references may outlive session transcripts; their IDs are not a promise
-of perpetual replay. Use `/config playbook`, `/model`, and `/features` as before:
+of perpetual replay. Use `/config playbook` and `/features` as before:
 retraction adds no configuration toggle and makes no extra model call.
 
 **Key Differences from Episodic Memory:**
 
 | Feature     | Episodic Memory       | ACE Playbook            |
 | ----------- | --------------------- | ----------------------- |
-| Stores      | Full task completions | Granular strategies     |
+| Stores      | Full task completions | Tool observations and retained notes |
 | Learns from | Successes only        | Successes AND failures  |
-| Format      | Conversation context  | Structured rules        |
+| Format      | Conversation context  | Structured, evidence-linked records |
 | Retrieval   | Semantic similarity   | Context + tool matching |
 
 **Configuration:**
@@ -330,18 +333,17 @@ retraction adds no configuration toggle and makes no extra model call.
 ENABLE_PLAYBOOK: true
 PLAYBOOK:
   MAX_ENTRIES: 500 # Active entries before archival/refinement
-  SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
   MAX_INJECT: 10 # Maximum entries to inject per query
-  REFLECTION_TIMEOUT: 30 # Wait bound, clamped to 1–120 seconds
 ```
 
-Use `/model` to choose the **Reflector model**, or configure
-`AREA_MODELS.REFLECTOR` like any other area, including a different provider.
-Without an override, reflection uses a separate, non-reasoning main-model
-instance. An explicit override uses its configured parameters. `/params` edits
-its parameters after an override is configured; `/usage` includes reported
-reflector tokens. A timed-out provider request may finish later, but its result
-cannot create a lesson, and another reflection does not start while it is pending.
+Set `ENABLE_PLAYBOOK: false` to disable local learning and playbook injection.
+An absent flag defaults to `true`; explicit user choices are preserved.
+Old `AREA_MODELS.REFLECTOR`, `PLAYBOOK.REFLECTION_TIMEOUT` and
+`PLAYBOOK.SIMILARITY_THRESHOLD` keys are ignored and may be removed. They cannot
+enable model reflection. Existing notes and their feedback/retractions remain
+available; this change does not clear them. Other features (chat, optional peer
+review, compaction, episodic embeddings, and MEMORY.md auto-extraction) retain
+their own independent model usage and controls.
 
 **Storage Location:**
 
