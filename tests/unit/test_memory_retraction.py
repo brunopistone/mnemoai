@@ -298,16 +298,17 @@ store.apply_retraction(entry["id"], action="retract", reason="Crash fixture", to
     assert bool(remaining) == (phase == "before")
 
 
-def test_late_model_result_is_rechecked_when_committing(store):
+def test_local_observation_is_rechecked_when_committing(store, monkeypatch):
+    from mnemoai.client.memory import reflection
+
     target = store.snapshot()[0]
     entered, released = threading.Event(), threading.Event()
-    class Model:
-        def invoke(self, *args, **kwargs):
-            entered.set()
-            released.wait(3)
-            return SimpleNamespace(content=json.dumps({"lessons": [{
-                "context": "editing", "strategy": "A late paraphrase", "evidence_ids": [0],
-            }]}))
+    extract = reflection.extract_local
+    def delayed(*args, **kwargs):
+        entered.set()
+        released.wait(3)
+        return extract(*args, **kwargs)
+    monkeypatch.setattr(reflection, "extract_local", delayed)
     trace = [
         SimpleNamespace(type="human", content="task"),
         SimpleNamespace(type="ai", tool_calls=[{"name": "file_edit", "args": {}, "id": "a"}]),
@@ -316,7 +317,7 @@ def test_late_model_result_is_rechecked_when_committing(store):
     reflector = Reflector()
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(
-            reflector.reflect_on_trajectory, trace, "task", model=Model(),
+            reflector.reflect_on_trajectory, trace, "task",
             source={"session_id": "session", "turn": 1}, scope=target["scope"],
             evidence_filter=lambda evidence: store.filter_learning_evidence(evidence, target["scope"]),
         )
@@ -330,9 +331,10 @@ def test_late_model_result_is_rechecked_when_committing(store):
     store.append_batch(entries)
     assert len(store.snapshot()) == 1 and store.snapshot()[0]["status"] == "retracted"
     def forbidden(*args, **kwargs):
-        pytest.fail("quarantined evidence must not trigger a model call")
+        pytest.fail("quarantined evidence must not create a local observation")
+    monkeypatch.setattr(reflection, "extract_local", forbidden)
     assert reflector.reflect_on_trajectory(
-        trace, "task", model=SimpleNamespace(invoke=forbidden),
+        trace, "task",
         source={"session_id": "session", "turn": 1}, scope=target["scope"],
         evidence_filter=lambda evidence: store.filter_learning_evidence(evidence, target["scope"]),
     ) == []

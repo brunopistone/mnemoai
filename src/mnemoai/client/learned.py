@@ -18,12 +18,12 @@ def _plain(value):
 
 def render(entries, path, enabled=True, error=None):
     lines = [
-        "Learned tool-use notes",
+        "Learned tool-use notes · local learning (no model calls)",
         f"Injection: {'on' if enabled else 'off for this session'}",
         f"Store: {_plain(path)}",
     ]
     if error:
-        lines.append("Last reflection: " + _plain(error))
+        lines.append("Local learning status: " + _plain(error))
     if not entries:
         lines.append("No entries yet.")
     for entry in entries[:30]:
@@ -37,8 +37,8 @@ def render(entries, path, enabled=True, error=None):
     if len(entries) > 30:
         lines.append(f"  … {len(entries) - 30} more entries; inspect by ID.")
     lines.extend([
-        "Model-inferred and legacy notes are not proven strategies.", USAGE,
-        "Settings: /config playbook · Model: /model · Enable/disable learning: /features",
+        "Historical observations, model-inferred and legacy notes are not proven strategies.", USAGE,
+        "Settings: /config playbook · Enable/disable local learning: /features",
     ])
     return "\n".join(lines)
 

@@ -1248,7 +1248,7 @@ def _build_config(
     text = _set_bool(text, "ENABLE_RAG", _ask_bool("Enable RAG (document indexing & search)?", _truthy(_get_top_level(text, "ENABLE_RAG"))))
     text = _set_bool(text, "ENABLE_EPISODIC_MEMORY", _ask_bool("Enable episodic memory (learn from past tasks)?", _truthy(_get_top_level(text, "ENABLE_EPISODIC_MEMORY"))))
     learning = _ask_bool(
-        "Enable playbook learning (additional model calls after tool turns)?",
+        "Enable local playbook learning (no extra model calls)?",
         _truthy(_get_top_level(text, "ENABLE_PLAYBOOK")),
     )
     text = _set_bool(text, "ENABLE_PLAYBOOK", learning)
@@ -1284,13 +1284,11 @@ def _build_config(
     # model), so Enter-through leaves the template exactly as it was. SUMMARY has
     # no toggle to hang off, so it stays a /model-only choice.
     for area, enabled in (
-        ("ROUTER", routing), ("ORCHESTRATOR", orchestration), ("REFLECTOR", learning),
+        ("ROUTER", routing), ("ORCHESTRATOR", orchestration),
         ("REVIEWER", reviewing),
     ):
         if enabled:
             text = _prompt_model_section(text, area, is_llm=False)
-    if learning:
-        text = _prompt_playbook_settings(text, timeout_only=True)
     if reviewing:
         text = _prompt_review_settings(text)
 
@@ -1375,10 +1373,8 @@ def run_first_run_setup() -> Optional[Path]:
 
 
 _PLAYBOOK_SETTINGS = {
-    "REFLECTION_TIMEOUT": ("Reflection wait (seconds, 1–120)", 30, "float", 1, 120),
     "MAX_ENTRIES": ("Active notes before archival (at least 1)", 500, "int", 1, None),
     "MAX_INJECT": ("Candidate notes per turn (0 = none; at most 2 per outcome)", 10, "int", 0, None),
-    "SIMILARITY_THRESHOLD": ("Semantic similarity threshold (0–1; needs embeddings)", 0.85, "float", 0, 1),
 }
 
 
@@ -1440,9 +1436,13 @@ def _set_settings_option(text: str, section: str, key: str, value: str) -> str:
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
 
 
-def _prompt_playbook_settings(text: str, timeout_only: bool = False) -> str:
-    specs = {k: v for k, v in _PLAYBOOK_SETTINGS.items() if not timeout_only or k == "REFLECTION_TIMEOUT"}
-    return _prompt_scoped_settings(text, "PLAYBOOK", specs)
+def _prompt_playbook_settings(text: str) -> str:
+    current = _get_top_level(text, "ENABLE_PLAYBOOK")
+    enabled = _truthy(current) if current is not None else True
+    selected = _ask_bool("Enable local playbook learning (no extra model calls)?", enabled)
+    if selected != enabled:
+        text = _set_top_level_or_add(text, "ENABLE_PLAYBOOK", "true" if selected else "false")
+    return _prompt_scoped_settings(text, "PLAYBOOK", _PLAYBOOK_SETTINGS)
 
 
 def _prompt_review_settings(text: str) -> str:
@@ -1476,7 +1476,7 @@ def _prompt_scoped_settings(text: str, section: str, specs: dict) -> str:
 
 
 def run_playbook_settings() -> Optional[Path]:
-    """Tune only PLAYBOOK settings; model selection stays in /model."""
+    """Enable/disable and tune local learning without model settings."""
     return _run_scoped_settings("playbook", _prompt_playbook_settings)
 
 
@@ -1565,7 +1565,6 @@ _MODEL_SECTIONS = {
     "4": ("ROUTER", f"Router model — {AREA_DESCRIPTIONS['ROUTER']}", False),
     "5": ("ORCHESTRATOR", f"Orchestrator model — {AREA_DESCRIPTIONS['ORCHESTRATOR']}", False),
     "6": ("SUMMARY", f"Summary model — {AREA_DESCRIPTIONS['SUMMARY']}", False),
-    "7": ("REFLECTOR", f"Reflector model — {AREA_DESCRIPTIONS['REFLECTOR']}", False),
     "8": ("REVIEWER", f"Reviewer model — {AREA_DESCRIPTIONS['REVIEWER']}", False),
 }
 
@@ -1576,7 +1575,6 @@ _MODEL_SECTIONS = {
 _AREA_FEATURE = {
     "ROUTER": ("ENABLE_ROUTING", "Query routing"),
     "ORCHESTRATOR": ("ENABLE_ORCHESTRATION", "Orchestration"),
-    "REFLECTOR": ("ENABLE_PLAYBOOK", "Playbook learning"),
     "REVIEWER": ("ENABLE_REVIEW", "Peer review"),
 }
 
@@ -1863,7 +1861,6 @@ _PARAM_SECTIONS = {
     "4": ("ROUTER", "Router model"),
     "5": ("ORCHESTRATOR", "Orchestrator model"),
     "6": ("SUMMARY", "Summary model"),
-    "7": ("REFLECTOR", "Reflector model"),
     "8": ("REVIEWER", "Reviewer model"),
 }
 
@@ -2182,7 +2179,7 @@ def run_model_override() -> Optional[ModelOverride]:
 _FEATURE_TOGGLES = [
     ("ENABLE_RAG", "RAG — index & search your documents"),
     ("ENABLE_EPISODIC_MEMORY", "Episodic memory — recall similar past tasks"),
-    ("ENABLE_PLAYBOOK", "Playbook learning — extra model calls after tool turns"),
+    ("ENABLE_PLAYBOOK", "Local playbook learning — no extra model calls"),
     ("ENABLE_REVIEW", "Peer review — coding/document strategies and changes"),
     ("ENABLE_WEB_SEARCH", "Web search (needs a Brave API key)"),
     ("ENABLE_WEB_CRAWL", "Web crawler — fetch & read pages"),
@@ -2226,29 +2223,33 @@ def _prompt_feature_dependencies(text: str, newly_on: set) -> str:
             + " need an embeddings model — let's set one."
         )
         text = _prompt_model_section(text, "EMBED_MODEL_ID", is_llm=False)
-    if "ENABLE_PLAYBOOK" in newly_on:
-        text = _prompt_model_section(text, "REFLECTOR", is_llm=False)
-        text = _prompt_playbook_settings(text, timeout_only=True)
     if "ENABLE_REVIEW" in newly_on:
         text = _prompt_model_section(text, "REVIEWER", is_llm=False)
         text = _prompt_review_settings(text)
     return text
 
 
-def run_features_override() -> Optional[Path]:
+class FeatureOverride(NamedTuple):
+    path: Path
+    changed_features: frozenset
+
+
+def run_features_override() -> Optional[FeatureOverride]:
     """Enable/disable app features (``/features``): a checklist of the ENABLE_*
     toggles, writing just those keys back. Prompts for any info a newly-enabled
-    feature needs (Brave key, embeddings model). Returns the written Path, or
-    None if cancelled or unchanged."""
+    feature needs (Brave key, embeddings model). Returns the written path and
+    changed toggle names, or None if cancelled or unchanged."""
     dest = _config_to_edit()
     if not dest.is_file():
         print_error("No config.yaml found. Run /config to create one first.")
         return None
 
     text = dest.read_text()
-    # Current state: a toggle counts as ON only when explicitly true (absent → off).
+    # Local learning is on by default; other toggles keep their existing defaults.
     def _on(key: str) -> bool:
         val = _get_top_level(text, key)
+        if val is None and key == "ENABLE_PLAYBOOK":
+            return True
         return val is not None and val.strip().lower() in ("true", "yes", "on", "1")
 
     options = [(key, label) for key, label in _FEATURE_TOGGLES]
@@ -2291,4 +2292,4 @@ def run_features_override() -> Optional[Path]:
     dest.write_text(new_text)
     print(f"\n  Updated features in:\n    {dest}")
     print("=" * 64 + "\n")
-    return dest
+    return FeatureOverride(dest, frozenset(selected.symmetric_difference(checked)))

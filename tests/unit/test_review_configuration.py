@@ -89,7 +89,7 @@ def test_features_enabling_review_offers_model_and_limits(config_file, monkeypat
     offered = Mock(side_effect=lambda text, *a, **kw: text)
     monkeypatch.setattr(C, "_prompt_model_section", offered)
     answers(monkeypatch, TIMEOUT=60)
-    assert C.run_features_override() == config_file
+    assert C.run_features_override().path == config_file
     assert offered.call_args.args[1] == "REVIEWER"
     assert yaml.safe_load(config_file.read_text())["ENABLE_REVIEW"] is True
 

@@ -1,17 +1,11 @@
-"""One bounded model extraction from observed tool evidence, without tool access."""
+"""Local, evidence-linked observations and shared credential redaction."""
 
 import hashlib
 import json
-import queue
 import re
-import threading
-import time
 
-from langchain_core.messages import HumanMessage, SystemMessage
-
-from mnemoai.client.agent.reasoning_utils import extract_visible_text
 from mnemoai.client.memory.playbook_records import PlaybookEntry
-from mnemoai.utils.config import config
+from mnemoai.utils.shell_syntax import simple_command_tokens
 
 _SENSITIVE = re.compile(r"api.?key|password|secret|token|authorization", re.I)
 _TOKEN = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|pypi-[A-Za-z0-9_-]{16,}|AKIA[A-Z0-9]{16})\b")
@@ -39,10 +33,19 @@ def evidence_item(name, args, result, call_id, outcome, source):
         preview = json.dumps(redact(json.loads(text)), ensure_ascii=True)
     except (ValueError, TypeError):
         preview = redact(text)
+    local_args = {key: value for key, value in args.items()
+                  if key in {"path", "file_path", "command", "mode", "working_directory"}}
+    match = args.get("old_string", args.get("old_str"))
+    if isinstance(match, str):
+        local_args["match_chars"] = len(match)
+    if "replace_all" in args:
+        local_args["replace_all"] = args["replace_all"]
     return {
         "tool": name, "args": json.dumps(redact(args), ensure_ascii=True)[:600],
         "result": preview[:1200], "truncated": len(preview) > 1200,
         "outcome": outcome,
+        "operation": operation_key(name, args, result),
+        "local_args": redact(local_args),
         "ref": {
             **source, "tool_call_id": call_id, "tool": name, "outcome": outcome,
             "result_sha256": hashlib.sha256(text.encode()).hexdigest(),
@@ -53,87 +56,100 @@ def evidence_item(name, args, result, call_id, outcome, source):
     }
 
 
-def extract(evidence, task, model, *, scope, timeout=30, cancel=None, record_usage=None,
-            in_flight=None):
-    """Errors/timeouts create no entries; late responses never write to the store."""
-    evidence = evidence[-12:]
-    payload = {
-        "task": redact(task)[:1500],
-        "evidence": [{"id": i, **{k: v for k, v in item.items() if k != "ref"}}
-                     for i, item in enumerate(evidence)],
-    }
-    prompt = config.prompt("REFLECTOR_SYSTEM_PROMPT")
-    if not prompt:
-        raise ValueError("REFLECTOR_SYSTEM_PROMPT is missing")
-    if cancel is not None and cancel():
-        raise InterruptedError("Reflection cancelled")
-    inbox = queue.Queue(maxsize=1)
-
-    def invoke():
+def operation_key(name, args, result):
+    """Only pair retries whose tool and explicit target/command agree."""
+    target = args.get("file_path") or args.get("path")
+    if name == "execute_bash":
+        if not args.get("command"):
+            return None
         try:
-            response = model.invoke([
-                SystemMessage(content=prompt),
-                HumanMessage(content=json.dumps(payload, ensure_ascii=True)),
-            ], config={"callbacks": []})
-            if record_usage is not None:
-                record_usage(response)
-            inbox.put((response, None))
-        except Exception as exc:
-            inbox.put((None, exc))
-        finally:
-            if in_flight is not None:
-                in_flight.clear()
+            data = json.loads(result) if isinstance(result, str) else result
+        except (ValueError, TypeError):
+            data = {}
+        cwd = data.get("cwd", "") if isinstance(data, dict) else ""
+        target = (args.get("command"), args.get("working_directory") or cwd)
+    if not target:
+        return None
+    return hashlib.sha256(json.dumps([name, target], sort_keys=True).encode()).hexdigest()
 
-    if in_flight is not None:
-        in_flight.set()
-    threading.Thread(target=invoke, daemon=True, name="mnemoai-reflector").start()
-    deadline = time.monotonic() + timeout
-    while True:
-        if cancel is not None and cancel():
-            raise InterruptedError("Reflection cancelled")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise TimeoutError("Reflection timed out; no lesson stored")
-        try:
-            response, error = inbox.get(timeout=min(0.1, remaining))
-            break
-        except queue.Empty:
-            pass
-    if error is not None:
-        raise error
-    text = extract_visible_text(getattr(response, "content", ""))
-    if len(text) > 12_000:
-        raise ValueError("Reflection response exceeds its size limit")
-    if text.startswith("```") and text.endswith("```"):
-        text = text.partition("\n")[2].rsplit("```", 1)[0]
-    data = json.loads(text)
-    if not isinstance(data, dict) or not isinstance(data.get("lessons"), list):
-        raise ValueError("Reflection must return a lessons list")
-    if len(data["lessons"]) > 3:
-        raise ValueError("Reflection returned too many lessons")
-    entries = []
-    for lesson in data["lessons"]:
-        if not isinstance(lesson, dict):
-            raise ValueError("Invalid lesson")
-        context, strategy = lesson.get("context"), lesson.get("strategy")
-        ids = lesson.get("evidence_ids")
-        for value, limit in ((context, 200), (strategy, 800)):
-            if not isinstance(value, str) or not value.strip() or len(value) > limit:
-                raise ValueError("Invalid lesson text")
-            if any(not c.isprintable() and not c.isspace() for c in value):
-                raise ValueError("Invalid lesson control characters")
-            if redact(value) != value:
-                raise ValueError("Possible credential in lesson")
-        if not isinstance(ids, list) or not ids or any(
-            type(i) is not int or i < 0 or i >= len(evidence) for i in ids
-        ):
-            raise ValueError("Lesson references unobserved evidence")
-        selected = [evidence[i] for i in sorted(set(ids))]
+
+def _arguments(item):
+    if isinstance(item.get("local_args"), dict):
+        return item["local_args"]
+    try:
+        value = json.loads(item["args"])
+        return value if isinstance(value, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def _is_check(item):
+    if item["tool"] != "execute_bash":
+        return False
+    tokens = simple_command_tokens(_arguments(item).get("command", ""))
+    if not tokens:
+        return False
+    program = tokens[0].rsplit("/", 1)[-1]
+    if program in {"pytest", "mypy", "pyright"}:
+        return True
+    if program == "ruff":
+        return "check" in tokens or "--check" in tokens
+    if program.startswith("python"):
+        return (
+            len(tokens) >= 3 and tokens[1] == "-m"
+            and tokens[2] in {"pytest", "unittest", "compileall"}
+        ) or any(t.rsplit("/", 1)[-1].startswith("test_") and t.endswith(".py") for t in tokens[1:])
+    return False
+
+
+def _describe(item):
+    # Never persist file bodies, replacement text or arbitrary stdout as advice.
+    args = {key: value for key, value in _arguments(item).items()
+            if key in {"path", "file_path", "command", "mode", "working_directory",
+                       "match_chars", "replace_all"}}
+    return f"{item['tool']} {json.dumps(args, ensure_ascii=True, sort_keys=True)[:240]}"
+
+
+def extract_local(evidence, task, *, scope):
+    """Record bounded facts, not invented causes, instructions or success claims."""
+    failures, candidates = {}, []
+    for item in evidence:
+        key = item.get("operation")
+        if item["outcome"] == "failure":
+            candidates.append([item])
+            if key:
+                failures[key] = candidates[-1]
+        elif key in failures:
+            pair = failures.pop(key)
+            pair.append(item)
+        elif _is_check(item):
+            candidates.append([item])
+
+    # Failures/recoveries get priority over repetitive successful checks.
+    candidates.sort(key=lambda items: (items[0]["outcome"] != "failure", -len(items)))
+    entries, seen = [], set()
+    context = " ".join(str(redact(task)).split())[:200]
+    for items in candidates:
+        first = items[0]
+        if first["outcome"] == "failure":
+            kind = first.get("failure_type") or "tool error"
+            strategy = f"Observed {_describe(first)} failed ({kind})."
+            if len(items) > 1:
+                strategy += f" Later {_describe(items[-1])} on the same operation succeeded."
+        else:
+            strategy = f"Observed check {_describe(first)} returned success."
+        qualification = " Historical tool outcome only; not proof of cause or general correctness."
+        strategy = str(redact(strategy))[:800 - len(qualification)] + qualification
+        identity = (context, strategy)
+        if identity in seen:
+            continue
+        seen.add(identity)
         entries.append(PlaybookEntry(
-            context=" ".join(context.split()), strategy=" ".join(strategy.split()),
-            source="Model inference from recorded tool evidence", confidence=0.5,
-            outcome="failure" if any(e["outcome"] == "failure" for e in selected) else "success",
-            tools=sorted({e["tool"] for e in selected}),
-            source_refs=[e["ref"] for e in selected], scope=scope, provenance="model",
+            context=context or f"Using {first['tool']}", strategy=strategy,
+            source="Locally recorded tool outcomes", confidence=0.5,
+            outcome=first["outcome"], tools=sorted({item["tool"] for item in items}),
+            source_refs=[item["ref"] for item in items], scope=scope, provenance="observed",
         ))
+        if len(entries) == 3:
+            break
     return entries

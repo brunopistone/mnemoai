@@ -399,12 +399,13 @@ copy as a second conversation turn.
 ### ACE Playbook learning (`client/memory/reflector.py`, `client/memory/playbook_store.py`)
 
 After tool-using interactions, `Reflector` measures observed tool outcomes and
-`memory/reflection.py` makes one bounded, tool-free model call to extract up to
-three scoped lessons. `AREA_MODELS.REFLECTOR` uses the normal provider machinery;
-without an override it builds an independent non-reasoning main-model variant.
-Provider errors, invalid evidence IDs, timeouts, and cancellation store nothing.
-Capture tool evidence before post-answer compaction, and keep usage attributed
-to the actual reflector model.
+`memory/reflection.py` records up to three local, evidence-linked observations:
+failures, later successes on the same operation, and successful checks. No LLM
+or embedding calls are allowed anywhere in this learning path. Preserve existing
+model/legacy notes. `ENABLE_PLAYBOOK` defaults to true; explicit false disables
+learning and injection. Retired reflector/timeout/similarity settings are ignored.
+Capture evidence before compaction and rank notes against the actual current task,
+not an empty query. Observations do not establish causes or universal rules.
 
 **An injected block may only claim what its evidence supports.** Keep the public
 `PLAYBOOK_BLOCK_MARKER` and two-per-outcome injection cap. Model inference and
@@ -435,10 +436,10 @@ In-flight requests, episodic recall, curated memory, and permissions are outside
 this stage. Automatic dependency cascades remain future work.
 
 Playbook runtime settings have an interactive path: `/config playbook` edits
-only the four `PLAYBOOK` tuning fields and reloads them without changing models
-or the conversation. Full `/config` and newly enabling learning in `/features`
-offer the reflector and wait limit. Lock/directory errors disable optional
-learning without aborting chat; lock waits are bounded. Tests include real
+the enabled flag and capacity/candidate limits without changing models or the
+conversation. A playbook-only `/features` change also applies in place. No
+reflector model or inference settings are offered. Local storage errors go to
+file logs and `/learned`/`/doctor`, not routine chat warnings. Tests include real
 process contention, abrupt writer exit, and scripted configuration flows.
 
 **A trait inferred from markers needs a neutral case, or absence of evidence becomes evidence** (`managers/user_profile_manager.py`). `verbosity`/`directness`/`abstraction` each default their observation to 0.5 when nothing matches; `technical_level` folded a **0.0** on every prompt containing none of its 21 listed terms — i.e. most real prompts — so the EMA converged to the floor for any user and the `<profile>` block injected `beginner-level` into every turn (observed: 0.00018 after 915 interactions, and it got there AGAIN after `_repair_inflated_counts` had reset it, because that repair fixed the inflation while the live signal kept pulling). The fold is now skipped without evidence. Post-fix the smallest folded observation is `1/3`, so a value at the floor is unreachable by honest accrual — which is what licenses the second one-shot repair (`_repair_degenerate_tech_level`, own flag `_tech_signal_repaired`, same `_SATURATION_EPSILON` rule: only a **saturated** value is reset, an unsaturated one still carries signal).

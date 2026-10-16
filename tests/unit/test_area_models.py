@@ -299,19 +299,19 @@ class TestClientWiring:
         assert c._area_model("ROUTER") is None
         assert c.llm_controller.asked == []
 
-    def test_reflector_without_override_builds_an_isolated_model(self, monkeypatch):
+    def test_retired_reflector_area_never_builds_a_model(self, monkeypatch):
         c = self._client(monkeypatch, {})
-        assert c._area_model("REFLECTOR") == "MODEL:MAIN"
-        assert c.llm_controller.asked == [{}]
+        assert c._area_model("REFLECTOR") is None
+        assert c.llm_controller.asked == []
         c._area_model("REFLECTOR")
-        assert c.llm_controller.asked == [{}]
+        assert c.llm_controller.asked == []
 
     def test_failed_reflector_is_unavailable_not_the_chat_instance(self, monkeypatch):
         c = self._client(monkeypatch, {"REFLECTOR": "side-model"}, fail=True)
         c.model = "MAIN-INSTANCE"
         assert c._area_model("REFLECTOR") is None
         assert c._area_model("REFLECTOR") is None
-        assert c.llm_controller.asked == [{"NAME": "side-model"}]
+        assert c.llm_controller.asked == []
 
     def test_a_configured_area_gets_its_own_model(self, monkeypatch):
         c = self._client(monkeypatch, {"ROUTER": "small"})

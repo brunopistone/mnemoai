@@ -25,7 +25,6 @@ MODEL_ID:
 # AREA_MODELS:
 #   ROUTER: qwen3.5:1.7b            # query classification (one label per turn)
 #   ORCHESTRATOR: qwen3.5:4b        # task decomposition into subtasks
-#   REFLECTOR: qwen3.5:4b           # evidence-linked lessons after tool turns
 #   REVIEWER: qwen3.5:4b            # supervisor feedback and verification
 #   SUMMARY:                        # conversation compaction
 #     NAME: qwen3.5:1.7b
@@ -173,7 +172,7 @@ NOTIFY:
 # into the system prompt; the model loads a full skill body on demand via the
 # use_skill tool. A bundled example skill is seeded on first run.
 ENABLE_SKILLS: true
-# ACE Playbook Configuration (Agentic Context Engineering)
+# Local playbook learning: observed tool outcomes, no LLM or embedding calls.
 ENABLE_PLAYBOOK: true
 ENABLE_REVIEW: false # Startup default; /review on|off changes this session only
 REVIEW:
@@ -184,9 +183,7 @@ REVIEW:
   TIMEOUT: 45 # Seconds, including evidence preparation/model initialization (1–120)
   MAX_INPUT_TOKENS: 6000 # Conservative estimate, not a provider billing quota (1000–32000)
 PLAYBOOK:
-  REFLECTION_TIMEOUT: 30 # Seconds to wait for extraction (1–120); timeout stores nothing
   MAX_ENTRIES: 500 # Maximum playbook entries before refinement
-  SIMILARITY_THRESHOLD: 0.85 # Threshold for merging similar strategies
   MAX_INJECT: 10 # Maximum entries to inject per query
 # Query Routing Configuration
 # When enabled, queries are classified and routed to specialized tool subsets

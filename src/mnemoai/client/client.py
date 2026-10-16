@@ -179,7 +179,7 @@ class LangGraphClient:
         # any existing fork back together BEFORE either store opens: a merge into
         # a live store wouldn't be visible until the next restart.
         if config.get("ENABLE_EPISODIC_MEMORY", False) or config.get(
-            "ENABLE_PLAYBOOK", False
+            "ENABLE_PLAYBOOK", True
         ):
             unfork_model_dirs(config.get("MODEL_ID", {}).get("NAME", "default"))
 
@@ -192,7 +192,7 @@ class LangGraphClient:
 
         self.reflector = None
         self.playbook = None
-        if config.get("ENABLE_PLAYBOOK", False):
+        if config.get("ENABLE_PLAYBOOK", True):
             self._initialize_playbook()
 
         self.previous_query = None
@@ -282,14 +282,14 @@ class LangGraphClient:
         logger.debug(f"✓ {store_type.upper()} episodic memory initialized")
 
     def _initialize_playbook(self) -> None:
-        """Initialize ACE Reflector and Playbook store."""
+        """Initialize the local learner and playbook store."""
         self._playbook_error = None
         try:
             self._open_playbook()
         except Exception as e:
             self.reflector = self.playbook = None
             self._playbook_error = str(e)
-            logger.warning("Playbook unavailable; conversation remains available: %s", e)
+            logger.warning("Playbook unavailable; conversation remains available: %s", e, extra={"console": False})
 
     def _open_playbook(self) -> None:
         """Open optional learning stores; the caller owns graceful degradation."""
@@ -299,47 +299,37 @@ class LangGraphClient:
         playbook_path = os.path.join(self._model_scoped_dir(), "playbook")
         os.makedirs(playbook_path, exist_ok=True)
 
-        # Embeddings for semantic deduplication, if available.
-        embeddings = None
-        if config.get("RAG", {}).get("EMBED_MODEL_ID"):
-            try:
-                from mnemoai.models.controllers.embeddings_controller import (
-                    EmbeddingsController,
-                )
-
-                embeddings = EmbeddingsController()
-            except Exception as e:
-                logger.warning(f"Could not initialize embeddings for playbook: {e}")
-
         self.reflector = Reflector(persist_path=playbook_path)
         self.playbook = PlaybookStore(
             persist_path=playbook_path,
-            embeddings_controller=embeddings,
             max_entries=config.get("PLAYBOOK", {}).get("MAX_ENTRIES", 500),
-            similarity_threshold=config.get("PLAYBOOK", {}).get(
-                "SIMILARITY_THRESHOLD", 0.85
-            ),
         )
 
         if self.playbook.error:
             self._playbook_error = self.playbook.error
             return
         stats = self.playbook.get_stats()
+        self._playbook_error = None
         logger.debug(f"✓ Playbook initialized ({stats['total_entries']} entries)")
 
     def reload_playbook_settings(self) -> bool:
         """Apply playbook-only tuning without replacing models or the conversation."""
         try:
             config.reload()
-            settings = config.get("PLAYBOOK", {}) or {}
-            limit = int(settings.get("MAX_ENTRIES", 500))
-            threshold = float(settings.get("SIMILARITY_THRESHOLD", 0.85))
-            if limit < 1 or not 0 <= threshold <= 1:
-                raise ValueError("Invalid playbook capacity or similarity threshold")
-            if self.playbook is not None:
+            if not config.get("ENABLE_PLAYBOOK", True):
+                self.playbook = self.reflector = None
+                self._playbook_error = None
+            else:
+                settings = config.get("PLAYBOOK", {}) or {}
+                limit = int(settings.get("MAX_ENTRIES", 500))
+                if limit < 1:
+                    raise ValueError("Invalid playbook capacity")
+                if self.playbook is None:
+                    self._open_playbook()
                 self.playbook.max_entries = limit
-                self.playbook.similarity_threshold = threshold
-                self.refresh_playbook_context()
+            self.refresh_playbook_context()
+            if self.playbook is not None and getattr(self.playbook, "error", None):
+                return False
             return True
         except Exception as e:
             logger.warning("Could not apply playbook settings: %s", e)
@@ -532,6 +522,7 @@ class LangGraphClient:
 
         try:
             self.refresh_steering(notify=True)
+            self._playbook_task = prompt
             if isinstance(self.agent, LangGraphAgent):
                 # invoke() normally resets this, but discovery precedes invoke.
                 self.agent._cancel_event.clear()
@@ -613,7 +604,7 @@ class LangGraphClient:
                     try:
                         self.playbook.record_exposure(self._playbook_exposed_ids)
                     except Exception:
-                        logger.warning("Could not record playbook exposure", exc_info=True)
+                        logger.warning("Could not record playbook exposure", exc_info=True, extra={"console": False})
                 try:
                     response = self.agent(prompt)
                 finally:
@@ -1023,6 +1014,7 @@ class LangGraphClient:
         if self.agent is not None and hasattr(self.agent, "_last_input_tokens"):
             self.agent._last_input_tokens = None
         # /load, /resume, /branch and /rewind replace the task context too.
+        self._playbook_task = ""
         if getattr(self, "reviewer", None) is not None:
             self.reviewer.reset()
 
@@ -1088,7 +1080,9 @@ class LangGraphClient:
             logger.debug(f"Session log eviction checkpoint failed: {e}")
 
     def reflect_and_learn(self, task: str) -> None:
-        """Reflect on the last interaction and update the playbook."""
+        """Learn locally from completed tool evidence; never build or invoke a model."""
+        if not config.get("ENABLE_PLAYBOOK", True):
+            return
         if not self.reflector or not self.playbook or getattr(self.playbook, "error", None):
             return
 
@@ -1106,25 +1100,13 @@ class LangGraphClient:
             if source and source_key == getattr(self, "_last_reflected_source", None):
                 return
             self._last_reflected_source = source_key
-            model = self._area_model("REFLECTOR")
-            usage_name = self._area_usage_name("REFLECTOR")
-            tracker = getattr(self.agent, "usage", None)
-            if tracker is None:
-                tracker = getattr(self.agent, "usage_tracker", None)
             failed_before = self.reflector.metrics["failed_calls"]
             total_before = self.reflector.metrics["total_tool_calls"]
-            cancel_event = getattr(self.agent, "_cancel_event", None)
             scope = os.path.realpath(os.getcwd())
             entries = self.reflector.reflect_on_trajectory(
-                messages=messages, task=task, model=model, source=source,
+                messages=messages, task=task, source=source,
                 scope=scope, scope_to_last_turn=False,
                 evidence_filter=lambda evidence: self.playbook.filter_learning_evidence(evidence, scope),
-                timeout=max(1, min(120, float(config.get("PLAYBOOK", {}).get(
-                    "REFLECTION_TIMEOUT", 30
-                )))),
-                cancel=cancel_event.is_set if cancel_event is not None else None,
-                record_usage=(lambda response: tracker.record(response, usage_name))
-                if tracker is not None else None,
             )
             if self.reflector.metrics["total_tool_calls"] > total_before:
                 self.playbook.record_exposure(
@@ -1133,9 +1115,10 @@ class LangGraphClient:
                 )
             if entries:
                 stored = self.playbook.append_batch(entries)
-                logger.debug("Reflector proposed %d lessons; %d records stored/updated", len(entries), stored)
+                logger.debug("Local learning: %d observations; %d records stored/updated", len(entries), stored)
         except Exception as e:
-            logger.error(f"Reflection failed: {e}")
+            self.reflector.last_error = f"Local learning unavailable ({type(e).__name__})"
+            logger.error("Local learning failed: %s", e, exc_info=True, extra={"console": False})
 
     def auto_extract_memory(self, query: str, response: str) -> None:
         """Distill durable facts from the last exchange into MEMORY.md, in the
@@ -1237,32 +1220,32 @@ class LangGraphClient:
         needn't run on the model that writes the answer. Cached per area — these are
         built once at startup and reused for every turn.
 
-        None selects the main model for routing/decomposition only. REFLECTOR
-        and REVIEWER instead treat it as unavailable: optional analysis must not
+        None selects the main model for routing/decomposition only. REVIEWER
+        instead treats it as unavailable: optional analysis must not
         silently substitute a model or break the working chat turn.
         """
+        if area not in area_models.AREAS:
+            return None  # includes the retired REFLECTOR model setting
         cache = self._area_model_cache
         if area in cache:
             return cache[area]
         model = None
         overrides = area_models.reviewer_overrides() if area == "REVIEWER" else area_models.overrides_for(area)
-        if overrides or area in {"REFLECTOR", "REVIEWER"}:
+        if overrides or area == "REVIEWER":
             try:
                 # No callbacks: these calls are internal, and the streaming handler
                 # belongs to the visible turn.
                 actual = {"MAX_TOKENS": review.DEFAULT_OUTPUT_TOKENS, **overrides} if area == "REVIEWER" else overrides
                 model = self.llm_controller.build_model_variant(
                     actual, callbacks=[], non_reasoning=not bool(overrides),
-                ) if area in {"REFLECTOR", "REVIEWER"} else self.llm_controller.build_model_variant(overrides)
+                ) if area == "REVIEWER" else self.llm_controller.build_model_variant(overrides)
                 logger.info(
                     "%s uses %s",
                     area_models.DESCRIPTIONS.get(area, area).capitalize(),
                     area_models.label(overrides, self.llm_controller.model_name),
                 )
             except Exception as e:
-                fallback = "review unavailable" if area == "REVIEWER" else (
-                    "reflection unavailable" if area == "REFLECTOR" else "using the main model"
-                )
+                fallback = "review unavailable" if area == "REVIEWER" else "using the main model"
                 logger.error(f"{area} model override failed to build; {fallback}: {e}")
         cache[area] = model
         return model
@@ -1413,6 +1396,7 @@ class LangGraphClient:
 
     def clear_context(self) -> None:
         """Clear conversation history but keep system prompt."""
+        self._playbook_task = ""
         if self.agent:
             self.agent.clear_messages()
 

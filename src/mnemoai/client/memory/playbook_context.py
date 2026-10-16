@@ -49,7 +49,7 @@ def refresh_messages(messages, provider):
         if not isinstance(current, str):
             raise ValueError("Invalid playbook context")
     except Exception as exc:
-        logger.warning("Playbook refresh unavailable (%s); stale notes omitted", type(exc).__name__)
+        logger.warning("Playbook refresh unavailable (%s); stale notes omitted", type(exc).__name__, extra={"console": False})
         current = ""
 
     def replace(text):

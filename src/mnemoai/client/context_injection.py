@@ -119,15 +119,23 @@ def inject_subagents_context(client) -> str:
 
 
 def get_playbook_context(client) -> str:
-    """Formatted general playbook strategies for the system prompt, or ""."""
-    if not client.playbook or not getattr(client.playbook, "enabled", True):
+    """Task-relevant local observations and retained notes, or ""."""
+    if (not config.get("ENABLE_PLAYBOOK", True) or not client.playbook
+            or not getattr(client.playbook, "enabled", True)):
         client._playbook_selected_ids = []
         return ""
 
-    # Empty task → general (not task-specific) strategies.
-    block, selected_ids = client.playbook.prepare_prompt(
-        top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
-    )
+    try:
+        block, selected_ids = client.playbook.prepare_prompt(
+            top_k=config.get("PLAYBOOK", {}).get("MAX_INJECT", 10),
+            task=getattr(client, "_playbook_task", ""),
+        )
+    except Exception as exc:
+        client._playbook_error = f"Local notes unavailable ({type(exc).__name__})"
+        client._playbook_selected_ids = []
+        logger.warning("Local notes unavailable: %s", exc, exc_info=True, extra={"console": False})
+        return ""
+    client._playbook_error = None
     client._playbook_selected_ids = selected_ids
     return block
 

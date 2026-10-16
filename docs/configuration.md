@@ -394,15 +394,14 @@ work; later tasks can retry without repeated warnings.
 See [Peer review](guides/peer-review.md) for scope, limits and macro compatibility.
 
 For learning configuration, use `/features` to enable/disable the playbook,
-`/model` and `/params` for its reflector, and `/config playbook` for learning
-limits without a restart. Full `/config` setup also offers reflector selection
-and the wait limit. These controls do not change tool permissions.
-
-`REFLECTOR` selects the model for evidence-linked playbook extraction
-(`ENABLE_PLAYBOOK`). It supports the same partial model configuration as the
-other areas and appears in `/model`, `/params`, and `/doctor`. Without an
-override it uses a separate non-reasoning instance of the chat model. An
-unavailable reflector creates no new lesson and does not fail the conversation.
+or `/config playbook` to toggle it and tune capacity/candidate limits in place.
+Learning is local-only and enabled by default (`ENABLE_PLAYBOOK: true`); an
+explicit `false` disables it. It records observed tool outcomes, not generated
+lessons, and makes no LLM or embedding requests. There is no reflector model,
+timeout setting or LLM-learning mode. Old `AREA_MODELS.REFLECTOR`,
+`PLAYBOOK.REFLECTION_TIMEOUT`, and `PLAYBOOK.SIMILARITY_THRESHOLD` keys are
+accepted but ignored, so existing configs still load without restoring model
+reflection. Peer review remains a separate opt-in feature.
 See [Inspect and control learning](guides/memory.md#inspect-and-control-learning).
 
 A turn is not one model call. Before the answer is streamed, the query is

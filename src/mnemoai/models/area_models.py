@@ -50,14 +50,13 @@ CONFIG_SECTION = "AREA_MODELS"
 # Deliberately NOT an area: the aggregator. Its output is the user-visible answer,
 # streamed through the same path as an ordinary reply — a different model there
 # would change the voice of the answer, not just the cost of an internal step.
-AREAS: Tuple[str, ...] = ("ROUTER", "ORCHESTRATOR", "SUMMARY", "REFLECTOR", "REVIEWER")
+AREAS: Tuple[str, ...] = ("ROUTER", "ORCHESTRATOR", "SUMMARY", "REVIEWER")
 
 # One line each, for `/doctor` and the startup log.
 DESCRIPTIONS = {
     "ROUTER": "query classification",
     "ORCHESTRATOR": "task decomposition",
     "SUMMARY": "conversation compaction",
-    "REFLECTOR": "evidence-linked learning",
     "REVIEWER": "coding/document strategy and change review",
 }
 
@@ -91,6 +90,8 @@ def overrides_for(area: str) -> Dict[str, Any]:
     raising at startup. A bare string is accepted as shorthand for ``NAME``,
     since naming a smaller model is the whole point of the common case.
     """
+    if _canonical(area) not in AREAS:
+        return {}
     section = config.get(CONFIG_SECTION, {})
     if not isinstance(section, dict):
         return {}
@@ -131,7 +132,7 @@ def unknown_keys() -> Tuple[str, ...]:
     section = config.get(CONFIG_SECTION, {})
     if not isinstance(section, dict):
         return ()
-    known = {_canonical(a) for a in AREAS}
+    known = {_canonical(a) for a in AREAS} | {"REFLECTOR"}  # accepted legacy config, never invoked
     return tuple(
         str(k) for k in section if isinstance(k, str) and _canonical(k) not in known
     )
