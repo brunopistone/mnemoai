@@ -161,6 +161,18 @@ the provider's own `retry-after` honored when it sends one.
 
 ## A turn dies on a dropped connection
 
+Bedrock connections that have been idle are retired before the next request,
+without a heartbeat or an extra model call. This avoids reusing a connection
+silently dropped by a proxy/NAT while the terminal was idle. It applies on both
+Linux and macOS; normal first-token and generation timeouts are unchanged.
+Routing/decomposition waits also notice Esc while their SDK call is blocked.
+Late responses from a cancelled wait are not applied to the conversation.
+
+If a wait still stalls, the log's `Model stream request starting`, `AWS request
+preparation`, `AWS HTTP request dispatch` and `First model payload received`
+markers help distinguish preparation/credentials, transport and first-token
+waiting. These diagnostics are file-only and contain no prompt or credentials.
+
 ```
 WARNING — Stream connection failed (No stream data for 120s (connection likely dropped));
           retrying turn on a fresh connection in 1.2s (attempt 1/6)

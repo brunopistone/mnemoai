@@ -7,6 +7,30 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.29.3] — 2026-10-24
+
+### Fixed
+
+- Retire idle Bedrock HTTP connection pools before reuse, without extra requests
+  or shortening valid model-generation timeouts. Routing and decomposition waits
+  can now be cancelled while their SDK request is blocked; late responses are ignored.
+- Bind file-read freshness to the version actually observed, and reject concurrent
+  changes during reading. Save conversations atomically and preserve existing modes.
+- Serialize curated-memory changes and configuration updates across processes.
+  Configuration dialogs refuse stale edits instead of overwriting newer settings.
+- Make FAISS document persistence failure explicit, retain the old in-memory state,
+  and recover interrupted index/metadata publication with a checked journal.
+- Serialize document clearing with ingestion/search, including a first ingestion
+  whose store has not yet been initialized.
+- Enforce the background-agent concurrency limit while retaining queued-job
+  visibility and cancellation. Resolve background working directories in the
+  owning workspace.
+- Discover every page of MCP tools; reject cursor cycles without publishing a
+  partial tool list. Count automatic MEMORY.md extraction in token usage and handle
+  structured model text without leaking background callbacks into the chat UI.
+- Report JSON truncation only when it occurred, bound ordinary background-log tail
+  reads, and retain bytecode caches in the legacy checkout launcher.
+
 ## [1.29.2] — 2026-10-16
 
 ### Changed

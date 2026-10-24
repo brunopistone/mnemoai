@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
+from mnemoai.client import usage_tracker
 from mnemoai.client.agent import stream_policy
 from mnemoai.client.agent.reasoning_utils import (
     disable_reasoning,
@@ -265,12 +266,18 @@ class QueryRouter:
         llm = config.get("LLM", {})
         def invoke():
             response = None
+            attempted = False
+            record = usage_tracker.recorder(self.usage, model, self.usage_model_name)
+            def call():
+                nonlocal attempted
+                attempted = True
+                return model.invoke(messages, config={"callbacks": []})
             try:
-                response = model.invoke(messages, config={"callbacks": []})
+                response = stream_policy.cancellable_call(call, getattr(self, "cancel_event", None))
                 return response
             finally:
-                if self.usage is not None:
-                    self.usage.record(response, self.usage_model_name)
+                if attempted:
+                    record(response)
         return stream_policy.call_with_transient_retry(
             invoke,
             attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),

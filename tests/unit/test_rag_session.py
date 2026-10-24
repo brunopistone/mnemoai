@@ -1,11 +1,72 @@
 """Document replacement and session changes in the long-lived MCP process."""
 
+import threading
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from mnemoai.server.tools.rag import session
+from mnemoai.server.tools.rag_tool import register_rag_tools
+
+
+@pytest.mark.parametrize("backend", ["faiss", "chromadb"])
+@pytest.mark.parametrize("already_initialized", [False, True])
+def test_clear_waits_for_inflight_ingestion_and_leaves_no_late_rows(
+    tmp_path, monkeypatch, backend, already_initialized,
+):
+    monkeypatch.setattr(session.config, "get", lambda key, default=None: (
+        {"VECTOR_STORE": {"TYPE": backend}} if key == "RAG" else default
+    ))
+    rag = session.SessionRAG(
+        embed_model_config={"NAME": "fixture", "TYPE": "openai", "DIMENSION": 3},
+        session_id="clear-inflight", rag_dir=str(tmp_path),
+    )
+    monkeypatch.setattr(rag, "_embed_batch", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
+    if already_initialized:
+        rag.ingest("existing", "old text")
+    tools = {}
+    class Registry:
+        def tool(self):
+            def register(fn):
+                tools[fn.__name__] = fn
+                return fn
+            return register
+    register_rag_tools(Registry())
+    monkeypatch.setattr("mnemoai.server.tools.rag_tool.get_rag_session", lambda: rag)
+    entered, finish_embedding, cleared = threading.Event(), threading.Event(), threading.Event()
+    errors = []
+    def embed(texts):
+        entered.set()
+        assert finish_embedding.wait(5)
+        return np.ones((len(texts), 3), dtype=np.float32)
+    monkeypatch.setattr(rag, "_embed_batch", embed)
+    def ingest():
+        try:
+            rag.ingest("later", "new text")
+        except BaseException as exc:
+            errors.append(exc)
+    def clear():
+        try:
+            assert "cleared" in tools["clear_documents"]()
+            cleared.set()
+        except BaseException as exc:
+            errors.append(exc)
+    writer = threading.Thread(target=ingest)
+    cleaner = threading.Thread(target=clear)
+    writer.start()
+    try:
+        assert entered.wait(5)
+        cleaner.start()
+        assert not cleared.wait(0.05)
+    finally:
+        finish_embedding.set()
+        writer.join(timeout=5)
+        if cleaner.ident is not None:
+            cleaner.join(timeout=5)
+    assert not errors
+    assert cleared.is_set() and not rag.store.metadatas and rag.bm25 is None
+    assert rag.query("text") == ([], [])
 
 
 def test_new_session_pointer_invalidates_the_server_cache(tmp_path, monkeypatch):

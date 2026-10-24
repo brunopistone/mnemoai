@@ -129,12 +129,11 @@ def register_rag_tools(mcp: FastMCP) -> None:
             # for the life of the process. (The earlier code assigned to
             # `store.metadatas` / `store.index` — getter-ONLY properties — so it
             # raised AttributeError on every call and never cleared anything.)
-            if rag_instance.store is None:
-                # No store yet means nothing was ever ingested — that's "nothing
-                # to clear", not an unsupported backend.
-                rag_instance.bm25 = None
-                return "No documents to clear."
             rag_instance.clear()
+            if rag_instance.store is None:
+                # Check AFTER the serialized clear: a first ingestion may have
+                # been embedding while the store was still uninitialized.
+                return "No documents to clear."
 
             return "All documents have been cleared from the RAG system."
 

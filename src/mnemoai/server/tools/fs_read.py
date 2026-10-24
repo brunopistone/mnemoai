@@ -7,7 +7,7 @@ from mcp.server.fastmcp import FastMCP
 from mnemoai.utils.logger import logger
 
 from ..error_handler import tool_error_handler
-from .read_state import record_read
+from .read_state import current_version, record_read
 from .readers import (
     read_csv,
     read_directory,
@@ -101,6 +101,7 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             # Normalize path, tolerating shell escaping/quoting (a path the user
             # copied from a terminal as `/Users/me/My\ File.txt` or quoted).
             normalized_path = normalize_path(path)
+            observed_version = current_version(normalized_path) if mode != "Directory" else None
 
             if mode == "Directory":
                 # A directory listing isn't a file read; nothing to gate later.
@@ -134,7 +135,13 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             # file the model didn't actually see.
             try:
                 if not json.loads(result).get("error"):
-                    record_read(normalized_path)
+                    if observed_version is None or not record_read(normalized_path, observed_version):
+                        return json.dumps({
+                            "error": True,
+                            "stale_read": True,
+                            "message": "File changed while being read; read it again before editing.",
+                            "path": normalized_path,
+                        })
             except (ValueError, TypeError):
                 pass
             return result

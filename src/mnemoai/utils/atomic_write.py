@@ -12,9 +12,9 @@ follow from that:
 
 Writing to a sibling temp file and ``os.replace``-ing it over the target makes
 the swap atomic on POSIX: a reader sees either the old file or the new one,
-never a partial one. Concurrent writers become last-writer-wins, which is the
-intended semantics for these files (they're caches of learned state, not a
-ledger) -- the point is that the loser can't corrupt the winner.
+never a partial one. The helper alone is last-writer-wins: callers performing
+read/modify/write transactions (such as MEMORY.md and configuration editors)
+must also hold a shared file lock so concurrent updates are not lost.
 
 The temp file is created in the SAME directory as the target because
 ``os.replace`` is only atomic within one filesystem.
@@ -22,11 +22,12 @@ The temp file is created in the SAME directory as the target because
 
 import json
 import os
+import stat
 import tempfile
 from typing import Any
 
 
-def atomic_write_text(path: str, text: str) -> None:
+def atomic_write_text(path: str, text: str, *, preserve_mode: bool = False) -> None:
     """Write ``text`` to ``path`` atomically (temp file + ``os.replace``).
 
     Args:
@@ -35,6 +36,12 @@ def atomic_write_text(path: str, text: str) -> None:
     """
     parent = os.path.dirname(os.path.abspath(path))
     os.makedirs(parent, exist_ok=True)
+    mode = None
+    if preserve_mode:
+        try:
+            mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            pass
     fd, tmp = tempfile.mkstemp(dir=parent, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
@@ -44,6 +51,8 @@ def atomic_write_text(path: str, text: str) -> None:
             # leaves an atomically-renamed but EMPTY file.
             f.flush()
             os.fsync(f.fileno())
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
         os.replace(tmp, path)
     except BaseException:
         # Includes KeyboardInterrupt/SystemExit on purpose: a cancelled write

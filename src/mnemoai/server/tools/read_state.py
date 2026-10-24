@@ -1,10 +1,10 @@
 """In-process read-state registry: read-before-write + staleness gate.
 
 The MCP server is one long-lived stdio subprocess, so this module-level dict
-persists across tool calls for the whole session. We record the on-disk mtime
+persists across tool calls for the whole session. We record the on-disk version
 of every file the model reads (via ``fs_read``) and, before mutating an
 EXISTING file (``fs_write`` / ``file_edit``), require that it was read at its
-current mtime. It refuses to edit a file that was never read, or that changed
+current identity/modification stamp. It refuses to edit a file that was never read, or that changed
 on disk since it was last read — the model would otherwise clobber content it
 never saw.
 
@@ -25,16 +25,16 @@ from typing import Optional
 
 from mnemoai.utils.logger import logger
 
-# realpath(path) -> st_mtime_ns at the moment we last read (or wrote) it.
-_read_mtimes: dict[str, int] = {}
+# A preserved mtime alone does not identify a file after replacement.
+FileVersion = tuple[int, int, int, int, int]
+_read_versions: dict[str, FileVersion] = {}
 
 
 def _key(path: str) -> str:
     """Canonical registry key (symlinks/.. resolved) so different spellings of
     the same file — fs_read's normalize_path vs fs_write's _resolve_path — map
-    to one entry. normcase folds case on case-insensitive filesystems (macOS
-    APFS, Windows) so a read then a case-varied write of the same file isn't
-    falsely blocked; it's a no-op on case-sensitive Linux."""
+    to one entry. normcase additionally folds case on Windows; it is a no-op
+    on POSIX."""
     return os.path.normcase(os.path.realpath(path))
 
 
@@ -46,22 +46,30 @@ def _stat(path: str) -> Optional[os.stat_result]:
         return None
 
 
-def _current_mtime_ns(path: str) -> Optional[int]:
-    """Current mtime in ns, or None if the file can't be stat'd (absent/unreadable)."""
+def _version(info: os.stat_result) -> FileVersion:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def current_version(path: str) -> Optional[FileVersion]:
+    """Capture the identity and modification stamp of the file being read."""
     info = _stat(path)
-    return info.st_mtime_ns if info is not None else None
+    return _version(info) if info is not None else None
 
 
-def record_read(path: str) -> None:
-    """Remember that ``path`` was read at its current mtime.
+def record_read(path: str, expected_version: Optional[FileVersion] = None) -> bool:
+    """Remember a read only when it still refers to the captured version.
 
     Called after every successful read (and after a successful write, so an
     immediately-following edit in the same turn isn't flagged stale). A path
     that can't be stat'd is silently ignored.
     """
-    mtime = _current_mtime_ns(path)
-    if mtime is not None:
-        _read_mtimes[_key(path)] = mtime
+    version = current_version(path)
+    if version is None or (expected_version is not None and version != expected_version):
+        return False
+    # Store the observed version, not another later stat which could bless a
+    # concurrent writer's unseen content.
+    _read_versions[_key(path)] = expected_version if expected_version is not None else version
+    return True
 
 
 def check_write_allowed(path: str) -> Optional[dict]:
@@ -81,8 +89,8 @@ def check_write_allowed(path: str) -> Optional[dict]:
         # Same case as a create, in every way that matters here: nothing to lose.
         return None
 
-    current = info.st_mtime_ns
-    seen = _read_mtimes.get(_key(path))
+    current = _version(info)
+    seen = _read_versions.get(_key(path))
     if seen is None:
         logger.info("read-gate: %s modified without a prior read", path)
         return {
@@ -117,9 +125,9 @@ def check_write_allowed(path: str) -> Optional[dict]:
 
 def forget(path: str) -> None:
     """Drop any recorded read-state for ``path`` (e.g. after deletion)."""
-    _read_mtimes.pop(_key(path), None)
+    _read_versions.pop(_key(path), None)
 
 
 def reset() -> None:
     """Clear all recorded read-state (new session / test isolation)."""
-    _read_mtimes.clear()
+    _read_versions.clear()

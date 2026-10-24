@@ -52,6 +52,16 @@ labelled BM25 keyword search. Unstamped legacy episodic vectors are likewise not
 silently adopted. Rebuild a document index by explicitly clearing and re-ingesting
 it; no automatic migration fabricates vectors or guesses the old model.
 
+FAISS document writes stage the index and journal the corresponding metadata
+before publication. A failed write is reported, not counted as successful
+ingestion; an interrupted publication can be recovered when the store next
+opens. Clearing documents is serialized with ingestion and search.
+
+Curated `MEMORY.md` add/replace/remove operations use a cross-process transaction
+lock so simultaneous agents do not silently overwrite each other's additions.
+Optional MEMORY.md auto-extraction is separate from local playbook learning:
+its model calls are included in `/usage`.
+
 ## 🧭 Steering (STEERING.md)
 
 `STEERING.md` is where **you** write always-on instructions for the assistant — conventions, commands, and "always do X" rules it should follow every turn. It's the user-authored counterpart to `MEMORY.md`: the assistant maintains `MEMORY.md` itself, but never writes `STEERING.md` — that file is yours.

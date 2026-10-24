@@ -8,7 +8,9 @@ so a fresh conversation saves to a new file. These drive ``save_conversation`` /
 
 import json
 
+import mnemoai.client.client as client_module
 from mnemoai.client.client import LangGraphClient
+from mnemoai.utils import atomic_write
 
 
 class _StubAgent:
@@ -37,6 +39,44 @@ def _client(tmp_path, summary_text=""):
     c.tools = []
     c.current_conversation_path = None
     return c
+
+
+def test_failed_save_publication_preserves_the_previous_conversation(tmp_path, monkeypatch):
+    target = tmp_path / "saved.json"
+    original = '{"messages": [], "summary": "preserve the earlier save"}'
+    target.write_text(original)
+    client = _client(tmp_path)
+    def fail(*args):
+        raise OSError("injected disk-full failure")
+    monkeypatch.setattr(atomic_write.os, "replace", fail)
+    client.save_conversation(path=str(target))
+    assert target.read_text() == original
+    assert client.current_conversation_path is None
+    assert list(tmp_path.iterdir()) == [target]
+
+
+def test_failed_save_serialization_preserves_the_previous_conversation(tmp_path, monkeypatch):
+    target = tmp_path / "saved.json"
+    target.write_text('{"messages": []}')
+    def fail(*args, **kwargs):
+        raise ValueError("injected serialization failure")
+    monkeypatch.setattr(client_module.json, "dumps", fail)
+    _client(tmp_path).save_conversation(path=str(target))
+    assert target.read_text() == '{"messages": []}'
+
+
+def test_save_follows_symlinks_and_preserves_file_permissions(tmp_path):
+    target = tmp_path / "saved.json"
+    target.write_text("{}")
+    target.chmod(0o640)
+    link = tmp_path / "alias.json"
+    link.symlink_to(target)
+    client = _client(tmp_path, summary_text="new summary")
+    client.save_conversation(path=str(link))
+    assert link.is_symlink()
+    assert json.loads(target.read_text())["summary"] == "new summary"
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert client.current_conversation_path == str(link)
 
 
 def test_bare_save_uses_timestamped_file(tmp_path, monkeypatch):

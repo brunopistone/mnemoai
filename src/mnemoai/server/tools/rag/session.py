@@ -213,11 +213,12 @@ class SessionRAG:
         past the (now-empty) metadata list — i.e. the isolation rested on a bounds
         check, not on the data being gone. Both halves are dropped here.
         """
-        if self.store is not None:
-            clear = getattr(self.store, "clear", None)
-            if callable(clear):
-                clear()
-        self.bm25 = None
+        with self._ingest_lock:
+            if self.store is not None:
+                clear = getattr(self.store, "clear", None)
+                if callable(clear):
+                    clear()
+            self.bm25 = None
         logger.debug("Session RAG cleared (vectors + BM25)")
 
     def _embed_batch(self, texts: List[str]) -> np.ndarray:
@@ -313,6 +314,11 @@ class SessionRAG:
         return len(chunks)
 
     def query(self, query_text: str, top_k: int = 6) -> Tuple[List[float], List[Dict]]:
+        """Search a consistent vector/metadata/BM25 snapshot."""
+        with self._ingest_lock:
+            return self._query(query_text, top_k)
+
+    def _query(self, query_text: str, top_k: int = 6) -> Tuple[List[float], List[Dict]]:
         """Search indexed documents using hybrid search (semantic + BM25).
 
         Retrieves candidates independently from both semantic search and BM25,

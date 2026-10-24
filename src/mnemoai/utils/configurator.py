@@ -39,6 +39,7 @@ from mnemoai.models.provider_params import (
 from mnemoai.utils.atomic_write import atomic_write_text
 from mnemoai.utils.config import Config
 from mnemoai.utils.console import print_error, print_notice
+from mnemoai.utils.file_lock import file_lock
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import config_path
 from mnemoai.utils.radio_select import commit_paging, highlighted_value
@@ -1307,6 +1308,7 @@ def _build_config(
 def _run_configurator(dest: Path) -> Optional[Path]:
     """Pick a provider, fill the template, write to ``dest`` (caller handles
     first-run/overwrite gating); returns the Path, or None if a template's missing."""
+    original = dest.read_text() if dest.exists() else None
     provider_labels = {k: label for k, (_, _, label, _) in _PROVIDERS.items()}
     if not _is_tty():
         print(_CANCEL_HINT)
@@ -1326,8 +1328,8 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     template_text = template_path.read_text()
     config_text = _build_config(provider, default_model, template_text, template_file)
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(config_text)
+    if not _save_config_update(dest, original, config_text):
+        return None
 
     print(f"\n  Config written to:\n    {dest}")
     # Env-based auth reminder survives to scrollback after the restart.
@@ -1505,15 +1507,25 @@ def _run_scoped_settings(label, prompt) -> Optional[Path]:
     if new_text == text:
         print_notice(f"{label.capitalize()} settings unchanged.")
         return None
-    if dest.read_text() != text:
-        print_error("Configuration changed while the dialog was open; please try again.")
-        return None
+    return dest if _save_config_update(dest, text, new_text) else None
+
+
+def _save_config_update(dest: Path, original: Optional[str], updated: str) -> bool:
+    """Publish one dialog's edit only if its input still matches the live file."""
     try:
-        atomic_write_text(str(dest.resolve()), new_text)
-    except OSError as e:
-        print_error(f"Could not save {label} settings ({type(e).__name__}); original preserved.")
-        return None
-    return dest
+        if not isinstance(yaml.safe_load(updated), dict):
+            raise ValueError("Configuration must be a YAML mapping")
+        target = dest.resolve()
+        with file_lock(str(target) + ".lock"):
+            current = target.read_text() if target.exists() else None
+            if current != original:
+                print_error("Configuration changed while the dialog was open; please try again.")
+                return False
+            atomic_write_text(str(target), updated, preserve_mode=True)
+        return True
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        print_error(f"Could not save configuration ({type(exc).__name__}); original preserved.")
+        return False
 
 
 def run_reconfigure() -> Optional[Path]:
@@ -2037,7 +2049,8 @@ def run_params_override() -> Optional[ParamsOverride]:
         print("  No changes made.")
         return None
 
-    dest.write_text(new_text)
+    if not _save_config_update(dest, text, new_text):
+        return None
     print(f"\n  Updated {label} parameters in:\n    {dest}")
     # No "reload to apply" note: the only caller (/params) reloads the params in
     # place and says so, so telling the user to reload contradicts what happens
@@ -2153,7 +2166,8 @@ def run_model_override() -> Optional[ModelOverride]:
         print_notice("Model unchanged.")
         return None
 
-    dest.write_text(new_text)
+    if not _save_config_update(dest, text, new_text):
+        return None
     follows_chat = section in AREAS and not _area_configured(new_text, section)
     effective_section = "MODEL_ID" if follows_chat else section
     changed = ModelOverride(
@@ -2289,7 +2303,8 @@ def run_features_override() -> Optional[FeatureOverride]:
         print("  No changes made.")
         return None
 
-    dest.write_text(new_text)
+    if not _save_config_update(dest, text, new_text):
+        return None
     print(f"\n  Updated features in:\n    {dest}")
     print("=" * 64 + "\n")
     return FeatureOverride(dest, frozenset(selected.symmetric_difference(checked)))

@@ -5,6 +5,12 @@ rejection, the char-cap overflow → consolidation contract, unique-substring
 matching, and multi-line entries.
 """
 
+import multiprocessing
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
 import pytest
 
 from mnemoai.client.memory.memory_store import MemoryError, MemoryStore
@@ -13,6 +19,71 @@ from mnemoai.client.memory.memory_store import MemoryError, MemoryStore
 @pytest.fixture
 def store(tmp_path):
     return MemoryStore(path=tmp_path / "MEMORY.md", max_chars=200)
+
+
+def test_concurrent_additions_all_survive(tmp_path):
+    path = tmp_path / "MEMORY.md"
+    start = threading.Barrier(4)
+    class SlowStore(MemoryStore):
+        def _write_entries(self, entries):
+            time.sleep(0.02)
+            super()._write_entries(entries)
+    def add(i):
+        start.wait(timeout=5)
+        SlowStore(path).add(f"fact {i}")
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(add, range(4)))
+    assert set(MemoryStore(path)._entries()) == {f"fact {i}" for i in range(4)}
+
+
+def _process_additions(path, start, label):
+    class SlowStore(MemoryStore):
+        def _write_entries(self, entries):
+            time.sleep(0.02)
+            super()._write_entries(entries)
+    assert start.wait(5)
+    for i in range(4):
+        SlowStore(Path(path)).add(f"{label} fact {i}")
+
+
+def test_additions_from_separate_processes_all_survive(tmp_path):
+    path = tmp_path / "MEMORY.md"
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    processes = [
+        context.Process(target=_process_additions, args=(str(path), start, label))
+        for label in ("one", "two")
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=10)
+    try:
+        assert all(process.exitcode == 0 for process in processes)
+        assert set(MemoryStore(path)._entries()) == {
+            f"{label} fact {i}" for label in ("one", "two") for i in range(4)
+        }
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+
+def test_unreadable_existing_memory_is_not_replaced_by_an_add(tmp_path, monkeypatch):
+    path = tmp_path / "MEMORY.md"
+    path.write_text("important existing fact")
+    original = Path.read_text
+    def unavailable(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("temporarily unreadable")
+        return original(self, *args, **kwargs)
+    with monkeypatch.context() as failure:
+        failure.setattr(Path, "read_text", unavailable)
+        with pytest.raises(MemoryError, match="no changes"):
+            MemoryStore(path).add("new fact")
+    assert path.read_text() == "important existing fact"
 
 
 def test_add_and_read(store):

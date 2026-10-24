@@ -54,6 +54,33 @@ class BackgroundAgentRegistry:
         self._agents: Dict[str, BackgroundAgent] = {}
         self._counter = 0
         self._namespace = uuid.uuid4().hex[:12]
+        self._worker_slots = None
+
+    def submit(self, work, max_workers: int, cancelled=lambda: False, on_cancel=None) -> None:
+        """Bound active background work; waiting/cancelled jobs never call a model."""
+        with self._lock:
+            if self._worker_slots is None:
+                self._worker_slots = threading.BoundedSemaphore(max(1, int(max_workers)))
+            slots = self._worker_slots
+
+        def run():
+            acquired = False
+            try:
+                while not cancelled():
+                    if slots.acquire(timeout=0.1):
+                        acquired = True
+                        break
+                if acquired:
+                    work()
+                elif on_cancel is not None:
+                    on_cancel()
+            except BaseException:
+                logger.debug("Background dispatch callback failed", exc_info=True)
+            finally:
+                if acquired:
+                    slots.release()
+
+        threading.Thread(target=run, name="background-agent", daemon=True).start()
 
     def _next_id(self, agent_type: str) -> str:
         self._counter += 1

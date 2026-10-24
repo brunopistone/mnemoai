@@ -17,10 +17,12 @@ delimiter are still read correctly and migrate to ``---`` on the next write.
 """
 
 import re
+from functools import wraps
 from pathlib import Path
 from typing import List, Optional
 
 from mnemoai.utils.atomic_write import atomic_write_text
+from mnemoai.utils.file_lock import file_lock
 from mnemoai.utils.logger import logger
 
 # Entry separator written to disk: a Markdown thematic break, blank-line padded
@@ -38,6 +40,15 @@ class MemoryError(Exception):
     The message is written for the model to read and act on (e.g. "consolidate
     then retry", "no unique match").
     """
+
+
+def _transaction(method):
+    """Serialize the complete read/modify/write across threads and app processes."""
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with file_lock(str(self.path.resolve()) + ".lock"):
+            return method(self, *args, **kwargs)
+    return locked
 
 
 class MemoryStore:
@@ -64,11 +75,15 @@ class MemoryStore:
 
     # --- low-level entry IO --------------------------------------------------
 
-    def read(self) -> str:
+    def read(self, *, strict: bool = False) -> str:
         """Return the raw file contents, or "" if absent/unreadable."""
         try:
-            return self.path.read_text() if self.path.is_file() else ""
+            return self.path.read_text()
+        except FileNotFoundError:
+            return ""
         except OSError as e:
+            if strict:
+                raise MemoryError("Could not read existing memory; no changes were made.") from e
             logger.warning(f"Could not read memory file {self.path}: {e}")
             return ""
 
@@ -78,7 +93,7 @@ class MemoryStore:
         Splits on a ``---`` rule on its own line or the legacy ``§`` delimiter,
         so both the current and old on-disk formats parse correctly.
         """
-        text = self.read().strip()
+        text = self.read(strict=True).strip()
         if not text:
             return []
         return [e.strip() for e in _SPLIT_RE.split(text) if e.strip()]
@@ -102,6 +117,7 @@ class MemoryStore:
 
     # --- public operations (used by the MCP tool) ---------------------------
 
+    @_transaction
     def add(self, text: str) -> str:
         """Append a new entry. Rejects blanks, exact duplicates, and overflow."""
         text = (text or "").strip()
@@ -121,6 +137,7 @@ class MemoryStore:
         self._write_entries(entries)
         return f"Added memory entry ({self._projected_len(entries)}/{self.max_chars} chars used)."
 
+    @_transaction
     def replace(self, old_text: str, new_text: str) -> str:
         """Replace the entry uniquely matching ``old_text`` with ``new_text``."""
         old_text = (old_text or "").strip()
@@ -147,6 +164,7 @@ class MemoryStore:
         self._write_entries(candidate)
         return f"Replaced memory entry ({projected}/{self.max_chars} chars used)."
 
+    @_transaction
     def remove(self, old_text: str) -> str:
         """Remove the entry uniquely matching ``old_text``."""
         old_text = (old_text or "").strip()
@@ -164,6 +182,7 @@ class MemoryStore:
         self._write_entries(entries)
         return f"Removed memory entry ({self._projected_len(entries)}/{self.max_chars} chars used)."
 
+    @_transaction
     def clear(self) -> None:
         """Delete all entries (used by ``/memory clear``)."""
         self._write_entries([])

@@ -185,7 +185,9 @@ not give a sub-agent a way to ask for permission.
 
 **Background sub-agents.** For a long task you don't want to wait on, the
 assistant can run a sub-agent **in the background**: the call returns right away
-and you keep working. When it finishes, its report **surfaces automatically** —
+and you keep working. `LLM.SUBAGENT_MAX_CONCURRENCY` also limits active background
+agents; additional jobs wait for a slot and remain visible/cancellable in the
+agents panel. When one finishes, its report **surfaces automatically** —
 if you're idle, the assistant speaks up on its own to deliver it; if you're
 mid-conversation, it's folded into your next turn. Because a background sub-agent
 has no terminal to prompt on, it **refuses unapproved mutations without

@@ -12,9 +12,12 @@ SessionRAG can still rank that text with BM25.
 
 import json
 import os
+import threading
 
 import numpy as np
 import pytest
+
+from mnemoai.utils import faiss_persistence
 
 faiss_store = pytest.importorskip(
     "mnemoai.server.tools.rag.faiss_store", reason="faiss not installed"
@@ -88,6 +91,55 @@ class TestNoTmpFallback:
 
 
 class TestRoundTripAndRecovery:
+    def test_failed_index_staging_is_reported_and_keeps_old_data(self, tmp_path, monkeypatch):
+        store = FaissStore(4, session_id="staging-failure", rag_dir=str(tmp_path))
+        store.add(_vec(4), [{"doc_id": "doc", "text": "old"}])
+        before = open(store.persist_path, "rb").read()
+        def fail(*args):
+            raise OSError("injected disk full")
+        with monkeypatch.context() as fault:
+            fault.setattr(faiss_store.faiss, "write_index", fail)
+            with pytest.raises(OSError, match="disk full"):
+                store.replace_document("doc", _vec(4, seed=2), [{"doc_id": "doc", "text": "new"}])
+        assert store.metadatas == [{"doc_id": "doc", "text": "old"}]
+        assert open(store.persist_path, "rb").read() == before
+        assert store.integrity_error is None
+
+    def test_metadata_failure_recovers_same_length_replacement_on_reopen(self, tmp_path, monkeypatch):
+        store = FaissStore(4, session_id="metadata-failure", rag_dir=str(tmp_path))
+        store.add(_vec(4), [{"doc_id": "doc", "text": "old"}])
+        write = faiss_persistence.atomic_write_json
+        def fail_metadata(path, value):
+            if str(path) == store.metadata_path:
+                raise OSError("injected metadata failure")
+            return write(path, value)
+        with monkeypatch.context() as fault:
+            fault.setattr(faiss_persistence, "atomic_write_json", fail_metadata)
+            with pytest.raises(OSError):
+                store.replace_document("doc", _vec(4, seed=2), [{"doc_id": "doc", "text": "new"}])
+        assert store.metadatas == [{"doc_id": "doc", "text": "old"}]
+        assert store.integrity_error
+        reopened = FaissStore(4, session_id="metadata-failure", rag_dir=str(tmp_path))
+        assert reopened.metadatas == [{"doc_id": "doc", "text": "new"}]
+        assert reopened.integrity_error is None
+        assert not os.path.exists(store.persist_path + faiss_persistence.JOURNAL_SUFFIX)
+
+    def test_failed_index_publication_reopens_the_original_pair(self, tmp_path, monkeypatch):
+        store = FaissStore(4, session_id="publish-failure", rag_dir=str(tmp_path))
+        store.add(_vec(4), [{"doc_id": "doc", "text": "old"}])
+        replace = faiss_persistence.os.replace
+        def fail_index(src, dest):
+            if str(dest) == store.persist_path:
+                raise OSError("injected rename failure")
+            return replace(src, dest)
+        with monkeypatch.context() as fault:
+            fault.setattr(faiss_persistence.os, "replace", fail_index)
+            with pytest.raises(OSError):
+                store.replace_document("doc", _vec(4, seed=2), [{"doc_id": "doc", "text": "new"}])
+        reopened = FaissStore(4, session_id="publish-failure", rag_dir=str(tmp_path))
+        assert reopened.metadatas == [{"doc_id": "doc", "text": "old"}]
+        assert reopened.integrity_error is None
+
     def test_persists_across_reopen(self, tmp_path):
         store = FaissStore(4, session_id="s3", rag_dir=str(tmp_path))
         v = _vec(4, seed=1)
@@ -221,6 +273,7 @@ class TestClearingTheStore:
         from mnemoai.utils.bm25 import BM25
 
         s = SessionRAG.__new__(SessionRAG)
+        s._ingest_lock = threading.RLock()
         s.store = self._store(tmp_path)
         s.bm25 = BM25()
         s.bm25.fit(["secret plan alpha"])
@@ -237,6 +290,7 @@ class TestClearingTheStore:
         from mnemoai.utils.bm25 import BM25
 
         s = SessionRAG.__new__(SessionRAG)
+        s._ingest_lock = threading.RLock()
         s.store = FaissStore(dim=4, persist_path=str(tmp_path / "empty"))
         s.bm25 = BM25()
         s.bm25.fit(["stale text from before"])
@@ -254,6 +308,7 @@ class TestClearingTheStore:
         from mnemoai.utils.bm25 import BM25
 
         session = SessionRAG.__new__(SessionRAG)
+        session._ingest_lock = threading.RLock()
         session.store = self._store(tmp_path)
         session.bm25 = BM25()
         session.bm25.fit(["secret plan alpha"])
@@ -286,6 +341,7 @@ class TestClearingTheStore:
         from mnemoai.server.tools.rag.session import SessionRAG
 
         session = SessionRAG.__new__(SessionRAG)
+        session._ingest_lock = threading.RLock()
         session.store = None
         session.bm25 = None
         captured = {}

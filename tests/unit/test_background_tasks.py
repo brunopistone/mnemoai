@@ -10,8 +10,10 @@ model-initiated sub-agent registry, not background shell tasks).
 import asyncio
 import json
 import time
+import tracemalloc
 
 from mnemoai.server.tools.background_tasks import register_background_tasks_tools
+from mnemoai.utils import execution_context
 
 
 class _CapturingMCP:
@@ -37,6 +39,43 @@ def run(result):
 
 
 class TestBackgroundTasks:
+    def test_default_tail_does_not_load_the_complete_log(self, tmp_path, monkeypatch):
+        import mnemoai.server.tools.background_tasks as bt
+
+        tools = self._tools(tmp_path, monkeypatch)
+        log = tmp_path / "large.log"
+        with log.open("w") as stream:
+            for i in range(10000):
+                stream.write(f"{i}: " + "x" * 1000 + "\n")
+        monkeypatch.setitem(bt._background_tasks, "tail-test", {
+            "output_file": str(log), "status": "completed",
+        })
+        tracemalloc.start()
+        try:
+            result = json.loads(run(tools["get_task_output"]("tail-test")))
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        assert result["total_lines"] == 10000
+        assert len(result["output"].splitlines()) == 50
+        assert "9999: " in result["output"]
+        assert peak < 3_000_000
+
+    def test_relative_working_directory_is_resolved_in_the_owning_workspace(self, tmp_path, monkeypatch):
+        server = tmp_path / "server"
+        worker = tmp_path / "worker"
+        (server / "subdir").mkdir(parents=True)
+        (worker / "subdir").mkdir(parents=True)
+        monkeypatch.chdir(server)
+        tools = self._tools(tmp_path / "logs", monkeypatch)
+        with execution_context.use(execution_context.Workspace(str(worker))):
+            response = json.loads(run(tools["start_background_task"](
+                "pwd", working_directory="subdir",
+            )))
+        result = json.loads(run(tools["wait_for_task"](response["task_id"], timeout_seconds=5)))
+        assert result["success"]
+        assert result["output"].strip() == str(worker / "subdir")
+
     def _tools(self, tmp_path, monkeypatch):
         # Point the task dir at a temp location so we don't touch the real one.
         import mnemoai.server.tools.background_tasks as bt

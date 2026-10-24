@@ -32,6 +32,7 @@ other family, and being on the common path means it can't rot unnoticed.
 
 from typing import Any
 
+from mnemoai.models.aws_connections import recycle_idle_connections
 from mnemoai.utils.logger import logger
 
 # Both carry a single block payload that langchain-aws indexes with [0].
@@ -103,6 +104,7 @@ class _StreamHardenedClient:
 def harden_converse_stream(model: Any) -> Any:
     """Wrap a `ChatBedrockConverse`'s client so an unparseable event is skipped.
 
+    Also retire idle HTTP pools for both converse and converse_stream calls.
     Wrapping the transport rather than subclassing, because the offending index
     lives in a module-level function that `_stream` looks up directly (and
     `_astream` runs `_stream` in an executor, so one seam covers both). Returns
@@ -112,6 +114,7 @@ def harden_converse_stream(model: Any) -> Any:
     if client is None or isinstance(client, _StreamHardenedClient):
         return model
     try:
+        recycle_idle_connections(client)
         model.client = _StreamHardenedClient(client)
     except Exception as exc:  # a future pydantic config could refuse the assignment
         logger.debug("Could not harden the Converse stream client: %s", exc)
