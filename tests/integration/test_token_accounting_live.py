@@ -12,6 +12,17 @@ from mnemoai.client.session_log import SessionLog, read_session
 pytestmark = pytest.mark.integration
 
 
+def test_live_auxiliary_memory_format_and_usage(live_client):
+    before = live_client.agent.usage.totals()
+    result = live_client._invoke_model_once(
+        "This is a connectivity and JSON-format test. Reply with exactly [] and no other text. Do not use tools."
+    )
+    after = live_client.agent.usage.totals()
+    assert result.strip() == "[]"
+    assert after["calls"] == before["calls"] + 1
+    assert after["total_tokens"] > before["total_tokens"]
+
+
 def test_live_usage_and_restore_estimate_include_real_mcp_schemas(
     live_client, _neutral_root, monkeypatch, record_testsuite_property,
 ):

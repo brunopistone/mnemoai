@@ -65,6 +65,7 @@ from mnemoai.client.ui.spinner import WRAP_UP_LABEL, Spinner
 from mnemoai.client.ui.streaming_callback import StreamingCallbackHandler
 from mnemoai.models import area_models
 from mnemoai.models.controllers.llm_controller import LangChainLLMController
+from mnemoai.utils.atomic_write import atomic_write_text
 from mnemoai.utils.config import config
 from mnemoai.utils.exceptions import leaf_exception
 from mnemoai.utils.logger import exception_line, log_file_hint, logger
@@ -1257,22 +1258,37 @@ class LangGraphClient:
         touch the agent's conversation state. Supports both the LangChain
         (``invoke``) and Strands (``stream``) model shapes.
         """
+        model = self.model
+        if model is None:
+            return ""
         try:
-            from langchain_core.messages import HumanMessage
+            model = model.model_copy(update={"callbacks": None})
+        except (AttributeError, TypeError):
+            pass  # legacy/custom model; do not mutate a shared model in place
+        agent = getattr(self, "agent", None)
+        record = usage_tracker.recorder(
+            getattr(agent, "usage", None), model, getattr(agent, "usage_model_name", ""),
+        )
+        if hasattr(model, "invoke"):
+            result = None
+            try:
+                from langchain_core.messages import HumanMessage
 
-            if hasattr(self.model, "invoke"):
-                result = self.model.invoke([HumanMessage(content=prompt)])
-                return str(getattr(result, "content", result))
-        except Exception as e:
-            logger.debug(f"LangChain single-invoke failed ({e}); trying stream")
+                result = model.invoke([HumanMessage(content=prompt)])
+                return extract_visible_text(getattr(result, "content", result))
+            except Exception as e:
+                logger.debug(f"Single model invoke failed: {e}")
+                return ""
+            finally:
+                record(result)
 
-        # Strands fallback: drain the stream into text.
+        # Compatibility for legacy models that expose only an async stream.
         try:
             text = ""
 
             async def _run() -> str:
                 nonlocal text
-                async for event in self.model.stream(
+                async for event in model.stream(
                     [{"role": "user", "content": [{"text": prompt}]}]
                 ):
                     delta = (
@@ -1288,6 +1304,8 @@ class LangGraphClient:
         except Exception as e:
             logger.debug(f"Single model invoke failed: {e}")
             return ""
+        finally:
+            record(None)  # legacy streams lack normalized usage metadata
 
     @staticmethod
     def _parse_memory_ops(raw: str) -> list:
@@ -1510,8 +1528,8 @@ class LangGraphClient:
                 ),
             }
 
-            with open(filepath, "w") as f:
-                json.dump(conversation_data, f, indent=2, default=str)
+            serialized = json.dumps(conversation_data, indent=2, default=str)
+            atomic_write_text(os.path.realpath(filepath), serialized, preserve_mode=True)
 
             # Remember it so a bare /save updates it in place.
             self.current_conversation_path = filepath

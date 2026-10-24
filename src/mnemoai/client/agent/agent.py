@@ -1607,17 +1607,23 @@ class LangGraphAgent:
             model, getattr(self, "usage_model_name", "") or "",
         ))
 
-    def _invoke_accounted(self, model, messages, config=None):
+    def _invoke_accounted(self, model, messages, config=None, cancel_event=None):
         """Record exactly one non-streamed attempt, including failed requests."""
         record = usage_tracker.recorder(
             getattr(self, "usage", None), model, getattr(self, "usage_model_name", ""),
         )
         response = None
+        attempted = False
+        def invoke():
+            nonlocal attempted
+            attempted = True
+            return model.invoke(messages, config=config or {})
         try:
-            response = model.invoke(messages, config=config or {})
+            response = stream_policy.cancellable_call(invoke, cancel_event)
             return response
         finally:
-            record(response)
+            if attempted:
+                record(response)
 
     def _record_file_activity(self, name: str, args: Dict[str, Any]) -> None:
         """Note the file a completed tool call touched (drives ``/files``, ``/why``).
@@ -2246,7 +2252,10 @@ class LangGraphAgent:
         """
         llm = config.get("LLM", {})
         return stream_policy.call_with_transient_retry(
-            lambda: self._invoke_accounted(model, messages, config={"callbacks": []}),
+            lambda: self._invoke_accounted(
+                model, messages, config={"callbacks": []},
+                cancel_event=getattr(self, "_cancel_event", None),
+            ),
             attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),
             base=float(llm.get("RETRY_DELAY", 1.0)),
             factor=float(llm.get("RETRY_BACKOFF", 2.0)),
@@ -2346,6 +2355,7 @@ class LangGraphAgent:
                     review_budget.check()
                 if cancelled():
                     raise KeyboardInterrupt
+                logger.info("Model stream request starting", extra={"console": False})
                 for chunk in active_model.stream(fresh, config=config):
                     if abandoned.is_set():
                         return
@@ -2398,6 +2408,8 @@ class LangGraphAgent:
                 # and treating that as the stream starting forfeits the whole window.
                 fresh = started or stream_policy.chunk_has_payload(chunk)
                 if fresh:
+                    if not started:
+                        logger.info("First model payload received", extra={"console": False})
                     started, budget = True, idle
                 yield chunk
                 if fresh:

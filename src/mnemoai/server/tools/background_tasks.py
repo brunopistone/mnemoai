@@ -14,6 +14,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from datetime import datetime
 from typing import Dict
 
@@ -22,7 +23,7 @@ from mcp.server.fastmcp import FastMCP
 from mnemoai.utils.paths import tasks_dir
 
 from .safety import classify_shell_command, classify_write_path
-from .shell_state import bash_path, current_cwd
+from .shell_state import bash_path, current_cwd, resolve_path
 
 # Store for background tasks
 _background_tasks: Dict[str, dict] = {}
@@ -109,7 +110,7 @@ def run_background_command(task_id: str, command: str, cwd: str):
             _background_tasks[task_id]["pid"] = process.pid
 
         # Capture output
-        output_lines = []
+        output_lines = deque(maxlen=20)
         with open(output_file, "w") as f:
             for line in process.stdout:
                 f.write(line)
@@ -129,7 +130,7 @@ def run_background_command(task_id: str, command: str, cwd: str):
             _background_tasks[task_id]["return_code"] = process.returncode
             _background_tasks[task_id]["completed_at"] = datetime.now().isoformat()
             _background_tasks[task_id]["output_preview"] = "".join(
-                output_lines[-20:]
+                output_lines
             )  # Last 20 lines
 
     except Exception as e:
@@ -199,7 +200,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         # Default to the shell session's tracked directory, not the process cwd:
         # after `cd project` in execute_bash, a background task with no explicit
         # working_directory has to start where the model believes it is.
-        cwd = working_directory if working_directory else current_cwd()
+        cwd = resolve_path(working_directory) if working_directory else current_cwd()
 
         # Expand user directory
         cwd = os.path.expanduser(cwd)
@@ -326,12 +327,11 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
         if os.path.exists(output_file):
             try:
                 with open(output_file, "r") as f:
-                    lines = f.readlines()
-                total_lines = len(lines)
-                if tail_lines > 0:
-                    output = "".join(lines[-tail_lines:])
-                else:
-                    output = "".join(lines)
+                    lines = deque(maxlen=tail_lines if tail_lines > 0 else None)
+                    for line in f:
+                        total_lines += 1
+                        lines.append(line)
+                output = "".join(lines)
             except Exception as e:
                 output = f"Error reading output: {e}"
 
@@ -495,8 +495,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
                 if os.path.exists(output_file):
                     try:
                         with open(output_file, "r") as f:
-                            lines = f.readlines()
-                            output = "".join(lines[-50:])  # Last 50 lines
+                            output = "".join(deque(f, maxlen=50))
                     except:
                         pass
 

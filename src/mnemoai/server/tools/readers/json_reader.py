@@ -130,14 +130,16 @@ def read_json(path: str, start_line: int = 1, end_line: int = -1) -> str:
                 "max_tokens": max_tokens,
                 "truncated": was_truncated,
                 "syntax_validated": not bounded,
-                "message": f"""
-                    Read {'JSONL' if is_jsonl else 'JSON'} file lines {start_line}-{end_line} ({content_tokens} tokens).
-                    TRUNCATED at token limit {max_tokens}. File has {total_lines} total lines.
-                    Inform the of the file's total size, structure, and how many lines were actually included. 
-                    Then ask what specific information they're looking for. 
-                    Do not attempt to read the entire file in chunks unless the user explicitly requests it. 
-                    The correct response to truncation is to ask for guidance, not to try to fulfill the original request completely.
-                """,
+                "message": (
+                    f"Read {'JSONL' if is_jsonl else 'JSON'} file lines "
+                    f"{start_line}-{end_line} ({content_tokens} tokens). "
+                    f"File has {total_lines} total lines."
+                    + (
+                        " TRUNCATED: only the returned portion was read. "
+                        "State the coverage limit and request a narrower range if needed."
+                        if was_truncated else " The selected range was read completely."
+                    )
+                ),
             }
         )
 

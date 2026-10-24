@@ -24,8 +24,11 @@ config import.
 """
 
 import asyncio
+import queue
 import random
+import threading
 import time
+from contextvars import copy_context
 
 from mnemoai.utils.exceptions import exception_text
 
@@ -355,6 +358,50 @@ def sleep_or_cancel(cancel_event, delay: float) -> bool:
         time.sleep(delay)
         return False
     return cancel_event.wait(delay)
+
+
+def cancellable_call(call, cancel_event=None):
+    """Wait interruptibly for a stateless model request, never for a tool action.
+
+    SDK socket reads cannot notice our cancellation Event. Like streamed
+    requests, auxiliary requests use a daemon reader so Esc can abandon a wait.
+    The request is not retried here and a late response is never applied.
+    """
+    if cancel_event is None:
+        return call()
+    if cancel_event.is_set():
+        raise KeyboardInterrupt("cancelled before model request")
+    result = queue.Queue(maxsize=1)
+    abandoned = threading.Event()
+    context = copy_context()
+
+    def run():
+        if abandoned.is_set() or cancel_event.is_set():
+            result.put((False, KeyboardInterrupt("cancelled before model request")))
+            return
+        try:
+            value = context.run(call)
+        except BaseException as exc:
+            result.put((False, exc))
+        else:
+            result.put((True, value))
+
+    threading.Thread(target=run, name="aux-model-request", daemon=True).start()
+    try:
+        while True:
+            if cancel_event.is_set():
+                raise KeyboardInterrupt("cancelled while waiting for model request")
+            try:
+                ok, value = result.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if cancel_event.is_set():
+                raise KeyboardInterrupt("cancelled before accepting model response")
+            if not ok:
+                raise value
+            return value
+    finally:
+        abandoned.set()
 
 
 def call_with_transient_retry(

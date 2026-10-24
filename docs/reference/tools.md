@@ -189,6 +189,11 @@ same path policy as a file write, and with none given a task starts in the shell
 current directory — wherever the last `execute_bash` left off, not necessarily
 where mnemoai was launched.
 
+An explicit relative `working_directory` is resolved in that same owning
+workspace, including for delegated work. Normal tail requests stream the log and
+retain only the requested trailing lines; explicitly requesting the whole log
+still returns the whole log.
+
 ## Track multi-step work
 
 | Tool         | Parameters                                                | Purpose                                    |

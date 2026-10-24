@@ -7,6 +7,7 @@ no LLM.
 
 import json
 import threading
+import time
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
@@ -232,6 +233,77 @@ def _agent(tmp_path):
     a.verbose = False
     a.tools = []
     return a
+
+
+def test_background_jobs_honor_the_configured_concurrency_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    agent = _agent(tmp_path)
+    agent._max_subagent_concurrency = 1
+    release, entered, finished = threading.Event(), threading.Event(), threading.Event()
+    lock = threading.Lock()
+    active, maximum, completed = [0], [0], []
+    def worker(subagent, prompt, label, **kwargs):
+        with lock:
+            active[0] += 1
+            maximum[0] = max(maximum[0], active[0])
+        try:
+            entered.set()
+            assert release.wait(5)
+            return label
+        finally:
+            with lock:
+                active[0] -= 1
+    agent._run_one_subagent = worker
+    def notify(ident):
+        with lock:
+            completed.append(ident)
+            if len(completed) == 3:
+                finished.set()
+    agent._on_background_complete = notify
+    spec = subagents.get_subagent("explore")
+    try:
+        for i in range(3):
+            agent._launch_background_subagent(spec, "fixture", str(i))
+        assert entered.wait(2)
+        time.sleep(0.05)
+        assert maximum[0] == 1
+    finally:
+        release.set()
+    assert finished.wait(5)
+    assert maximum[0] == 1 and all(r.status == "done" for r in agent._bg_agents.list_all())
+
+
+def test_queued_background_cancellation_does_not_wait_for_or_start_a_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    agent = _agent(tmp_path)
+    agent._max_subagent_concurrency = 1
+    release, entered, stopped = threading.Event(), threading.Event(), threading.Event()
+    first_finished = threading.Event()
+    queued_id = [None]
+    calls = []
+    def worker(subagent, prompt, label, **kwargs):
+        calls.append(label)
+        entered.set()
+        assert release.wait(5)
+        return "done"
+    agent._run_one_subagent = worker
+    agent._on_background_complete = lambda ident: stopped.set() if ident == queued_id[0] else first_finished.set()
+    spec = subagents.get_subagent("explore")
+    agent._launch_background_subagent(spec, "first", "first")
+    try:
+        assert entered.wait(2)
+        agent._launch_background_subagent(spec, "queued", "queued")
+        queued = agent._bg_agents.list_all()[1]
+        queued_id[0] = queued.agent_id
+        runs = agent._activity.snapshot()
+        assert len(runs) == 2, "queued jobs must remain visible and cancellable"
+        assert agent._activity.request_stop(runs[1].run_id)
+        assert stopped.wait(2), "queued cancellation must not wait for the running model"
+        assert queued.status == "failed"
+        assert calls == ["first"]
+    finally:
+        release.set()
+        assert first_finished.wait(2)
 
 
 class TestHeadlessConfirm:

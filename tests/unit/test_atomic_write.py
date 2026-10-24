@@ -36,6 +36,25 @@ def test_overwrite_replaces_contents_entirely(tmp_path):
     assert json.loads(target.read_text()) == {"a": 1}
 
 
+def test_requested_permission_preservation_happens_before_publication(tmp_path):
+    target = tmp_path / "shared-config.yaml"
+    target.write_text("before")
+    target.chmod(0o640)
+    atomic_write_text(str(target), "after", preserve_mode=True)
+    assert target.read_text() == "after"
+    assert target.stat().st_mode & 0o777 == 0o640
+
+
+def test_permission_preservation_failure_keeps_the_original(tmp_path, monkeypatch):
+    target = tmp_path / "config.yaml"
+    target.write_text("before")
+    monkeypatch.setattr(os, "fchmod", lambda *args: (_ for _ in ()).throw(OSError("no permission")))
+    with pytest.raises(OSError):
+        atomic_write_text(str(target), "after", preserve_mode=True)
+    assert target.read_text() == "before"
+    assert list(tmp_path.iterdir()) == [target]
+
+
 def test_no_temp_files_left_behind(tmp_path):
     target = tmp_path / "profile.json"
     atomic_write_json(str(target), {"k": "v"})

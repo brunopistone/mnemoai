@@ -185,6 +185,7 @@ def flush_rag_store(client, session_id: str = None) -> None:
             f"rag_store_{session_id}.embedding.json",
             f"rag_store_{session_id}.faiss.synthetic-checked.json",
             f"rag_store_{session_id}.faiss.synthetic-repair.json",
+            f"rag_store_{session_id}.faiss.pending-write.json",
             f"rag_store_{session_id}",
         ):
             path = os.path.join(rag_dir, name)

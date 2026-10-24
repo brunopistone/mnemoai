@@ -21,13 +21,13 @@ from typing import Dict, List, Tuple  # noqa: E402
 import faiss  # noqa: E402
 import numpy as np  # noqa: E402
 
-from mnemoai.utils.atomic_write import atomic_write_json  # noqa: E402
 from mnemoai.utils.embedding_integrity import (  # noqa: E402
     discard_faiss_repair_state,
     load_faiss_pair,
     mark_faiss_clean,
     require_clean_vectors,
 )
+from mnemoai.utils.faiss_persistence import JOURNAL_SUFFIX, save_pair  # noqa: E402
 from mnemoai.utils.logger import logger  # noqa: E402
 from mnemoai.utils.paths import profile_dir  # noqa: E402
 
@@ -98,9 +98,11 @@ class FaissStore:
         vectors = vectors / norms
 
         with self.lock:
-            self.index.add(vectors)
-            self.metadatas.extend(metadatas)
-            self._persist()
+            candidate = faiss.clone_index(self.index)
+            candidate.add(vectors)
+            metadata = self.metadatas + list(metadatas)
+            self._persist(candidate, metadata)
+            self.index, self.metadatas = candidate, metadata
 
     def search(self, q: np.ndarray, top_k: int = 5) -> Tuple[List[float], List[Dict]]:
         """Search using query vector.
@@ -151,24 +153,21 @@ class FaissStore:
             if retained:
                 index.add(np.vstack([self.index.reconstruct(i) for i in retained]))
             index.add(vectors)
-            self.index = index
-            self.metadatas = [self.metadatas[i] for i in retained] + list(metadatas)
-            self._persist()
+            metadata = [self.metadatas[i] for i in retained] + list(metadatas)
+            self._persist(index, metadata)
+            self.index, self.metadatas = index, metadata
 
     def clear(self, dim: int = None) -> None:
         """Clear all vectors and metadata from the store."""
         with self.lock:
             discard_faiss_repair_state(self.persist_path)
-            if dim is not None:
-                self.dim = dim
-                self.index = faiss.IndexFlatIP(dim)
-            else:
-                self.index.reset()
-            self.metadatas = []
+            dimension = dim if dim is not None else self.dim
+            candidate = faiss.IndexFlatIP(dimension)
+            self._persist(candidate, [])
+            self.index, self.dim, self.metadatas = candidate, dimension, []
             self.integrity_error = None
-            self._persist()
 
-    def _persist(self) -> None:
+    def _persist(self, index=None, metadata=None) -> None:
         """Save index and metadata to disk.
 
         The metadata write is atomic so a crash can't leave a half-written file
@@ -176,13 +175,19 @@ class FaissStore:
         """
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self.persist_path)), exist_ok=True)
-            faiss.write_index(self.index, self.persist_path)
-            atomic_write_json(self.metadata_path, self.metadatas)
+            save_pair(
+                self.index if index is None else index,
+                self.metadatas if metadata is None else metadata,
+                self.persist_path, self.metadata_path,
+            )
             mark_faiss_clean(self.persist_path, self.metadata_path)
-        except Exception as e:
+        except BaseException as e:
             # exc_info, not file= : logger.error() takes no `file` kwarg, so the
             # previous version raised TypeError from inside its own handler.
-            logger.error(f"Failed to persist RAG store: {e}", exc_info=True)
+            if os.path.exists(self.persist_path + JOURNAL_SUFFIX):
+                self.integrity_error = "Incomplete FAISS write; reopen the store to recover it."
+            logger.error(f"Failed to persist RAG store: {e}", exc_info=True, extra={"console": False})
+            raise
 
 
 def create_store(dim: int) -> "FaissStore":

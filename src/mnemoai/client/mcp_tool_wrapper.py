@@ -464,9 +464,23 @@ class MCPClientWrapper:
         if not self._session:
             raise RuntimeError("Not connected to MCP server")
 
-        result = await self._session.list_tools()
+        discovered = []
+        cursor = None
+        seen = set()
+        while True:
+            result = await (
+                self._session.list_tools(cursor=cursor) if cursor is not None
+                else self._session.list_tools()
+            )
+            discovered.extend(result.tools)
+            cursor = getattr(result, "nextCursor", None)
+            if cursor is None:
+                break
+            if not isinstance(cursor, str) or cursor in seen:
+                raise RuntimeError("MCP tool discovery returned an invalid or repeated pagination cursor")
+            seen.add(cursor)
         self._tools = [
-            MCPToolWrapper(mcp_tool=tool, mcp_client=self) for tool in result.tools
+            MCPToolWrapper(mcp_tool=tool, mcp_client=self) for tool in discovered
         ]
         return self._tools
 

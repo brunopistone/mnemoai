@@ -7,8 +7,49 @@ in the background, and writes only via `MemoryStore`. Pure-logic tests use a bar
 client (no LLM/agent) and drive the worker synchronously.
 """
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
+from langchain_core.messages import AIMessage
+
 import mnemoai.client.client as client_mod
 from mnemoai.client.client import LangGraphClient
+from mnemoai.client.usage_tracker import UsageTracker
+
+
+def test_auxiliary_memory_call_records_usage_and_extracts_text_blocks():
+    client = LangGraphClient.__new__(LangGraphClient)
+    client.agent = SimpleNamespace(usage=UsageTracker(), usage_model_name="fixture")
+    client.model = SimpleNamespace(invoke=Mock(return_value=AIMessage(
+        content=[{"type": "text", "text": '[{"action":"add","text":"fact"}]'}],
+        usage_metadata={"input_tokens": 100, "output_tokens": 5, "total_tokens": 105},
+    )))
+    raw = client._invoke_model_once("fixture")
+    assert client._parse_memory_ops(raw) == [{"action": "add", "text": "fact"}]
+    assert client.agent.usage.totals()["calls"] == 1
+    assert client.agent.usage.totals()["total_tokens"] == 105
+
+
+def test_failed_auxiliary_call_is_counted_without_an_unexpected_stream_retry():
+    client = LangGraphClient.__new__(LangGraphClient)
+    client.agent = SimpleNamespace(usage=UsageTracker(), usage_model_name="fixture")
+    client.model = SimpleNamespace(invoke=Mock(side_effect=OSError("provider unavailable")), stream=Mock())
+    assert client._invoke_model_once("fixture") == ""
+    assert client.agent.usage.totals()["calls_without_usage"] == 1
+    client.model.stream.assert_not_called()
+
+
+def test_late_auxiliary_usage_cannot_pollute_a_cleared_session():
+    client = LangGraphClient.__new__(LangGraphClient)
+    client.agent = SimpleNamespace(usage=UsageTracker(), usage_model_name="fixture")
+    def invoke(messages):
+        client.agent.usage.reset()
+        return AIMessage(content="[]", usage_metadata={
+            "input_tokens": 100, "output_tokens": 5, "total_tokens": 105,
+        })
+    client.model = SimpleNamespace(invoke=invoke)
+    assert client._invoke_model_once("fixture") == "[]"
+    assert client.agent.usage.totals()["calls"] == 0
 
 
 class TestParseMemoryOps:

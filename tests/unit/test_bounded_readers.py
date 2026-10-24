@@ -10,6 +10,15 @@ from mnemoai.server.tools.readers import json_reader, line_reader
 from mnemoai.server.tools.readers.bounded_lines import count_lines, iter_lines
 
 
+def test_complete_json_does_not_tell_the_model_that_it_was_truncated(tmp_path):
+    path = tmp_path / "small.json"
+    path.write_text('{"value": 1}\n')
+    result = json.loads(json_reader.read_json(str(path)))
+    assert result["truncated"] is False
+    assert "TRUNCATED" not in result["message"]
+    assert "read completely" in result["message"]
+
+
 @pytest.mark.parametrize("text,expected", [("", 0), ("a", 1), ("a\n", 1), ("a\nb", 2), ("\n\n", 2)])
 def test_chunked_line_count_keeps_eof_semantics(text, expected):
     assert count_lines(io.StringIO(text)) == expected

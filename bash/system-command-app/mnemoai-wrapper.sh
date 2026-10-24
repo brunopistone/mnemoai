@@ -12,9 +12,6 @@ else
     conda activate mnemoai
 fi
 
-# Remove all __pycache__ directories
-find "$PROJECT_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null
-
 # src layout: put the package's parent (src/) on PYTHONPATH so the package is
 # importable from a checkout without installing, then run via module invocation.
 PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" python -m mnemoai "$@"

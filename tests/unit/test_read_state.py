@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from mnemoai.server.tools import fs_read as fs_read_module
 from mnemoai.server.tools import read_state
 from mnemoai.server.tools.file_edit import register_edit_tools
 from mnemoai.server.tools.fs_read import register_fs_read_tools
@@ -54,7 +55,46 @@ def _reset():
 # --------------------------------------------------------------------------- #
 # Pure registry
 # --------------------------------------------------------------------------- #
+def test_read_does_not_bless_content_changed_before_read_state_is_recorded(tmp_path, monkeypatch):
+    path = tmp_path / "file.txt"
+    path.write_text("original content\n")
+    mcp = _CapturingMCP()
+    register_fs_read_tools(mcp)
+    register_fs_write_tools(mcp)
+    original = fs_read_module.read_lines
+
+    def concurrent_change(*args):
+        result = original(*args)
+        path.write_text("unseen external content\n")
+        return result
+
+    with monkeypatch.context() as during_read:
+        during_read.setattr(fs_read_module, "read_lines", concurrent_change)
+        result = json.loads(run(mcp.registered["fs_read"](str(path))))
+    assert result["error"] and result["stale_read"]
+    write = json.loads(run(mcp.registered["fs_write"](
+        str(path), "create", file_text="overwrite",
+    )))
+    assert write["error"] and path.read_text() == "unseen external content\n"
+    # Reading the stable new version restores the normal edit capability.
+    assert not json.loads(run(mcp.registered["fs_read"](str(path)))).get("error")
+    assert json.loads(run(mcp.registered["fs_write"](
+        str(path), "create", file_text="verified edit",
+    )))["success"]
+
+
 class TestRegistry:
+    def test_replaced_file_with_preserved_mtime_is_stale(self, tmp_path):
+        path = tmp_path / "file.txt"
+        path.write_text("old")
+        before = path.stat()
+        read_state.record_read(str(path))
+        replacement = tmp_path / "replacement.txt"
+        replacement.write_text("new")
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(replacement, path)
+        assert read_state.check_write_allowed(str(path))["stale_read"]
+
     def test_absent_file_allowed(self, tmp_path):
         # Brand-new file: create needs no prior read.
         assert read_state.check_write_allowed(str(tmp_path / "new.txt")) is None

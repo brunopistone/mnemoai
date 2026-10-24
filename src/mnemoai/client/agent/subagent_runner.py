@@ -21,7 +21,6 @@ remain agent-owned fields, so background threads and the TUI activity panel are
 unchanged.
 """
 
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from typing import Dict, List
@@ -34,6 +33,7 @@ from mnemoai.utils import execution_context
 from mnemoai.utils.logger import logger
 
 _background_cancel = ContextVar("background_cancel", default=None)
+_background_activity = ContextVar("background_activity", default=None)
 
 
 def subagent_tools(agent, subagent) -> List[BaseTool]:
@@ -173,35 +173,49 @@ def wrap_subagent_result(agent_name: str, result: str, resumed: bool = False) ->
 
 
 def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
-    """Start a sub-agent on a daemon thread and return immediately.
+    """Submit a sub-agent to bounded daemon workers and return immediately.
 
     The thread runs the quiet loop in HEADLESS mode (unapproved mutations are
     refused without prompts), records the result in the registry
     on completion, and never raises into the parent. Returns an ack string
     with the agent id the parent can reference."""
     rec = agent._bg_agents.register(subagent.name, label, prompt)
+    activity_store = getattr(agent, "_activity", None)
+    activity = (
+        activity_store.open_run(subagent.name, label, "background", cancel=rec.cancel)
+        if activity_store is not None else None
+    )
     parent_workspace = execution_context.for_agent(agent)
     workspace = execution_context.Workspace(parent_workspace.cwd) if parent_workspace else None
 
     def _run() -> None:
         _background_cancel.set(rec.cancel)
+        _background_activity.set(activity)
         agent._set_headless(True)
         # Detached work must never be attributed to a later foreground review.
         excluded = getattr(agent, "_review_excluded", None)
         if excluded is not None:
             excluded.value = True
         try:
+            if rec.cancel.is_set() or getattr(agent, "_cancelled", lambda: False)():
+                raise KeyboardInterrupt
             with execution_context.use(workspace):
                 result = agent._run_one_subagent(
                     subagent, prompt, label, drive_spinner=False, kind="background"
                 )
             agent._bg_agents.complete(rec.agent_id, result)
+            if activity is not None:
+                activity.finish_if_running("done")
         except KeyboardInterrupt:
+            if activity is not None:
+                activity.finish_if_running("stopped")
             agent._bg_agents.complete(
                 rec.agent_id, f"The {subagent.name} sub-agent was stopped; completed work is retained.",
                 failed=True,
             )
-        except Exception as e:  # never crash the daemon
+        except BaseException as e:  # never strand this record or the queue
+            if activity is not None:
+                activity.finish_if_running("failed")
             logger.error(f"Background sub-agent {rec.agent_id} failed: {e}")
             agent._bg_agents.complete(
                 rec.agent_id, f"The {subagent.name} sub-agent failed: {e}",
@@ -217,10 +231,27 @@ def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
             except Exception as e:
                 logger.debug(f"background-complete hook failed: {e}")
 
-    threading.Thread(target=_run, daemon=True).start()
+    def cancel_queued():
+        # Remember cancellation even if a later foreground turn clears its
+        # shared cancel Event before this queued job gets CPU time.
+        rec.cancel.set()
+        _run()
+
+    try:
+        agent._bg_agents.submit(
+            _run, getattr(agent, "_max_subagent_concurrency", 4),
+            cancelled=lambda: rec.cancel.is_set() or getattr(agent, "_cancelled", lambda: False)(),
+            on_cancel=cancel_queued,
+        )
+    except BaseException:
+        rec.cancel.set()
+        if activity is not None:
+            activity.finish_if_running("failed")
+        agent._bg_agents.complete(rec.agent_id, "The background worker could not start.", failed=True)
+        raise
     return (
         f"Started background sub-agent '{rec.agent_id}' ({subagent.name}: {label}). "
-        "It runs while you continue; you'll be notified when it finishes, and "
+        "It runs when a background worker slot is free; you'll be notified when it finishes, and "
         "its result will be delivered then. Do not wait for it — carry on."
     )
 
@@ -396,9 +427,11 @@ def run_one_subagent(
 
     # Live activity run for the agents panel/detail view (covers foreground
     # solo + batch spawns, background spawns, and inline resume).
-    sink = agent._activity.open_run(
-        subagent.name, label, kind, cancel=_background_cancel.get(),
-    )
+    sink = _background_activity.get() if kind == "background" else None
+    if sink is None:
+        sink = agent._activity.open_run(
+            subagent.name, label, kind, cancel=_background_cancel.get(),
+        )
 
     agent._spawn_depth += 1
     try:

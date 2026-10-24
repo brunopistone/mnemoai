@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from mnemoai.utils.atomic_write import atomic_write_json
+from mnemoai.utils.faiss_persistence import JOURNAL_SUFFIX, recover_write
 from mnemoai.utils.logger import logger
 
 _BATCH_SIZE = 256
@@ -78,7 +79,7 @@ def mark_faiss_clean(index_path, metadata_path) -> None:
 
 def discard_faiss_repair_state(index_path) -> None:
     """Drop a pending journal/marker only when the user explicitly clears a store."""
-    for suffix in (".synthetic-repair.json", ".synthetic-checked.json"):
+    for suffix in (".synthetic-repair.json", ".synthetic-checked.json", JOURNAL_SUFFIX):
         Path(str(index_path) + suffix).unlink(missing_ok=True)
 
 
@@ -104,6 +105,10 @@ def load_faiss_pair(index_path, metadata_path):
     import faiss
 
     index, metadata, errors = None, [], []
+    try:
+        recover_write(index_path, metadata_path)
+    except Exception as exc:
+        errors.append(f"cannot recover pending write: {exc}")
     if Path(index_path).exists():
         try:
             index = faiss.read_index(str(index_path))
