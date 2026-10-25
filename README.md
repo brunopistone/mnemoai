@@ -39,7 +39,9 @@ mnemoai                          # verbose (shows thinking); --no-verbose to hid
 ```
 
 macOS/Linux: the installer selects the latest stable **GitHub release**, verifies
-its wheel checksum and installed version, and manages an isolated Python runtime.
+its wheel checksum and installed version, and installs into an isolated Python
+environment. It reuses compatible CPython (3.11+) on PATH, or downloads managed
+Python 3.12 when none is available. Global Python packages stay separate.
 Re-run the same command to update, even if PyPI publication is still pending.
 Follow its PATH hint if needed. Existing configuration and conversations stay in
 `~/.mnemoai`. Prefer managing Python yourself? `uv tool install mnemoai-assistant`,

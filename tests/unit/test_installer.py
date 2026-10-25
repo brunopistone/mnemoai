@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -80,12 +81,20 @@ def fake_uv(executable):
     # Use the interpreter explicitly: the harness intentionally has no Python on PATH.
     executable("uv", f"""exec '{sys.executable}' -c '
 import json, os, pathlib, sys
+if sys.argv[2:4] == ["python", "find"]:
+    pathlib.Path(os.environ["INSTALL_TEST_RECORD"] + ".find").write_text(json.dumps(sys.argv[1:]))
+    found = os.environ.get("INSTALL_TEST_PYTHON")
+    if not found:
+        sys.exit(1)
+    print(found)
+    sys.exit(0)
 if sys.argv[2] == "run":
     pathlib.Path(os.environ["INSTALL_TEST_RECORD"] + ".python").write_text(json.dumps(sys.argv[1:]))
     os.execv(sys.executable, [sys.executable, *sys.argv[sys.argv.index("python") + 1:]])
 pathlib.Path(os.environ["INSTALL_TEST_RECORD"]).write_text(json.dumps({{
     "args": sys.argv[1:],
     "dirs": {{k: os.environ[k] for k in ("UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR")}},
+    "python_flags": {{k: os.environ.get(k) for k in ("UV_MANAGED_PYTHON", "UV_NO_MANAGED_PYTHON")}},
 }}))
 if os.environ.get("INSTALL_TEST_FAIL"):
     sys.exit(7)
@@ -102,7 +111,8 @@ else:
     selected_version = pathlib.Path(package).name.split("-")[1]
 actual = os.environ.get("INSTALL_TEST_ACTUAL_VERSION", selected_version)
 metadata_python = path.parent / "python"
-metadata_python.write_text("#!/bin/sh\\necho " + actual + "\\n")
+python_version = os.environ.get("INSTALL_TEST_PYTHON_VERSION", "3.12.15")
+metadata_python.write_text("#!" + sys.executable + "\\nimport sys\\nprint(" + repr(python_version) + " if \\"platform.python_version\\" in sys.argv[-1] else " + repr(actual) + ")\\n")
 metadata_python.chmod(0o755)
 link = pathlib.Path(os.environ["UV_TOOL_BIN_DIR"]) / "mnemoai"
 if not link.is_symlink():
@@ -133,7 +143,91 @@ def test_install_and_rerun_use_private_managed_runtime(installer, shell):
     assert "--force" not in record["args"]
     assert "FRONT of PATH" in result.stdout
     assert f"Installed MnemoAI {RELEASE_VERSION}:" in result.stdout
+    assert "Python runtime: 3.12.15" in result.stdout
     assert not list(Path(env["TMPDIR"]).glob("mnemoai-install.*"))
+
+
+@pytest.mark.parametrize("version", [(3, 11, 14), (3, 12, 15), (3, 13, 9), (3, 14, 0)])
+@pytest.mark.parametrize("mode", ["latest", "version", "wheel"])
+def test_compatible_existing_python_is_reused_for_lookup_and_install(installer, tmp_path, version, mode):
+    env, executable, run = installer
+    fake_uv(executable)
+    candidate = tmp_path / "existing Python with spaces"
+    candidate.write_text(
+        f"#!{sys.executable}\n"
+        "import collections, sys\n"
+        "Version = collections.namedtuple('Version', 'major minor micro releaselevel serial')\n"
+        f"sys.version_info = Version({version[0]}, {version[1]}, {version[2]}, 'final', 0)\n"
+        "exec(sys.argv[-1])\n"
+    )
+    candidate.chmod(0o755)
+    env["INSTALL_TEST_PYTHON"] = str(candidate)
+    env["INSTALL_TEST_PYTHON_VERSION"] = ".".join(map(str, version))
+    args = []
+    if mode == "version":
+        args = ["--version", RELEASE_VERSION]
+    elif mode == "wheel":
+        wheel = tmp_path / f"mnemoai_assistant-{RELEASE_VERSION}-py3-none-any.whl"
+        wheel.write_bytes(WHEEL_CONTENT)
+        args = ["--wheel", str(wheel)]
+    result = run(*args)
+    assert result.returncode == 0, result.stderr
+    record = json.loads(Path(env["INSTALL_TEST_RECORD"]).read_text())
+    assert record["args"][record["args"].index("--python") + 1] == str(candidate)
+    assert "--no-managed-python" in record["args"] and "--managed-python" not in record["args"]
+    assert record["dirs"]["UV_TOOL_DIR"] == env["MNEMOAI_INSTALL_DIR"] + "/tools"
+    assert f"Using existing Python {env['INSTALL_TEST_PYTHON_VERSION']}" in result.stdout
+    assert f"Python runtime: {env['INSTALL_TEST_PYTHON_VERSION']}" in result.stdout
+    discovery = json.loads(Path(env["INSTALL_TEST_RECORD"] + ".find").read_text())
+    assert "--no-python-downloads" in discovery and "--no-project" in discovery
+    requirement = tomllib.loads((INSTALLER.parent / "pyproject.toml").read_text())["project"]["requires-python"]
+    assert discovery[-1] == "cpython" + requirement
+    if mode == "latest":
+        lookup = json.loads(Path(env["INSTALL_TEST_RECORD"] + ".python").read_text())
+        assert lookup[lookup.index("--python") + 1] == str(candidate)
+        assert "--no-managed-python" in lookup and "--managed-python" not in lookup
+        assert "--no-env-file" in lookup and "--isolated" in lookup
+
+
+@pytest.mark.parametrize("kind", ["too-old", "prerelease", "broken"])
+def test_unsuitable_existing_python_falls_back_without_installing_into_it(installer, tmp_path, kind):
+    env, executable, run = installer
+    fake_uv(executable)
+    candidate = tmp_path / "unsuitable-python"
+    version = (3, 10, 19, "final", 0) if kind == "too-old" else (3, 15, 0, "alpha", 1)
+    candidate.write_text(
+        f"#!{sys.executable}\n"
+        "import collections, sys\n"
+        "Version = collections.namedtuple('Version', 'major minor micro releaselevel serial')\n"
+        f"sys.version_info = Version{version!r}\n"
+        "exec(sys.argv[-1])\n"
+    )
+    candidate.chmod(0o755)
+    env["INSTALL_TEST_PYTHON"] = str(candidate if kind != "broken" else tmp_path / "missing-python")
+    before = candidate.read_bytes()
+    result = run()
+    assert result.returncode == 0, result.stderr
+    record = json.loads(Path(env["INSTALL_TEST_RECORD"]).read_text())
+    assert record["args"][record["args"].index("--python") + 1] == "3.12"
+    assert "--managed-python" in record["args"]
+    assert "No compatible Python found" in result.stdout
+    assert candidate.read_bytes() == before
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_inherited_uv_preferences_do_not_override_interpreter_selection(installer, existing):
+    env, executable, run = installer
+    fake_uv(executable)
+    env.update(UV_MANAGED_PYTHON="1", UV_NO_MANAGED_PYTHON="1")
+    if existing:
+        env["INSTALL_TEST_PYTHON"] = sys.executable
+    result = run("--version", RELEASE_VERSION)
+    assert result.returncode == 0, result.stderr
+    record = json.loads(Path(env["INSTALL_TEST_RECORD"]).read_text())
+    assert all(value is None for value in record["python_flags"].values())
+    assert record["args"][record["args"].index("--python") + 1] == (
+        sys.executable if existing else "3.12"
+    )
 
 
 def test_explicit_version_and_local_wheel_are_single_arguments(installer, tmp_path):

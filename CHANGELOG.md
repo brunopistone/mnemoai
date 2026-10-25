@@ -7,6 +7,15 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.29.5] — 2026-10-25
+
+### Fixed
+
+- Reuse a compatible existing CPython interpreter in the installer, falling back
+  to managed Python 3.12 when none is available. Release lookup and installation
+  use the same selected interpreter, packages remain isolated, and completion
+  reports the actual Python version.
+
 ## [1.29.4] — 2026-10-25
 
 ### Fixed

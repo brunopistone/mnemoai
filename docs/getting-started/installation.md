@@ -44,7 +44,15 @@ the installed version before reporting success. GitHub publication no longer has
 to wait for PyPI indexing. If release discovery or checksum verification fails,
 installation stops rather than silently selecting an older release.
 
-The installer uses `uv` with an isolated, managed Python 3.12 runtime. If `uv` is missing, it
+The installer uses `uv` with an isolated package environment. It first looks for
+an existing stable CPython 3.11+ on PATH, outside project virtual environments.
+If none is available, it uses a private managed Python 3.12 runtime, downloading
+it when needed. Reusing an interpreter does not import or change its global
+packages. The installer displays the selected interpreter and the installed
+Python version. Python 3.12 is the fallback, not the only supported version;
+CI tests Python 3.11–3.13.
+
+If `uv` is missing, the installer
 downloads a pinned binary and verifies its SHA-256 checksum before executing it.
 Python bytecode is compiled during installation rather than on the first launch.
 This is still the Python application, not a native rewrite.
