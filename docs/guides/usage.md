@@ -214,14 +214,15 @@ claude-opus-5 · bedrock          ~/dev/project          ▓░░░░░░�
 
 the **model** (and provider) the turn will go to, the **directory** the session is
 running in — which is what the file and shell tools act on — and the **context
-meter**: how large the next prompt is and how much of the model's window that
+meter**: the last measured prompt size and how much of the model's window that
 fills. The meter turns **amber past 70%** and **red past 90%**, which is the point
 at which [compaction](#commands) is close (it starts at 80% by default), so a long
 session tells you it's getting long before a summary interrupts it.
 
 The count is the provider's input-token number for the last request, not the size
-of the unsent next request. Before that measurement is available, after resume,
-`/load` or compaction, and when a response omits usage, it is a local estimate
+of the unsent next request. It stays visible while the next request runs, then
+updates when the provider reports the new count. Before a measurement is available,
+after resume, `/load` or compaction, and when a request fails or omits usage, it is a local estimate
 marked `~`. The estimate includes instructions, tools and structured history;
 it can differ from the provider's actual tokenizer.
 A narrow terminal drops the path, then the provider, keeping the meter.

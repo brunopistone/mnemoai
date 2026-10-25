@@ -1063,10 +1063,10 @@ class ChatInterface:
         def _context_tokens():
             """``(tokens, estimated)`` for the footer meter.
 
-            Exact once a turn has reported its ``input_tokens``; until then a
-            CACHED estimate — the footer repaints ~10x/second while the estimate
-            walks the whole history, so it is recomputed only when the history
-            (or the system prompt) actually changes.
+            Keep the last reported ``input_tokens`` while the next request runs.
+            Without a valid measurement, use a CACHED estimate. The footer
+            repaints ~10x/second, so recount the history only when its contents
+            or the system prompt actually change.
             """
             exact = context_report.reported_input_tokens(self.client)
             if exact:

@@ -15,9 +15,10 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from mnemoai.client import usage_tracker as ut
-from mnemoai.client.agent.agent import LangGraphAgent
+from mnemoai.client.agent.agent import LangGraphAgent, _ContextOverflow
 from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
 from mnemoai.utils.config import config
+from mnemoai.utils.review_protocol import ReviewStopped
 
 
 class _Resp:
@@ -363,6 +364,35 @@ def test_none_stream_and_fallback_invoke_are_distinct_attempts(agent):
     assert agent.usage.totals()["calls"] == 2
     assert agent.usage.totals()["calls_without_usage"] == 1
     assert agent.usage.totals()["total_tokens"] == 120
+
+
+@pytest.mark.parametrize("error", [
+    RuntimeError("503 service unavailable"),
+    KeyboardInterrupt(),
+    ReviewStopped("Review cancelled"),
+    _ContextOverflow("prompt is too long"),
+])
+def test_failed_or_cancelled_request_invalidates_previous_context_count(agent, error):
+    agent._last_input_tokens = 510_300
+    agent._get_route_model = lambda state: object()
+    agent._stream_response = Mock(side_effect=error)
+    agent._compact_and_rebuild = Mock(return_value=None)
+    state = {"messages": [SystemMessage(content="test"), HumanMessage(content="Hi")]}
+    if isinstance(error, (KeyboardInterrupt, ReviewStopped)):
+        with pytest.raises(type(error)):
+            agent._call_model(state)
+    else:
+        agent._call_model(state)
+    assert agent._last_input_tokens is None
+
+
+def test_response_without_usage_invalidates_previous_context_count(agent):
+    agent._last_input_tokens = 510_300
+    agent._get_route_model = lambda state: object()
+    agent._stream_response = Mock(return_value=(AIMessage(content="Done"), False))
+    agent._call_model({"messages": [SystemMessage(content="test"), HumanMessage(content="Hi")]})
+    assert agent._last_input_tokens is None
+    assert agent.usage.totals()["calls_without_usage"] == 1
 
 
 def test_decomposition_and_aggregation_are_attributed_without_changing_context(agent):

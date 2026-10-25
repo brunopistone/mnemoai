@@ -1582,14 +1582,15 @@ class LangGraphAgent:
         """
         if record_usage:
             self._record_usage(response)
-        self._last_input_tokens = None
+        input_tokens = None
         try:
             um = getattr(response, "usage_metadata", None) or {}
             it = um.get("input_tokens")
             if it is not None and int(it) > 0:
-                self._last_input_tokens = int(it)
+                input_tokens = int(it)
         except Exception:
             pass
+        self._last_input_tokens = input_tokens
 
     def _record_usage(self, response: Any, *, model=None) -> None:
         """Add one model call to the session usage totals (best-effort).
@@ -1652,7 +1653,8 @@ class LangGraphAgent:
 
     def _call_model(self, state: AgentState) -> Dict[str, Any]:
         """Call the model with the current state, streaming the response."""
-        self._last_input_tokens = None  # the new request has not reported its size yet
+        # Keep the last measured input size while waiting for the next response.
+        # Clearing it here makes the footer jump to a conservative estimate.
         messages = list(state["messages"])
 
         # Swap in the compacted history if a compaction replaced it mid-turn.
@@ -1682,6 +1684,7 @@ class LangGraphAgent:
                 messages, config, model=active_model, mark_answer=True
             )
         except _ContextOverflow as overflow:
+            self._last_input_tokens = None
             if supervised_turn.budget_for(self) is not None:
                 raise ReviewStopped("Correction exceeded the model context; compact before retrying") from overflow
             # The prompt exceeded the context window. Compact history and retry
@@ -1736,8 +1739,10 @@ class LangGraphAgent:
                     "thinking": None,
                 }
         except (KeyboardInterrupt, ReviewStopped):
+            self._last_input_tokens = None
             raise  # user cancel — propagate so the turn rolls back cleanly
         except Exception as e:
+            self._last_input_tokens = None
             # A stream error that survived the retry wrapper. Two families:
             #  - transient (dead/stalled connection, 5xx/overloaded) exhausted its
             #    abortable retries — e.g. the network is still down after a sleep;
@@ -1796,6 +1801,7 @@ class LangGraphAgent:
             return {"messages": [AIMessage(content=msg)], "thinking": None}
 
         if response is None:
+            self._last_input_tokens = None
             self._record_usage(None)
             if supervised_turn.budget_for(self) is not None:
                 raise ReviewStopped("Chat model returned no correction or counterevidence")

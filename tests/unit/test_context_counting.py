@@ -6,9 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from mnemoai.client import context_injection, context_report
+from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
 from mnemoai.client.memory.steering_store import SteeringSnapshot
@@ -111,6 +112,68 @@ def test_pinned_footer_recounts_same_length_replaced_history(make_client, tmp_pa
             assert client.agent._last_input_tokens is None and estimated
             assert after == client._count_context_tokens() and after > before * 100
             assert client.agent.usage.totals()["calls"] == 0
+
+    interface = chat_interface.ChatInterface.__new__(chat_interface.ChatInterface)
+    interface.client = client
+    interface._completion_commands = []
+    interface.command_history = None
+    monkeypatch.setattr(chat_interface, "PinnedPromptReader", Reader)
+    interface._run_pinned_loop()
+
+
+def test_pinned_footer_retains_measured_count_while_requests_run(make_client, monkeypatch):
+    client = make_client([HumanMessage(content="Earlier work")])
+    agent = LangGraphAgent.__new__(LangGraphAgent)
+    agent.__dict__.update(vars(client.agent))
+    agent._messages = client.agent.messages
+    client.agent = agent
+    client.clear_context = lambda: None
+    client.conversation_manager.max_tokens = 1_000_000
+    agent.callbacks = []
+    agent._get_route_model = lambda state: object()
+    agent._start_spinner = agent._stop_spinner = lambda *a: None
+    agent._last_input_tokens = 505_000
+    client._count_context_tokens = Mock(return_value=715_900)
+
+    class Reader:
+        def __init__(self, **kwargs):
+            self.footer = kwargs["footer_text"]
+
+        def __getattr__(self, name):
+            return lambda *a, **kw: None
+
+        def text(self):
+            return "".join(text for _, text in self.footer(120))
+
+        def run(self):
+            for previous, measured in ((505_000, 508_000), (508_000, 510_300)):
+                pending = []
+
+                def stream(*args, **kwargs):
+                    # Repaints before the first token and during streaming must
+                    # keep the previous measurement, not jump to the safety estimate.
+                    for _ in range(3):
+                        pending.append(self.text())
+                    return AIMessage(content="Done", usage_metadata={
+                        "input_tokens": measured, "output_tokens": 10,
+                        "total_tokens": measured + 10,
+                    }), False
+
+                agent._stream_response = stream
+                agent._call_model({"messages": [
+                    SystemMessage(content="test"), HumanMessage(content="Continue"),
+                ]})
+                for text in pending:
+                    assert f"{previous / 1000:.1f}k" in text
+                    assert f"~{previous / 1000:.1f}k" not in text
+                    assert "72%" not in text
+                assert f"{measured / 1000:.1f}k" in self.text()
+            client._count_context_tokens.assert_not_called()
+            assert agent.usage.totals()["calls"] == 2
+            # Replacing the history must still discard the old measurement.
+            client._forget_context_size()
+            assert "~715.9k" in self.text()
+            assert "72%" in self.text()
 
     interface = chat_interface.ChatInterface.__new__(chat_interface.ChatInterface)
     interface.client = client
