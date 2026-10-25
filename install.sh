@@ -9,6 +9,7 @@ usage() {
         'Install/update the latest stable GitHub release; --version selects a PyPI version.' \
         'MNEMOAI_INSTALL_DIR: runtime directory (default ~/.local/share/mnemoai-runtime)' \
         'MNEMOAI_BIN_DIR: command directory (default ~/.local/bin)' \
+        'Reuse compatible Python on PATH; otherwise download managed Python 3.12.' \
         'Existing config, memory, sessions and shell profiles are not modified.'
 }
 
@@ -33,6 +34,31 @@ verify_checksum() {
     [ "$actual" = "$2" ] || fail 'checksum mismatch; refusing an unverified download'
 }
 
+run_uv() (
+    # Selection below controls interpreter ownership, independently of uv defaults.
+    unset UV_MANAGED_PYTHON UV_NO_MANAGED_PYTHON
+    UV_PYTHON_INSTALL_DIR="$runtime/python" "$uv_command" --no-config "$@"
+)
+
+select_python() {
+    python_request=$(run_uv python find --no-project --system --no-managed-python \
+        --no-python-downloads "cpython$python_requirement" 2>/dev/null) || python_request=
+    if [ -n "$python_request" ] && python_version=$("$python_request" -I -c '
+import sys
+if sys.implementation.name != "cpython" or sys.version_info < (3, 11) or sys.version_info.releaselevel != "final":
+    sys.exit(1)
+print(".".join(map(str, sys.version_info[:3])))
+' 2>/dev/null); then
+        python_mode=--no-managed-python
+        printf 'Using existing Python %s: %s\n' "$python_version" "$python_request"
+    else
+        python_request=$fallback_python
+        python_version=$fallback_python
+        python_mode=--managed-python
+        printf 'No compatible Python found; using managed Python %s.\n' "$fallback_python"
+    fi
+}
+
 latest_release() {
     command -v curl >/dev/null 2>&1 || fail 'curl is required to resolve the latest release'
     make_temp
@@ -44,12 +70,10 @@ latest_release() {
         --output "$installer_tmp/release.json" ||
         fail 'cannot determine the latest release; no older version was selected'
 
-    # Python is required by the app anyway. Resolve it privately before parsing
-    # JSON; no jq dependency, system Python, project environment or .env file.
+    # Use the selected interpreter without loading a project environment or .env.
     release_info=$(
-        UV_PYTHON_INSTALL_DIR="$runtime/python" \
-        "$uv_command" --no-config run --no-project --isolated --no-env-file \
-            --python 3.12 --managed-python python -I -c '
+        run_uv run --no-project --isolated --no-env-file \
+            --python "$python_request" "$python_mode" python -I -c '
 import json
 import re
 import sys
@@ -103,6 +127,8 @@ main() {
     expected_version=
     installer_tmp=
     release_stage=
+    python_requirement='>=3.11'
+    fallback_python=3.12
     case "${1:-}" in
         --help|-h) usage; return ;;
         --version)
@@ -191,16 +217,15 @@ main() {
         fi
     fi
 
+    select_python
     if [ "$use_latest" = true ]; then
         latest_release
     fi
-    printf 'Installing MnemoAI with a managed Python 3.12 runtime…\n'
-    # Isolate both tool and interpreter storage. Do not import packages from the
-    # developer's global Python or write to the user's existing uv tool installs.
+    printf 'Installing MnemoAI in an isolated environment using Python %s…\n' "$python_version"
+    # Tool packages remain private even when the base interpreter already exists.
     UV_TOOL_DIR="$runtime/tools" UV_TOOL_BIN_DIR="$bin_dir" \
-        UV_PYTHON_INSTALL_DIR="$runtime/python" \
-        "$uv_command" --no-config tool install --upgrade --compile-bytecode \
-        --python 3.12 --managed-python "$package"
+        run_uv tool install --upgrade --compile-bytecode \
+        --python "$python_request" "$python_mode" "$package"
 
     [ -x "$bin_dir/mnemoai" ] || fail 'installation did not produce the mnemoai command'
     installed_version=$("$runtime/tools/mnemoai-assistant/bin/python" -I -c \
@@ -209,7 +234,11 @@ main() {
     if [ -n "$expected_version" ] && [ "$installed_version" != "$expected_version" ]; then
         fail "expected $expected_version but installed $installed_version; installation is not verified"
     fi
+    installed_python=$("$runtime/tools/mnemoai-assistant/bin/python" -I -c \
+        'import platform; print(platform.python_version())') ||
+        fail 'cannot verify the installed Python runtime'
     printf '\nInstalled MnemoAI %s: %s/mnemoai\n' "$installed_version" "$bin_dir"
+    printf 'Python runtime: %s\n' "$installed_python"
     printf 'Your configuration and conversations were left unchanged.\n'
     active=$(command -v mnemoai || true)
     if [ -z "$active" ] || [ ! "$active" -ef "$bin_dir/mnemoai" ]; then
