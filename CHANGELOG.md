@@ -7,6 +7,15 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.29.4] — 2026-10-25
+
+### Fixed
+
+- Keep the last provider-reported context size visible while the next model
+  request runs, avoiding jumps to the conservative token estimate on each call.
+  History replacement, compaction, failed requests and missing usage still
+  invalidate the measurement.
+
 ## [1.29.3] — 2026-10-24
 
 ### Fixed
