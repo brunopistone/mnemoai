@@ -15,10 +15,21 @@ ROOT = Path(__file__).resolve().parents[2]
 SECURITY_FLOORS = [
     # GHSA-fvww-7h3r-vfhp: resource decorators previously ignored actions=.
     ("langgraph-sdk", "0.4.4", ("0.4.2", "0.4.3")),
-    # 6.19.0 also includes the 6.17/6.18 resource-exhaustion fixes.
-    ("pypdf", "6.19.0", ("6.16.2", "6.18.0", "6.18.1")),
+    # Includes the malformed-reference and parser resource-exhaustion fixes.
+    ("pypdf", "6.21.2", ("6.18.1", "6.19.0", "6.20.1", "6.21.1")),
     ("pyjwt", "2.15.0", ("2.13.0", "2.14.0")),
     ("urllib3", "2.8.0", ("2.6.3", "2.7.0")),
+    ("certifi", "2026.10.19", ("2026.7.22", "2026.10.17")),
+    ("aiohttp", "3.14.4", ("3.14.2", "3.14.3")),
+    ("brotli", "1.2.1", ("1.1.0", "1.2.0")),
+    ("filelock", "4.2.1", ("3.32.0", "4.2.0")),
+    ("litellm", "1.93.2", ("1.93.0", "1.93.1")),
+    ("mcp", "1.30.0", ("1.28.1", "1.29.0")),
+    ("multidict", "6.9.1", ("6.7.1", "6.9.0")),
+    ("nltk", "3.10.4", ("3.9.4", "3.10.3")),
+    ("oauthlib", "4.0.0", ("3.3.1",)),
+    ("opentelemetry-api", "1.45.1", ("1.44.0", "1.45.0")),
+    ("pillow", "13.0.0", ("12.3.0",)),
 ]
 
 
@@ -58,6 +69,23 @@ def test_lockfile_project_version_matches_package_metadata():
         if package["name"] == project["name"]
     )
     assert locked["version"] == project["version"]
+
+
+def test_certifi_excludes_root_with_compromised_intermediate_keys():
+    import ssl
+
+    import certifi
+
+    context = ssl.create_default_context(cafile=certifi.where())
+    common_names = {
+        value
+        for cert in context.get_ca_certs()
+        for rdn in cert["subject"]
+        for key, value in rdn
+        if key == "commonName"
+    }
+    assert common_names
+    assert "emSign ECC Root CA - G3" not in common_names
 
 
 @pytest.mark.parametrize("resource", ["threads", "assistants", "crons"])

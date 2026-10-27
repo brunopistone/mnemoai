@@ -2,14 +2,13 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import chromadb
-
 from mnemoai.client.memory.similarity import (
     SCORING_VERSION,
     l2_normalize,
     squared_l2_to_unit,
 )
 from mnemoai.utils.bm25 import BM25
+from mnemoai.utils.chroma_client import PRECOMPUTED_EMBEDDINGS, persistent_client
 from mnemoai.utils.config import config
 from mnemoai.utils.embedding_integrity import (
     mark_chroma_clean,
@@ -45,7 +44,7 @@ class ChromaEpisodicStore:
         self.keyword_weight = episodic_config.get("KEYWORD_WEIGHT", 0.3)
 
         # Initialize ChromaDB client
-        self.client = chromadb.PersistentClient(path=self.persist_path)
+        self.client = persistent_client(self.persist_path)
 
         # Get or create the collection, migrating it if the embedding model
         # changed. An existing collection's vectors are only comparable to new
@@ -60,7 +59,9 @@ class ChromaEpisodicStore:
         # re-embedding the whole history on every switch would be slow).
         existing = None
         try:
-            existing = self.client.get_collection(name="episodic_memory")
+            existing = self.client.get_collection(
+                name="episodic_memory", embedding_function=PRECOMPUTED_EMBEDDINGS
+            )
         except Exception:
             pass
         self.integrity_error = (
@@ -116,6 +117,7 @@ class ChromaEpisodicStore:
         """Create the collection stamped with the current model fingerprint."""
         collection = self.client.create_collection(
             name="episodic_memory",
+            embedding_function=PRECOMPUTED_EMBEDDINGS,
             metadata={
                 "description": "Task solutions with tool usage patterns",
                 "embed_fingerprint": self._embed_fingerprint(),
@@ -128,7 +130,9 @@ class ChromaEpisodicStore:
         """Load the collection, or reset it if the embedding model changed."""
         current_fp = self._embed_fingerprint()
         try:
-            self.collection = self.client.get_collection(name="episodic_memory")
+            self.collection = self.client.get_collection(
+                name="episodic_memory", embedding_function=PRECOMPUTED_EMBEDDINGS
+            )
         except Exception:
             self.collection = self._create_collection()
             logger.info(
@@ -269,9 +273,11 @@ class ChromaEpisodicStore:
         False so the caller re-raises the original error rather than masking it."""
         try:
             os.makedirs(self.persist_path, exist_ok=True)
-            self.client = chromadb.PersistentClient(path=self.persist_path)
+            self.client = persistent_client(self.persist_path)
             try:
-                self.collection = self.client.get_collection(name="episodic_memory")
+                self.collection = self.client.get_collection(
+                    name="episodic_memory", embedding_function=PRECOMPUTED_EMBEDDINGS
+                )
             except Exception:
                 # Stamp the fingerprint like the normal create path (else the next
                 # open takes the legacy un-fingerprinted branch).

@@ -277,6 +277,32 @@ still be current.
 This exists because a blind edit to a file that changed underneath silently
 discards someone else's work — including your own edits in another editor.
 
+## Dependency security
+
+MnemoAI publishes minimum versions for dependencies with released security
+fixes. These requirements apply to pip and installer upgrades as well as
+the versions recorded in `uv.lock`.
+
+ChromaDB 1.5.9 still has four upstream advisories with no patched release:
+[CVE-2026-45829](https://github.com/advisories/GHSA-f4j7-r4q5-qw2c),
+[CVE-2026-45833](https://github.com/advisories/GHSA-36p7-vc44-83pf),
+[CVE-2026-45830](https://github.com/advisories/GHSA-2wm9-hf6c-p5cr) and
+[CVE-2026-45831](https://github.com/advisories/GHSA-xph7-9rjv-w5fr).
+MnemoAI uses embedded local storage and does not start Chroma's HTTP server or
+its multi-tenant authorization endpoints. It explicitly selects the embedded
+backend, so Chroma environment variables cannot redirect memory to an HTTP
+server.
+
+All embeddings are computed by MnemoAI's configured provider and passed as
+vectors. Collections use a guard that refuses implicit embedding requests,
+including after reopening or clearing a store. This prevents a saved Chroma
+embedding-function configuration from loading executable model code through that
+path. Existing vectors and text remain usable.
+
+These protections address MnemoAI's integration; they do not patch a separately
+run Chroma server. The four upstream dependency alerts remain open pending an
+upstream fix.
+
 ## See also
 
 - [Configuration](../configuration.md): the `REQUIRE_*` toggles and every other key

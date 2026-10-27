@@ -20,6 +20,16 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   counts and session usage reflect the provider's totals rather than their sum
   across stream chunks.
 
+### Security
+
+- Upgrade vulnerable dependencies, including certifi's compromised CA bundle,
+  Pillow, pypdf, Brotli, MCP and the affected networking and file libraries.
+  Published minimum versions also protect pip and installer upgrades.
+- Keep ChromaDB explicitly embedded and refuse implicit embedding-function
+  execution from saved collection configuration. Existing vector data remains
+  usable. Four upstream ChromaDB advisories have no patched release; the
+  integration protections and remaining scope are documented in the safety guide.
+
 ## [1.29.5] — 2026-10-25
 
 ### Fixed

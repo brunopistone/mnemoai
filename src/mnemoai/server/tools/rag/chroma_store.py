@@ -9,9 +9,9 @@ import threading
 import uuid
 from typing import Dict, List, Tuple
 
-import chromadb
 import numpy as np
 
+from mnemoai.utils.chroma_client import PRECOMPUTED_EMBEDDINGS, persistent_client
 from mnemoai.utils.embedding_integrity import (
     mark_chroma_clean,
     prepare_chroma,
@@ -46,16 +46,19 @@ class ChromaStore:
             self.persist_path = os.path.join(base_dir, "rag_store")
 
         # Initialize ChromaDB client
-        self.client = chromadb.PersistentClient(path=self.persist_path)
+        self.client = persistent_client(self.persist_path)
 
         # Get or create collection
         collection_name = f"rag_{session_id}" if session_id else "rag_default"
         try:
-            self.collection = self.client.get_collection(name=collection_name)
+            self.collection = self.client.get_collection(
+                name=collection_name, embedding_function=PRECOMPUTED_EMBEDDINGS
+            )
             logger.debug(f"Loaded existing ChromaDB collection: {collection_name}")
         except:
             self.collection = self.client.create_collection(
-                name=collection_name, metadata={"dimension": dim}
+                name=collection_name, metadata={"dimension": dim},
+                embedding_function=PRECOMPUTED_EMBEDDINGS,
             )
             logger.debug(f"Created new ChromaDB collection: {collection_name}")
 
@@ -142,7 +145,8 @@ class ChromaStore:
         collection_name = self.collection.name
         self.client.delete_collection(collection_name)
         self.collection = self.client.create_collection(
-            name=collection_name, metadata={"dimension": self.dim}
+            name=collection_name, metadata={"dimension": self.dim},
+            embedding_function=PRECOMPUTED_EMBEDDINGS,
         )
         self.metadatas = []
         self.integrity_error = None
