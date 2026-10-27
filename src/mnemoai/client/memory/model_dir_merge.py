@@ -30,10 +30,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, List, Optional
 
-import chromadb
-
 from mnemoai.client.memory.episode_tools import compact_tools
 from mnemoai.utils.atomic_write import atomic_write_json
+from mnemoai.utils.chroma_client import PRECOMPUTED_EMBEDDINGS, persistent_client
 from mnemoai.utils.console import print_notice
 from mnemoai.utils.logger import log_file_hint, logger
 from mnemoai.utils.paths import normalize_model_key, profile_dir
@@ -317,8 +316,10 @@ def _read_entries(path: Path) -> Optional[List[dict]]:
 def _collection(store_path: Path):
     """The episodic collection at ``store_path``, or None if it has none."""
     try:
-        client = chromadb.PersistentClient(path=str(store_path))
-        return client.get_collection(name=_COLLECTION)
+        client = persistent_client(store_path)
+        return client.get_collection(
+            name=_COLLECTION, embedding_function=PRECOMPUTED_EMBEDDINGS
+        )
     except Exception:
         logger.debug("No episodic collection at %s", store_path, exc_info=True)
         return None
