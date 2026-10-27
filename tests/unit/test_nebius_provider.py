@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 
 import httpx
@@ -95,6 +96,14 @@ def wire(monkeypatch):
             "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
         } for delta in deltas]
         chunks[-1]["choices"][0]["finish_reason"] = finish
+        # Nebius reports cumulative counters on every chunk, then repeats the
+        # final total in the empty-choices usage chunk.
+        for index, chunk in enumerate(chunks):
+            chunk["usage"] = {
+                "prompt_tokens": 37, "completion_tokens": index,
+                "total_tokens": 37 + index,
+            }
+        chunks[-1]["usage"] = {k: v for k, v in usage.items() if not isinstance(v, dict)}
         chunks.append({
             "id": "chat-test", "object": "chat.completion.chunk", "created": 1,
             "model": body["model"], "choices": [], "usage": usage,
@@ -143,6 +152,8 @@ def test_chat_stream_switch_reasoning_usage_and_account_isolation(settings, wire
     assert response.content == "ANSWER"
     assert response.additional_kwargs["reasoning_content"] == "Check facts."
     assert response.usage_metadata["input_tokens"] == 37
+    assert response.usage_metadata["output_tokens"] == 11
+    assert response.usage_metadata["total_tokens"] == 48
     assert response.usage_metadata["input_token_details"]["cache_read"] == 8
     assert response.usage_metadata["output_token_details"]["reasoning"] == 3
     request, body = wire[-1]
@@ -166,6 +177,35 @@ def test_async_reasoning_and_usage(settings, wire):
     assert result.content == "ANSWER"
     assert result.additional_kwargs["reasoning_content"] == "Check facts."
     assert result.usage_metadata["input_tokens"] == 37
+    assert result.usage_metadata["output_tokens"] == 11
+    assert result.usage_metadata["total_tokens"] == 48
+
+
+def test_cumulative_usage_is_local_to_each_concurrent_stream(settings, wire):
+    model = _chat()
+
+    def run(_):
+        chunks = list(model.stream("Question"))
+        result = chunks[0]
+        for chunk in chunks[1:]:
+            result += chunk
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(run, range(4)))
+    assert all(response.usage_metadata["total_tokens"] == 48 for response in responses)
+    assert all(response.content == "ANSWER" for response in responses)
+
+
+def test_usage_delta_retains_late_details_and_counter_corrections():
+    previous = {}
+    first = chat_nebius._usage_delta({"input_tokens": 40, "output_tokens": 1}, previous)
+    final = chat_nebius._usage_delta({
+        "input_tokens": 39, "output_tokens": 4, "input_token_details": {"cache_read": 8},
+    }, previous)
+    assert first["input_tokens"] + final["input_tokens"] == 39
+    assert first["output_tokens"] + final["output_tokens"] == 4
+    assert final["input_token_details"]["cache_read"] == 8
 
 
 def test_sampling_and_advanced_parameters_reach_nebius(settings, wire):

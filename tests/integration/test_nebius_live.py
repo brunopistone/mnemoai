@@ -41,6 +41,15 @@ def test_nebius_tools_reasoning_and_output(
         "TYPE": "nebius", "NAME": model_id, "MAX_TOKENS": 2048,
         "REASONING_EFFORT": effort, "STREAM": True,
     })
+    provider_usage = []
+    convert = type(model)._convert_chunk_to_generation_chunk
+
+    def observe_usage(self, chunk, *args, **kwargs):
+        if self is model and chunk.get("usage") and not chunk.get("choices"):
+            provider_usage.append(dict(chunk["usage"]))
+        return convert(self, chunk, *args, **kwargs)
+
+    monkeypatch.setattr(type(model), "_convert_chunk_to_generation_chunk", observe_usage)
     tools = [tool for tool in live_client.tools if tool.name in ("fs_write", "fs_read")]
     assert len(tools) == 2
     agent = LangGraphAgent(
@@ -71,6 +80,10 @@ def test_nebius_tools_reasoning_and_output(
         assert not any(thoughts)
     assert agent._last_input_tokens and agent._last_input_tokens > 0
     assert agent.usage.totals()["calls"] >= 2
+    assert provider_usage, "capture the actual provider totals, not only positive counts"
+    assert agent._last_input_tokens == provider_usage[-1]["prompt_tokens"]
+    assert agent.usage.totals()["input_tokens"] == sum(row["prompt_tokens"] for row in provider_usage)
+    assert agent.usage.totals()["output_tokens"] == sum(row["completion_tokens"] for row in provider_usage)
     record_testsuite_property(f"nebius-{model_id}-{visible}", {
         "model": model_id, "reasoning_chars": sum(len(t) for t in thoughts),
         "reasoning_visible": visible and reasoning, "last_input_tokens": agent._last_input_tokens,

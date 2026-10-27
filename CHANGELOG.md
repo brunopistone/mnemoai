@@ -16,6 +16,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
   Preserve streamed/non-streamed reasoning and usage, carry reasoning across tool
   turns, and use Nebius-specific credentials. A complete example reaches existing
   installations through normal template seeding.
+- Normalize Nebius's cumulative per-chunk usage before aggregation so context
+  counts and session usage reflect the provider's totals rather than their sum
+  across stream chunks.
 
 ## [1.29.5] — 2026-10-25
 

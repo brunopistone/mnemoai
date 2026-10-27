@@ -80,7 +80,7 @@ with the package manager/environment that installed them.
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), MLX (local, Apple Silicon), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), [Nebius Token Factory](https://brunopistone.github.io/mnemoai/guides/nebius/), Amazon SageMaker AI (chat only — no tool calling), LiteLLM (100+ providers)
+- **🤖 Multi-Model Support**: Ollama (local), MLX (local, Apple Silicon), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), [Nebius Token Factory](https://brunopistone.github.io/mnemoai/configuration/#nebius-token-factory), Amazon SageMaker AI (chat only — no tool calling), LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG**: Automatic document indexing and semantic (hybrid) search
 - **🧠 User Profile Learning**: Personalized responses learned from interactions
