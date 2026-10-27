@@ -399,11 +399,11 @@ def test_provider_params_registry_shape():
 
     assert set(providers("MODEL_ID")) == {
         "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker",
-        "litellm", "mlx",
+        "litellm", "mlx", "nebius",
     }
     assert set(providers("VISION_MODEL_ID")) == {
         "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker",
-        "litellm", "mlx",
+        "litellm", "mlx", "nebius",
     }
     # Anthropic (direct Claude API): STOP-capable, with extended-thinking
     # specials. EXTRA_PARAMS (the generic passthrough) is supported everywhere.
@@ -429,7 +429,7 @@ def test_provider_params_registry_shape():
         "API_BASE", "API_KEY", "TEMPERATURE", "MAX_TOKENS", "TOP_P", "EXTRA_PARAMS"
     }
     assert set(providers("EMBED_MODEL_ID")) == {
-        "ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx"
+        "ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx", "nebius"
     }
     # Embeddings take no inference params — only connection keys, the optional
     # DIMENSION override, and EXTRA_PARAMS.
@@ -1053,7 +1053,7 @@ def test_config_providers_menu_covers_every_llm_provider():
     types = {v[0] for v in _PROVIDERS.values()}
     assert types == {
         "ollama", "bedrock", "mantle", "openai", "anthropic", "sagemaker",
-        "litellm", "mlx",
+        "litellm", "mlx", "nebius",
     }
     assert types == set(providers("MODEL_ID"))
     # Every menu entry also needs a /model label (else it shows its raw key).

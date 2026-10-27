@@ -60,7 +60,7 @@ class TestDispatch:
 
 
 class TestRealControllersUseTheTable:
-    def test_llm_controller_declares_all_eight_providers(self):
+    def test_llm_controller_declares_supported_providers(self):
         from mnemoai.models.controllers.llm_controller import LangChainLLMController
 
         assert set(LangChainLLMController.PROVIDERS) == {
@@ -72,9 +72,10 @@ class TestRealControllersUseTheTable:
             "sagemaker",
             "litellm",
             "mlx",
+            "nebius",
         }
 
-    def test_vision_controller_declares_all_eight_providers(self):
+    def test_vision_controller_declares_supported_providers(self):
         from mnemoai.models.controllers.vision_model_controller import (
             VisionModelController,
         )
@@ -88,9 +89,10 @@ class TestRealControllersUseTheTable:
             "sagemaker",
             "litellm",
             "mlx",
+            "nebius",
         }
 
-    def test_embeddings_controller_declares_its_six_providers(self):
+    def test_embeddings_controller_declares_supported_providers(self):
         from mnemoai.models.controllers.embeddings_controller import (
             EmbeddingsController,
         )
@@ -102,6 +104,7 @@ class TestRealControllersUseTheTable:
             "sagemaker",
             "litellm",
             "mlx",
+            "nebius",
         }
 
     @pytest.mark.parametrize(

@@ -313,6 +313,7 @@ def _credentials_check(provider: str, section: dict) -> Check:
 
     env_keys = {
         "openai": "OPENAI_API_KEY",
+        "nebius": "NEBIUS_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
         "litellm": "",
     }

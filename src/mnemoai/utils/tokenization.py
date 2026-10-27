@@ -19,6 +19,7 @@ _DEFAULT_MULTIPLIERS = {
     "sagemaker": 1.35,
     "litellm": 1.35,
     "openai": 1.0,      # tokenizer basis; wrappers/model-specific encodings can differ
+    "nebius": 1.35,     # multiple model tokenizers; provider usage remains authoritative
 }
 
 

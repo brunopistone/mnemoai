@@ -6,6 +6,7 @@ from typing import Optional
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models.chat_models import BaseChatModel
 
+from mnemoai.models import nebius
 from mnemoai.models.chat_models.bedrock_stream_compat import harden_converse_stream
 from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
 from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
@@ -49,6 +50,7 @@ class LangChainLLMController(BaseModelController):
         "sagemaker",
         "litellm",
         "mlx",
+        "nebius",
     )
     PROVIDER_LABEL = "model"
 
@@ -299,6 +301,14 @@ class LangChainLLMController(BaseModelController):
             kwargs["extra_body"] = extra_body
 
         self.model = ChatOpenAIReasoning(**kwargs)
+
+    def _initialize_nebius_model(self, callbacks: list = None) -> None:
+        """Initialize Nebius Token Factory with its own credentials and endpoint."""
+        params, body = build_kwargs("MODEL_ID", "nebius", self)
+        self.model = nebius.build_model(
+            self.model_id, params, body, streaming=self.stream, callbacks=callbacks,
+            timeout=float((config.get("LLM", {}) or {}).get("REQUEST_TIMEOUT", 600)),
+        )
 
     def _initialize_openai_model(self, callbacks: list = None) -> None:
         """Initialize an OpenAI-compatible model.

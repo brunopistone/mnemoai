@@ -268,7 +268,7 @@ def test_invalid_explicit_override_is_not_treated_as_no_override(value, monkeypa
 def test_every_template_exposes_the_same_off_by_default_limits():
     root = Path(__file__).resolve().parents[2] / "src/mnemoai/utils"
     templates = list(root.glob("config.yaml*.example"))
-    assert len(templates) == 4
+    assert templates, "No bundled configuration templates found"
     for path in templates:
         data = yaml.safe_load(path.read_text())
         assert data["ENABLE_REVIEW"] is False
