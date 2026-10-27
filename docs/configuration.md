@@ -10,6 +10,7 @@ The fragments below show one section at a time. For a full, coherent file you ca
 - **[`config.yaml.bedrock.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.bedrock.example)** — Amazon Bedrock setup.
 - **[`config.yaml.bedrock.mantle.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.bedrock.mantle.example)** — Bedrock Mantle setup.
 - **[`config.yaml.mlx.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.mlx.example)** — a local MLX server on Apple Silicon (one server backing chat + vision + embeddings), with the sampler knobs, `KEEP_ALIVE` and the timeouts a local server needs.
+- **[`config.yaml.nebius.example`](https://github.com/brunopistone/mnemoai/blob/main/src/mnemoai/utils/config.yaml.nebius.example)** — Nebius Token Factory chat, vision and embeddings, using `NEBIUS_API_KEY`.
 
 Copy one and edit it:
 
@@ -140,6 +141,26 @@ MODEL_ID:
   REASONING_EFFORT: medium
 # Requires OPENAI_API_KEY environment variable
 ```
+
+#### Nebius Token Factory
+
+Select Nebius Token Factory in `/config` or `/model`, then tune it through
+`/params`. Set `NEBIUS_API_KEY` in the environment.
+
+```yaml
+MODEL_ID:
+  TYPE: nebius
+  NAME: openai/gpt-oss-120b
+  MAX_TOKENS: 8192
+  REASONING_EFFORT: low
+  STREAM: true
+```
+
+The default API base is `https://api.tokenfactory.nebius.com/v1`.
+`API_BASE`/`ENDPOINT_URL` and `API_KEY` can override the connection for each
+model section. Nebius also supports `VISION_MODEL_ID`, `RAG.EMBED_MODEL_ID`
+and all `AREA_MODELS` roles. See the [Nebius guide](guides/nebius.md) for
+model-specific capabilities, reasoning visibility and the complete configuration.
 
 #### Local OpenAI-compatible servers (llama.cpp / LM Studio / vLLM)
 

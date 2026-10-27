@@ -53,6 +53,7 @@ nav:
           - Safety & permissions: guides/safety.md
           - Agent skills: guides/agent-skills.md
       - Extending & advanced:
+          - Nebius Token Factory: guides/nebius.md
           - Orchestration & sub-agents: guides/orchestration.md
           - Memory & learning: guides/memory.md
           - Peer review: guides/peer-review.md

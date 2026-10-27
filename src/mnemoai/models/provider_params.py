@@ -170,6 +170,21 @@ _LLM = {
         # `-1` to pin). Handled inline by the controller, hence "special".
         "special": {"STREAM", "KEEP_ALIVE"},
     },
+    "nebius": {
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("TOP_K", "top_k", "top_k", "extra_body"),
+            _p("STOP", "stop", "stop"),
+            _p("PRESENCE_PENALTY", "presence_penalty", "presence_penalty"),
+            _p("FREQUENCY_PENALTY", "frequency_penalty", "frequency_penalty"),
+            _p("REPETITION_PENALTY", "repetition_penalty", "repetition_penalty", "extra_body"),
+            _p("REASONING_EFFORT", "reasoning_effort", "reasoning_effort"),
+        ],
+        "connection": {"API_BASE", "ENDPOINT_URL", "API_KEY"},
+        "special": {"STREAM"},
+    },
 }
 
 # --- VISION_MODEL_ID: mirrors vision_model_controller._initialize_*_model ----
@@ -261,6 +276,18 @@ _VISION = {
         "connection": {"HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY"},
         "special": {"KEEP_ALIVE"},
     },
+    "nebius": {
+        "params": [
+            _p("TEMPERATURE", "temperature", "temperature"),
+            _p("MAX_TOKENS", "max_tokens", "max_tokens"),
+            _p("TOP_P", "top_p", "top_p"),
+            _p("TOP_K", "top_k", "top_k", "extra_body"),
+            _p("STOP", "stop", "stop"),
+            _p("REASONING_EFFORT", "reasoning_effort", "reasoning_effort"),
+        ],
+        "connection": {"API_BASE", "ENDPOINT_URL", "API_KEY"},
+        "special": set(),
+    },
 }
 
 # --- RAG.EMBED_MODEL_ID: mirrors embeddings_controller -----------------------
@@ -290,6 +317,11 @@ _EMBED = {
         "params": [],
         "connection": {"HOST", "PORT", "API_BASE", "ENDPOINT_URL", "API_KEY"},
         "special": {"DIMENSION", "KEEP_ALIVE"},
+    },
+    "nebius": {
+        "params": [],
+        "connection": {"API_BASE", "ENDPOINT_URL", "API_KEY"},
+        "special": {"DIMENSION", "MAX_INPUT_TOKENS", "MAX_INPUT_CHARS"},
     },
 }
 

@@ -6,6 +6,7 @@ from typing import Any, Optional
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
+from mnemoai.models import nebius
 from mnemoai.models.chat_models.bedrock_stream_compat import harden_converse_stream
 from mnemoai.models.controllers.base_model_controller import BaseModelController
 from mnemoai.models.provider_params import build_kwargs, extra_params
@@ -26,6 +27,7 @@ class VisionModelController(BaseModelController):
         "sagemaker",
         "litellm",
         "mlx",
+        "nebius",
     )
     PROVIDER_LABEL = "vision model"
 
@@ -42,6 +44,7 @@ class VisionModelController(BaseModelController):
         self.input_format = self.model_id.get("INPUT_FORMAT", "openai_chat")
         self.api_base = self.model_id.get("API_BASE")
         self.api_key = self.model_id.get("API_KEY")
+        self.reasoning_effort = self.model_id.get("REASONING_EFFORT")
 
         self.model: Optional[BaseChatModel] = None
 
@@ -154,6 +157,15 @@ class VisionModelController(BaseModelController):
             kwargs["extra_body"] = extra_body
 
         self.model = ChatOpenAI(**kwargs)
+
+    def _initialize_nebius_model(self) -> None:
+        """Initialize an OpenAI-compatible Nebius vision model."""
+        params, body = build_kwargs("VISION_MODEL_ID", "nebius", self)
+        self.model = nebius.build_model(
+            self.model_id, params, body,
+            timeout=float((config.get("LLM", {}) or {}).get("REQUEST_TIMEOUT", 600)),
+            max_retries=2,
+        )
 
     def _initialize_openai_model(self) -> None:
         """Initialize OpenAI vision model using LangChain."""

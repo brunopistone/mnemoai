@@ -8,7 +8,9 @@ import numpy as np
 import ollama
 from openai import OpenAI
 
+from mnemoai.models import nebius
 from mnemoai.models.controllers.base_model_controller import BaseModelController
+from mnemoai.models.provider_params import extra_params
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.tokenization import count_tokens
@@ -61,7 +63,7 @@ class EmbeddingsController(BaseModelController):
     controllers require them), so the shared reads don't apply.
     """
 
-    PROVIDERS = ("ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx")
+    PROVIDERS = ("ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx", "nebius")
     PROVIDER_METHOD_TEMPLATE = "_embed_{provider}"
     PROVIDER_LABEL = "embedding model"
 
@@ -78,6 +80,8 @@ class EmbeddingsController(BaseModelController):
             "API_BASE"
         ) or self.embed_model_config.get("ENDPOINT_URL")
         self.api_key = self.embed_model_config.get("API_KEY")
+        if self.embed_model_type == "nebius":
+            self.api_base = nebius.base_url(self.embed_model_config)
 
         # ``DIMENSION`` has two roles: (1) the empty-result shape
         # (always), and (2) the REQUESTED output size for providers that support a
@@ -506,6 +510,30 @@ class EmbeddingsController(BaseModelController):
             modelId=self.embed_model_name, body=json.dumps(body)
         )
         return json.loads(response["body"].read())
+
+    def _embed_nebius(self, texts: List[str]) -> np.ndarray:
+        """Create real Nebius embeddings; generic retry/outage handling stays above."""
+        kwargs = {
+            "model": self.embed_model_name, "input": texts, "encoding_format": "float",
+        }
+        if self._configured_dim is not None:
+            kwargs["dimensions"] = self._configured_dim
+        extra = extra_params(self.embed_model_config)
+        if extra:
+            kwargs["extra_body"] = extra
+        with OpenAI(
+            base_url=self.api_base,
+            api_key=nebius.api_key(self.embed_model_config),
+            max_retries=0,
+            timeout=float((config.get("LLM", {}) or {}).get("REQUEST_TIMEOUT", 600)),
+        ) as client:
+            client.organization = None
+            client.project = None
+            response = client.embeddings.create(**kwargs)
+        return np.asarray(
+            [item.embedding for item in sorted(response.data, key=lambda item: item.index)],
+            dtype=np.float32,
+        )
 
     def _embed_openai(self, texts: List[str]) -> np.ndarray:
         """One OpenAI / OpenAI-compatible embed call; raises on failure.

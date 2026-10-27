@@ -7,6 +7,16 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.30.0] — 2026-10-27
+
+### Added
+
+- Nebius Token Factory provider for chat, vision, embeddings and per-area models.
+  Configure it through `/config`, `/model`, `/params` and existing feature controls.
+  Preserve streamed/non-streamed reasoning and usage, carry reasoning across tool
+  turns, and use Nebius-specific credentials. A complete example reaches existing
+  installations through normal template seeding.
+
 ## [1.29.5] — 2026-10-25
 
 ### Fixed

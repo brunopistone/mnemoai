@@ -28,6 +28,7 @@ from prompt_toolkit.widgets import (
 )
 
 from mnemoai.client.review import SETTINGS as _REVIEW_SETTINGS
+from mnemoai.models import nebius
 from mnemoai.models.area_models import AREAS
 from mnemoai.models.area_models import CONFIG_SECTION as AREA_SECTION
 from mnemoai.models.area_models import DESCRIPTIONS as AREA_DESCRIPTIONS
@@ -69,6 +70,7 @@ _PROVIDERS = {
     "6": ("sagemaker", "config.yaml.example", "Amazon SageMaker AI", "your-endpoint-name"),
     "7": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
     "8": ("mlx", "config.yaml.mlx.example", "MLX server (local, Apple Silicon)", "qwen3-4b"),
+    "9": ("nebius", "config.yaml.nebius.example", "Nebius Token Factory", nebius.DEFAULT_CHAT_MODEL),
 }
 
 # Human-facing menu label per provider TYPE (stored value is the canonical key).
@@ -81,6 +83,7 @@ _PROVIDER_LABELS = {
     "sagemaker": "sagemaker",
     "litellm": "litellm",
     "mlx": "mlx",
+    "nebius": "nebius",
 }
 
 # Wording + defaults for the shared HOST/PORT prompts, per local-runner provider
@@ -1134,6 +1137,13 @@ def _connection_steps(section: str, provider: str) -> list:
             steps.append(_optional_field_step(section, "API_BASE", "MLX base URL (optional; blank uses http://HOST:PORT/v1)"))
         if "API_KEY" in allowed:
             steps.append(_optional_field_step(section, "API_KEY", "API key (optional; a local MLX server needs none)"))
+    if provider == "nebius":
+        steps.append(_optional_field_step(
+            section, "API_BASE", "Nebius API base URL", nebius.DEFAULT_BASE_URL,
+        ))
+        steps.append(_optional_field_step(
+            section, "API_KEY", "Nebius API key (optional; blank uses NEBIUS_API_KEY)",
+        ))
 
     # Embeddings: optional real output dimension; blank uses runtime detection.
     if section == "EMBED_MODEL_ID":
@@ -1156,6 +1166,9 @@ def _print_credential_note(provider: str) -> None:
     elif provider == "openai":
         print("  Note: OpenAI reads the OPENAI_API_KEY environment variable")
         print("  (set it in your shell or the config ENV section).")
+    elif provider == "nebius":
+        print("  Note: Nebius Token Factory reads NEBIUS_API_KEY, or API_KEY")
+        print("  in the model section. Set the key in your shell or config ENV.")
     elif provider == "anthropic":
         print("  Note: Anthropic (Claude API) reads the ANTHROPIC_API_KEY env")
         print("  var, or MODEL_ID.API_KEY. This is the direct api.anthropic.com")
@@ -1755,7 +1768,7 @@ def _prompt_model_section(
         chat_name = _get_field(text, "MODEL_ID", "NAME") or ""
         if chat_name and _ask_bool(
             f"Use the same model as Chat?  ({chat_type} / {chat_name})",
-            default=True,
+            default=chat_type != "nebius",
         ):
             return _copy_chat_to_vision(text)
 
@@ -1788,6 +1801,10 @@ def _prompt_model_section(
     # may be rejected by another); MAX_TOKENS is prompted below. Done before the
     # prompts so the connection steps re-add exactly the right keys.
     if new_type != cur_type:
+        if "nebius" in (new_type, cur_type):
+            # Shared key names must not transfer another service's credentials.
+            for key in ("API_KEY", "API_BASE", "ENDPOINT_URL"):
+                text = _remove_field(text, section, key)
         text = _prune_unsupported_params(text, section, new_type)
     text = _clear_inference_params(text, section, keep={"MAX_TOKENS"})
 
@@ -1829,6 +1846,8 @@ _PARAM_META = {
     "TOP_K": ("int", "top-k sampling, e.g. 40"),
     "MIN_P": ("float", "min-p sampling, e.g. 0.05 (0 disables)"),
     "MAX_TOKENS": ("int", "max output tokens"),
+    "MAX_INPUT_TOKENS": ("int", "embedding input token limit"),
+    "MAX_INPUT_CHARS": ("int", "embedding input character limit"),
     "PRESENCE_PENALTY": ("float", "e.g. 0.0-2.0"),
     "FREQUENCY_PENALTY": ("float", "e.g. 0.0-2.0"),
     "REPETITION_PENALTY": ("float", "e.g. 1.0-1.3"),
@@ -1855,6 +1874,7 @@ _PARAM_META = {
 # Order params are prompted in (registry membership decides which appear).
 _PARAM_ORDER = [
     "TEMPERATURE", "TOP_P", "TOP_K", "MIN_P", "MAX_TOKENS",
+    "MAX_INPUT_TOKENS", "MAX_INPUT_CHARS",
     "PRESENCE_PENALTY", "FREQUENCY_PENALTY", "REPETITION_PENALTY",
     "STOP", "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
     "PROMPT_CACHE", "PROMPT_CACHE_TTL",
