@@ -7,6 +7,21 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.30.1] — 2026-10-30
+
+### Fixed
+
+- Honor the embedding model's `MAX_INPUT_CHARS` setting saved by `/params`,
+  retaining `RAG.EMBEDDINGS.MAX_INPUT_CHARS` as the fallback. An explicit zero
+  disables the character cap without disabling the separate token limit.
+
+### Security
+
+- Prevent Chroma from deserializing embedding functions from saved dense or sparse
+  schemas during precomputed-vector writes. Sanitize collection configuration and
+  schemas in memory on every collection acquisition, preserving stored vectors,
+  metadata and index settings without rewriting the database.
+
 ## [1.30.0] — 2026-10-27
 
 ### Added
@@ -5469,7 +5484,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.28.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.30.1...HEAD
+[1.30.1]: https://github.com/brunopistone/mnemoai/compare/v1.30.0...v1.30.1
 [1.28.0]: https://github.com/brunopistone/mnemoai/compare/v1.27.0...v1.28.0
 [1.27.0]: https://github.com/brunopistone/mnemoai/compare/v1.26.0...v1.27.0
 [1.26.0]: https://github.com/brunopistone/mnemoai/compare/v1.25.0...v1.26.0

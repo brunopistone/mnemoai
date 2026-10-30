@@ -235,17 +235,17 @@ does not grant a worker permission to stage, commit, restore or push. Read-only
 Git calls remain available. Dangerous operations additionally use the Git
 safety-override gate, which no `/auto` tier grants.
 
-| Operation                                                  | Protection                                              |
-| ---------------------------------------------------------- | ------------------------------------------------------- |
-| Force push to `main`/`master`                              | **Blocked** — cannot be overridden                      |
-| Option injection (`-c`, `--exec-path`, `--upload-pack`, …) | **Blocked** — these make git run arbitrary commands     |
-| `git reset --hard`                                         | Asks first                                              |
+| Operation                                                  | Protection                                               |
+| ---------------------------------------------------------- | -------------------------------------------------------- |
+| Force push to `main`/`master`                              | **Blocked** — cannot be overridden                       |
+| Option injection (`-c`, `--exec-path`, `--upload-pack`, …) | **Blocked** — these make git run arbitrary commands      |
+| `git reset --hard`                                         | Asks first                                               |
 | `git push --force` / `--force-with-lease`                  | Asks first; a lease does not authorize rewriting history |
-| `git restore --worktree`, `checkout --`, remote deletion   | Asks before discarding content or remote refs |
-| `git commit --amend`                                       | Checks whether the commit was already pushed, then asks |
-| `git clean -f` / `-fd`                                     | Asks first                                              |
-| Force-delete branch (`-D`)                                 | Asks first                                              |
-| Skip hooks (`--no-verify`)                                 | Asks first                                              |
+| `git restore --worktree`, `checkout --`, remote deletion   | Asks before discarding content or remote refs            |
+| `git commit --amend`                                       | Checks whether the commit was already pushed, then asks  |
+| `git clean -f` / `-fd`                                     | Asks first                                               |
+| Force-delete branch (`-D`)                                 | Asks first                                               |
+| Skip hooks (`--no-verify`)                                 | Asks first                                               |
 
 Checks run against the command as **git will receive it**, not the raw string, so
 quoting can't smuggle a flag past them: `push origin main --for"ce"` is still
@@ -295,9 +295,11 @@ server.
 
 All embeddings are computed by MnemoAI's configured provider and passed as
 vectors. Collections use a guard that refuses implicit embedding requests,
-including after reopening or clearing a store. This prevents a saved Chroma
-embedding-function configuration from loading executable model code through that
-path. Existing vectors and text remain usable.
+including after reopening or clearing a store. Before Chroma interprets a
+collection's saved configuration or dense/sparse schema, the adapter removes its
+embedding-function definitions from a private in-memory copy. This also protects
+writes with precomputed vectors, which Chroma otherwise checks for implicit sparse
+embeddings. The stored database, vector data and index settings are preserved.
 
 These protections address MnemoAI's integration; they do not patch a separately
 run Chroma server. The four upstream dependency alerts remain open pending an

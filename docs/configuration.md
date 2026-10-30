@@ -257,6 +257,11 @@ use MnemoAI's existing embedding machinery. Failed writes never fabricate
 vectors, and existing stores retain their normal keyword-search fallback.
 Local playbook learning continues to make no model or embedding calls.
 
+The embedding model's `MAX_INPUT_CHARS` setting (also exposed in `/params`)
+overrides `RAG.EMBEDDINGS.MAX_INPUT_CHARS`. When omitted or null, the global setting
+applies, defaulting to 200,000 characters. Set it to `0` to disable the character
+cap; the independent `MAX_INPUT_TOKENS` limit still applies.
+
 Official references:
 
 - [Quickstart and authentication](https://docs.tokenfactory.nebius.com/quickstart)
