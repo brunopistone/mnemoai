@@ -20,6 +20,10 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ### Security
 
+- Require patched LiteLLM, LangGraph, LangGraph SDK and Mem0 releases, covering
+  proxy credential-file access and salt-key reuse, authenticated streaming URL
+  redirection, and session-scope key collisions. Apply the minimum versions to
+  package metadata as well as the dependency lockfile.
 - Prevent Chroma from deserializing embedding functions from saved dense or sparse
   schemas during precomputed-vector writes. Sanitize collection configuration and
   schemas in memory on every collection acquisition, preserving stored vectors,

@@ -13,8 +13,10 @@ ROOT = Path(__file__).resolve().parents[2]
 # PyJWT 2.15 also fixes CVE-2026-101918, beyond the 2.14 algorithm-confusion fixes.
 # urllib3 2.8 fixes CVE-2026-97687/97688/97689.
 SECURITY_FLOORS = [
-    # GHSA-fvww-7h3r-vfhp: resource decorators previously ignored actions=.
-    ("langgraph-sdk", "0.4.4", ("0.4.2", "0.4.3")),
+    # Preserve action-scope enforcement and encode streaming resource identifiers.
+    # GHSA-fvww-7h3r-vfhp and GHSA-3fx2-cqw9-xr3c.
+    ("langgraph-sdk", "0.4.6", ("0.4.2", "0.4.3", "0.4.4", "0.4.5")),
+    ("langgraph", "1.2.14", ("1.2.3", "1.2.9", "1.2.13")),
     # Includes the malformed-reference and parser resource-exhaustion fixes.
     ("pypdf", "6.21.2", ("6.18.1", "6.19.0", "6.20.1", "6.21.1")),
     ("pyjwt", "2.15.0", ("2.13.0", "2.14.0")),
@@ -23,7 +25,11 @@ SECURITY_FLOORS = [
     ("aiohttp", "3.14.4", ("3.14.2", "3.14.3")),
     ("brotli", "1.2.1", ("1.1.0", "1.2.0")),
     ("filelock", "4.2.1", ("3.32.0", "4.2.0")),
-    ("litellm", "1.93.2", ("1.93.0", "1.93.1")),
+    # Proxy credential-file access and salt-key reuse: GHSA-g5ff-637f-6q2m /
+    # GHSA-7hp6-4w63-5g45.
+    ("litellm", "1.100.4", ("1.93.0", "1.93.1", "1.93.2", "1.94.0", "1.100.3")),
+    # Session-scope delimiter collision: GHSA-5324-3w58-qpp2.
+    ("mem0ai", "2.0.18", ("2.0.14", "2.0.17")),
     ("mcp", "1.30.0", ("1.28.1", "1.29.0")),
     ("multidict", "6.9.1", ("6.7.1", "6.9.0")),
     ("nltk", "3.10.4", ("3.9.4", "3.10.3")),
