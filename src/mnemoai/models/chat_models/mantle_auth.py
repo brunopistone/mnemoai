@@ -23,14 +23,24 @@ class RotatingTokenHeaders:
         if _origin(request.url) != self.origin:
             raise ValueError("Refusing to send generated Mantle credentials to a different origin")
 
+    def _set_token(self, request, token):
+        # Anthropic SDK 2.x uses Authorization for API keys. Refresh that header
+        # when present, rather than leaving the initial token beside a fresh
+        # X-Api-Key. Older SDKs keep their original X-Api-Key authentication.
+        if self.header == "X-Api-Key" and "Authorization" in request.headers:
+            request.headers.pop("X-Api-Key", None)
+            request.headers["Authorization"] = "Bearer " + token
+        else:
+            request.headers[self.header] = self.prefix + token
+
     def request(self, request):
         self._check_origin(request)
-        request.headers[self.header] = self.prefix + self.provider()
+        self._set_token(request, self.provider())
 
     async def async_request(self, request):
         self._check_origin(request)
         token = await to_thread.run_sync(self.provider)
-        request.headers[self.header] = self.prefix + token
+        self._set_token(request, token)
 
 
 def _transport(sdk, provider, *, anthropic, asynchronous, proxy):

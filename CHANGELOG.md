@@ -14,6 +14,9 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 - Honor the embedding model's `MAX_INPUT_CHARS` setting saved by `/params`,
   retaining `RAG.EMBEDDINGS.MAX_INPUT_CHARS` as the fallback. An explicit zero
   disables the character cap without disabling the separate token limit.
+- Refresh generated Mantle tokens in the authentication header used by the
+  installed Anthropic SDK. Newer SDKs use `Authorization`; older SDKs retain
+  `X-Api-Key`. Do not leave a stale token in a second header.
 
 ### Security
 
