@@ -274,6 +274,51 @@ def test_embeddings_dimensions_order_and_credentials(settings, wire):
     assert "openai-organization" not in request.headers and "openai-project" not in request.headers
 
 
+@pytest.mark.parametrize("model_limit,global_limit,expected", [
+    (12, 8, 12), (0, 8, 100), (None, 8, 8), (None, 0, 100),
+    (None, None, 100),
+])
+def test_embedding_character_limit_reaches_provider_with_legacy_fallback(
+    settings, wire, model_limit, global_limit, expected,
+):
+    settings["RAG"]["EMBED_MODEL_ID"]["MAX_INPUT_CHARS"] = model_limit
+    if global_limit is not None:
+        settings["RAG"]["EMBEDDINGS"]["MAX_INPUT_CHARS"] = global_limit
+    EmbeddingsController().embed(["0123456789" * 10, "abcdefghij" * 10])
+    assert all(len(text) == expected for text in wire[-1][1]["input"])
+
+
+def test_params_saved_character_limit_is_applied_after_reload(settings, wire, monkeypatch, tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(settings))
+    monkeypatch.setattr(configurator, "_config_to_edit", lambda: path)
+    monkeypatch.setattr(configurator, "_is_tty", lambda: False)
+    choice = next(
+        key for key, (section, _) in configurator._PARAM_SECTIONS.items()
+        if section == "EMBED_MODEL_ID"
+    )
+    monkeypatch.setattr(configurator, "_ask_choice", lambda *a, **kw: choice)
+    monkeypatch.setattr(configurator, "_ask", lambda prompt, default=None, **kw: (
+        "12" if prompt.split()[0] == "MAX_INPUT_CHARS" else default or ""
+    ))
+    assert configurator.run_params_override() is not None
+    monkeypatch.setattr(config, "_config_data", yaml.safe_load(path.read_text()))
+    EmbeddingsController().embed(["0123456789" * 10, "abcdefghij" * 10])
+    assert wire[-1][1]["input"] == ["012345678901", "abcdefghijab"]
+
+
+def test_disabled_character_cap_keeps_the_token_limit(settings, wire):
+    settings["RAG"]["EMBED_MODEL_ID"].update(MAX_INPUT_CHARS=0, MAX_INPUT_TOKENS=16)
+    original = "an embedding input " * 100
+    controller = EmbeddingsController()
+    controller.embed([original, original])
+    assert controller.max_input_chars == 0
+    assert all(
+        0 < embeddings_controller.count_tokens(text) <= 16
+        for text in wire[-1][1]["input"]
+    )
+
+
 def test_default_and_explicit_embedding_endpoints_have_same_identity(settings):
     implicit = EmbeddingsController()
     cfg = dict(settings["RAG"]["EMBED_MODEL_ID"], API_BASE=nebius.DEFAULT_BASE_URL + "/")

@@ -23,8 +23,10 @@ def test_generated_tokens_rotate_for_sync_and_async_requests(
         return minted[-1]
 
     def response(request, backend):
-        header = "x-api-key" if protocol == "anthropic" else "authorization"
-        headers.append(request.headers[header])
+        headers.append({
+            key: request.headers[key]
+            for key in ("x-api-key", "authorization") if key in request.headers
+        })
         return backend.Response(200, request=request, json={
             "id": "fixture", "model": "fixture", "object": "chat.completion",
             "created": 1, "created_at": 1, "status": "completed",
@@ -66,20 +68,54 @@ def test_generated_tokens_rotate_for_sync_and_async_requests(
     sync()
     asyncio.run(asynchronous())
     asyncio.run(asynchronous())
-    prefix = "" if protocol == "anthropic" else "Bearer "
     expected = ["explicit-key"] * 4 if explicit_key else ["generated-2", "generated-3", "generated-4", "generated-5"]
-    assert headers == [prefix + value for value in expected]
+    assert len(headers) == len(expected)
+    for actual, token in zip(headers, expected):
+        allowed = [{"authorization": "Bearer " + token}]
+        if protocol == "anthropic":
+            allowed.append({"x-api-key": token})
+        # Accept the SDK's auth scheme, but never an additional stale credential.
+        assert actual in allowed
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
-def test_generated_credentials_are_never_added_to_a_cross_origin_redirect(sdk_http_modules, asynchronous):
+@pytest.mark.parametrize("initial", [
+    {"x-api-key": "old"},
+    {"authorization": "Bearer old"},
+    {"authorization": "Bearer old", "x-api-key": "also-old"},
+])
+def test_anthropic_rotation_updates_the_sdk_header_without_stale_credentials(
+    sdk_http_modules, asynchronous, initial,
+):
+    for backend in sdk_http_modules:
+        headers = RotatingTokenHeaders(lambda: "fresh", "https://sdk-test.invalid", anthropic=True)
+        request = backend.Request("POST", "https://sdk-test.invalid/v1/messages", headers=initial)
+        if asynchronous:
+            asyncio.run(headers.async_request(request))
+        else:
+            headers.request(request)
+        expected = (
+            {"authorization": "Bearer fresh"} if "authorization" in initial
+            else {"x-api-key": "fresh"}
+        )
+        assert {
+            key: request.headers[key]
+            for key in ("x-api-key", "authorization") if key in request.headers
+        } == expected
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("anthropic", [False, True])
+def test_generated_credentials_are_never_added_to_a_cross_origin_redirect(sdk_http_modules, asynchronous, anthropic):
     for backend in sdk_http_modules:
         minted = []
-        headers = RotatingTokenHeaders(lambda: minted.append(1) or "secret", "https://sdk-test.invalid")
+        headers = RotatingTokenHeaders(
+            lambda: minted.append(1) or "secret", "https://sdk-test.invalid", anthropic=anthropic,
+        )
         request = backend.Request("GET", "https://different-origin.invalid/collect")
         with pytest.raises(ValueError, match="different origin"):
             if asynchronous:
                 asyncio.run(headers.async_request(request))
             else:
                 headers.request(request)
-        assert minted == [] and "authorization" not in request.headers
+        assert minted == [] and "authorization" not in request.headers and "x-api-key" not in request.headers

@@ -111,10 +111,14 @@ class EmbeddingsController(BaseModelController):
         self.cache_enabled = embeddings_config.get("CACHE_ENABLED", True)
         self.cache_size = embeddings_config.get("CACHE_SIZE", 1000)
         # Cap per-text input as defensive hygiene against a genuinely huge text
-        # OOM-ing the embed runner (tune via RAG.EMBEDDINGS.MAX_INPUT_CHARS, 0
-        # disables). Generous — transient runner EOFs are handled by retry below,
-        # not by truncation.
-        self.max_input_chars = int(embeddings_config.get("MAX_INPUT_CHARS", 200000))
+        # OOM-ing the embed runner. The model-specific /params value overrides
+        # the legacy RAG.EMBEDDINGS setting; 0 disables only the character cap.
+        # Generous — transient runner EOFs are handled by retry below.
+        cfg_chars = self.embed_model_config.get("MAX_INPUT_CHARS")
+        self.max_input_chars = int(
+            cfg_chars if cfg_chars is not None
+            else embeddings_config.get("MAX_INPUT_CHARS", 200000)
+        )
         # Token cap: the real guard against overflowing the embed model's context
         # (chars alone can't bound tokens). Provider-agnostic — applied in the
         # shared truncate before dispatch. Explicit MAX_INPUT_TOKENS config wins;
