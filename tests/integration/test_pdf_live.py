@@ -9,9 +9,13 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 pytestmark = pytest.mark.integration
 
 
-def test_live_pdf_reader_recovers_from_bad_input_and_extracts_text(live_client, _neutral_root):
+@pytest.mark.parametrize("payload", [
+    b"%PDF-1.7\nNot a valid PDF.\n%%EOF\n",
+    b"%PDF-1.4\nstartxref\n28\n%%EOF\nxref\n1 0\naaa",
+], ids=["invalid-pdf", "truncated-xref"])
+def test_live_pdf_reader_recovers_from_bad_input_and_extracts_text(live_client, _neutral_root, payload):
     malformed = _neutral_root / "malformed-security-fixture.pdf"
-    malformed.write_bytes(b"%PDF-1.7\nNot a valid PDF.\n%%EOF\n")
+    malformed.write_bytes(payload)
     valid = _neutral_root / "security-fixture.pdf"
     writer = PdfWriter()
     page = writer.add_blank_page(width=300, height=200)

@@ -17,8 +17,9 @@ SECURITY_FLOORS = [
     # GHSA-fvww-7h3r-vfhp and GHSA-3fx2-cqw9-xr3c.
     ("langgraph-sdk", "0.4.6", ("0.4.2", "0.4.3", "0.4.4", "0.4.5")),
     ("langgraph", "1.2.14", ("1.2.3", "1.2.9", "1.2.13")),
-    # Includes the malformed-reference and parser resource-exhaustion fixes.
-    ("pypdf", "6.21.2", ("6.18.1", "6.19.0", "6.20.1", "6.21.1")),
+    # GHSA-5849-834g-hvw5 / GHSA-cggf-277g-3q54 / GHSA-mfr5-77xh-9j7h:
+    # EOF xref loop, shared page-tree memory amplification, cyclic cloning.
+    ("pypdf", "6.21.4", ("6.18.1", "6.19.0", "6.20.1", "6.21.1", "6.21.2", "6.21.3")),
     ("pyjwt", "2.15.0", ("2.13.0", "2.14.0")),
     ("urllib3", "2.8.0", ("2.6.3", "2.7.0")),
     ("certifi", "2026.10.19", ("2026.7.22", "2026.10.17")),
