@@ -252,7 +252,9 @@ def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
     return (
         f"Started background sub-agent '{rec.agent_id}' ({subagent.name}: {label}). "
         "It runs when a background worker slot is free; you'll be notified when it finishes, and "
-        "its result will be delivered then. Do not wait for it — carry on."
+        "its result will be delivered then. Continue independent work. Until you have "
+        "its report, any answer depending on it is an interim update, not a final "
+        "conclusion. Do not duplicate its work or poll with shell/sleep commands."
     )
 
 
@@ -323,7 +325,7 @@ def handle_resume_agent(
 def drain_background_completions(agent) -> List[BaseMessage]:
     """Pop newly-finished background sub-agents as wrapped user messages.
 
-    Called by the chat loop at the start of a turn: each just-completed
+    Called at turn start and safe graph boundaries: each just-completed
     background agent becomes a HumanMessage carrying its report, so the model
     addresses it as new input (reusing the steering framing). Returns [] when
     nothing finished since the last drain."""
@@ -336,15 +338,43 @@ def drain_background_completions(agent) -> List[BaseMessage]:
         verb = "failed" if rec.status == "failed" else "finished"
         msgs.append(
             HumanMessage(
+                additional_kwargs={"mnemoai_background_report": rec.agent_id},
                 content=(
                     f"Your background sub-agent '{rec.agent_id}' "
                     f"({rec.agent_type}: {rec.description}) {verb} while you "
                     f"were working. Its report:\n\n{rec.result}\n\n"
-                    "Address this now: summarize what matters for the user."
+                    "Incorporate this report with the other findings. If required agents "
+                    "are still running, give an interim update; otherwise consolidate "
+                    "the results for the original request. Report failures or missing "
+                    "evidence honestly; do not repeat completed work."
                 )
             )
         )
     return msgs
+
+
+def background_status(agent) -> tuple[int, int]:
+    """Active jobs and completed reports not yet delivered in this conversation."""
+    registry = getattr(agent, "_bg_agents", None)
+    return registry.pending_counts() if registry is not None else (0, 0)
+
+
+def with_background_status(agent, messages: list) -> list:
+    """Ephemeral status for a parent response, never saved as user history."""
+    running, ready = background_status(agent)
+    if not (running or ready):
+        return messages
+    return list(messages) + [HumanMessage(content=(
+        "<background-agent-status>\n"
+        f"{running} delegated agents are running or queued; "
+        f"{ready} completed reports await delivery. "
+        "Continue independent work without duplicating delegated work or polling. "
+        "If you reply before the required reports arrive, explicitly call it an "
+        "interim update and state what is outstanding. Do not claim the original "
+        "task is complete or present a final conclusion that depends on those "
+        "reports. They will be delivered automatically for you to consolidate.\n"
+        "</background-agent-status>"
+    ))]
 
 
 def has_undelivered_background(agent) -> bool:

@@ -81,6 +81,13 @@ def test_reset_clears_the_clickable_snapshot():
     assert reviewer.view is None
 
 
+@pytest.mark.parametrize("verdict", ["pass", "revise", "inconclusive"])
+def test_pending_agents_cannot_be_labelled_final_by_peer_review(verdict):
+    output = visible(review_view.final_answer("ACTOR-UPDATE", report(verdict), pending_agents=True))
+    assert "Interim answer" in output and "Final answer" not in output
+    assert "ACTOR-UPDATE" in output
+
+
 def test_a_late_snapshot_cannot_reappear_after_context_reset():
     reviewer = review.Reviewer(enabled=True)
     old = review_view.snapshot((id(reviewer), reviewer._generation), "complete", report())

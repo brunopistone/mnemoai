@@ -489,7 +489,8 @@ def render_session_notice(text: str) -> str:
 
 
 def render_turn_end(
-    seconds: float, finished: float, stopped: bool = False, files: int = 0
+    seconds: float, finished: float, stopped: bool = False, files: int = 0,
+    running_agents: int = 0, pending_reports: int = 0,
 ) -> str:
     """One dim line closing a turn: how long it took and when it ended.
 
@@ -516,6 +517,16 @@ def render_turn_end(
     changed = f" · {files} file{'s' if files != 1 else ''} · /why" if files > 0 else ""
     if stopped:
         return f"{_GRAY}⊘ stopped after {duration}{changed} · {clock}{_RESET}"
+    if running_agents or pending_reports:
+        pending = []
+        if running_agents:
+            pending.append(f"{running_agents} agent{'s' if running_agents != 1 else ''} still running")
+        if pending_reports:
+            pending.append(f"{pending_reports} report{'s' if pending_reports != 1 else ''} awaiting delivery")
+        return (
+            f"{_GRAY}· interim update in {duration}{changed} · "
+            f"{' · '.join(pending)} · {clock}{_RESET}"
+        )
     return f"{_GRAY}· done in {duration}{changed} · {clock}{_RESET}"
 
 

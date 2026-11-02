@@ -528,7 +528,7 @@ class LangGraphAgent:
         tool-call-free model call has no tool round left to ride on, so it gets
         one more pass through the model rather than leaking into the next turn —
         the structural hole that retired the first version of this feature."""
-        return {"messages": mid_turn.drain(self)}
+        return {"messages": self.drain_background_completions() + mid_turn.drain(self)}
 
     def _is_headless(self) -> bool:
         """True in an unattended execution context (parallel/background work)."""
@@ -593,7 +593,11 @@ class LangGraphAgent:
                     self._route_after_decompose,
                     {"agent": "agent", "orchestrator": "orchestrator"},
                 )
-                workflow.add_edge("orchestrator", END)
+                workflow.add_conditional_edges(
+                    "orchestrator",
+                    self._should_continue,
+                    {"continue": "tools", "deliver": "deliver", "end": END},
+                )
             else:
                 workflow.add_edge("classifier", "agent")
         else:
@@ -2101,8 +2105,12 @@ class LangGraphAgent:
             if self._cancelled() or (stop_requested is not None and stop_requested()):
                 raise KeyboardInterrupt("sub-agent stopped before stream retry")
             try:
+                request_messages = (
+                    subagent_runner.with_background_status(self, messages)
+                    if mark_answer and not quiet else messages
+                )
                 response, had_reasoning = self._stream_once(
-                    active_model, messages, config, print_reasoning, mark_answer,
+                    active_model, request_messages, config, print_reasoning, mark_answer,
                     quiet=quiet,
                     **({"stop_requested": stop_requested} if stop_requested is not None else {}),
                 )
@@ -2975,6 +2983,10 @@ class LangGraphAgent:
         """Delegates to :func:`subagent_runner.has_undelivered_background`."""
         return subagent_runner.has_undelivered_background(self)
 
+    def background_status(self) -> tuple[int, int]:
+        """Counts used to distinguish interim output from completed work."""
+        return subagent_runner.background_status(self)
+
     def _callback_free_model(self):
         """Delegates to :func:`subagent_runner.callback_free_model`."""
         return subagent_runner.callback_free_model(self)
@@ -3177,6 +3189,7 @@ class LangGraphAgent:
             self._start_spinner()
             # All tool replies precede mid-turn guidance; providers require
             # every tool_call_id to be answered before the next human message.
+            tool_results.extend(self.drain_background_completions())
             tool_results.extend(mid_turn.drain(self))
             work_review = getattr(self, "_work_review", None)
             if work_review is not None:
@@ -3208,6 +3221,8 @@ class LangGraphAgent:
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             return "continue"
+        if self.has_undelivered_background():
+            return "deliver"
         if mid_turn.close_if_empty(self):
             return "end"
         return "deliver"
@@ -3509,7 +3524,7 @@ class LangGraphAgent:
 
         Skips System/Human: the user turn was already stored as the clean prompt,
         so the reminder-bearing ``HumanMessage`` the model ran on must not be
-        re-added. A **mid-turn message** is the one exception — it was produced
+        re-added. Mid-turn messages and background reports are exceptions — produced
         INSIDE the turn and exists nowhere else, so dropping it would leave live
         history and the transcript holding an answer to a question neither of them
         contains; it is stored in the position it was delivered, as the user's own
@@ -3539,7 +3554,9 @@ class LangGraphAgent:
         new_messages: List[BaseMessage] = []
         for m in produced:
             if isinstance(m, (SystemMessage, HumanMessage)):
-                if isinstance(m, HumanMessage) and is_feedback(m.content):
+                if isinstance(m, HumanMessage) and (
+                    is_feedback(m.content) or m.additional_kwargs.get("mnemoai_background_report")
+                ):
                     if m not in self._messages:
                         new_messages.append(m)
                     continue
@@ -3604,7 +3621,11 @@ class LangGraphAgent:
         self._last_input_tokens = None  # context is small again
         self._preapproved_bash = []  # plan-scoped approvals don't outlive a clear
         self._execute_plan_route = False  # plan-execution route pin is plan-scoped
-        self._activity.clear()  # drop the agents-panel feed for a fresh context
+        self.retire_background_work()
+
+    def retire_background_work(self) -> None:
+        """Prevent jobs from the replaced conversation delivering into its successor."""
+        self._activity.clear()
         registry = getattr(self, "_bg_agents", None)
         if registry is not None:
             registry.reset_delivery()

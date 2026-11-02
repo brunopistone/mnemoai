@@ -88,7 +88,7 @@ def draft_prefix():
     return f"{GRAY}Chat model · draft (review pending){RESET}\n"
 
 
-def final_answer(answer, report):
+def final_answer(answer, report, *, pending_agents=False):
     """Make the actor's chosen answer distinct from review advice and prior drafts."""
     if not isinstance(answer, str) or not answer.strip():
         return ""
@@ -106,6 +106,9 @@ def final_answer(answer, report):
     else:
         header = "Chat model answer · review incomplete"
         note = "This is the latest answer, not a verified completion."
+    if pending_agents:
+        header = "Interim answer · chat model"
+        note = "Delegated work is still pending; remaining reports will follow. " + note
     return (
         f"\033[1;36m{header}{RESET}\n"
         + (f"{GRAY}{note}{RESET}\n" if note else "") + "\n"

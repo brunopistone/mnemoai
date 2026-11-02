@@ -1120,6 +1120,10 @@ class ChatInterface:
             agents_stop_all=_agents_stop_all,
             agents_turn=_agents_turn,
             review_provider=_review_snapshot,
+            background_pending=lambda: bool(
+                getattr(getattr(self.client, "agent", None),
+                        "has_undelivered_background", lambda: False)()
+            ),
         )
 
         # Route the worker-thread confirmation gate through the app (a plain
@@ -1194,12 +1198,19 @@ class ChatInterface:
     ) -> str:
         """The dim end-of-turn marker for a turn that began at ``started``
         (a ``time.monotonic()`` reading) with the file ledger at ``mark``."""
+        running, ready = self._background_status()
         return turn_view.render_turn_end(
             time.monotonic() - started,
             time.time(),
             stopped=stopped,
             files=self._files_changed_since(mark),
+            running_agents=running,
+            pending_reports=ready,
         )
+
+    def _background_status(self) -> tuple[int, int]:
+        agent = getattr(self.client, "agent", None)
+        return getattr(agent, "background_status", lambda: (0, 0))()
 
     def _files_mark(self) -> int:
         """The file ledger's position now, so a turn's own edits can be counted."""
@@ -1597,11 +1608,20 @@ class ChatInterface:
             has_undelivered = getattr(agent, "has_undelivered_background", None)
             if has_undelivered is not None and has_undelivered():
                 started, mark = time.monotonic(), self._files_mark()
-                self.client.query("")  # delivery-only turn
-                # Marked like any other turn — this one appeared without the user
-                # typing, so where it ends is even less obvious.
-                print("\n" + self._turn_end_line(started, mark))
-                notify.notify_turn_end(time.monotonic() - started)
+                try:
+                    response = self.client.query("")  # delivery-only turn
+                    stopped = response == "Operation was cancelled."
+                    print("\n" + self._turn_end_line(started, mark, stopped=stopped))
+                    if not stopped and not any(self._background_status()):
+                        notify.notify_turn_end(time.monotonic() - started)
+                except KeyboardInterrupt:
+                    print(self._turn_end_line(started, mark, stopped=True))
+                except Exception as e:
+                    logger.error("Background report delivery failed", exc_info=True, extra={"console": False})
+                    print_error(
+                        f"{type(e).__name__}: {one_line(e)}. "
+                        "Could not finish the background update; send a message to retry."
+                    )
             else:
                 print("Input cannot be empty. Please try again.")
             return None
@@ -1669,7 +1689,8 @@ class ChatInterface:
                 # …and, if the turn ran long enough that the user has plausibly
                 # looked away, ring the terminal. Deliberately NOT on the
                 # cancelled path above: their hand is already on the keyboard.
-                notify.notify_turn_end(time.monotonic() - started)
+                if not any(self._background_status()):
+                    notify.notify_turn_end(time.monotonic() - started)
         except KeyboardInterrupt:
             # The cancel landed in this frame instead of being turned into a
             # "cancelled" response (Esc between steps, Ctrl+C in the plain loop).

@@ -641,7 +641,10 @@ class LangGraphClient:
                     # Drafts may have streamed before the verdict was known. End
                     # with the returned actor answer, never with reviewer prose.
                     try:
-                        print("\n" + review_view.final_answer(response, self.reviewer.last), flush=True)
+                        pending = any(getattr(self.agent, "background_status", lambda: (0, 0))())
+                        print("\n" + review_view.final_answer(
+                            response, self.reviewer.last, pending_agents=pending,
+                        ), flush=True)
                     except Exception:
                         logger.debug("Could not render reviewed answer", exc_info=True)
 
@@ -1619,6 +1622,7 @@ class LangGraphClient:
             )
 
             if self.agent:
+                getattr(self.agent, "retire_background_work", lambda: None)()
                 self.agent.messages.clear()
                 self.agent.messages.extend(langchain_messages)
                 self._forget_context_size()
@@ -1927,6 +1931,7 @@ class LangGraphClient:
             data = read_session(new_path)
             raw = [m for m in data["messages"] if m.get("role") != "system"]
             messages = self._decode_restored(raw)
+            getattr(self.agent, "retire_background_work", lambda: None)()
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
             self._forget_context_size()
@@ -2011,6 +2016,7 @@ class LangGraphClient:
             messages = self._decode_restored(raw)
             replayed = self._decode_restored(full) if data["checkpoint"] else messages
 
+            getattr(self.agent, "retire_background_work", lambda: None)()
             self.agent.messages.clear()
             self.agent.messages.extend(messages)
             self._forget_context_size()
