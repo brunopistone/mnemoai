@@ -6,6 +6,15 @@ Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). Th
 
 ## Current integrity and permission invariants
 
+**Background completion:** background execution keeps the input usable, but an
+answer depending on pending agents is interim. Reports are drained at turn start,
+after tool replies and at graph completion (including aggregation); the UI
+rechecks undelivered reports after wrap-up so a busy callback cannot strand them.
+Only completed turns with no pending jobs/reports show `done` or ring the
+completion bell. Pending-status reminders are ephemeral; delivered reports remain
+in history and the session log. Queued user input takes priority over automatic
+delivery, and `/clear` or `/load` retires old reports.
+
 **Delegated execution policy:** spawned sub-agents and parallel/background
 orchestrator workers are noninteractive. Inline foreground orchestrator workers
 keep the foreground approval channel, including in a sequential dependency

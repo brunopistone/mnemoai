@@ -55,6 +55,9 @@ def register_subagent_tools(mcp: FastMCP) -> None:
             call returns immediately with an agent id, you keep working, and its
             report is delivered when it finishes. This is the right choice for most
             delegation — you stay responsive instead of blocking on the sub-agent.
+            Until required reports arrive, present only an interim update and
+            name the outstanding work. Consolidate the reports before a final
+            conclusion; do not duplicate the agents' work or poll with shell commands.
             Sub-agents never prompt for approval: read-only and pre-approved
             actions run; unapproved mutations are refused. Delegation grants no
             extra permission; tool scope, plan mode, hooks, and server floors apply.

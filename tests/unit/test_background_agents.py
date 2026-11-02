@@ -12,11 +12,145 @@ import time
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 
-from mnemoai.client.agent import subagents
+from mnemoai.client.agent import mid_turn, subagent_runner, subagents
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
 
 _MISSING_STOP = "Incomplete Bedrock response stream: missing messageStop event."
+
+
+@pytest.mark.parametrize("boundary", ["answer", "tools", "orchestrator"])
+def test_report_arriving_during_turn_is_consumed_and_persisted(tmp_path, monkeypatch, boundary):
+    """Real graph: late reports reach synthesis once and survive the turn log."""
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    requests = []
+    tool_calls = []
+
+    class Read:
+        name = "fs_read"
+
+        def invoke(self, args):
+            tool_calls.append(args)
+            finish_reports()
+            return "read successfully"
+
+    class Model:
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def stream(self, messages, config=None):
+            requests.append(list(messages))
+            if len(requests) == 1 and boundary != "orchestrator":
+                if boundary == "tools":
+                    yield AIMessageChunk(content="", tool_call_chunks=[{
+                        "name": "fs_read", "id": "read-once", "index": 0, "args": "{}",
+                    }])
+                else:
+                    finish_reports()
+                    # Concurrent user steering must still be delivered.
+                    assert agent.accept_mid_turn("Keep the answer concise.")
+                    yield AIMessageChunk(content="Interim findings.")
+            else:
+                yield AIMessageChunk(content="Consolidated findings, including the failed check.")
+
+    agent = LangGraphAgent(Model(), [Read()], "Inspect the fixture.", verbose=False)
+    first = agent._bg_agents.register("explore", "code review", "inspect code")
+    second = agent._bg_agents.register("explore", "test review", "inspect tests")
+    def finish_reports():
+        agent._bg_agents.complete(first.agent_id, "UNIQUE-CODE-FINDING")
+        agent._bg_agents.complete(second.agent_id, "UNIQUE-FAILED-CHECK", failed=True)
+
+    if boundary == "orchestrator":
+        agent.router = object()
+        agent.orchestrator_enabled = True
+        agent._classify = lambda state: {"route": "full"}
+        agent._route_after_classify = lambda state: "decompose"
+        agent._decompose = lambda state: {"subtasks": [{}, {}]}
+        def aggregate(state):
+            finish_reports()
+            return {"messages": [AIMessage(content="Interim aggregation.")]}
+        agent._orchestrate = aggregate
+        agent.graph = agent._build_graph()
+
+    answer = agent.invoke("Review the code and tests.")
+    assert "Consolidated" in answer
+    last = requests[-1]
+    for marker in ("UNIQUE-CODE-FINDING", "UNIQUE-FAILED-CHECK"):
+        assert sum(marker in str(m.content) for m in last) == 1
+        assert sum(marker in str(m.content) for m in agent.messages) == 1
+        assert sum(marker in str(m.content) for m in agent._last_turn_messages) == 1
+    assert not agent.has_undelivered_background()
+    assert agent.background_status() == (0, 0)
+    assert all("background-agent-status" not in str(m.content) for m in agent.messages)
+    if boundary == "tools":
+        tool_index = next(i for i, m in enumerate(last) if isinstance(m, ToolMessage))
+        report_index = next(i for i, m in enumerate(last) if "UNIQUE-CODE-FINDING" in str(m.content))
+        assert tool_index < report_index
+        assert len(tool_calls) == 1
+    elif boundary == "answer":
+        assert any(m.content == "Keep the answer concise." for m in agent.messages)
+
+
+def test_pending_status_is_ephemeral_and_does_not_block_or_poll(tmp_path, monkeypatch):
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    seen = []
+    class Model:
+        def bind_tools(self, tools, **kwargs):
+            return self
+        def stream(self, messages, config=None):
+            seen.append(list(messages))
+            yield AIMessageChunk(content="Interim update: the delegated check is pending.")
+
+    agent = LangGraphAgent(Model(), [], "SYS", verbose=False)
+    job = agent._bg_agents.register("explore", "pending check", "check")
+    assert "Interim" in agent.invoke("Review this.")
+    assert len(seen) == 1
+    assert "1 delegated agents are running" in str(seen[0][-1].content)
+    assert agent.background_status() == (1, 0)
+    assert all("background-agent-status" not in str(m.content) for m in agent.messages)
+    # A reset retires even a thread that has not stopped yet.
+    agent._bg_agents.reset_delivery()
+    agent._bg_agents.complete(job.agent_id, "old conversation")
+    assert agent.background_status() == (0, 0)
+    assert not agent.has_undelivered_background()
+
+
+def test_cancel_does_not_resume_the_graph_for_pending_reports(tmp_path, monkeypatch):
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    agent = _agent(tmp_path)
+    job = agent._bg_agents.register("explore", "check", "check")
+    agent._bg_agents.complete(job.agent_id, "finished")
+    agent._cancel_event = threading.Event()
+    agent._cancel_event.set()
+    assert agent._should_continue({"messages": [AIMessage(content="stopped")]}) == "end"
+    assert agent.has_undelivered_background()
+
+
+def test_pending_guidance_does_not_rewrite_input_or_hide_tool_pairs(tmp_path, monkeypatch):
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    agent = _agent(tmp_path)
+    agent._bg_agents.register("explore", "check", "check")
+    messages = [AIMessage(content="", tool_calls=[{"name": "fs_read", "args": {}, "id": "r"}]),
+                ToolMessage(content="contents", tool_call_id="r")]
+    outgoing = subagent_runner.with_background_status(agent, messages)
+    assert outgoing[:-1] == messages
+    assert len(messages) == 2
+    assert isinstance(outgoing[-1], HumanMessage)
+
+
+def test_delivered_report_survives_cancelled_turn_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    agent = _agent(tmp_path)
+    agent._messages = []
+    agent._turn_seed_len = 0
+    job = agent._bg_agents.register("explore", "check", "check")
+    agent._bg_agents.complete(job.agent_id, "retained evidence")
+    mid_turn.open_window(agent)
+    delivered = agent._deliver_mid_turn({"messages": []})
+    log = []
+    agent._commit_turn(delivered, log, log=False)
+    assert len(log) == 1 and "retained evidence" in log[0].content
+    assert agent.messages == log
 
 
 class TestInterruptedStreamRecovery:

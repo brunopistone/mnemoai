@@ -92,6 +92,236 @@ def _drive(reader, lines):
     asyncio.run(main())
 
 
+@pytest.mark.parametrize("next_line", [None, "user follow-up", "/config", "/clear"])
+def test_busy_completion_is_delivered_after_wrap_up_without_another_prompt(next_line, monkeypatch):
+    """Callbacks during dispatch must survive; queued user work comes first."""
+    pending = []
+    seen = []
+    bells = []
+    monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", bells.append)
+
+    def dispatch(line):
+        seen.append(line)
+        if line == "first":
+            # The current request has already passed its final model drain.
+            pending.extend(["report one", "report two"])
+            reader.notify_background_complete()
+            reader.notify_background_complete()
+        elif line == "/clear":
+            pending.clear()
+        elif line in ("", "user follow-up"):
+            assert pending == ["report one", "report two"]
+            pending.clear()
+        if line == "" or line in ("user follow-up", "/clear"):
+            reader._loop.call_soon_threadsafe(reader._queue.put_nowait, "/quit")
+        return _ExitRepl if line == "/quit" else None
+
+    reader = _reader(dispatch)
+    reader._background_pending = lambda: bool(pending)
+    reader._buffer.text = "unsent draft"
+    async def main():
+        reader._loop = asyncio.get_running_loop()
+        reader._queue = asyncio.Queue()
+        lines = ["first"] + ([next_line] if next_line else [])
+        for line in lines:
+            reader._queue.put_nowait(line)
+        reader._pending = len(lines)
+        await asyncio.wait_for(reader._worker(), timeout=5)
+        await asyncio.sleep(0)
+        assert reader._queue.empty()
+    asyncio.run(main())
+    expected = ["first"] + ([next_line] if next_line else [])
+    if next_line in (None, "/config"):
+        expected += [""]
+        assert len(bells) == 1
+    else:
+        assert not bells
+    assert seen == expected + ["/quit"]
+    assert reader._buffer.text == "unsent draft"
+
+
+def test_stale_background_wakeup_is_silent_and_idle_callbacks_are_coalesced(monkeypatch, capsys):
+    pending = [True]
+    seen = []
+    monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", lambda text: None)
+    reader = _reader(lambda line: seen.append(line) or _ExitRepl)
+    reader._background_pending = lambda: pending[0]
+    async def main():
+        reader._loop = asyncio.get_running_loop()
+        reader._queue = asyncio.Queue()
+        reader.notify_background_complete()
+        reader.notify_background_complete()
+        await asyncio.sleep(0)
+        assert reader._queue.qsize() == 1
+        pending[0] = False  # consumed by a turn or retired by conversation reset
+        reader._queue.put_nowait("/quit")
+        await asyncio.wait_for(reader._worker(), timeout=5)
+    asyncio.run(main())
+    assert seen == ["/quit"]
+    assert "background sub-agent finished" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("last_failed", [False, True])
+def test_last_of_three_agents_closes_automatically_once(monkeypatch, tmp_path, capsys, last_failed):
+    """Real graph + dispatcher + queue, with the last completion during wrap-up."""
+    from types import SimpleNamespace
+
+    from langchain_core.messages import AIMessageChunk
+
+    from mnemoai.client.agent.agent import LangGraphAgent
+    from mnemoai.client.ui.chat_interface import ChatInterface
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", lambda text: None)
+    bells = []
+    monkeypatch.setattr("mnemoai.client.ui.chat_interface.notify.notify_turn_end", bells.append)
+    requests = []
+    def complete(index):
+        agent._bg_agents.complete(jobs[index].agent_id, f"REPORT-{index}", failed=last_failed and index == 2)
+        reader.notify_background_complete()
+
+    class Model:
+        def bind_tools(self, tools, **kwargs):
+            return self
+        def stream(self, messages, config=None):
+            requests.append(list(messages))
+            if len(requests) == 2:
+                complete(1)  # second finishes while the first report is discussed
+            ready_to_close = all(any(f"REPORT-{i}" in str(m.content) for m in messages) for i in range(3))
+            if ready_to_close:
+                yield AIMessageChunk(content="FINAL-CONSOLIDATED: all reports addressed.")
+            else:
+                yield AIMessageChunk(content="PARTIAL: delegated checks remain outstanding.")
+
+    agent = LangGraphAgent(Model(), [], "Review the fixture.", verbose=False)
+    jobs = [agent._bg_agents.register("explore", f"check {i}", f"task {i}") for i in range(3)]
+    ci = ChatInterface.__new__(ChatInterface)
+    queries = []
+    def query(text):
+        queries.append(text)
+        answer = agent.invoke(text)
+        if len(queries) == 1:
+            complete(0)  # first finishes during initial wrap-up
+        elif len(queries) == 2:
+            complete(2)  # last finishes during delivery-turn wrap-up
+        return answer
+    ci.client = SimpleNamespace(
+        agent=agent, query=query, episodic_memory=None, reflector=None,
+        session_id="fixture", plan_mode_active=False,
+    )
+    def dispatch(text):
+        if text == "/quit":
+            return _ExitRepl
+        ci._dispatch(text)
+        if len(queries) == 3:
+            # Let all queued notification callbacks run before exiting. Any extra
+            # automatic turn would alter queries and fail the assertions below.
+            reader._loop.call_soon_threadsafe(reader._queue.put_nowait, "/quit")
+    reader = _reader(dispatch)
+    reader._background_pending = agent.has_undelivered_background
+    reader._buffer.text = "draft left intact"
+
+    async def main():
+        reader._loop = asyncio.get_running_loop()
+        reader._queue = asyncio.Queue()
+        reader._queue.put_nowait("Review all three checks.")
+        reader._pending = 1
+        await asyncio.wait_for(reader._worker(), timeout=10)
+        await asyncio.sleep(0)
+        assert reader._queue.empty()
+    asyncio.run(main())
+    output = capsys.readouterr().out
+    assert queries == ["Review all three checks.", "", ""]
+    assert len(requests) == 4
+    assert output.count("interim update in") == 2
+    assert output.count("done in") == 1 and len(bells) == 1
+    assert output.count("FINAL-CONSOLIDATED") == 1
+    assert agent.background_status() == (0, 0)
+    assert reader._buffer.text == "draft left intact"
+    for i in range(3):
+        assert sum(f"REPORT-{i}" in str(m.content) for m in agent.messages) == 1
+
+
+def test_simultaneous_completions_are_coalesced_without_losing_reports(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", lambda text: None)
+    registry = BackgroundAgentRegistry()
+    jobs = [registry.register("explore", str(i), "check") for i in range(20)]
+    barrier = Barrier(len(jobs))
+    delivered = []
+    def finish(job):
+        barrier.wait(timeout=5)
+        registry.complete(job.agent_id, job.description)
+        reader.notify_background_complete()
+    def dispatch(text):
+        if text == "/quit":
+            return _ExitRepl
+        assert text == ""
+        delivered.extend(registry.drain_completed_unnotified())
+        reader._loop.call_soon_threadsafe(reader._queue.put_nowait, "/quit")
+    reader = _reader(dispatch)
+    reader._background_pending = registry.any_undelivered
+    async def main():
+        reader._loop = asyncio.get_running_loop()
+        reader._queue = asyncio.Queue()
+        # No consumer yet: concurrent notifications must coalesce into one turn.
+        def run_workers():
+            with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+                list(pool.map(finish, jobs))
+        await asyncio.to_thread(run_workers)
+        await asyncio.sleep(0)
+        assert reader._queue.qsize() == 1
+        await asyncio.wait_for(reader._worker(), timeout=5)
+        assert reader._queue.empty()
+    asyncio.run(main())
+    assert {r.agent_id for r in delivered} == {r.agent_id for r in jobs}
+    assert len(delivered) == len(jobs)
+
+
+def test_failed_delivery_cannot_loop_or_kill_the_input_worker(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from mnemoai.client.ui.chat_interface import ChatInterface
+
+    monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", lambda text: None)
+    attempts = []
+    def fail_before_drain(text):
+        attempts.append(text)
+        raise RuntimeError("fixture preflight failure")
+    ci = ChatInterface.__new__(ChatInterface)
+    ci.client = SimpleNamespace(
+        agent=SimpleNamespace(has_undelivered_background=lambda: True),
+        query=fail_before_drain,
+    )
+    reader = _reader(lambda text: _ExitRepl if text == "/quit" else ci._dispatch(text))
+    reader._background_pending = lambda: True
+    async def main():
+        reader._loop = asyncio.get_running_loop()
+        reader._queue = asyncio.Queue()
+        reader.notify_background_complete()
+        await asyncio.sleep(0)
+        worker = asyncio.create_task(reader._worker())
+        try:
+            await asyncio.wait_for(reader._queue.join(), timeout=2)
+            await asyncio.sleep(0)
+            assert not worker.done()  # still accepting input
+            assert reader._queue.empty() and reader.pending == 0
+            reader._queue.put_nowait("/quit")
+            await asyncio.wait_for(worker, timeout=2)
+        finally:
+            worker.cancel()
+    asyncio.run(main())
+    assert attempts == [""]
+    output = capsys.readouterr().out
+    assert "send a message to retry" in output
+    assert "done in" not in output
+
+
 def test_dispatches_in_fifo_order_until_exit():
     seen = []
 

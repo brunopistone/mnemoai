@@ -1,5 +1,6 @@
 """Live approval policy for foreground orchestration and unattended workers."""
 
+import asyncio
 import json
 import threading
 import time
@@ -9,6 +10,83 @@ import pytest
 from mnemoai.utils.config import config
 
 pytestmark = pytest.mark.integration
+
+
+def test_live_last_background_agent_triggers_one_consolidated_answer(
+    live_client, monkeypatch, record_testsuite_property,
+):
+    """Real parent and worker models; controlled timing, actual UI delivery queue."""
+    from types import SimpleNamespace
+
+    from mnemoai.client.agent import subagents
+    from mnemoai.client.agent.agent import LangGraphAgent
+    from mnemoai.client.ui.tui import PinnedPromptReader, _ExitRepl
+
+    agent = LangGraphAgent(
+        live_client.agent._callback_free_model(), [],
+        "Compare the delegated reports. While any required report is pending, "
+        "begin your reply with INTERIM and state what is missing. Once both "
+        "arrive, begin with FINAL and give both reported numbers and their sum.",
+        verbose=False,
+    )
+    releases = [threading.Event(), threading.Event()]
+    original = agent._run_one_subagent
+    def gated_worker(subagent, prompt, label, **kwargs):
+        if not releases[int(label)].wait(120):
+            raise RuntimeError("fixture worker release timed out")
+        return original(subagent, prompt, label, **kwargs)
+    monkeypatch.setattr(agent, "_run_one_subagent", gated_worker)
+    monkeypatch.setattr(agent, "_prompt_confirm",
+                        lambda *a, **kw: pytest.fail("Background work must never prompt"))
+    queries, answers = [], []
+    def dispatch(text):
+        queries.append(text)
+        answer = agent.invoke(text)
+        answers.append(answer)
+        if len(queries) <= 2:
+            releases[len(queries) - 1].set()
+        if not any(agent.background_status()):
+            return _ExitRepl
+    reader = PinnedPromptReader(
+        prompt_text=lambda: "> ", commands=[], dispatch=dispatch,
+        background_pending=agent.has_undelivered_background,
+    )
+    reader._app = SimpleNamespace(invalidate=lambda: None, exit=lambda: None)
+    reader._buffer.text = "unsent live-test draft"
+    async def no_terminal(func, *args, **kwargs):
+        func()
+    monkeypatch.setattr("mnemoai.client.ui.tui.run_in_terminal", no_terminal)
+    monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", lambda text: None)
+    agent._on_background_complete = lambda ident: reader.notify_background_complete()
+    async def run():
+        reader._loop = asyncio.get_running_loop()
+        reader._queue = asyncio.Queue()
+        for i, number in enumerate([11, 29]):
+            agent._launch_background_subagent(
+                subagents.get_subagent("explore"),
+                f"Connectivity fixture. No tools. Reply only REPORT_{i}: {number}.", str(i),
+            )
+        reader._queue.put_nowait("Compare both delegated reports, including their numbers and sum.")
+        reader._pending = 1
+        await asyncio.wait_for(reader._worker(), timeout=360)
+        await asyncio.sleep(0)
+        assert reader._queue.empty()
+    try:
+        asyncio.run(run())
+    finally:
+        agent.request_cancel()
+        for release in releases:
+            release.set()
+    assert len(queries) == 3 and queries[1:] == ["", ""]
+    assert all("INTERIM" in answer for answer in answers[:2]), answers
+    assert "FINAL" in answers[-1] and all(str(n) in answers[-1] for n in [11, 29, 40]), answers
+    assert agent.background_status() == (0, 0)
+    assert reader._buffer.text == "unsent live-test draft"
+    record_testsuite_property(
+        "background_final_delivery",
+        "real parent and two worker model calls; controlled staggered completion; "
+        "actual UI queue automatically delivered one consolidated final answer",
+    )
 
 
 def test_live_background_agent_recovers_from_an_injected_incomplete_stream(

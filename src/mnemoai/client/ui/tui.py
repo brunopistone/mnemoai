@@ -241,6 +241,7 @@ class PinnedPromptReader:
         agents_stop_all: Optional[Callable[[], int]] = None,
         agents_turn: Optional[Callable[[], int]] = None,
         review_provider: Optional[Callable[[], Any]] = None,
+        background_pending: Optional[Callable[[], bool]] = None,
     ) -> None:
         """Build the pinned app.
 
@@ -279,6 +280,8 @@ class PinnedPromptReader:
                 (Ctrl+A still reaches all of them). Absent → 0, i.e. no scoping.
             review_provider: Cheap immutable review display snapshot; no file or
                 model access. Click/Ctrl+O opens its grey scrollable detail pane.
+            background_pending: Whether a completed agent report still needs a
+                turn. Rechecked after dispatch to cover completions during wrap-up.
         """
         self._prompt_text = prompt_text
         self._dispatch = dispatch
@@ -302,6 +305,8 @@ class PinnedPromptReader:
         # Current turn number, for scoping the live glance (see _glance_rows).
         self._agents_turn = agents_turn or (lambda: 0)
         self._review_provider = review_provider or (lambda: None)
+        self._background_pending = background_pending or (lambda: False)
+        self._background_delivery_needed = False
         self._review_expanded = False
         self._review_open_display = None
         self._nav_mode = False  # Ctrl+A: navigate the agents panel
@@ -1065,25 +1070,32 @@ class PinnedPromptReader:
 
         Marshals to the event-loop thread and enqueues a delivery-only turn (an
         empty line) so the finished report is auto-surfaced while the user is
-        idle. If a turn is already running or one is already queued, does nothing
-        — the agent drains pending completions at the start of every turn, so the
-        in-flight/queued turn will pick it up; we never pile up redundant empty
-        turns."""
+        idle. Busy completions are rechecked when dispatch finishes, including
+        those arriving after the graph's final drain point."""
         loop = self._loop
         if loop is None or self._queue is None:
             return
 
-        def _enqueue() -> None:
-            if self._busy or self._queued_lines or self._pending:
-                return  # a running/queued turn will drain the completion itself
-            self._pending += 1
-            self._queue.put_nowait("")  # empty line → delivery-only turn
-            # Only on the idle path (above, the user is demonstrably here), and
-            # not duration-gated: the report lands seconds later, but the work it
-            # describes ran for as long as it ran.
-            notify.notify("mnemoai · a background agent finished")
+        def wake():
+            self._background_delivery_needed = True
+            self._enqueue_background_delivery()
+        loop.call_soon_threadsafe(wake)
 
-        loop.call_soon_threadsafe(_enqueue)
+    def _enqueue_background_delivery(self) -> None:
+        """Event-loop only: coalesce wakeups and give queued user input priority."""
+        if not self._background_delivery_needed:
+            return
+        if self._busy or self._queued_lines or self._pending or self._queue is None:
+            return
+        # Consume the wakeup, not the report. If dispatch fails before it can
+        # drain reports, do not schedule an endless series of empty retries.
+        # A new completion can wake us again; a user request always drains them.
+        self._background_delivery_needed = False
+        if not self._background_pending():
+            return
+        self._pending += 1
+        self._queue.put_nowait("")
+        notify.notify("mnemoai · a background agent finished")
 
     def _expand_pastes(self, text: str, echo: bool = False) -> str:
         """Replace each `[Pasted text #N …]` placeholder with its stored text.
@@ -1257,6 +1269,8 @@ class PinnedPromptReader:
         # onto the UI thread.
         self._loop = asyncio.get_event_loop()
         worker = asyncio.ensure_future(self._worker())
+        self._background_delivery_needed = True
+        self._enqueue_background_delivery()
         try:
             while True:
                 result = await self._app.run_async()
@@ -1575,6 +1589,11 @@ class PinnedPromptReader:
         while True:
             line = await self._queue.get()
             self._pending = max(0, self._pending - 1)
+            if not line.strip() and not self._background_pending():
+                # A queued user turn or /clear may already have consumed/retired
+                # the report. A stale wakeup is not an empty user submission.
+                self._queue.task_done()
+                continue
             # Remove from the live "queued" list — it's about to be committed to
             # scrollback for real, so it shouldn't also show as pending.
             if self._queued_lines and self._queued_lines[0] == line:
@@ -1624,6 +1643,7 @@ class PinnedPromptReader:
             if result is _ExitRepl and self._app is not None:
                 self._app.exit()
                 return
+            self._enqueue_background_delivery()
 
     def _dispatch_tracked(self, line: str):
         """Run ``dispatch`` on the pool thread, recording its id so Esc can inject

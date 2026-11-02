@@ -7,6 +7,19 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.30.2] — 2026-11-02
+
+### Fixed
+
+- Label replies as interim while delegated agents or their reports are pending.
+  Collect completed reports during the parent turn and reliably deliver reports
+  arriving during wrap-up, preserving them in conversation history. Loading or
+  clearing a conversation retires its pending jobs and delivery notifications.
+- Automatically consolidate the remaining reports when the last background
+  agent finishes, without requiring another user message. Coalesce completion
+  notifications, preserve queued input and unsent drafts, and prevent failed
+  delivery from causing an endless sequence of empty retries.
+
 ## [1.30.1] — 2026-10-30
 
 ### Fixed
@@ -5491,7 +5504,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.30.1...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.30.2...HEAD
+[1.30.2]: https://github.com/brunopistone/mnemoai/compare/v1.30.1...v1.30.2
 [1.30.1]: https://github.com/brunopistone/mnemoai/compare/v1.30.0...v1.30.1
 [1.28.0]: https://github.com/brunopistone/mnemoai/compare/v1.27.0...v1.28.0
 [1.27.0]: https://github.com/brunopistone/mnemoai/compare/v1.26.0...v1.27.0

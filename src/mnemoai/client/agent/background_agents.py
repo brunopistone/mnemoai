@@ -141,6 +141,19 @@ class BackgroundAgentRegistry:
         with self._lock:
             return any(r.status == "running" for r in self._agents.values())
 
+    def pending_counts(self) -> tuple[int, int]:
+        """One snapshot of active jobs and reports still awaiting delivery.
+
+        Reset retires old jobs before their threads stop, so ignore notified
+        records even when they still say running.
+        """
+        with self._lock:
+            pending = [r for r in self._agents.values() if not r.notified]
+            return (
+                sum(r.status == "running" for r in pending),
+                sum(r.status in ("done", "failed") for r in pending),
+            )
+
     def any_undelivered(self) -> bool:
         """True if a finished background agent hasn't been surfaced yet."""
         with self._lock:

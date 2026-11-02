@@ -108,6 +108,22 @@ def test_plain_query_calls_client_query(ci):
     assert ("query", "what time is it?") in ci.client.calls
 
 
+@pytest.mark.parametrize("status", [(2, 0), (0, 2), (1, 1), (0, 0)])
+def test_completion_marker_and_bell_respect_pending_agents(ci, monkeypatch, capsys, status):
+    from types import SimpleNamespace
+
+    ci.client.agent = SimpleNamespace(background_status=lambda: status)
+    bells = []
+    monkeypatch.setattr("mnemoai.client.ui.chat_interface.notify.notify_turn_end", bells.append)
+    ci._dispatch("Review the code.")
+    output = capsys.readouterr().out
+    if any(status):
+        assert "interim update" in output and "done in" not in output
+        assert not bells
+    else:
+        assert "done in" in output and len(bells) == 1
+
+
 def test_blank_query_is_noop(ci):
     assert ci._dispatch("   ") is None
     assert not any(

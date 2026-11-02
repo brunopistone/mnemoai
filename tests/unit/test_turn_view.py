@@ -280,6 +280,15 @@ class TestTurnEnd:
         # A cancel doesn't undo the edits already made — that's when it matters.
         assert "2 files" in render_turn_end(9.0, self._AT, stopped=True, files=2)
 
+    def test_pending_work_is_interim_even_when_all_agents_have_finished(self):
+        running = render_turn_end(9, self._AT, running_agents=3)
+        ready = render_turn_end(9, self._AT, pending_reports=1, files=2)
+        assert "3 agents still running" in running and "done" not in running
+        assert "1 report awaiting delivery" in ready and "done" not in ready
+        assert "2 files" in ready and "/why" in ready
+        stopped = render_turn_end(9, self._AT, stopped=True, running_agents=3)
+        assert "stopped" in stopped and "interim" not in stopped
+
 
 class TestFileOpRendering:
     """file_edit / fs_write get a structured block (Update/Create header +

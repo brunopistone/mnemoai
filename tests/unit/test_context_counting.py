@@ -10,6 +10,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from mnemoai.client import context_injection, context_report
 from mnemoai.client.agent.agent import LangGraphAgent
+from mnemoai.client.agent.agent_activity import AgentActivityStore
+from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
 from mnemoai.client.memory.steering_store import SteeringSnapshot
@@ -247,3 +249,27 @@ def test_compacted_resume_and_save_load_counts_remain_stable(make_client, tmp_pa
         assert client.load_conversation(str(path))
         assert client._count_context_tokens() == counts[-1]
         assert json.loads(path.read_text())["summary"] == "Earlier facts."
+
+
+@pytest.mark.parametrize("restore", ["load", "resume"])
+def test_restore_retires_background_reports_from_replaced_conversation(make_client, tmp_path, restore):
+    client = make_client()
+    client.conversation_manager._session_blocks = lambda *args: []
+    agent = client.agent
+    agent._activity = AgentActivityStore()
+    agent._bg_agents = BackgroundAgentRegistry()
+    agent.retire_background_work = lambda: LangGraphAgent.retire_background_work(agent)
+    old = agent._bg_agents.register("explore", "old task", "old request")
+    if restore == "load":
+        path = tmp_path / "saved.json"
+        path.write_text(json.dumps([{"role": "user", "content": "new request"}]))
+        assert client.load_conversation(str(path))
+    else:
+        log = SessionLog(cwd=str(tmp_path))
+        log.log_turn([HumanMessage(content="new request"), AIMessage(content="new answer")])
+        assert client.resume_session(str(log.path))
+    assert old.cancel.is_set()
+    agent._bg_agents.complete(old.agent_id, "LATE-OLD-REPORT")
+    assert not agent._bg_agents.any_undelivered()
+    assert agent._bg_agents.pending_counts() == (0, 0)
+    assert "LATE-OLD-REPORT" not in str(agent.messages)

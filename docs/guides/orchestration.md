@@ -8,7 +8,7 @@ When enabled, the assistant classifies each query before processing it and route
 
 | Route       | Description                                 | Tools Available                                              |
 | ----------- | ------------------------------------------- | ------------------------------------------------------------ |
-| `simple_qa` | Greetings, explanations, general knowledge  | Meta tools and configured external MCP tools |
+| `simple_qa` | Greetings, explanations, general knowledge  | Meta tools and configured external MCP tools                 |
 | `code`      | File ops, code editing, git, shell commands | fs_read, fs_write, file_edit, execute_bash, git, search, etc |
 | `research`  | Web search, URL fetching                    | web_search, web_crawler                                      |
 | `knowledge` | Document reading, indexing, RAG queries     | pdf/csv/docx/json readers, RAG tools, fs_read                |
@@ -188,8 +188,15 @@ assistant can run a sub-agent **in the background**: the call returns right away
 and you keep working. `LLM.SUBAGENT_MAX_CONCURRENCY` also limits active background
 agents; additional jobs wait for a slot and remain visible/cancellable in the
 agents panel. When one finishes, its report **surfaces automatically** —
-if you're idle, the assistant speaks up on its own to deliver it; if you're
-mid-conversation, it's folded into your next turn. Because a background sub-agent
+if you're idle, the assistant speaks up on its own to deliver it; during a turn,
+it's collected after tool results or before the turn closes. Reports arriving
+during wrap-up trigger a follow-up automatically, without requiring another message.
+Partial responses are labelled **interim updates** while agents are running or
+reports await delivery; the assistant consolidates the reports before presenting
+a final conclusion. You can keep typing, and queued messages take priority over
+automatic delivery. Off-TTY, reports are collected during a running turn or on
+your next request; idle automatic delivery requires the pinned interactive UI.
+Because a background sub-agent
 has no terminal to prompt on, it **refuses unapproved mutations without
 prompting**. `/auto off` does not authorize delegated writes or shell commands.
 A flagged git override without prior trust is refused immediately. The
