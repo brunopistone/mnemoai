@@ -7,6 +7,14 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.30.3] — 2026-11-02
+
+### Security
+
+- Require pypdf 6.21.4 or newer in package metadata and the lockfile. This fixes
+  infinite loops in truncated cross-reference tables and cyclic dictionary
+  cloning, plus excessive memory use when flattening shared page trees.
+
 ## [1.30.2] — 2026-11-02
 
 ### Fixed
@@ -5504,7 +5512,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.30.2...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.30.3...HEAD
+[1.30.3]: https://github.com/brunopistone/mnemoai/compare/v1.30.2...v1.30.3
 [1.30.2]: https://github.com/brunopistone/mnemoai/compare/v1.30.1...v1.30.2
 [1.30.1]: https://github.com/brunopistone/mnemoai/compare/v1.30.0...v1.30.1
 [1.28.0]: https://github.com/brunopistone/mnemoai/compare/v1.27.0...v1.28.0
