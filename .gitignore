@@ -1,6 +1,5 @@
-# Configuration (contains API keys)
-src/mnemoai/utils/config.yaml
-utils/config.yaml
+# Node.js dependencies
+node_modules/
 
 # IDE
 .idea/
@@ -80,7 +79,6 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
-.ruff_cache/
 
 # Translations
 *.mo
@@ -155,15 +153,27 @@ dmypy.json
 */**/default.profraw
 
 # Terraform files
+
 */**/.terraform*
 
 # Base data exclude
+
+*/**/data/
+data/outputs
 */**/cdk.*/
+*/**/configs_*
+*/**/input
 
-claude
-./**/claude
-.claude
-./**/.claude
+# Linter / formatter caches
+# Ruff writes a .gitignore containing '*' inside .ruff_cache, so this is belt and
+# braces - but relying on that is accidental, and `git check-ignore .ruff_cache`
+# reports the directory itself as not ignored.
+-.ruff_cache/
 
-# MCP server runtime artifacts (e.g. the playwright MCP server's browser profile)
-.playwright-mcp/
+# Ignore Claude-related directories (any depth)
+.claude/
+**/.claude/
+
+# Ignore any 'codex' directories (any depth)
+codex/
+**/codex/
