@@ -6,6 +6,15 @@ Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). Th
 
 ## Current integrity and permission invariants
 
+**Configuration restarts:** snapshot the active messages and compaction summary
+before shutting down MCP or re-executing. Preserve the `/load` save target without
+writing it, plus label, draft input and auto/plan modes. Wait for queued input and
+delegated reports, including undelivered guidance. The private, temporary handoff
+also works when session recording is disabled. A failed snapshot keeps the old
+client open; failed startup/restore retains the handoff for recovery. Restore with
+the new model's system prompt and clear the old provider token count. Do not
+replay stale `--resume`, `--continue` or `--auto` launch arguments.
+
 **Task continuation:** `LLM.AUTO_CONTINUE_TASKS` defaults true. The main graph
 and delegated workers renew their execution segment only after new completed
 tool activity; failed/refused calls and changing job IDs alone do not renew it.

@@ -7,6 +7,17 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.31.2] — 2026-11-18
+
+### Fixed
+
+- Continue the active conversation automatically after a chat or vision model
+  change restarts the app, retaining unsaved messages, compaction summaries,
+  conversation labels, draft input and the `/load` save-file association.
+  Wait for queued input and delegated reports before restarting. A failed
+  snapshot leaves the current chat open; failed startup retains a private
+  recovery file instead of silently opening a fresh conversation.
+
 ## [1.31.1] — 2026-11-18
 
 ### Fixed
@@ -5543,7 +5554,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.1...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.2...HEAD
+[1.31.2]: https://github.com/brunopistone/mnemoai/compare/v1.31.1...v1.31.2
 [1.31.1]: https://github.com/brunopistone/mnemoai/compare/v1.31.0...v1.31.1
 [1.31.0]: https://github.com/brunopistone/mnemoai/compare/v1.30.3...v1.31.0
 [1.30.3]: https://github.com/brunopistone/mnemoai/compare/v1.30.2...v1.30.3

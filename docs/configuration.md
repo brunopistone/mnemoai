@@ -609,8 +609,8 @@ Notes:
 - **`/usage` attributes each call to the model that ran it**, so a smaller router
   shows up as its own row.
 - **Changing one applies without restarting**, from either command: `/params` for
-  its inference knobs, `/model` for the model itself. The conversation continues —
-  unlike `/model` on the chat, vision or embeddings model, which restarts. (The one
+  its inference knobs, `/model` for the model itself. Changing the chat, vision or
+  embeddings model restarts the app and automatically restores the conversation. (The one
   exception: if that same edit also switches routing or orchestration **on**, the
   app restarts, because the router and the orchestrator are built at startup.)
 - `LLM.SUMMARIZATION_THINK: true` takes precedence over the `SUMMARY` area: it
@@ -626,9 +626,26 @@ credential instructions or the config-file path. An in-place update reports
 “changed to”; a change requiring the existing restart reports “saved” and
 “Restarting to apply…”. A short `/params` hint appears only when configured
 inference parameters were reset. Switching an area back to the chat model is
-reported as “now follows Chat”. These messages do not change which edits require
-a restart or preserve the current conversation. `/doctor` and the application
+reported as “now follows Chat”. `/doctor` and the application
 log retain configuration-path diagnostics.
+
+When a model change requires a restart, MnemoAI restores the current conversation,
+including unsaved replies, the compaction summary, label and unfinished input.
+If you used `/load`, a later `/save` still targets that file; switching models
+does not overwrite it. An empty chat remains empty. Queued messages and pending
+agent reports are handled before the restart.
+
+Restoration uses a private temporary file under `~/.mnemoai/restarts` (or
+`$MNEMOAI_HOME/restarts`), including when automatic session recording is disabled.
+The file is removed after successful restoration. If creating it fails, the
+current chat stays open with its existing model; the new settings are saved.
+If the new process cannot start or restore, the file is retained for recovery
+and the app shows its path. A restore failure offers the session picker.
+
+Auto-approval tier and plan mode carry across this internal restart. Individual
+tool approvals reset, and context tokens are estimated again until the new
+model reports usage. `/usage` starts a new process total, as on manual resume.
+Restoring the conversation itself makes no model or embedding request.
 
 `/params` applies chat and auxiliary-chat changes in place. Vision and embedding
 models are also cached by the MCP server: their edits are saved, and the command

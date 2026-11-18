@@ -391,6 +391,12 @@ files, one per session. A turn that was **cancelled or that failed** is recorded
 too — so a resumed session shows exactly what the live one did, including a
 question you interrupted and one a dropped connection cut short.
 
+**Changing models also preserves the conversation.** If `/model` restarts the app,
+the current messages, summary, label and draft input are restored automatically.
+For a conversation opened with `/load`, the save-file association survives too,
+including any replies you have not saved yet. See
+[model-change restarts](../configuration.md#model-parameters) for failure recovery.
+
 **Resuming carries the whole conversation forward.** When you resume (or `/load`),
 the restored history is copied into the new session's file, so that file is a
 complete record on its own and resuming _it_ later replays everything — not just

@@ -64,7 +64,7 @@ class TestSinglePrintSite:
         )
 
     def test_turn_resume_and_load_all_use_it(self):
-        for name in ("query", "resume_session", "load_conversation"):
+        for name in ("query", "resume_session", "load_conversation", "restore_after_restart"):
             src = inspect.getsource(getattr(LangGraphClient, name))
             assert "_print_context_size()" in src, name
 

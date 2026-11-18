@@ -325,7 +325,7 @@ class TestStaleContextSizeAfterHistoryIsReplaced:
     def test_every_history_replacing_path_invalidates_it(self):
         from mnemoai.client.client import LangGraphClient
 
-        for name in ("resume_session", "load_conversation", "branch_conversation"):
+        for name in ("resume_session", "load_conversation", "branch_conversation", "restore_after_restart"):
             src = inspect.getsource(getattr(LangGraphClient, name))
             assert "_forget_context_size()" in src, name
 

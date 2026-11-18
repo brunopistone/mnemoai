@@ -240,7 +240,7 @@ class TestARestoredSummaryIsReApplied:
 
         from mnemoai.client.client import LangGraphClient
 
-        for name in ("resume_session", "load_conversation", "branch_conversation"):
+        for name in ("resume_session", "load_conversation", "branch_conversation", "restore_after_restart"):
             src = inspect.getsource(getattr(LangGraphClient, name))
             assert "apply_restored_summary(" in src, name
 
