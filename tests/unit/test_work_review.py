@@ -300,21 +300,22 @@ def test_cancellation_during_strategy_does_not_leave_a_running_badge(setup):
 
 def test_orchestrator_reviews_between_dependency_waves_and_preserves_original_query(setup):
     client, root = setup
-    paths = [root / "first.py", root / "second.py"]
+    paths = [root / "first.py", root / "second.py", root / "third.py"]
     judge = Judge(lambda phase, packet: verdict("revise" if phase == "changes" else "pass"))
     client._area_model = lambda _: judge
     feed(client, [])
     client.agent.router = SimpleNamespace(classify=lambda query, context: "full")
     client.agent.orchestrator_enabled = True
     client.agent._max_subagent_concurrency = 1
-    task_text = "Implement the two requested changes in the project files."
+    task_text = "Implement the three requested changes in the project files."
     def decompose(query, *args, **kwargs):
         assert query == task_text
         return [{"description": "first", "category": "full", "depends_on": []},
-                {"description": "second", "category": "full", "depends_on": [0]}]
+                {"description": "second", "category": "full", "depends_on": []},
+                {"description": "third", "category": "full", "depends_on": [0, 1]}]
     client.agent._decompose_task = decompose
     def worker(index, tasks, done, history=None):
-        if index == 0:
+        if index < 2:
             assert judge.calls == ["strategy"]
         else:
             assert judge.calls == ["strategy", "changes"]
@@ -324,11 +325,30 @@ def test_orchestrator_reviews_between_dependency_waves_and_preserves_original_qu
         client.agent._run_tool_calls(messages[0].tool_calls, client.agent.tools, messages)
         return {"task": tasks[index]["description"], "result": "Done.", "messages": messages}
     client.agent._run_subtask = worker
-    client.agent._aggregate_results = lambda *a: "Both changes are done."
+    client.agent._aggregate_results = lambda *a: "All changes are done."
     client.agent.graph = client.agent._build_graph()
-    assert client.query(task_text) == "Both changes are done."
+    assert client.query(task_text) == "All changes are done."
     assert judge.calls == ["strategy", "changes", "completion"]
     assert all(path.exists() for path in paths)
+
+
+def test_dependent_work_keeps_review_checkpoints_in_main_agent(setup):
+    client, root = setup
+    paths = [root / "first.py", root / "second.py"]
+    judge = Judge(lambda phase, packet: verdict())
+    client._area_model = lambda _: judge
+    feed(client, [write(paths[0]), write(paths[1]), AIMessage(content="Both changes are done.")])
+    client.agent.router = SimpleNamespace(classify=lambda query, context: "full")
+    client.agent.orchestrator_enabled = True
+    client.agent._decompose_task = lambda *a, **kw: [
+        {"description": "first", "category": "full", "depends_on": []},
+        {"description": "second", "category": "full", "depends_on": [0]},
+    ]
+    client.agent.graph = client.agent._build_graph()
+    assert client.query("Implement the two related changes and verify them.") == "Both changes are done."
+    assert judge.calls == ["strategy", "changes", "changes", "completion"]
+    assert all(path.exists() for path in paths)
+    assert client.agent._activity.snapshot() == []
 
 
 def test_changed_snapshot_feedback_is_not_applied_to_newer_file_contents(setup):

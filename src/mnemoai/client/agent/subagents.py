@@ -81,8 +81,9 @@ _BUILTIN_SUBAGENTS = [
     SubAgentType(
         name="general-purpose",
         description=(
-            "General-purpose agent for multi-step tasks: researching, searching, "
-            "and making changes across files. Has the full toolset."
+            "General-purpose agent for a substantial, self-contained delegated "
+            "task with a concrete benefit from separate execution. Has the full "
+            "toolset; routine multi-step work belongs in the parent agent."
         ),
         tools=None,  # all parent tools
         prompt_key="SUBAGENT_GENERAL_PROMPT",
@@ -108,10 +109,9 @@ _BUILTIN_SUBAGENTS = [
     SubAgentType(
         name="explore",
         description=(
-            "Read-only agent for exploring a codebase or documents — locating "
-            "code, tracing how things work, gathering context. Cannot edit or run "
-            "commands. Use it to answer 'where/how is X' without cluttering your "
-            "own context."
+            "Read-only agent for a substantial, bounded investigation or independent "
+            "review. Cannot edit or run commands. Use direct file/search tools for "
+            "a few reads or a focused 'where/how is X' lookup."
         ),
         tools=_READONLY_TOOLS,
         prompt_key="SUBAGENT_EXPLORE_PROMPT",

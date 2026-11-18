@@ -4,6 +4,7 @@ import asyncio
 import json
 import threading
 import time
+import uuid
 
 import pytest
 
@@ -12,8 +13,82 @@ from mnemoai.utils.config import config
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize("workflow", ["read-save", "edit-verify"])
+def test_live_routine_work_uses_direct_tools(
+    live_client, _neutral_root, monkeypatch, workflow
+):
+    """Observe actual delegation decisions, without hiding or blocking spawn tools."""
+    monkeypatch.setattr(live_client, "auto_approve_mode", "all")
+    agent = live_client.agent
+    before = {run.run_id for run in agent._activity.snapshot()}
+    calls = []
+    invoke = agent._invoke_tool
+
+    def observe(tool, name, args, quiet=False):
+        calls.append(name)
+        return invoke(tool, name, args, quiet=quiet)
+
+    monkeypatch.setattr(agent, "_invoke_tool", observe)
+    if workflow == "read-save":
+        source = _neutral_root / "amounts.csv"
+        source.write_text("item,amount\nA,2\nB,5\nC,9\n")
+        target = _neutral_root / "total.txt"
+        prompt = (
+            f"Read {source}, total its amount column, and save only the integer "
+            f"total to {target}. Check the saved file."
+        )
+        expected = "16"
+    else:
+        target = _neutral_root / "settings.py"
+        target.write_text("ENABLED = False\nTIMEOUT = 30\n")
+        prompt = (
+            f"Change ENABLED to True in {target}, preserving TIMEOUT. "
+            "Verify the saved settings and report the result."
+        )
+        expected = "ENABLED = True\nTIMEOUT = 30"
+    answer = live_client.query(prompt)
+    assert target.read_text().strip() == expected, answer
+    assert calls, "the requested file work must actually run"
+    new_runs = [run for run in agent._activity.snapshot() if run.run_id not in before]
+    assert not new_runs, [(run.agent_type, run.description) for run in new_runs]
+    assert "spawn_agent" not in calls and "resume_agent" not in calls
+
+
+def test_live_explicit_parallel_delegation_remains_available(
+    live_client,
+    _neutral_root,
+    monkeypatch,
+):
+    monkeypatch.setattr(live_client, "auto_approve_mode", "all")
+    paths = [_neutral_root / f"review-{i}.txt" for i in range(2)]
+    markers = [f"RESULT_{uuid.uuid4().hex[:12]}" for _ in paths]
+    for path, marker in zip(paths, markers):
+        path.write_text(marker + "\n")
+    agent = live_client.agent
+    before = {run.run_id for run in agent._activity.snapshot()}
+    answer = live_client.query(
+        "Use two explore subagents in parallel, one per file: "
+        f"{paths[0]} and {paths[1]}. Have each read its file and report its marker. "
+        "Launch both spawn_agent calls together with run_in_background=false, "
+        "wait for both reports, then return both markers. Do not read the files yourself."
+    )
+    runs = [run for run in agent._activity.snapshot() if run.run_id not in before]
+    assert len(runs) == 2 and all(run.status == "done" for run in runs), runs
+    assert all(marker in answer for marker in markers), answer
+    assert all(
+        any(
+            event.kind == "tool_call" and event.name == "fs_read"
+            for event in run.events
+        )
+        for run in runs
+    )
+    assert runs[0].start < runs[1].end and runs[1].start < runs[0].end
+
+
 def test_live_last_background_agent_triggers_one_consolidated_answer(
-    live_client, monkeypatch, record_testsuite_property,
+    live_client,
+    monkeypatch,
+    record_testsuite_property,
 ):
     """Real parent and worker models; controlled timing, actual UI delivery queue."""
     from types import SimpleNamespace
@@ -23,22 +98,36 @@ def test_live_last_background_agent_triggers_one_consolidated_answer(
     from mnemoai.client.ui.tui import PinnedPromptReader, _ExitRepl
 
     agent = LangGraphAgent(
-        live_client.agent._callback_free_model(), [],
+        live_client.agent._callback_free_model(),
+        [],
         "Compare the delegated reports. While any required report is pending, "
         "begin your reply with INTERIM and state what is missing. Once both "
         "arrive, begin with FINAL and give both reported numbers and their sum.",
         verbose=False,
+        router=SimpleNamespace(classify=lambda query, context: "full"),
+        orchestrator_enabled=True,
     )
+    decomposed = []
+    def decompose(query, *args, **kwargs):
+        decomposed.append(query)
+        return [{"description": query, "category": "full", "depends_on": []}]
+    monkeypatch.setattr(agent, "_decompose_task", decompose)
     releases = [threading.Event(), threading.Event()]
     original = agent._run_one_subagent
+
     def gated_worker(subagent, prompt, label, **kwargs):
         if not releases[int(label)].wait(120):
             raise RuntimeError("fixture worker release timed out")
         return original(subagent, prompt, label, **kwargs)
+
     monkeypatch.setattr(agent, "_run_one_subagent", gated_worker)
-    monkeypatch.setattr(agent, "_prompt_confirm",
-                        lambda *a, **kw: pytest.fail("Background work must never prompt"))
+    monkeypatch.setattr(
+        agent,
+        "_prompt_confirm",
+        lambda *a, **kw: pytest.fail("Background work must never prompt"),
+    )
     queries, answers = [], []
+
     def dispatch(text):
         queries.append(text)
         answer = agent.invoke(text)
@@ -47,30 +136,40 @@ def test_live_last_background_agent_triggers_one_consolidated_answer(
             releases[len(queries) - 1].set()
         if not any(agent.background_status()):
             return _ExitRepl
+
     reader = PinnedPromptReader(
-        prompt_text=lambda: "> ", commands=[], dispatch=dispatch,
+        prompt_text=lambda: "> ",
+        commands=[],
+        dispatch=dispatch,
         background_pending=agent.has_undelivered_background,
     )
     reader._app = SimpleNamespace(invalidate=lambda: None, exit=lambda: None)
     reader._buffer.text = "unsent live-test draft"
+
     async def no_terminal(func, *args, **kwargs):
         func()
+
     monkeypatch.setattr("mnemoai.client.ui.tui.run_in_terminal", no_terminal)
     monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", lambda text: None)
     agent._on_background_complete = lambda ident: reader.notify_background_complete()
+
     async def run():
         reader._loop = asyncio.get_running_loop()
         reader._queue = asyncio.Queue()
         for i, number in enumerate([11, 29]):
             agent._launch_background_subagent(
                 subagents.get_subagent("explore"),
-                f"Connectivity fixture. No tools. Reply only REPORT_{i}: {number}.", str(i),
+                f"Connectivity fixture. No tools. Reply only REPORT_{i}: {number}.",
+                str(i),
             )
-        reader._queue.put_nowait("Compare both delegated reports, including their numbers and sum.")
+        reader._queue.put_nowait(
+            "Compare both delegated reports, including their numbers and sum."
+        )
         reader._pending = 1
         await asyncio.wait_for(reader._worker(), timeout=360)
         await asyncio.sleep(0)
         assert reader._queue.empty()
+
     try:
         asyncio.run(run())
     finally:
@@ -78,8 +177,11 @@ def test_live_last_background_agent_triggers_one_consolidated_answer(
         for release in releases:
             release.set()
     assert len(queries) == 3 and queries[1:] == ["", ""]
+    assert decomposed == [queries[0]], "completion reports must not start another decomposition"
     assert all("INTERIM" in answer for answer in answers[:2]), answers
-    assert "FINAL" in answers[-1] and all(str(n) in answers[-1] for n in [11, 29, 40]), answers
+    assert "FINAL" in answers[-1] and all(
+        str(n) in answers[-1] for n in [11, 29, 40]
+    ), answers
     assert agent.background_status() == (0, 0)
     assert reader._buffer.text == "unsent live-test draft"
     record_testsuite_property(
@@ -110,25 +212,35 @@ def test_live_background_agent_recovers_from_an_injected_incomplete_stream(
                 for chunk in stream:
                     yield chunk
                     if attempt == 1:
-                        raise ValueError("Incomplete Bedrock response stream: missing messageStop event.")
+                        raise ValueError(
+                            "Incomplete Bedrock response stream: missing messageStop event."
+                        )
             finally:
                 close = getattr(stream, "close", None)
                 if close is not None:
                     close()
 
-    monkeypatch.setattr(agent, "_bind_tools", lambda model, tools: InterruptOnce(bind(model, tools)))
+    monkeypatch.setattr(
+        agent, "_bind_tools", lambda model, tools: InterruptOnce(bind(model, tools))
+    )
     monkeypatch.setattr(agent, "_subagent_tools", lambda subagent: [])
     monkeypatch.setattr(agent, "_empty_response_retries", 2)
     monkeypatch.setattr(agent, "_sleep_or_cancel", lambda delay: False)
-    monkeypatch.setattr(agent, "_prompt_confirm",
-                        lambda *a, **kw: pytest.fail("background retry must never request approval"))
+    monkeypatch.setattr(
+        agent,
+        "_prompt_confirm",
+        lambda *a, **kw: pytest.fail("background retry must never request approval"),
+    )
     finished = threading.Event()
-    monkeypatch.setattr(agent, "_on_background_complete", lambda ident: finished.set(), raising=False)
+    monkeypatch.setattr(
+        agent, "_on_background_complete", lambda ident: finished.set(), raising=False
+    )
     before = {r.agent_id for r in agent._bg_agents.list_all()}
     agent._handle_spawn_agent(
         "general-purpose",
         "Connectivity fixture: do not use tools. Reply with exactly STREAM_RETRY_OK.",
-        "live incomplete-stream retry", run_in_background=True,
+        "live incomplete-stream retry",
+        run_in_background=True,
     )
     if not finished.wait(120):
         agent.request_cancel()
@@ -199,9 +311,9 @@ def test_live_orchestrator_preserves_foreground_approval(
     ]
     results = agent._run_subtasks_scheduled(tasks)
     assert len(results) == len(targets)
-    assert len(attempts) == len(targets), (
-        "each real model worker must attempt its write"
-    )
+    assert len(attempts) == len(
+        targets
+    ), "each real model worker must attempt its write"
     assert len(prompts) == (0 if parallel else len(targets))
     permitted = approved and not parallel
     assert attempts == [permitted] * len(targets)

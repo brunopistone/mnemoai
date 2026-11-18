@@ -241,10 +241,14 @@ Keeps history under `MAX_CONVERSATION_TOKENS` by summarizing older turns into th
 
 ### Orchestrator-workers (`client/agent/orchestrator.py`, `client/agent/agent.py`) ★
 
-For "full" tasks: decompose → parse subtasks (JSON, with optional `depends_on`) →
-run a worker loop per subtask with category tools → aggregate.
+For "full" tasks, the decomposer defaults to direct execution. Only substantial
+independent deliverables should produce multiple subtasks. The graph checks for
+parallel work: atomic tasks and purely dependent read/edit/test sequences stay
+in the main agent with their original request and context. Independent plans
+run category workers and aggregate their results. Completed background reports
+return directly to the main loop; a new user request can still be decomposed.
 `_run_subtasks_scheduled` runs each dependency-satisfied wave concurrently on the
-bounded pool (`LLM.SUBAGENT_MAX_CONCURRENCY`); no `depends_on` → sequential.
+bounded pool (`LLM.SUBAGENT_MAX_CONCURRENCY`); no `depends_on` → independent.
 Parallel workers run headless and refuse unapproved destructive tools without
 prompting. Lone/sequential workers preserve the calling context: foreground
 work can ask for approval, while an already-headless or spawned context cannot.
@@ -264,6 +268,12 @@ only when the current turn needs the result before continuing. **Neither mode
 can prompt or acquire edit permission.** Both inherit existing explicit trust
 and `/auto` policy, and refuse unapproved mutations. `resume_agent` also defaults
 to background and can load a prior run from disk after restart.
+
+Default to direct work. Agent availability, multiple files, or multiple tool
+steps do not justify delegation. Delegate on an explicit user/project/skill
+request or a concrete benefit from substantial independent work, bounded bulk
+investigation, or independent review. Use the smallest useful number, keep
+tightly coupled work in the parent, and avoid duplicate work or overlapping edits.
 
 ### Session token accounting (`/usage`) (`client/usage_tracker.py`) ★
 

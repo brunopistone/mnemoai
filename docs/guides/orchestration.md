@@ -55,21 +55,24 @@ shape (any partial `MODEL_ID`, including a different provider).
 
 ## Orchestrator-Workers
 
-When enabled alongside routing, tasks classified as `full` (spanning multiple categories) are automatically decomposed into focused subtasks executed by specialized workers.
+When enabled alongside routing, `full` tasks are assessed for useful independent
+work. The default is direct execution: using several tools or having several
+steps does not itself justify workers.
+Completed background reports return to the main agent for consolidation rather
+than being automatically decomposed into another worker group.
 
 **How it works:**
 
-1. **Orchestrator**: An LLM call decomposes the complex query into subtasks, each assigned a category (code, research, knowledge, etc.) and an optional `depends_on` (which earlier subtasks it needs).
-2. **Workers**: Each subtask runs with only the tools for its category. Subtasks are **scheduled by their dependencies** — independent subtasks run **in parallel** (bounded by `SUBAGENT_MAX_CONCURRENCY`), while a subtask that declared a `depends_on` waits for exactly those results (threaded into its prompt). A purely linear plan still runs in order.
+1. **Orchestrator**: An LLM call assesses whether substantial independent deliverables justify the extra model calls and coordination. Ordinary workflows return one `full` task for the main agent.
+2. **Workers**: The graph only selects workers when the plan contains work that can run independently. A purely dependent plan returns to the main agent with the original request and context. For independent plans, each worker receives category tools and waits for its declared `depends_on` results; concurrency is bounded by `SUBAGENT_MAX_CONCURRENCY`.
 3. **Aggregator**: If there were multiple subtasks, a final LLM call synthesizes all worker results into a single coherent response.
 
-**Example flow for "Read this PDF and write a summary to a file" (a dependency chain):**
+**Example flow for "Read this PDF and write a summary to a file":**
 
 ```
-Orchestrator decomposes into:
-  [Step 1/2: Read and summarize the PDF document]        → knowledge worker
-  [Step 2/2: Write the summary to summary.md]            → code worker (depends_on step 1)
-  [Synthesizing results...]                               → aggregator
+Main agent:
+  Read the PDF → prepare the summary → save the file
+  No worker or aggregation call needed.
 ```
 
 **Example flow for "Investigate X and Y independently" (parallel):**
@@ -158,6 +161,14 @@ self-contained task to a fresh sub-agent that runs in its **own isolated
 context** and returns **only its final report**. The sub-agent's intermediate
 tool calls never enter the main conversation, so the assistant's context stays
 clean during search-heavy or multi-step work.
+
+The assistant works directly by default. It delegates when you or applicable
+project/skill instructions request it, or when a clear benefit outweighs the
+extra calls, latency and coordination: substantial independent work, a bounded
+investigation with large intermediate output, or an independent review.
+Small edits, a few file reads, targeted searches and routine checks stay in the
+main loop. Parallel tool calls can often do the work without additional agents.
+Delegated tasks should have distinct deliverables and avoid overlapping edits.
 
 **How it works:**
 

@@ -1,6 +1,8 @@
-"""Unit tests for subtask parsing (client/orchestrator.py)."""
+"""Subtask parsing, scheduling and direct-execution fallback."""
 
-from langchain_core.messages import AIMessage
+import json
+
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from pydantic import BaseModel
 
 from mnemoai.client.agent.agent import LangGraphAgent
@@ -175,6 +177,57 @@ class TestDecomposeDoesNotMutateTheSharedModel:
         a._restore_reasoning = lambda saved, model=None: None
         assert a._decompose_task("do a thing", "decompose", VALID)
         assert disabled == [True]
+
+
+def test_dependent_plan_executes_directly_with_original_context(tmp_path, monkeypatch):
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path / "home"))
+    target = tmp_path / "report.txt"
+    calls = []
+    requests = []
+
+    class Write:
+        name = "fs_write"
+        def invoke(self, args):
+            calls.append(args)
+            target.write_text(args["text"])
+            return "saved"
+
+    class Model:
+        def bind_tools(self, tools, **kwargs):
+            return self
+        def stream(self, messages, config=None):
+            requests.append(messages)
+            if calls:
+                yield AIMessageChunk(content="Saved the requested report.")
+            else:
+                yield AIMessageChunk(content="", tool_call_chunks=[{
+                    "id": "write", "name": "fs_write",
+                    "args": json.dumps({"text": "original context retained"}), "index": 0,
+                }])
+
+    class Router:
+        def classify(self, query, context):
+            return "full"
+
+    agent = LangGraphAgent(
+        Model(), [Write()], "Keep the original context.",
+        router=Router(), orchestrator_enabled=True, verbose=False,
+        auto_approve_provider=lambda: "all",
+    )
+    agent._messages = [HumanMessage(content="Use the title we agreed earlier.")]
+    agent._decompose_task = lambda *a, **kw: [
+        {"description": "Read the report", "category": "knowledge", "depends_on": []},
+        {"description": "Save the result", "category": "code", "depends_on": [0]},
+    ]
+    query = "Read the source report and save the requested result."
+    assert agent.invoke(query) == "Saved the requested report."
+    assert target.read_text() == "original context retained"
+    assert len(calls) == 1
+    assert agent._activity.snapshot() == []
+    assert any(m.content == query for m in requests[0])
+    assert any(m.content == "Use the title we agreed earlier." for m in requests[0])
+
+
 def test_real_scheduler_retains_worker_tools_if_later_step_is_interrupted():
     import pytest
     from langchain_core.messages import HumanMessage, ToolMessage
