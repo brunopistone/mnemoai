@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from mcp import StdioServerParameters
 
 from mnemoai.client import (
@@ -449,6 +449,8 @@ class LangGraphClient:
                     # model call when history exceeds its high-water mark, reusing the
                     # same manager as the post-turn /compact path.
                     self.agent._compact_provider = self._compact_now
+                    self._worker_compaction_slot = threading.BoundedSemaphore(1)
+                    self.agent._worker_compact_provider = self._compact_worker_context
                     # Attribute usage to the configured model, and let the router
                     # (a model call the user never sees) count toward the same totals.
                     self.agent.usage_model_name = self.model_name_for_log() or "model"
@@ -507,6 +509,8 @@ class LangGraphClient:
         """Send a query to the agent and return its response."""
         if not self.agent:
             raise RuntimeError("Client not started. Call start() first.")
+        if isinstance(self.agent, LangGraphAgent):
+            self.agent._last_turn_stopped = False
 
         self.callback_handler.reset()
         with self.spinner_lock:
@@ -686,6 +690,8 @@ class LangGraphClient:
                 return response
 
         except KeyboardInterrupt:
+            if isinstance(self.agent, LangGraphAgent):
+                self.agent._last_turn_stopped = True
             with self.spinner_lock:
                 self.spinner.stop()
             if review_work is not None and review_capture is None:
@@ -698,6 +704,8 @@ class LangGraphClient:
 
         except Exception as e:
             # Clean user-facing message for any model/MCP/runtime failure.
+            if isinstance(self.agent, LangGraphAgent):
+                self.agent._last_turn_stopped = True
             with self.spinner_lock:
                 self.spinner.stop()
             if review_capture is not None:
@@ -1021,6 +1029,68 @@ class LangGraphClient:
         self._playbook_task = ""
         if getattr(self, "reviewer", None) is not None:
             self.reviewer.reset()
+
+    def _compact_worker_context(self, messages, *, force=False, cancelled=lambda: False):
+        """Summarize a worker's private context without changing the parent.
+
+        Summaries share the existing summary model/accounting. Serialize worker
+        compactions so each worker cannot independently fan out a full map pool.
+        No memory learning, tool execution or parent history mutation occurs.
+        """
+        manager = AgentConversationManager(max_tokens=self.conversation_manager.max_tokens)
+        encoded = messages_to_dict_list(messages)
+        before = manager.count_tokens(encoded)
+        if not force and before < int(manager.max_tokens * 0.7):
+            return None
+        system = messages[:1] if messages and isinstance(messages[0], SystemMessage) else []
+        body = messages[len(system):]
+        split = manager._split_keep_recent(body, 6)
+        if split < 2:
+            return None
+        slot = getattr(self, "_worker_compaction_slot", None)
+        acquired = False
+        try:
+            if slot is not None:
+                while not cancelled():
+                    if slot.acquire(timeout=0.1):
+                        acquired = True
+                        break
+            if cancelled():
+                return None
+            model = self._summary_model()
+
+            class CheckedModel:
+                def __getattr__(self, name):
+                    return getattr(model, name)
+
+                async def ainvoke(self, *args, **kwargs):
+                    if cancelled():
+                        raise CompactionError("Worker summary was cancelled")
+                    return await model.ainvoke(*args, **kwargs)
+
+                def invoke(self, *args, **kwargs):
+                    if cancelled():
+                        raise CompactionError("Worker summary was cancelled")
+                    return model.invoke(*args, **kwargs)
+
+            summary = asyncio.run(manager.generate_summary(
+                messages_to_dict_list(body[:split]), CheckedModel(),
+                "Preserve the worker's task, constraints, completed actions, failures, "
+                "remaining work and next action. This is a continuation, not task completion.",
+                record_usage=usage_tracker.recorder(
+                    getattr(self.agent, "usage", None), model, getattr(self.agent, "usage_model_name", ""),
+                ),
+            ))
+            if cancelled():
+                return None
+            recent = self.agent._sanitize_tool_pairs(body[split:])
+            fresh = system + [HumanMessage(content="<worker-context-summary>\n" + summary + "\n</worker-context-summary>")] + recent
+            if manager.count_tokens(messages_to_dict_list(fresh)) >= before:
+                return None
+            return fresh
+        finally:
+            if acquired:
+                slot.release()
 
     def _compact_now(self, force: bool = False) -> bool:
         """Mid-loop compaction hook the agent calls before each model call.

@@ -84,6 +84,7 @@ class TestBashTimeoutLive:
 def test_live_continue_after_step_limit(live_client, _neutral_cwd, monkeypatch, cutoff):
     """Real model + graph + MCP, with a deliberately tiny initial step budget."""
     agent = live_client.agent
+    monkeypatch.setattr(agent, "_auto_continue_tasks", False)  # explicit hard-limit mode
     target = _neutral_cwd / f"step-limit-{cutoff}.txt"
     target.write_text("CONTINUITY_TOKEN_582931\n")
     read_tool = next(tool for tool in agent.tools if tool.name == "fs_read")

@@ -143,7 +143,7 @@ class ActivitySink:
             self.finish("stopped")
         else:
             self.final(final_text)
-            self.finish("done")
+            self.finish("failed" if getattr(final_text, "incomplete", False) is True else "done")
 
     def finish_if_running(self, status: str) -> None:
         """Finish the run ONLY if it's still 'running' — an idempotent backstop

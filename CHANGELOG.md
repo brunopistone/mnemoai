@@ -7,6 +7,26 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.31.0] — 2026-11-18
+
+### Added
+
+- Continue long-running tasks across execution checkpoints when tool activity
+  advances, retaining the original request and follow-up guidance through
+  compaction. `LLM.AUTO_CONTINUE_TASKS` defaults to true; false retains a strict
+  step limit. Delegated workers can continue and compact their private context.
+
+### Fixed
+
+- Resume from the next action without replaying completed tools, preserve
+  in-flight work in compaction checkpoints, and keep status questions from
+  prematurely closing an active tool task.
+- Mark execution-guard stops and incomplete worker reports accurately instead
+  of treating them as user cancellation or successful completion.
+- Verify and repair overlapping LiteLLM files during installer updates.
+  Crawl4AI's bundled fork can otherwise overwrite the canonical dependency
+  despite its installed version metadata reporting the required release.
+
 ## [1.30.3] — 2026-11-02
 
 ### Security
@@ -5512,7 +5532,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.30.3...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.0...HEAD
+[1.31.0]: https://github.com/brunopistone/mnemoai/compare/v1.30.3...v1.31.0
 [1.30.3]: https://github.com/brunopistone/mnemoai/compare/v1.30.2...v1.30.3
 [1.30.2]: https://github.com/brunopistone/mnemoai/compare/v1.30.1...v1.30.2
 [1.30.1]: https://github.com/brunopistone/mnemoai/compare/v1.30.0...v1.30.1

@@ -10,6 +10,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from mnemoai.client.agent.agent import INTERRUPTED_MARKER, LangGraphAgent
+from mnemoai.client.agent.turn_failure import STEP_LIMIT_MARKER
 
 
 class _OkGraph:
@@ -237,7 +238,7 @@ class TestRecursionLimitKeepsTheWork:
         a = _agent(_Boom())
         a._emit_answer = lambda m: None
         a.invoke("a task")
-        assert a._messages[-1].content == INTERRUPTED_MARKER
+        assert a._messages[-1].content == STEP_LIMIT_MARKER
 
     def test_stale_token_count_is_reset(self):
         a = self._looping_agent()

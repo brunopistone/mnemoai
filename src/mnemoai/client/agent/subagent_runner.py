@@ -29,6 +29,7 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 
 from mnemoai.client.agent import subagents
+from mnemoai.client.agent.task_continuation import IncompleteResult
 from mnemoai.utils import execution_context
 from mnemoai.utils.logger import logger
 
@@ -165,11 +166,12 @@ def handle_spawn_agent(
 def wrap_subagent_result(agent_name: str, result: str, resumed: bool = False) -> str:
     """Wrap a sub-agent's report with the header + not-shown-to-user footer."""
     header = f"[{agent_name} sub-agent result{' — resumed' if resumed else ''}]"
-    return (
+    text = (
         f"{header}\n{result}\n\n"
         "(This result is not shown to the user — summarize what matters for "
         "them yourself.)"
     )
+    return IncompleteResult(text) if isinstance(result, IncompleteResult) else text
 
 
 def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
@@ -203,7 +205,7 @@ def launch_background_subagent(agent, subagent, prompt: str, label: str) -> str:
                 result = agent._run_one_subagent(
                     subagent, prompt, label, drive_spinner=False, kind="background"
                 )
-            agent._bg_agents.complete(rec.agent_id, result)
+            agent._bg_agents.complete(rec.agent_id, result, failed=isinstance(result, IncompleteResult))
             if activity is not None:
                 activity.finish_if_running("done")
         except KeyboardInterrupt:

@@ -1,5 +1,31 @@
 # Usage
 
+## Long-running tasks
+
+MnemoAI keeps the active request and your follow-up guidance while it works.
+Compaction preserves completed work and the next action; it does not end the task.
+A status question can receive a brief answer while the original work continues.
+Use **Esc** to cancel the running turn.
+
+By default, the 200-step limit is an execution checkpoint. The assistant continues
+when completed tool activity has changed, and stops when activity repeats without
+new results. Completed tools are not replayed when execution resumes.
+Delegated workers can also continue and summarize their own context without
+changing the parent conversation. These summaries use the configured summary
+model and are included in usage accounting.
+
+For a strict step limit, set the following in your configuration and restart:
+
+```yaml
+LLM:
+  RECURSION_LIMIT: 200
+  AUTO_CONTINUE_TASKS: false
+```
+
+`AUTO_CONTINUE_TASKS` defaults to `true` when omitted. Cancellation and explicit
+peer-review budgets remain enforced in either mode. A stopped or incomplete task
+is labelled accordingly rather than shown as `done`.
+
 **Supervisor peer review:** `/review on|off|last` controls a bounded
 reviewer → chat-model correction → recheck dialogue without changing permissions.
 `/config review` edits its shared budgets and per-review limits.
@@ -37,7 +63,7 @@ All advanced features can be independently enabled or disabled in your config fi
 | **Turn-end notification** (bell + desktop notification when a long turn ends) | `NOTIFY.AFTER_SECONDS: 30`             | `30` seconds        | `0` disables; `NOTIFY.BELL` / `NOTIFY.DESKTOP` ([details](#when-the-terminal-wants-you-back)) |
 | **Log retention** (days a file under `~/.mnemoai/logs/` is kept)              | `LOG_MAX_AGE_DAYS: 7`                  | `7` days            | `0` keeps them forever ([details](../development/troubleshooting.md#read-the-logs))           |
 
-**Dependency note:** RAG, Episodic Memory, and ACE Playbook refinement all require a working embedding model. If the embedding model is unavailable, the system falls back to SHA256-based deterministic embeddings with degraded semantic search quality. Configure `RAG.EMBED_MODEL_ID` in `config.yaml` to use a real embedding model (see [Embeddings Model](../configuration.md#embeddings-model)).
+**Dependency note:** Semantic RAG and episodic memory require a working embedding model. During an embedding outage, existing content remains searchable through BM25 keyword ranking; new embedding writes fail rather than storing fabricated vectors. Playbook learning is local-only and makes no model or embedding requests. Configure `RAG.EMBED_MODEL_ID` for semantic retrieval (see [Embeddings Model](../configuration.md#embeddings-model)).
 
 **Toggle them from the app:** run **`/features`** for a checklist of these `ENABLE_*` features — flip any on/off without editing `config.yaml`. Turning one on prompts for anything it needs (a Brave API key for web search, an embeddings model for RAG / episodic memory).
 
