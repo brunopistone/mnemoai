@@ -14,8 +14,15 @@ from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 
 from mnemoai import app_version
-from mnemoai.client import context_report, file_ledger, file_mentions, learned, review
-from mnemoai.client.agent import auto_approve
+from mnemoai.client import (
+    context_report,
+    file_ledger,
+    file_mentions,
+    learned,
+    restart_state,
+    review,
+)
+from mnemoai.client.agent import auto_approve, mid_turn
 from mnemoai.client.memory.episodic_memory import (
     extract_tools_from_messages,
     is_task_successful,
@@ -853,24 +860,35 @@ class ChatInterface:
         print()
 
     def _restart_in_place(self, notice: str = None) -> None:
-        """Re-exec the process (``os.execv``) so reloaded config takes full effect.
-
-        The only way to apply *every* setting — the MCP subprocess fixes its tool
-        set at boot and the model/memory wire at startup. In-memory conversation
-        is intentionally dropped. The MCP subprocess is shut down first since
-        ``os.execv`` doesn't reap children.
-        """
-        print("\n" + (notice or "Restarting to apply the new configuration...") + "\n")
-        # os.execv REPLACES this process: no atexit, no finally, so main()'s
-        # end-of-run cleanup never runs and a turn-less session file (always the
-        # case when the restart follows a `--resume` the user hadn't typed into
-        # yet) would linger on disk until it aged out. Discard it here instead.
+        """Preserve the conversation before replacing this process."""
+        reader = getattr(self, "_pinned_reader", None)
+        if self._restart_work_pending():
+            self._pending_restart_notice = notice or ""
+            print("\n\033[90mSettings saved. Restarting after pending work finishes.\033[0m")
+            return
+        self._pending_restart_notice = None
         try:
+            draft = getattr(getattr(reader, "_buffer", None), "text", "")
+            if reader is not None and hasattr(reader, "_expand_pastes"):
+                draft = reader._expand_pastes(draft)
+            state = self.client.snapshot_for_restart(draft=draft)
+            path = restart_state.write(state)
+        except Exception as error:
+            logger.debug("Conversation handoff failed", exc_info=True)
+            print_error(
+                f"Settings saved, but restart was cancelled: {one_line(error)}. "
+                "Your current conversation is still open."
+            )
+            return
+        print("\n" + (notice or "Restarting to apply the new configuration...") + "\n")
+        # Keep the old log: the new process may use it to replay compacted turns.
+        if not state["messages"] and not state["summary"]:
             log = getattr(getattr(self.client, "agent", None), "session_log", None)
             if log is not None:
-                log.discard_if_empty()
-        except Exception as e:  # cleanup must never block the restart
-            logger.debug(f"Session cleanup before restart failed: {e}")
+                try:
+                    log.discard_if_empty()
+                except Exception:
+                    logger.debug("Empty-session cleanup before restart failed", exc_info=True)
         try:
             self.client.mcp_client.shutdown()
         except Exception as e:
@@ -880,8 +898,38 @@ class ChatInterface:
             sys.stderr.flush()
         except Exception:
             pass
-        # Re-exec with the original interpreter + argv (preserves --no-verbose).
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        try:
+            os.execv(sys.executable, [sys.executable] + restart_state.argv(sys.argv, path))
+        except OSError as error:
+            print_error(
+                f"Restart failed: {one_line(error)}. Conversation preserved at {path}. "
+                f"Recover with: {restart_state.recovery_command(path)}"
+            )
+            # The old MCP connection has already shut down. Do not return to a
+            # prompt that appears usable but can no longer execute its tools.
+            raise SystemExit(1) from error
+
+    def _finish_pending_restart(self, *, in_dialog: bool = False) -> None:
+        """Apply a deferred restart after accepted work and reports finish."""
+        notice = getattr(self, "_pending_restart_notice", None)
+        reader = getattr(self, "_pinned_reader", None)
+        if notice is None or self._restart_work_pending():
+            return
+        if reader is not None and not in_dialog:
+            reader.run_dialog(lambda: self._restart_in_place(notice=notice))
+        else:
+            self._restart_in_place(notice=notice)
+
+    def _restart_work_pending(self) -> bool:
+        reader = getattr(self, "_pinned_reader", None)
+        return (
+            any(self._background_status())
+            # _pending also counts empty background wakeups. Once their report
+            # has been consumed, the reader discards them without dispatching;
+            # waiting for one here would strand the deferred restart.
+            or bool(getattr(reader, "_queued_lines", []))
+            or mid_turn.has_pending(getattr(self.client, "agent", None))
+        )
 
     # Sentinel returned by _dispatch to signal the loop should exit.
     _EXIT = object()
@@ -940,6 +988,7 @@ class ChatInterface:
                 except KeyboardInterrupt:
                     pass
                 break
+            self._finish_pending_restart()
 
     def _run_pinned_loop(self) -> None:
         """Drive the pinned-input REPL (default TTY UI).
@@ -988,11 +1037,18 @@ class ChatInterface:
             status.begin_turn()
             try:
                 if first in dialog_cmds and not self._is_review_control(line):
+                    def in_dialog():
+                        result = self._dispatch(line)
+                        if result is not self._EXIT:
+                            self._finish_pending_restart(in_dialog=True)
+                        return result
                     result = self._pinned_reader.run_dialog(
-                        lambda: self._dispatch(line)
+                        in_dialog
                     )
                 else:
                     result = self._dispatch(line)
+                    if result is not self._EXIT:
+                        self._finish_pending_restart()
             finally:
                 status.end_turn()
             return _ExitRepl if result is self._EXIT else None
@@ -1152,6 +1208,8 @@ class ChatInterface:
             self.client.agent._activity.on_change = reader.request_repaint
         # Exposed so _dispatch can route dialog commands through the reader.
         self._pinned_reader = reader
+        if getattr(self, "_restart_draft", ""):
+            reader.restore_draft(self._restart_draft)
 
         interrupt_count = 0
         last_interrupt_time = 0.0

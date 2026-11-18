@@ -1097,6 +1097,16 @@ class PinnedPromptReader:
         self._queue.put_nowait("")
         notify.notify("mnemoai · a background agent finished")
 
+    def restore_draft(self, text: str) -> None:
+        """Restore unsubmitted text, folding long drafts without losing content."""
+        num_lines = _paste_num_lines(text)
+        if len(text) > _PASTE_CHAR_THRESHOLD or num_lines > _PASTE_LINE_THRESHOLD:
+            self._paste_counter += 1
+            self._pasted[self._paste_counter] = text
+            text = _format_paste_ref(self._paste_counter, num_lines)
+        self._buffer.text = text
+        self._buffer.cursor_position = len(text)
+
     def _expand_pastes(self, text: str, echo: bool = False) -> str:
         """Replace each `[Pasted text #N …]` placeholder with its stored text.
 

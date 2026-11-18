@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Any, Optional
 
 # Only LIGHTWEIGHT modules at top level. The heavy LLM/agent stack
@@ -10,6 +11,7 @@ from typing import Any, Optional
 # instead of the terminal sitting frozen. configurator/console/paths/
 # startup_loader are all dependency-free — and `client.ui.screen` is too (stdlib
 # only; `client/__init__` resolves LangGraphClient lazily, so this costs nothing).
+from mnemoai.client import restart_state
 from mnemoai.client.ui import screen
 from mnemoai.utils.configurator import config_exists, run_first_run_setup
 from mnemoai.utils.console import print_error
@@ -22,7 +24,8 @@ _client: Optional[Any] = None
 
 
 def main(
-    verbose: bool = False, resume: Optional[str] = None, auto: bool = False
+    verbose: bool = False, resume: Optional[str] = None, auto: bool = False,
+    restart_path: Optional[str] = None,
 ) -> None:
     """Initialize the application and start the chat loop.
 
@@ -38,13 +41,16 @@ def main(
     """
     global _client
     _client = None
-
-    # Start on a blank screen: whatever the shell left behind is not part of this
-    # session, and a banner appended under the previous run's output reads as a
-    # continuation of it. Scrolled away, not erased — the prior output is still
-    # in scrollback (`/clear` is the one that discards it). Done before the
-    # spinner so anything the startup itself prints stays on screen.
+    # Scroll the previous output away before startup or recovery diagnostics.
+    # Unlike /clear, this keeps the previous output in terminal scrollback.
     screen.fresh()
+    handoff = None
+    if restart_path:
+        try:
+            handoff = restart_state.read(restart_path)
+        except Exception as error:
+            print_error(f"Could not read restart state: {error}. Choose a session to recover.")
+            resume = "pick"
 
     loader = StartupLoader().start("Loading libraries")
     try:
@@ -68,6 +74,11 @@ def main(
         chat_interface = ChatInterface(_client)
     except BaseException:
         _shutdown_client(_client)
+        if restart_path:
+            print_error(
+                f"Conversation handoff retained at {restart_path}. "
+                f"Retry from this directory with: {restart_state.recovery_command(restart_path)}"
+            )
         raise
     finally:
         # Clear the spinner line before the welcome banner prints (or on error).
@@ -79,9 +90,30 @@ def main(
     # `--resume` means "resume", so starting a new chat would be a surprise.
     try:
         resumed = False
-        if resume:
+        if handoff is not None:
+            chat_interface.show_welcome()
+            try:
+                continued = _client.restore_after_restart(handoff)
+            except Exception as error:
+                print_error(
+                    f"Could not restore the conversation: {error}. "
+                    f"The handoff is retained at {restart_path}."
+                )
+                outcome = _resume_session(_client, "pick", chat_interface)
+                if outcome != "resumed":
+                    return
+            else:
+                chat_interface._restart_draft = handoff["draft"]
+                try:
+                    Path(restart_path).unlink()
+                except OSError:
+                    pass  # restoration succeeded; do not undo it over cleanup
+                if continued:
+                    print("\n\033[90m• Conversation continued with the updated configuration.\033[0m")
+            resumed = True
+        elif resume:
             outcome = _resume_session(_client, resume, chat_interface)
-            if outcome == "exit":
+            if outcome == "exit" or (restart_path and outcome != "resumed"):
                 return
             resumed = outcome == "resumed"
 
@@ -214,7 +246,9 @@ def _resume_session(client: Any, resume: str, chat_interface: Any = None) -> str
         # Full id, not a prefix: `--resume <id>` matches by suffix, so this line is
         # also how you copy the id of the session you're now in.
         print(turn_view.render_session_notice(f"resumed  {target['session_id']}"))
-    return "resumed"
+        return "resumed"
+    print_error("Could not restore the selected session.")
+    return "exit"
 
 
 def cli() -> None:
@@ -253,6 +287,7 @@ def cli() -> None:
         action="store_true",
         help="Resume the most recent session from this directory (no prompt)",
     )
+    parser.add_argument(restart_state.FLAG, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     # Before anything can fail: from here on a traceback goes to
@@ -277,7 +312,10 @@ def cli() -> None:
     # --continue is the non-interactive form of --resume (most recent session);
     # an explicit --resume value wins if both are given.
     resume = args.resume or ("latest" if args.continue_latest else None)
-    main(verbose=verbose, resume=resume, auto=args.auto)
+    if args.restart_state:
+        main(verbose=verbose, resume=resume, auto=False, restart_path=args.restart_state)
+    else:
+        main(verbose=verbose, resume=resume, auto=args.auto)
 
 
 if __name__ == "__main__":

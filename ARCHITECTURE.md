@@ -554,6 +554,17 @@ presence remains the switch; no new toggle or slash command is needed.
 
 ### Session transcripts + `--resume` (`client/session_log.py`, `utils/paths.sessions_dir`)
 
+Internal configuration restarts use `client/restart_state.py` for a private,
+verified JSON handoff of the current context before MCP shutdown and `os.execv`.
+`LangGraphClient.snapshot_for_restart` and `restore_after_restart` share the
+existing conversation codec; the handoff carries the live compacted window and
+summary, `/load` save target, session label, draft and auto/plan modes. `main`
+restores it with the newly configured model, consumes it only on success, and
+retains it on failure. Pending user input and background reports defer the
+restart; the pinned UI enters cooked mode before either restart path. The old
+session log supplies full replay when it matches the snapshot, without expanding
+the live context. No reflection or embedding call is needed.
+
 **Automatic** append-only transcripts, scoped to the launch directory — the counterpart to the **user-curated** `/save`+`/load` (untouched, stored in `{profile}/conversations/`, and NEVER swept).
 
 **Storage.** `{profile}/sessions/{sanitize_cwd(cwd)}/session_<ts>_<pid>_<rand>.jsonl`. `sanitize_cwd` collapses everything outside `[A-Za-z0-9]` to `-`, truncating at 120 chars with an 8-hex suffix of the FULL path so two deep sibling directories can't collide into one dir. The id carries a random suffix because `<ts>_<pid>` alone collides when two sessions start in the same second (rapid relaunch), which would append two conversations into one file. One JSON object per line: `meta` (session id, cwd, started, model), `turn` (`n`, `ts`, the strands-encoded messages that turn added), `compact` (the `messages` kept live + a `summary` when older turns were summarized away — a checkpoint, see below), `restore`, `label`.

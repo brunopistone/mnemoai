@@ -22,6 +22,7 @@ from mnemoai.client import (
     file_ledger,
     hooks,
     provenance,
+    restart_state,
     review,
     rewind,
     session_artifacts,
@@ -144,8 +145,9 @@ class LangGraphClient:
 
         # User-toggled (/auto), plan mode's opposite: which confirmation
         # categories run WITHOUT asking. A tier name from `auto_approve.MODES`,
-        # read per tool call by the confirmation gate. Session-scoped — never
-        # persisted, so a new run always starts back at "off".
+        # read per tool call by the confirmation gate. Session-scoped and
+        # restored only for an internal configuration restart; an ordinary new
+        # run starts back at "off".
         self.auto_approve_mode: str = auto_approve.DEFAULT_MODE
         self.reviewer = review.Reviewer(enabled=config.get("ENABLE_REVIEW", False) is True)
 
@@ -1726,6 +1728,64 @@ class LangGraphClient:
         except Exception as e:
             logger.error(f"Failed to load conversation: {e}")
             return False
+
+    def snapshot_for_restart(self, draft: str = "") -> dict:
+        """Capture the live conversation without saving over a loaded JSON file."""
+        messages = [m for m in self.agent.messages if not isinstance(m, SystemMessage)]
+        encoded = convert_langchain_messages_to_strands(messages)
+        if len(encoded) != len(messages) or len(self._decode_restored(encoded)) != len(messages):
+            raise ValueError("Some conversation messages could not be preserved")
+        log = getattr(self.agent, "session_log", None)
+        path = getattr(log, "path", None)
+        opened = getattr(self, "current_conversation_path", None)
+        return restart_state.validate({
+            "restart_version": 1,
+            "messages": encoded,
+            "summary": getattr(self.conversation_manager, "summary_text", "") or "",
+            "conversation_path": os.path.abspath(opened) if opened else None,
+            "session_path": str(path) if path else None,
+            "label": self.session_label(),
+            "cwd": os.getcwd(),
+            "draft": draft,
+            "auto_mode": auto_approve.normalize(getattr(self, "auto_approve_mode", "off")),
+            "plan_mode": bool(getattr(self, "plan_mode_active", False)),
+        })
+
+    def restore_after_restart(self, data: dict) -> bool:
+        """Restore current context with the new model and preserve the /save target."""
+        restart_state.validate(data)
+        messages = self._decode_restored(data["messages"])
+        if len(messages) != len(data["messages"]):
+            raise ValueError("Restart messages could not be restored completely")
+        replayed = messages
+        source = data["session_path"]
+        if source:
+            try:
+                previous = read_session(source)
+                if previous["messages"] == data["messages"] and previous["summary"] == data["summary"]:
+                    replayed = self._decode_restored(previous["all_messages"])
+            except Exception:
+                logger.debug("Restart replay unavailable; using the live snapshot", exc_info=True)
+        self.agent.messages[:] = messages
+        self._forget_context_size()
+        applied = self.conversation_manager.apply_restored_summary(self, self.agent, data["summary"])
+        if data["summary"] and not applied:
+            raise ValueError("The saved compaction summary could not be restored")
+        self.current_conversation_path = data["conversation_path"]
+        self.set_auto_approve_mode("off" if data["plan_mode"] else data["auto_mode"])
+        self.plan_mode_active = data["plan_mode"]
+        continued = bool(messages or data["summary"])
+        if continued:
+            self._seed_session_log(
+                replayed, source or data["conversation_path"] or "",
+                label=data["label"], summary=data["summary"],
+                kept=messages if data["summary"] or replayed != messages else None,
+            )
+            transcript = turn_view.render_conversation(replayed)
+            if transcript:
+                print("\n" + transcript)
+            self._print_context_size()
+        return continued
 
     def _session_max_age_days(self) -> int:
         """Days a resumable session log is kept (0 disables persistence).

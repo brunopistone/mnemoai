@@ -314,6 +314,18 @@ class TestRebindModel:
 class TestRestartDiscardsTurnlessSession:
     """os.execv runs no atexit/finally, so the restart must clean up itself."""
 
+    @pytest.fixture(autouse=True)
+    def handoff(self, monkeypatch, tmp_path):
+        # This suite checks the cleanup/reload decision. The real snapshot and
+        # filesystem failure paths are exercised in test_restart_state.py.
+        monkeypatch.setattr(
+            _Client, "snapshot_for_restart",
+            lambda self, draft="": {"messages": [], "summary": ""}, raising=False,
+        )
+        monkeypatch.setattr(
+            "mnemoai.client.restart_state.write", lambda state: tmp_path / "restart.json",
+        )
+
     def test_restart_discards_an_empty_session_file(self, monkeypatch):
         c = ChatInterface.__new__(ChatInterface)
         c.client = _Client()
