@@ -1208,15 +1208,33 @@ class TestDecomposeNode:
 
 
 class TestRouteAfterDecompose:
-    """_route_after_decompose sends only a genuine multi-step plan (>=2
-    subtasks) to the orchestrator; everything else streams via the agent."""
+    """A multi-step checklist alone must not create worker agents."""
 
     def _agent(self):
         return LangGraphAgent.__new__(LangGraphAgent)
 
-    def test_two_subtasks_go_to_orchestrator(self):
+    def test_independent_subtasks_go_to_orchestrator(self):
         a = self._agent()
         assert a._route_after_decompose({"subtasks": [{}, {}]}) == "orchestrator"
+
+    def test_dependent_read_edit_test_workflow_stays_in_main_agent(self):
+        a = self._agent()
+        steps = [
+            {"description": "read", "depends_on": []},
+            {"description": "edit", "depends_on": [0]},
+            {"description": "test", "depends_on": [0, 1]},
+        ]
+        assert a._route_after_decompose({"subtasks": steps}) == "agent"
+
+    def test_independent_work_after_shared_preparation_can_use_workers(self):
+        a = self._agent()
+        steps = [
+            {"description": "prepare", "depends_on": []},
+            {"description": "inspect API", "depends_on": [0]},
+            {"description": "inspect packaging", "depends_on": [0]},
+            {"description": "combine", "depends_on": [1, 2]},
+        ]
+        assert a._route_after_decompose({"subtasks": steps}) == "orchestrator"
 
     def test_single_subtask_goes_to_agent(self):
         # The core user decision: the old "Step 1/1" now streams via the agent.
@@ -1273,6 +1291,28 @@ class TestRouteAfterClassify:
             ],
         }
         assert a._route_after_classify(state) == "agent"
+
+    def test_background_report_is_not_decomposed_into_more_workers(self):
+        from langchain_core.messages import HumanMessage
+
+        a = self._agent()
+        state = {"route": "full", "messages": [
+            HumanMessage(
+                content="Review of api.py and release.py completed. Incorporate both findings.",
+                additional_kwargs={"mnemoai_background_report": "completed-agent"},
+            ),
+        ]}
+        assert a._route_after_classify(state) == "agent"
+
+    def test_new_user_request_after_report_can_still_be_decomposed(self):
+        from langchain_core.messages import HumanMessage
+
+        a = self._agent()
+        state = {"route": "full", "messages": [
+            HumanMessage(content="Report", additional_kwargs={"mnemoai_background_report": "completed-agent"}),
+            HumanMessage(content="Investigate the independent issues in api.py and release.py."),
+        ]}
+        assert a._route_after_classify(state) == "decompose"
 
 
 class TestGraphShape:

@@ -7,6 +7,17 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [1.31.1] — 2026-11-18
+
+### Fixed
+
+- Prefer direct execution for ordinary multi-step work. Automatic orchestration
+  requires independent work; dependent read/edit/test sequences stay in the
+  main agent. Align prompts and delegation tool descriptions around concrete
+  benefits, preserving explicit delegation and useful parallel work. Deliver
+  completed background reports through the main loop instead of automatically
+  decomposing them into another worker group.
+
 ## [1.31.0] — 2026-11-18
 
 ### Added
@@ -5532,7 +5543,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.1...HEAD
+[1.31.1]: https://github.com/brunopistone/mnemoai/compare/v1.31.0...v1.31.1
 [1.31.0]: https://github.com/brunopistone/mnemoai/compare/v1.30.3...v1.31.0
 [1.30.3]: https://github.com/brunopistone/mnemoai/compare/v1.30.2...v1.30.3
 [1.30.2]: https://github.com/brunopistone/mnemoai/compare/v1.30.1...v1.30.2

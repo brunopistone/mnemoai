@@ -37,8 +37,16 @@ def register_subagent_tools(mcp: FastMCP) -> None:
 
         The sub-agent runs in its OWN isolated context — it does NOT see this
         conversation, only the ``prompt`` you give it — and returns a single final
-        report. Its intermediate steps stay out of your context, so this is ideal
-        for search-heavy or multi-step work whose details you don't need to keep.
+        report. Work directly by default: several steps, files, or tools do not
+        justify delegation. Each agent adds model calls, latency, and handoff cost.
+
+        Use only when requested by the user or applicable project/skill
+        instructions, or for a concrete benefit: substantial independent work
+        alongside your own work, a bounded investigation with large intermediate
+        output, or an independent review that materially improves verification.
+        Keep routine read/search/edit/test sequences and the immediate critical
+        path in your own tool loop. A few file reads, a symbol lookup, a small
+        edit, one check, or summarizing known information should use direct tools.
 
         Available agent types:
           - general-purpose: full toolset; research + make changes across files.
@@ -64,9 +72,10 @@ def register_subagent_tools(mcp: FastMCP) -> None:
           - **Pass ``run_in_background=false`` when you need the report to
             CONTINUE** — i.e. your very next step depends on the answer (so you'd
             just wait anyway). A foreground call blocks and returns the report.
-          - **Run several in parallel.** For independent investigations, emit
+          - **Use the smallest useful number.** For substantial independent investigations, emit
             multiple ``spawn_agent`` calls in the SAME turn — they run concurrently.
-            Only do this when the tasks don't depend on each other's results.
+            Give each a distinct deliverable. Avoid overlapping edits and do not
+            duplicate their work. Parallel tool calls often suffice without agents.
           - **The result is NOT shown to the user.** When the sub-agent returns,
             summarize what matters for the user yourself.
           - Don't use it for a single quick file read — call fs_read directly.
@@ -90,16 +99,15 @@ def register_subagent_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @tool_error_handler
-    def resume_agent(
-        agent_id: str, prompt: str, run_in_background: bool = True
-    ) -> str:
+    def resume_agent(agent_id: str, prompt: str, run_in_background: bool = True) -> str:
         """Resume a previously-run sub-agent with a follow-up instruction.
 
         Continues the sub-agent identified by ``agent_id`` (from an earlier
         ``spawn_agent`` / a completion notification) — it keeps its prior work as
         context and runs the new ``prompt``, returning a fresh report. Use this to
-        iterate on a sub-agent's work (e.g. "now also check the tests") without
-        re-briefing it from scratch.
+        continue substantial delegated work when the retained context is useful,
+        rather than starting a replacement agent. Handle a small follow-up or
+        one check directly; resuming also incurs model calls and handoff cost.
 
         By default the resumed run is **in the background** (like the original
         background sub-agent): it returns immediately and its report is delivered

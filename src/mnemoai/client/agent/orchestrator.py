@@ -18,6 +18,24 @@ def get_aggregator_prompt() -> str:
     return config.require_prompt("AGGREGATOR_PROMPT")
 
 
+def has_parallel_subtasks(subtasks: List[Dict[str, Any]]) -> bool:
+    """Whether a normalized plan has work that can run independently."""
+    remaining = set(range(len(subtasks)))
+    completed = set()
+    while remaining:
+        ready = [
+            i for i in remaining
+            if set(subtasks[i].get("depends_on", [])).issubset(completed)
+        ]
+        if len(ready) > 1:
+            return True
+        if not ready:
+            return False
+        completed.add(ready[0])
+        remaining.remove(ready[0])
+    return False
+
+
 def parse_subtasks(
     content: str,
     fallback_query: str,

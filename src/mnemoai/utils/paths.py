@@ -52,7 +52,9 @@ def app_home() -> Path:
     ``$MNEMOAI_HOME`` overrides the default ``~/.mnemoai``.
     """
     env_home = os.environ.get("MNEMOAI_HOME")
-    home = Path(env_home).expanduser() if env_home else Path.home() / DEFAULT_HOME_DIRNAME
+    home = (
+        Path(env_home).expanduser() if env_home else Path.home() / DEFAULT_HOME_DIRNAME
+    )
     home.mkdir(parents=True, exist_ok=True)
     return home
 
@@ -106,7 +108,7 @@ def mcp_config_path() -> Path:
     """Location of the external MCP servers config: ``<app_home>/mcp/mcp.json``.
 
     Holds extra MCP servers to launch alongside mnemoai's built-in server, in
-    the same ``{"mcpServers": {...}}`` schema. ``$MNEMOAI_HOME`` moves it with 
+    the same ``{"mcpServers": {...}}`` schema. ``$MNEMOAI_HOME`` moves it with
     the rest of the app home. Not auto-created.
     """
     return mcp_dir() / "mcp.json"
@@ -175,6 +177,7 @@ _PRISTINE_BUNDLED_SKILL_HASHES = {
 # other hash means the user customized it, and we never touch it. **Maintenance:**
 # when the bundled ``prompts.yaml`` changes, append its PREVIOUS shipped hash here.
 _PRISTINE_BUNDLED_PROMPTS_HASHES = {
+    "f4ad2eb24078a5177f9c3d388713c7523ed7dec3e53ce6fa0bddfca0a1176355",  # 1.31.0, before selective delegation
     "a64bc452dd2363452dfe5126a63c172cc37b323bf8c061f0ca0254e9531025f6",  # 1.30.2–1.30.3, before task continuation guidance
     "22cb52593869c970bd847ba83c8f906a7c68bee1755c1efff64d24fcc80378d2",  # through 1.30.1, background completion guidance
     "da767a814c3f95c6a39cab094631158395fcb025aeaa65bf3c5b1515db4622ab",  # 1.28.1–1.29.1, retired LLM reflection
@@ -270,7 +273,9 @@ def _refresh_pristine_command(src: Path, dest: Path) -> None:
     bundled skill applies: our wording improvements reach existing installs, an
     edited command is the user's own and is never touched.
     """
-    _refresh_if_pristine(src, dest, _PRISTINE_BUNDLED_COMMAND_HASHES.get(dest.name, set()))
+    _refresh_if_pristine(
+        src, dest, _PRISTINE_BUNDLED_COMMAND_HASHES.get(dest.name, set())
+    )
 
 
 def seed_example_files() -> None:

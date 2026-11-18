@@ -45,6 +45,7 @@ from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
 from mnemoai.client.agent.orchestrator import (
     get_aggregator_prompt,
     get_orchestrator_prompt,
+    has_parallel_subtasks,
     parse_subtasks,
 )
 from mnemoai.client.agent.reasoning_utils import (
@@ -591,10 +592,8 @@ class LangGraphAgent:
                     self._route_after_classify,
                     {"agent": "agent", "decompose": "decompose"},
                 )
-                # decompose then routes on the ACTUAL subtask count: an atomic
-                # task (<=1 subtask) runs through the normal streaming agent (full
-                # tools, native history), a genuine multi-step plan (>=2) is owned
-                # by the orchestrator. No more degenerate "step 1/1" worker.
+                # Keep atomic tasks and dependent workflows in the main loop;
+                # use workers only when the plan has independent work.
                 workflow.add_conditional_edges(
                     "decompose",
                     self._route_after_decompose,
@@ -730,9 +729,9 @@ class LangGraphAgent:
         else straight to the streaming agent.
 
         Decomposition runs BEFORE the agent-vs-orchestrator choice, which is then
-        made on the ACTUAL subtask count (``_route_after_decompose``): an atomic
-        task falls back to the normal streaming agent rather than a degenerate
-        single-subtask worker. A trivial 'full' query (short/signal-free) skips
+        made on independent work (``_route_after_decompose``): atomic tasks and
+        dependent workflows stay in the normal streaming agent. A trivial
+        'full' query (short/signal-free) skips
         decomposition — it goes to ``agent`` directly, paying no decompose LLM
         call. During plan execution we also skip decomposition entirely (the
         approved plan IS the decomposition — re-decomposing would spawn read-only
@@ -740,6 +739,13 @@ class LangGraphAgent:
         """
         if getattr(self, "_execute_plan_route", False):
             return "agent"
+        # A delivered report continues existing work; it is not a fresh task
+        # to split into another automatic worker group.
+        for message in reversed(state.get("messages") or []):
+            if isinstance(message, HumanMessage) and not is_feedback(message.content):
+                if message.additional_kwargs.get("mnemoai_background_report"):
+                    return "agent"
+                break
         if state.get("route") == "full":
             query = self._last_human_query(state.get("messages", []))
             if not is_trivial_query(query):
@@ -747,15 +753,9 @@ class LangGraphAgent:
         return "agent"
 
     def _route_after_decompose(self, state: AgentState) -> str:
-        """After decomposition, own the turn only for a genuine multi-step plan.
-
-        >=2 subtasks → the orchestrator executes + aggregates. <=1 (atomic task,
-        a parse/decompose fallback, or no query) → the normal streaming agent,
-        which has the full toolset and native conversation history — so an atomic
-        'full' task streams normally instead of running a hidden quiet worker.
-        """
+        """Keep dependent workflows in the main agent; fan out independent work."""
         subtasks = state.get("subtasks") or []
-        return "orchestrator" if len(subtasks) >= 2 else "agent"
+        return "orchestrator" if has_parallel_subtasks(subtasks) else "agent"
 
     def _classify(self, state: AgentState) -> Dict[str, Any]:
         """Classify the query and set the route in state."""
@@ -815,9 +815,8 @@ class LangGraphAgent:
         """Graph node: decompose a non-trivial 'full' task into subtasks.
 
         Runs between the classifier and the agent-vs-orchestrator branch so the
-        route decision (``_route_after_decompose``) can be made on the ACTUAL
-        subtask count — an atomic task (<=1 subtask) then falls back to the
-        normal streaming ``agent`` instead of a degenerate single-subtask worker.
+        route decision (``_route_after_decompose``) can check independence.
+        Atomic tasks and dependent sequences fall back to the normal agent.
         Writes ONLY the ``subtasks`` channel (no ``messages`` key) so the agent's
         conversation history stays pristine if the turn falls back to ``agent``.
         """
