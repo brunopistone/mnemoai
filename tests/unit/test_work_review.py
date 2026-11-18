@@ -242,6 +242,7 @@ def test_strategy_cannot_execute_returned_tool_calls(setup):
 def test_step_limit_cannot_present_a_strategy_pass_as_final_verification(setup):
     client, root = setup
     client.agent.recursion_limit = 3
+    client.agent._auto_continue_tasks = False  # exercise an explicit hard stop
     client._area_model = lambda _: Judge()
     feed(client, [write(root / "partial.py")])
     client.query("Implement the requested file.")

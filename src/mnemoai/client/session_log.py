@@ -60,6 +60,7 @@ Distinct from ``/save``: that writes a single user-curated snapshot to
 (:data:`mnemoai.utils.paths.SESSION_MAX_AGE_DAYS`).
 """
 
+import hashlib
 import json
 import os
 import time
@@ -323,10 +324,16 @@ class SessionLog:
                     record["summary"] = str(summary)
                 pending = getattr(self, "_pending_input", None)
                 if pending:
-                    record["included_turn"] = {
-                        "n": self.next_turn,
-                        "prefix": convert_langchain_messages_to_strands(pending),
-                    }
+                    prefix = convert_langchain_messages_to_strands(pending)
+                    included = {"n": self.next_turn}
+                    if len(prefix) > 8:
+                        # Long tasks checkpoint completed work from the same
+                        # unlogged turn. Do not copy its entire trace at every
+                        # checkpoint: the final turn record already retains it.
+                        included.update(prefix_count=len(prefix), prefix_sha256=_prefix_digest(prefix))
+                    else:
+                        included["prefix"] = prefix
+                    record["included_turn"] = included
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"Compaction checkpoint encode failed: {e}")
                 record.pop("messages", None)
@@ -490,6 +497,12 @@ def _active_conversation_records(records):
     return records
 
 
+def _prefix_digest(messages):
+    return hashlib.sha256(
+        json.dumps(messages, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _after_checkpoint_prefix(messages, included_turn, number):
     if isinstance(included_turn, dict):
         prefix = included_turn.get("prefix")
@@ -498,6 +511,13 @@ def _after_checkpoint_prefix(messages, included_turn, number):
             and messages[:len(prefix)] == prefix
         ):
             return messages[len(prefix):]
+        count = included_turn.get("prefix_count")
+        if (
+            included_turn.get("n") == number
+            and isinstance(count, int) and 0 < count <= len(messages)
+            and included_turn.get("prefix_sha256") == _prefix_digest(messages[:count])
+        ):
+            return messages[count:]
     return messages
 
 

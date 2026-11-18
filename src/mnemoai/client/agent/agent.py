@@ -7,6 +7,8 @@ import re
 import sys  # noqa: F401  — tests patch agent_mod.sys.stdin.isatty (the confirm gate reads the same sys.stdin)
 import threading
 import time
+from functools import wraps
+from itertools import count
 from typing import Annotated, Any, Callable, Dict, List, Optional, Sequence, TypedDict
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -33,6 +35,7 @@ from mnemoai.client.agent import (
     stream_policy,
     subagent_runner,
     supervised_turn,
+    task_continuation,
     tool_formatting,
     tool_loop,
     turn_failure,
@@ -320,9 +323,10 @@ class LangGraphAgent:
             except (AttributeError, TypeError):
                 pass
         self.orchestrator_enabled = orchestrator_enabled and router is not None
-        # Runaway guard on the model<->tool loop, set high (default 200) so real
-        # long tasks never hit it; compaction is the actual context limiter.
+        # Segment size for progress-checked continuation; a hard limit when
+        # AUTO_CONTINUE_TASKS is disabled. Compaction bounds the request context.
         self.recursion_limit = config.get("LLM", {}).get("RECURSION_LIMIT", 200)
+        self._auto_continue_tasks = config.get("LLM", {}).get("AUTO_CONTINUE_TASKS", True)
         # Some endpoints (Bedrock Mantle reasoning models on the Responses API)
         # intermittently return a fully empty response; a retry recovers it.
         self._empty_response_retries = max(
@@ -528,7 +532,11 @@ class LangGraphAgent:
         tool-call-free model call has no tool round left to ride on, so it gets
         one more pass through the model rather than leaking into the next turn —
         the structural hole that retired the first version of this feature."""
-        return {"messages": self.drain_background_completions() + mid_turn.drain(self)}
+        messages = self.drain_background_completions() + mid_turn.drain(self)
+        task = getattr(self, "_task_context", None)
+        if not messages and task is not None and task.needs_follow_through:
+            messages.append(task.follow_through())
+        return {"messages": messages}
 
     def _is_headless(self) -> bool:
         """True in an unattended execution context (parallel/background work)."""
@@ -570,12 +578,11 @@ class LangGraphAgent:
         workflow = StateGraph(AgentState)
 
         if self.router:
-            workflow.add_node("classifier", self._classify)
-            workflow.set_entry_point("classifier")
+            workflow.add_node("classifier", self._tracked_node("classifier", self._classify))
 
             if self.orchestrator_enabled:
-                workflow.add_node("decompose", self._decompose)
-                workflow.add_node("orchestrator", self._orchestrate)
+                workflow.add_node("decompose", self._tracked_node("decompose", self._decompose))
+                workflow.add_node("orchestrator", self._tracked_node("orchestrator", self._orchestrate))
                 # The classifier decides WHETHER to decompose (a non-trivial
                 # 'full' task); trivial/plan turns skip straight to the streaming
                 # agent and never pay the decompose LLM call.
@@ -600,16 +607,13 @@ class LangGraphAgent:
                 )
             else:
                 workflow.add_edge("classifier", "agent")
-        else:
-            workflow.set_entry_point("agent")
-
-        workflow.add_node("agent", self._call_model)
-        workflow.add_node("tools", self._execute_tools)
+        workflow.add_node("agent", self._tracked_node("agent", self._call_model))
+        workflow.add_node("tools", self._tracked_node("tools", self._execute_tools))
         # Turn end is a drain point too, not just a tool-round boundary: a message
         # the user sent during the final, tool-call-free model call has no tool
         # results to ride along with, so it gets a node of its own and one more
         # pass through the model (see mid_turn.py).
-        workflow.add_node("deliver", self._deliver_mid_turn)
+        workflow.add_node("deliver", self._tracked_node("deliver", self._deliver_mid_turn))
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
@@ -617,7 +621,93 @@ class LangGraphAgent:
         )
         workflow.add_edge("tools", "agent")
         workflow.add_edge("deliver", "agent")
-        return workflow.compile()
+        entries = {name: name for name in ("agent", "tools", "deliver")}
+        if self.router:
+            entries["classifier"] = "classifier"
+            if self.orchestrator_enabled:
+                entries.update(decompose="decompose", orchestrator="orchestrator")
+        workflow.set_conditional_entry_point(self._graph_entry, entries)
+        self._checkpoint_graph = workflow.compile()
+        return self._checkpoint_graph
+
+    def _tracked_node(self, name, run):
+        @wraps(run)
+        def tracked(state):
+            result = run(state)
+            self._last_graph_node = name
+            return result
+        return tracked
+
+    def _graph_entry(self, state):
+        resume, self._resume_node = getattr(self, "_resume_node", None), None
+        return resume or ("classifier" if self.router else "agent")
+
+    def _next_checkpoint_node(self, state):
+        node = getattr(self, "_last_graph_node", None)
+        if node == "classifier":
+            return self._route_after_classify(state) if self.orchestrator_enabled else "agent"
+        if node == "decompose":
+            return self._route_after_decompose(state)
+        if node in {"tools", "deliver"}:
+            return "agent"
+        if node in {"agent", "orchestrator"}:
+            return {"continue": "tools", "deliver": "deliver", "end": None}[self._should_continue(state)]
+        return None
+
+    def _checkpoint_context(self, state, turn_log, *, pending=None, force=False):
+        """Commit the completed prefix once, then compact the actual live work.
+
+        An unexecuted tool-call message stays outside compaction: sanitizing a
+        summary's kept window must not erase an action we still need to execute.
+        """
+        messages = list(state["messages"])
+        completed = messages[:-1] if pending is not None else messages
+        new = self._commit_turn({**state, "messages": completed}, turn_log, log=False)
+        self._task_progress.observe(new)
+        self._turn_seed_len = len(completed)
+        self._last_input_tokens = None  # recount the newly published tool results
+        log = getattr(self, "session_log", None)
+        if callable(getattr(log, "begin_turn", None)):
+            log.begin_turn(turn_log)
+        compact = getattr(self, "_compact_provider", None)
+        if compact is not None:
+            compact(force=True) if force else compact()
+        fresh = list(self._messages)
+        if self.system_prompt:
+            fresh = [self._system_message()] + fresh
+        self._mid_turn_compaction = (fresh, len(completed))
+        return fresh + ([pending] if pending is not None else [])
+
+    def _continue_checkpoint(self, state, turn_log):
+        """Return the next segment's state, or refuse an unchanged activity loop."""
+        if not getattr(self, "_auto_continue_tasks", False):
+            return None
+        if self.graph is not getattr(self, "_checkpoint_graph", None):
+            return None  # embedded/custom graphs own their own continuation policy
+        if self._cancelled():
+            raise KeyboardInterrupt
+        if supervised_turn.budget_for(self) is not None:
+            return None  # explicit review budgets cannot renew themselves
+        node = self._next_checkpoint_node(state)
+        if node is None:
+            return None
+        self._task_progress.observe(state["messages"][self._turn_seed_len:])
+        if not self._task_progress.take_progress():
+            return None
+        pending = state["messages"][-1] if node == "tools" else None
+        fresh = self._checkpoint_context(state, turn_log, pending=pending)
+        # The prefix is now part of the graph seed; pending calls are still new.
+        self._turn_seed_len = len(fresh) - int(pending is not None)
+        self._mid_turn_compaction = None
+        self._resume_node = node
+        if node == "agent" and (mid_turn.has_pending(self) or self.has_undelivered_background()):
+            self._resume_node = "deliver"
+        mid_turn.open_window(self, reset=False)
+        if not getattr(self, "_continuation_announced", False):
+            self._stop_spinner()
+            print("\n\033[90mContinuing the task from the current step…\033[0m", flush=True)
+            self._continuation_announced = True
+        return {**state, "messages": fresh}
 
     @classmethod
     def _last_human_query(cls, messages: Sequence[BaseMessage]) -> str:
@@ -1261,9 +1351,54 @@ class LangGraphAgent:
         # sibling sub-agents. Empty config keeps the sub-agent's stream silent.
         config = {} if quiet else ({"callbacks": self.callbacks} if self.callbacks else {})
         tool_calls_made = 0
+        progress_ledger = task_continuation.ProgressLedger()
+        progress_start = _seed_len
+        worker_task = task_continuation.TaskContext(prompt)
+        compacted_context = None
+        overflow_retried = False
 
-        for _ in range(max_iterations):
+        def request_messages():
+            if compacted_context is None:
+                return list(worker_messages)
+            prefix, consumed = compacted_context
+            return list(prefix) + worker_messages[consumed:]
+
+        def outgoing_messages():
+            messages = request_messages()
+            return worker_task.apply(messages) if getattr(self, "_auto_continue_tasks", False) else messages
+
+        def compact_worker_context(force):
+            try:
+                return task_continuation.compact_worker(
+                    getattr(self, "_worker_compact_provider", None), request_messages(),
+                    force=force,
+                    cancelled=lambda: self._cancelled() or (activity is not None and activity.is_cancelled()),
+                    timeout=getattr(self, "_stream_first_token_timeout", 600) or 600,
+                )
+            except KeyboardInterrupt:
+                if activity is not None and activity.is_cancelled() and not self._cancelled():
+                    return None  # the worker's stop must not cancel its parent
+                raise
+            except Exception:
+                logger.debug("Worker compaction unavailable", exc_info=True)
+                return None
+
+        for iteration in count():
             review_budget = supervised_turn.budget_for(self)
+            if iteration and iteration % max(1, max_iterations) == 0:
+                progress_ledger.observe(worker_messages[progress_start:])
+                progress_start = len(worker_messages)
+                if (
+                    not getattr(self, "_auto_continue_tasks", False)
+                    or review_budget is not None
+                    or not progress_ledger.take_progress()
+                ):
+                    break
+                fresh = compact_worker_context(False)
+                if fresh is not None:
+                    compacted_context = (fresh, len(worker_messages))
+            if max_iterations <= 0:
+                break
             if review_budget is not None:
                 review_budget.take_step()
             # Cooperative cancel: either the whole turn was cancelled (Esc/Ctrl+C
@@ -1289,7 +1424,7 @@ class LangGraphAgent:
                 stream_options = {"model": worker_model, "quiet": quiet}
                 if activity is not None:
                     stream_options["stop_requested"] = activity.is_cancelled
-                response, _ = self._stream_response(worker_messages, config, **stream_options)
+                response, _ = self._stream_response(outgoing_messages(), config, **stream_options)
             except KeyboardInterrupt:
                 if activity is not None and activity.is_cancelled() and not self._cancelled():
                     # Stopping one worker must not interrupt its parent turn.
@@ -1300,6 +1435,15 @@ class LangGraphAgent:
                     return (f"{partial}\n\n{note}" if partial else note, worker_messages[_seed_len:])
                 raise
             except _ContextOverflow as overflow:
+                if getattr(self, "_auto_continue_tasks", False) and review_budget is None and not overflow_retried:
+                    fresh = compact_worker_context(True)
+                    if fresh is not None:
+                        compacted_context = (fresh, len(worker_messages))
+                        overflow_retried = True
+                        continue
+                    if activity is not None and activity.is_cancelled():
+                        partial = self._last_visible_from(worker_messages)
+                        return (partial or "(cancelled)", worker_messages[_seed_len:])
                 # A worker's own history overflowed. Workers run on a local
                 # message list (not self._messages), so end this worker with
                 # what it has rather than crash the orchestration.
@@ -1309,8 +1453,10 @@ class LangGraphAgent:
                 saveable = worker_messages[_seed_len:]  # exclude system + history
                 partial = self._last_visible_from(worker_messages)
                 return (
-                    partial
-                    or "This subtask exceeded the context window before completing.",
+                    task_continuation.IncompleteResult(
+                        (partial + "\n\n" if partial else "")
+                        + "This subtask exceeded the context window before completing."
+                    ),
                     saveable,
                 )
 
@@ -1321,12 +1467,13 @@ class LangGraphAgent:
                 # Fallback invoke bypasses _stream_response, so scrub here too.
                 response = self._invoke_accounted(
                     worker_model,
-                    self._strip_malformed_reasoning(worker_messages), config=config
+                    self._strip_malformed_reasoning(outgoing_messages()), config=config
                 )
             else:
                 # Private worker usage must never replace the parent's context size.
                 self._record_usage(response, model=worker_model)
 
+            overflow_retried = False
             worker_messages.append(response)
 
             # No tool calls → worker is done.
@@ -1383,7 +1530,9 @@ class LangGraphAgent:
             f"(Step stopped after {max_iterations} tool iterations without "
             "finishing.)"
         )
-        result = f"{partial}\n\n{truncated_note}" if partial else truncated_note
+        result = task_continuation.IncompleteResult(
+            f"{partial}\n\n{truncated_note}" if partial else truncated_note
+        )
         return result, saveable
 
     def _salvage_empty_worker_turn(
@@ -1695,8 +1844,15 @@ class LangGraphAgent:
             # ONCE on the shrunken prompt so the in-flight task continues instead
             # of dead-ending. If it still overflows (or nothing could be
             # compacted), surface a terminal message rather than loop.
-            rebuilt = self._compact_and_rebuild(messages)
+            turn_log = getattr(self, "_task_turn_log", None)
+            if turn_log is not None and callable(getattr(self, "_compact_provider", None)):
+                rebuilt = self._checkpoint_context(state, turn_log, force=True)
+                if sum(len(str(m.content)) for m in rebuilt) >= sum(len(str(m.content)) for m in messages):
+                    rebuilt = None
+            else:
+                rebuilt = self._compact_and_rebuild(messages)
             if rebuilt is None:
+                self._last_turn_stopped = True
                 logger.warning(f"Context overflow: {overflow}; could not compact")
                 return {
                     "messages": [
@@ -1729,6 +1885,7 @@ class LangGraphAgent:
                     messages, config, model=active_model, mark_answer=True
                 )
             except _ContextOverflow as overflow2:
+                self._last_turn_stopped = True
                 logger.error(f"Context overflow persists after compaction: {overflow2}")
                 self._stop_spinner()
                 return {
@@ -1760,6 +1917,7 @@ class LangGraphAgent:
             self._stop_spinner()
             if supervised_turn.budget_for(self) is not None:
                 raise ReviewStopped(f"Chat model correction failed ({type(e).__name__})") from e
+            self._last_turn_stopped = True
             if isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e):
                 # The line names the CAUSE (the prose below can't — it's the turn's
                 # answer); exc_info sends the trace to the log file, not the screen.
@@ -2106,7 +2264,9 @@ class LangGraphAgent:
                 raise KeyboardInterrupt("sub-agent stopped before stream retry")
             try:
                 request_messages = (
-                    subagent_runner.with_background_status(self, messages)
+                    subagent_runner.with_background_status(
+                        self, task_continuation.task_messages(self, messages),
+                    )
                     if mark_answer and not quiet else messages
                 )
                 response, had_reasoning = self._stream_once(
@@ -3153,7 +3313,10 @@ class LangGraphAgent:
             )
         else:
             return None
-        return ToolMessage(content=content, tool_call_id=tool_id, name=tool_name)
+        return ToolMessage(
+            content=content, tool_call_id=tool_id, name=tool_name,
+            status="error" if isinstance(content, task_continuation.IncompleteResult) else "success",
+        )
 
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
         """Execute the tool calls on the last AI message."""
@@ -3189,6 +3352,9 @@ class LangGraphAgent:
             self._start_spinner()
             # All tool replies precede mid-turn guidance; providers require
             # every tool_call_id to be answered before the next human message.
+            task = getattr(self, "_task_context", None)
+            if task is not None:
+                task.tool_round()
             tool_results.extend(self.drain_background_completions())
             tool_results.extend(mid_turn.drain(self))
             work_review = getattr(self, "_work_review", None)
@@ -3216,12 +3382,19 @@ class LangGraphAgent:
         makes that true: a message accepted after this point would have no drain
         point left, which is exactly how the first version of the feature leaked
         one into the next turn."""
-        if self._cancelled():
+        if self._cancelled() or getattr(self, "_last_turn_stopped", False):
             return "end"
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             return "continue"
         if self.has_undelivered_background():
+            return "deliver"
+        task = getattr(self, "_task_context", None)
+        if (
+            getattr(self, "_auto_continue_tasks", False)
+            and task is not None and task.needs_follow_through
+            and supervised_turn.budget_for(self) is None
+        ):
             return "deliver"
         if mid_turn.close_if_empty(self):
             return "end"
@@ -3237,6 +3410,37 @@ class LangGraphAgent:
         return cls._EPHEMERAL_BLOCK_RE.sub("", text)
 
     def invoke(self, prompt: str) -> str:
+        """Run one task with instructions that survive its execution checkpoints."""
+        self._task_context = task_continuation.TaskContext(prompt)
+        self._task_progress = task_continuation.ProgressLedger()
+        self._last_turn_stopped = False
+        self._last_graph_node = None
+        self._resume_node = None
+        self._continuation_announced = False
+        self._task_logged = False
+        self._task_turn_log = None
+        try:
+            return self._invoke_task(prompt)
+        except BaseException as error:
+            self._last_turn_stopped = True
+            # Preflight compaction occurs before the graph's error handler.
+            # It must not leave accepted user input absent from the transcript.
+            if not self._task_logged and self._task_turn_log:
+                marker = AIMessage(content=(
+                    INTERRUPTED_MARKER if isinstance(error, KeyboardInterrupt)
+                    else turn_failure.failure_marker(error)
+                ))
+                self._messages.append(marker)
+                self._task_turn_log.append(marker)
+                self._log_turn(self._task_turn_log)
+            raise
+        finally:
+            mid_turn.close(self)
+            self._task_context = None
+            self._task_turn_log = None
+            self._resume_node = None
+
+    def _invoke_task(self, prompt: str) -> str:
         """Invoke the agent with a prompt; returns the response string.
 
         A **delivery-only** turn (empty ``prompt`` with pending background
@@ -3274,6 +3478,7 @@ class LangGraphAgent:
         bg = getattr(self, "drain_background_completions", None)
         delivered = 0
         turn_log: List[BaseMessage] = []
+        self._task_turn_log = turn_log
         if bg is not None:
             for m in bg():
                 self._messages.append(m)
@@ -3371,19 +3576,40 @@ class LangGraphAgent:
                 result = self.graph.invoke(initial_state, config=run_config)
                 steps_used = 1
             else:
-                for snapshot in streamer(
-                    initial_state, config=run_config, stream_mode="values"
-                ):
-                    result = snapshot
-                    steps_used += 1
-                steps_used = max(0, steps_used - 1)  # first value is the seeded state
+                segment = initial_state
+                while True:
+                    steps_used = 0
+                    try:
+                        for snapshot in streamer(segment, config=run_config, stream_mode="values"):
+                            result = snapshot
+                            steps_used += 1
+                        steps_used = max(0, steps_used - 1)
+                        break
+                    except GraphRecursionError:
+                        if (
+                            getattr(self, "_auto_continue_tasks", False)
+                            and self.graph is getattr(self, "_checkpoint_graph", None)
+                            and getattr(self, "_last_graph_node", None) in {"agent", "orchestrator"}
+                            and not self._cancelled()
+                            and self._next_checkpoint_node(result) is None
+                        ):
+                            # LangGraph may reach its limit on the same superstep
+                            # that produced the final answer. Nothing is pending.
+                            steps_used = max(0, steps_used - 1)
+                            break
+                        segment = self._continue_checkpoint(result, turn_log) if result else None
+                        if segment is None:
+                            raise
+                        run_config = {"recursion_limit": self.recursion_limit}
+                        preparation_steps = 0
             steps_used += preparation_steps
             supervisor = getattr(self, "_completion_supervisor", None)
-            if supervisor is not None and result is not None:
+            if supervisor is not None and result is not None and not self._last_turn_stopped:
                 if self._cancelled():
                     raise KeyboardInterrupt
                 supervisor(result, max(0, self.recursion_limit - steps_used))
         except KeyboardInterrupt:
+            self._last_turn_stopped = True
             # User cancelled mid-turn (the UI injects KeyboardInterrupt into this
             # worker thread). CLOSE the turn out rather than deleting it: keep the
             # user message and append an explicit interrupted marker.
@@ -3399,6 +3625,7 @@ class LangGraphAgent:
             self._last_input_tokens = None  # stale after the appended marker
             raise
         except GraphRecursionError:
+            self._last_turn_stopped = True
             logger.warning(
                 "Agent stopped after the safety step limit (%d); the task may be "
                 "looping. Raise LLM.RECURSION_LIMIT if a legitimate task needs "
@@ -3434,11 +3661,11 @@ class LangGraphAgent:
                     "LLM.RECURSION_LIMIT in config if the task legitimately "
                     "needs more steps, or ask for a narrower slice of it."
                 )
-                # Nothing to show means the turn is otherwise unanswered; close
-                # it out so the next turn doesn't re-answer it out of context.
-                marker = AIMessage(content=INTERRUPTED_MARKER)
-                self._messages.append(marker)
-                turn_log.append(marker)
+            # This was a guard, not a user cancellation. Preserve that distinction
+            # even when the turn had already streamed a partial answer.
+            marker = AIMessage(content=turn_failure.STEP_LIMIT_MARKER)
+            self._messages.append(marker)
+            turn_log.append(marker)
             self._log_turn(turn_log)
             self._last_input_tokens = None  # stale after this turn's rewrite
             self._emit_answer(msg)  # never streamed on this path — show it
@@ -3460,6 +3687,7 @@ class LangGraphAgent:
             # prefix of the next one. Committed with `log=False` so the marker
             # lands in the SAME turn record as the work above it (a second record
             # would count as a second turn everything downstream reads).
+            self._last_turn_stopped = True
             result = getattr(self, "_interrupted_node_state", None) or result
             if result:
                 self._commit_turn(result, turn_log, log=False)
@@ -3525,7 +3753,7 @@ class LangGraphAgent:
         Skips System/Human: the user turn was already stored as the clean prompt,
         so the reminder-bearing ``HumanMessage`` the model ran on must not be
         re-added. Mid-turn messages and background reports are exceptions — produced
-        INSIDE the turn and exists nowhere else, so dropping it would leave live
+        INSIDE the turn and existing nowhere else, so dropping them would leave live
         history and the transcript holding an answer to a question neither of them
         contains; it is stored in the position it was delivered, as the user's own
         text (``mid_turn.stored_text`` strips the framing the model needed), which
@@ -3580,6 +3808,7 @@ class LangGraphAgent:
         The client sets ``session_log`` when session persistence is on; a plain
         agent (unit tests, embedded use) has none and this is a no-op.
         """
+        self._task_logged = True
         self._last_turn_messages = list(messages)
         log = getattr(self, "session_log", None)
         if log is None or not messages:

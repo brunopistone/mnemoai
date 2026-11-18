@@ -16,6 +16,7 @@ that matter:
 Pure file logic — no LLM, no network.
 """
 
+import json
 import time
 
 import pytest
@@ -1257,6 +1258,27 @@ def test_uncompacted_restore_replaces_old_summary_and_display_history(tmp_path, 
     assert replay["summary"] == ""
     assert len(replay["messages"]) == len(replay["all_messages"]) == 1
     assert "conversation A" not in str(replay["all_messages"])
+
+
+def test_long_inflight_checkpoint_uses_digest_and_restores_without_replay(tmp_path, monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
+    log = slog.SessionLog(cwd=str(tmp_path))
+    prefix = [HumanMessage(content="Original task")]
+    prefix.extend(AIMessage(content=f"step {i}: " + "evidence " * 200) for i in range(30))
+    log.begin_turn(prefix)
+    log.log_compaction(summary="Completed those steps; finish the remaining work.", kept=[])
+    log.log_turn(prefix + [AIMessage(content="Finished")])
+    records = [json.loads(line) for line in log.path.read_text().splitlines()]
+    checkpoint = next(r for r in records if r.get("t") == "compact")
+    assert "prefix" not in checkpoint["included_turn"]
+    assert checkpoint["included_turn"]["prefix_count"] == len(prefix)
+    assert len(json.dumps(checkpoint)) < 1000
+    restored = slog.read_session(log.path)
+    assert len(restored["messages"]) == 1
+    assert convert_strands_messages_to_langchain(restored["messages"])[0].content == "Finished"
+    assert len(restored["all_messages"]) == len(prefix) + 1
 
 
 def test_branch_and_rewind_targets_follow_the_loaded_conversation(tmp_path, monkeypatch):

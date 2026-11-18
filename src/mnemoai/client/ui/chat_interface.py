@@ -1202,7 +1202,7 @@ class ChatInterface:
         return turn_view.render_turn_end(
             time.monotonic() - started,
             time.time(),
-            stopped=stopped,
+            stopped=stopped or getattr(getattr(self.client, "agent", None), "_last_turn_stopped", False),
             files=self._files_changed_since(mark),
             running_agents=running,
             pending_reports=ready,
@@ -1612,7 +1612,7 @@ class ChatInterface:
                     response = self.client.query("")  # delivery-only turn
                     stopped = response == "Operation was cancelled."
                     print("\n" + self._turn_end_line(started, mark, stopped=stopped))
-                    if not stopped and not any(self._background_status()):
+                    if not stopped and not getattr(agent, "_last_turn_stopped", False) and not any(self._background_status()):
                         notify.notify_turn_end(time.monotonic() - started)
                 except KeyboardInterrupt:
                     print(self._turn_end_line(started, mark, stopped=True))
@@ -1689,7 +1689,7 @@ class ChatInterface:
                 # …and, if the turn ran long enough that the user has plausibly
                 # looked away, ring the terminal. Deliberately NOT on the
                 # cancelled path above: their hand is already on the keyboard.
-                if not any(self._background_status()):
+                if not getattr(getattr(self.client, "agent", None), "_last_turn_stopped", False) and not any(self._background_status()):
                     notify.notify_turn_end(time.monotonic() - started)
         except KeyboardInterrupt:
             # The cancel landed in this frame instead of being turned into a

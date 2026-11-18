@@ -45,7 +45,9 @@ BLOCK_TAG = "mid-turn-message"
 _FRAMING = (
     f"<{BLOCK_TAG}>\n"
     "The user sent this while you were working. Finish the step you are on, "
-    "then address it — do not ignore it.\n"
+    "then address it — do not ignore it. This is guidance for the active task, "
+    "not permission to abandon it. Answer status questions briefly and then "
+    "continue working. Only cancel or replace the task if the user asks you to.\n"
     f"</{BLOCK_TAG}>\n"
 )
 
@@ -138,6 +140,9 @@ def drain(agent) -> List[BaseMessage]:
     texts = _take(agent)
     if not texts:
         return []
+    task = getattr(agent, "_task_context", None)
+    if task is not None:
+        task.add_guidance(texts)
     capture = getattr(agent, "_review_capture", None)
     if capture is not None:
         capture.add_instructions(texts)

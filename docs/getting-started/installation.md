@@ -25,7 +25,7 @@ Choose one provider to start:
 
 Optional, depending on features you enable:
 
-- **Embedding model** — needed for high-quality RAG, episodic memory, and ACE playbook refinement.
+- **Embedding model** — needed for semantic RAG and episodic memory. Playbook learning runs locally without embeddings.
 - **Vision model** — needed for image analysis.
 - **Brave Search API key** — needed for web search.
 - **ripgrep** — recommended for fast content search.
@@ -43,6 +43,10 @@ installer resolves the release when it runs, pins its wheel by SHA-256, and chec
 the installed version before reporting success. GitHub publication no longer has
 to wait for PyPI indexing. If release discovery or checksum verification fails,
 installation stops rather than silently selecting an older release.
+
+The installer also checks the canonical LiteLLM package files. If Crawl4AI's
+bundled fork overwrote them, it reinstalls the selected LiteLLM version and
+verifies the files again before reporting success.
 
 The installer uses `uv` with an isolated package environment. It first looks for
 an existing stable CPython 3.11+ on PATH, outside project virtual environments.

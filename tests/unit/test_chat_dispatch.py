@@ -108,6 +108,19 @@ def test_plain_query_calls_client_query(ci):
     assert ("query", "what time is it?") in ci.client.calls
 
 
+def test_safety_stop_is_not_printed_or_notified_as_done(ci, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    ci.client.agent = SimpleNamespace(_last_turn_stopped=True)
+    ci.client.query_return = "Partial results; stopped at an unchanged activity loop."
+    bells = []
+    monkeypatch.setattr("mnemoai.client.ui.chat_interface.notify.notify_turn_end", bells.append)
+    ci._dispatch("Do the work")
+    output = capsys.readouterr().out
+    assert "stopped" in output and "done in" not in output
+    assert bells == []
+
+
 @pytest.mark.parametrize("status", [(2, 0), (0, 2), (1, 1), (0, 0)])
 def test_completion_marker_and_bell_respect_pending_agents(ci, monkeypatch, capsys, status):
     from types import SimpleNamespace

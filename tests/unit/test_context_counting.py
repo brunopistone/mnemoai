@@ -12,6 +12,7 @@ from mnemoai.client import context_injection, context_report
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.agent.agent_activity import AgentActivityStore
 from mnemoai.client.agent.background_agents import BackgroundAgentRegistry
+from mnemoai.client.agent.task_continuation import TaskContext
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
 from mnemoai.client.memory.steering_store import SteeringSnapshot
@@ -47,6 +48,18 @@ def make_client(tmp_path, monkeypatch):
         client._summary_model = lambda: object()
         return client
     return create
+
+
+def test_active_task_is_counted_and_guidance_invalidates_the_estimate(make_client):
+    client = make_client([HumanMessage(content="Summary only.")])
+    before = client._count_context_tokens()
+    client.agent._task_context = TaskContext("Important original instructions. " * 1000)
+    assert client._count_context_tokens() > before + 1000
+    key = context_report.estimate_cache_key(client)
+    client.agent._task_context.add_guidance(["Keep the user's existing edits."])
+    assert context_report.estimate_cache_key(client) != key
+    client.agent._task_context = None
+    assert client._count_context_tokens() == before
 
 
 @pytest.mark.parametrize("component", ["tools", "calls", "reasoning", "system", "steering", "plan"])

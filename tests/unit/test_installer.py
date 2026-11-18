@@ -1,5 +1,7 @@
 """Exercise the POSIX installer without network access or touching real installs."""
 
+import base64
+import csv
 import hashlib
 import json
 import os
@@ -91,6 +93,13 @@ if sys.argv[2:4] == ["python", "find"]:
 if sys.argv[2] == "run":
     pathlib.Path(os.environ["INSTALL_TEST_RECORD"] + ".python").write_text(json.dumps(sys.argv[1:]))
     os.execv(sys.executable, [sys.executable, *sys.argv[sys.argv.index("python") + 1:]])
+if sys.argv[2:4] == ["pip", "install"]:
+    record = pathlib.Path(os.environ["INSTALL_TEST_RECORD"])
+    record.with_suffix(".repair").write_text(json.dumps(sys.argv[1:]))
+    if os.environ.get("INSTALL_TEST_REPAIR_FAIL"):
+        sys.exit(8)
+    record.with_suffix(".repaired").touch()
+    sys.exit(0)
 pathlib.Path(os.environ["INSTALL_TEST_RECORD"]).write_text(json.dumps({{
     "args": sys.argv[1:],
     "dirs": {{k: os.environ[k] for k in ("UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR")}},
@@ -112,7 +121,15 @@ else:
 actual = os.environ.get("INSTALL_TEST_ACTUAL_VERSION", selected_version)
 metadata_python = path.parent / "python"
 python_version = os.environ.get("INSTALL_TEST_PYTHON_VERSION", "3.12.15")
-metadata_python.write_text("#!" + sys.executable + "\\nimport sys\\nprint(" + repr(python_version) + " if \\"platform.python_version\\" in sys.argv[-1] else " + repr(actual) + ")\\n")
+metadata_python.write_text(
+    "#!" + sys.executable + "\\nimport os, pathlib, sys\\n"
+    "if \\"canonical_litellm\\" in sys.argv[-1]:\\n"
+    "    repaired = pathlib.Path(os.environ[\\"INSTALL_TEST_RECORD\\"]).with_suffix(\\".repaired\\").exists()\\n"
+    "    if os.environ.get(\\"INSTALL_TEST_SHADOWED_LITELLM\\") and (not repaired or os.environ.get(\\"INSTALL_TEST_REPAIR_INEFFECTIVE\\")):\\n"
+    "        print(\\"1.100.4\\")\\n"
+    "else:\\n"
+    "    print(" + repr(python_version) + " if \\"platform.python_version\\" in sys.argv[-1] else " + repr(actual) + ")\\n"
+)
 metadata_python.chmod(0o755)
 link = pathlib.Path(os.environ["UV_TOOL_BIN_DIR"]) / "mnemoai"
 if not link.is_symlink():
@@ -144,6 +161,7 @@ def test_install_and_rerun_use_private_managed_runtime(installer, shell):
     assert "FRONT of PATH" in result.stdout
     assert f"Installed MnemoAI {RELEASE_VERSION}:" in result.stdout
     assert "Python runtime: 3.12.15" in result.stdout
+    assert not Path(env["INSTALL_TEST_RECORD"]).with_suffix(".repair").exists()
     assert not list(Path(env["TMPDIR"]).glob("mnemoai-install.*"))
 
 
@@ -261,6 +279,70 @@ def test_help_needs_no_runtime(installer):
     assert result.returncode == 0
     assert "Usage:" in result.stdout
     assert not Path(env["MNEMOAI_INSTALL_DIR"]).exists()
+
+
+def test_litellm_collision_is_repaired_in_the_selected_private_environment(installer):
+    env, executable, run = installer
+    fake_uv(executable)
+    env["INSTALL_TEST_SHADOWED_LITELLM"] = "1"
+    result = run("--version", RELEASE_VERSION)
+    assert result.returncode == 0, result.stderr
+    assert "Repairing overlapping LiteLLM" in result.stdout
+    record = Path(env["INSTALL_TEST_RECORD"])
+    assert json.loads(record.with_suffix(".repair").read_text()) == [
+        "--no-config", "pip", "install", "--python",
+        env["MNEMOAI_INSTALL_DIR"] + "/tools/mnemoai-assistant/bin/python",
+        "--no-deps", "--reinstall-package", "litellm", "--compile-bytecode", "litellm==1.100.4",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["INSTALL_TEST_REPAIR_FAIL", "INSTALL_TEST_REPAIR_INEFFECTIVE"])
+def test_litellm_repair_failure_never_claims_installation_success(installer, failure):
+    env, executable, run = installer
+    fake_uv(executable)
+    env.update(INSTALL_TEST_SHADOWED_LITELLM="1", **{failure: "1"})
+    result = run("--version", RELEASE_VERSION)
+    assert result.returncode != 0
+    assert "Installed MnemoAI" not in result.stdout
+    assert "LiteLLM" in result.stderr
+
+
+@pytest.mark.parametrize("damage", [None, "changed", "missing", "no-records"])
+def test_litellm_integrity_check_reads_distribution_records_without_importing_package(tmp_path, damage):
+    """Exercise the actual standalone installer check against on-disk RECORDs."""
+    site = tmp_path / "site"
+    package = site / "litellm"
+    (package / "nested").mkdir(parents=True)
+    contents = {
+        "litellm/__init__.py": b'raise AssertionError("installer must not import this")\n',
+        "litellm/nested/client.py": b"canonical = True\n",
+    }
+    for name, content in contents.items():
+        (site / name).write_bytes(content)
+    for name, version in [("litellm", "1.100.4"), ("unclecode_litellm", "1.81.13")]:
+        metadata = site / f"{name}-{version}.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(f"Name: {name.replace('_', '-')}\nVersion: {version}\n")
+        with (metadata / "RECORD").open("w") as stream:
+            writer = csv.writer(stream)
+            if name == "litellm" and damage != "no-records":
+                for path, content in contents.items():
+                    digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).decode().rstrip("=")
+                    writer.writerow([path, f"sha256={digest}", len(content)])
+    if damage == "changed":
+        (package / "nested/client.py").write_bytes(b"canonical = False\n")
+    elif damage == "missing":
+        (package / "nested/client.py").unlink()
+    code = INSTALLER.read_text().split("litellm_repair_version() {", 1)[1].split("-I -c '", 1)[1].split("\n'\n}", 1)[0]
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", f"import sys; sys.path.insert(0, {str(site)!r})\n" + code],
+        capture_output=True, text=True, timeout=10,
+    )
+    if damage == "no-records":
+        assert result.returncode != 0 and "no verifiable package records" in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ("1.100.4" if damage else "")
 
 
 def test_unsupported_platform_is_rejected_before_download(installer):

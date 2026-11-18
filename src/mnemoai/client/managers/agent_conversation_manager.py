@@ -879,6 +879,14 @@ class AgentConversationManager:
         # call has no measurable total; we surface the discrete stages instead).
         client.spinner.start(f"Summarizing {len(older)} older messages")
         try:
+            task = getattr(agent, "_task_context", None)
+            if task is not None:
+                active = task.reminder([])
+                if active:
+                    focus_instructions = (
+                        focus_instructions + "\n\nPreserve the active task and its remaining "
+                        "work; summarization is not completion:\n" + active
+                    ).strip()
             tracker = getattr(agent, "usage", None)
             accounting = {}
             if tracker is not None:

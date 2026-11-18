@@ -284,6 +284,11 @@ def collect(client: Any) -> List[Part]:
         ), group="steering"))
     parts.extend(_tools_part(client))
     parts.extend(_history_part(client))
+    task = getattr(agent, "_task_context", None)
+    if task is not None:
+        reminder = task.reminder(list(getattr(agent, "messages", ()) or ()))
+        if reminder:
+            parts.append(Part("Active task", count_tokens(reminder) + 4, group="prompt"))
     return parts
 
 
@@ -328,6 +333,8 @@ def estimate_cache_key(client: Any) -> tuple:
     tools = getattr(client, "tools", ()) or ()
     return (
         id(agent),
+        id(getattr(agent, "_task_context", None)),
+        getattr(getattr(agent, "_task_context", None), "revision", 0),
         getattr(agent, "system_prompt", "") or getattr(client, "system_prompt", ""),
         getattr(client, "plan_mode_active", False),
         getattr(client, "_steering_revision", 0),

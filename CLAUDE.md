@@ -6,6 +6,18 @@ Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). Th
 
 ## Current integrity and permission invariants
 
+**Task continuation:** `LLM.AUTO_CONTINUE_TASKS` defaults true. The main graph
+and delegated workers renew their execution segment only after new completed
+tool activity; failed/refused calls and changing job IDs alone do not renew it.
+Resume the exact next node, never reclassify or replay completed work. Before
+compaction, publish the completed in-flight prefix and bind it to the session
+checkpoint. Keep pending tool calls outside compaction until they execute.
+The original request and accepted guidance stay in an ephemeral task context;
+status replies do not replace the task. Worker compaction is private, cancellable
+and accounted, and incomplete worker reports are marked failed. Explicit review
+budgets and cancellation remain hard boundaries. Actual guard stops are recorded
+as guard stops, not user interruptions, and never displayed as `done`.
+
 **Background completion:** background execution keeps the input usable, but an
 answer depending on pending agents is interim. Reports are drained at turn start,
 after tool replies and at graph completion (including aggregation); the UI

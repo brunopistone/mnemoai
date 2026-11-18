@@ -32,6 +32,10 @@ from mnemoai.utils.exceptions import exception_signature, leaf_exception
 
 # One sentence, one class name — see the module docstring on why it stays small.
 _MARKER_PREFIX = "[Turn failed before it produced an answer"
+STEP_LIMIT_MARKER = (
+    "[Task stopped at an execution guard before completion; the user did not "
+    "cancel it. Completed work is retained.]"
+)
 
 # Provider phrasings for "I understood the request and will not serve it": the
 # content itself was rejected, so repeating it verbatim fails identically. Kept
@@ -73,7 +77,9 @@ def failure_marker(exc: Union[BaseException, str]) -> str:
 
 def is_failure_marker(text: object) -> bool:
     """True if ``text`` is one of our failure markers (bookkeeping, not an answer)."""
-    return isinstance(text, str) and text.strip().startswith(_MARKER_PREFIX)
+    return isinstance(text, str) and (
+        text.strip().startswith(_MARKER_PREFIX) or text.strip() == STEP_LIMIT_MARKER
+    )
 
 
 def classify(exc: Exception) -> str:

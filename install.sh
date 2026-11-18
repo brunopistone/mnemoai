@@ -40,6 +40,67 @@ run_uv() (
     UV_PYTHON_INSTALL_DIR="$runtime/python" "$uv_command" --no-config "$@"
 )
 
+litellm_repair_version() {
+    "$runtime/tools/mnemoai-assistant/bin/python" -I -c '
+# Verify without importing either copy of the shared litellm namespace.
+import base64
+import csv
+import hashlib
+import io
+import re
+import sys
+from importlib.metadata import PackageNotFoundError, distribution
+from pathlib import PurePosixPath
+
+try:
+    distribution("unclecode-litellm")
+    canonical_litellm = distribution("litellm")
+except PackageNotFoundError:
+    sys.exit(0)  # Older releases may not install both distributions.
+
+try:
+    version = canonical_litellm.version
+    if not re.fullmatch(r"[0-9][a-zA-Z0-9.+-]*", version):
+        raise ValueError("invalid LiteLLM version")
+    # Distribution.files filters out missing files on some Python versions.
+    # Read RECORD directly so deleted modules also trigger a repair.
+    records = [
+        row for row in csv.reader(io.StringIO(canonical_litellm.read_text("RECORD") or ""))
+        if len(row) == 3 and PurePosixPath(row[0]).parts[:1] == ("litellm",) and row[1]
+    ]
+    if not records:
+        raise ValueError("LiteLLM has no verifiable package records")
+    damaged = False
+    for name, fingerprint, _size in records:
+        algorithm, expected = fingerprint.split("=", 1)
+        try:
+            with canonical_litellm.locate_file(name).open("rb") as stream:
+                digest = hashlib.file_digest(stream, algorithm).digest()
+            actual = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+            damaged |= actual != expected
+        except FileNotFoundError:
+            damaged = True
+    if damaged:
+        print(version)
+except (OSError, ValueError, AttributeError) as exc:
+    sys.exit(f"Cannot verify the installed LiteLLM files: {exc}")
+'
+}
+
+verify_litellm() {
+    repair_version=$(litellm_repair_version) || fail 'cannot verify LiteLLM package integrity'
+    if [ -n "$repair_version" ]; then
+        printf 'Repairing overlapping LiteLLM package files (%s)…\n' "$repair_version"
+        # Crawl4AI also installs unclecode-litellm into litellm/. Restore the
+        # canonical version selected by the resolver, without changing deps.
+        run_uv pip install --python "$runtime/tools/mnemoai-assistant/bin/python" \
+            --no-deps --reinstall-package litellm --compile-bytecode "litellm==$repair_version" ||
+            fail 'could not repair overlapping LiteLLM files'
+        remaining=$(litellm_repair_version) || fail 'cannot verify the repaired LiteLLM files'
+        [ -z "$remaining" ] || fail 'LiteLLM files still conflict; installation is not verified'
+    fi
+}
+
 select_python() {
     python_request=$(run_uv python find --no-project --system --no-managed-python \
         --no-python-downloads "cpython$python_requirement" 2>/dev/null) || python_request=
@@ -234,6 +295,7 @@ main() {
     if [ -n "$expected_version" ] && [ "$installed_version" != "$expected_version" ]; then
         fail "expected $expected_version but installed $installed_version; installation is not verified"
     fi
+    verify_litellm
     installed_python=$("$runtime/tools/mnemoai-assistant/bin/python" -I -c \
         'import platform; print(platform.python_version())') ||
         fail 'cannot verify the installed Python runtime'
