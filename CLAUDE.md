@@ -6,6 +6,22 @@ Local agentic AI assistant built on LangGraph + MCP (Model Context Protocol). Th
 
 ## Current integrity and permission invariants
 
+**Tool contracts and progress:** `utils/write_request.py` is the shared payload
+contract for `fs_write` and its preview. Append/insert accept one consistent text
+payload; missing/conflicting inputs fail before mutation. An identical create
+reports `changed: false`, preserves the original file and is not a recorded edit.
+Each actor owns a bounded `ToolProgressGuard`: three unchanged observations or
+failures produce feedback instead of re-executing the same call. New information,
+file changes and user guidance permit recovery; persistent refusal to change
+approach ends that actor as incomplete. Active job polling and useful writes
+remain available, and a worker's guard never stops its parent.
+
+**Request framing:** greetings retrieve neither episodes nor playbook tool notes;
+learning remains enabled. Episodic records are delimited historical data and
+never become the user's task or permission. The client supplies the original
+request separately. Continuation restores missing context into temporary system
+messages, without changing the stored history or adding a fake user request.
+
 **Configuration restarts:** snapshot the active messages and compaction summary
 before shutting down MCP or re-executing. Preserve the `/load` save target without
 writing it, plus label, draft input and auto/plan modes. Wait for queued input and

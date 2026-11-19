@@ -18,6 +18,15 @@ _FAILURE_PREFIXES = (
     "memory not updated:",
 )
 
+def is_unchanged_result(result: Any) -> bool:
+    """An explicit no-change result is not evidence of a file mutation."""
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (ValueError, TypeError):
+            return False
+    return isinstance(result, dict) and result.get("changed") is False
+
 
 def is_error_result(result: Any) -> bool:
     """Read native message status, structured payloads, and explicit error notices."""

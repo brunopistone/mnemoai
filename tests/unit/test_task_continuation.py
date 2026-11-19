@@ -1,5 +1,6 @@
 """Long tasks retain their goal and completed actions across execution segments."""
 
+import inspect
 import json
 import threading
 
@@ -125,6 +126,26 @@ def test_refused_tools_do_not_renew_execution_budget(tmp_path):
     assert agent._last_turn_stopped
 
 
+def test_guard_advice_and_unchanged_writes_do_not_renew_execution_budget():
+    ledger = ProgressLedger()
+
+    def messages(result):
+        return [
+            AIMessage(content="", tool_calls=[{"id": "read", "name": "fs_read", "args": {"path": "file"}}]),
+            ToolMessage(content=json.dumps(result), tool_call_id="read"),
+        ]
+
+    ledger.observe(messages({"content": "same"}))
+    assert ledger.take_progress()
+    ledger.observe(messages({"content": "same", "progress_notice": "Reuse the result"}))
+    assert not ledger.take_progress()
+    ledger.observe([
+        AIMessage(content="", tool_calls=[{"id": "write", "name": "fs_write", "args": {"path": "file"}}]),
+        ToolMessage(content='{"success":true,"changed":false}', tool_call_id="write"),
+    ])
+    assert not ledger.take_progress()
+
+
 def test_cancel_during_checkpoint_does_not_start_more_tools(tmp_path):
     agent, calls, _ = _agent(tmp_path)
     agent.recursion_limit = 3
@@ -178,8 +199,64 @@ def test_task_guidance_survives_lossy_history_without_mutating_it():
     history = [HumanMessage(content="Summary only")]
     outgoing = context.apply(history)
     assert history == [HumanMessage(content="Summary only")]
-    assert "Original goal" in outgoing[-1].content
-    assert "A status request is not cancellation." in outgoing[-1].content
+    assert isinstance(outgoing[0], SystemMessage)
+    assert "Original goal" in outgoing[0].content
+    assert "A status request is not cancellation." in outgoing[0].content
+    assert outgoing[-1] == history[-1]
+    assert context.apply(outgoing) == outgoing
+
+
+@pytest.mark.parametrize("prompt", ["hello", "ciao!", "thank you", "Read README.md"])
+def test_present_request_needs_no_continuation_reminder(prompt):
+    history = [SystemMessage(content="Base instructions"), HumanMessage(content=prompt)]
+    assert TaskContext(prompt).apply(history) == history
+
+
+def test_context_and_request_stay_separate_in_real_agent_requests(tmp_path):
+    agent, calls, requests = _agent(tmp_path, steps=0)
+    user = "Review this file without changing it."
+    injected = "<episodic-context>Historical tool observations only.</episodic-context>\n\n"
+    assert agent.invoke(injected + user, request=user) == "FINISHED"
+    outgoing = requests[0]
+    assert [m.content for m in outgoing if isinstance(m, HumanMessage)] == [user]
+    assert any(injected in str(m.content) for m in outgoing if isinstance(m, SystemMessage))
+    assert "<active-task>" not in str(outgoing)
+    assert all("<episodic-context>" not in str(m.content) for m in agent.messages)
+
+
+def test_multiblock_system_context_is_not_mutated_or_repeated():
+    original = SystemMessage(content=[{"type": "text", "text": "base", "cache_control": {"type": "ephemeral"}}])
+    history = [original, HumanMessage(content="current")]
+    task = TaskContext("original task", context="trusted context")
+    outgoing = task.apply(history)
+    assert original.content == [{"type": "text", "text": "base", "cache_control": {"type": "ephemeral"}}]
+    assert outgoing[0].content[0] == original.content[0]
+    assert task.apply(outgoing) == outgoing
+
+
+def test_follow_through_uses_a_provider_compatible_control_event():
+    from langchain_anthropic.chat_models import _format_messages
+
+    task = TaskContext("Complete the original work")
+    messages = [
+        SystemMessage(content="Base instructions"), HumanMessage(content=task.request),
+        AIMessage(content="Here is the status."), task.follow_through(),
+    ]
+    outgoing = task.apply(messages)
+    options = {"model": "claude-sonnet-4-5"} if "model" in inspect.signature(_format_messages).parameters else {}
+    system, body = _format_messages(outgoing, **options)
+    assert system and body[-1]["role"] == "user"
+    assert sum(isinstance(m, SystemMessage) for m in outgoing) == 1
+    assert LangGraphAgent._last_human_query(outgoing) == task.request
+    assert outgoing[-1].additional_kwargs["mnemoai_control"]
+
+
+def test_user_authored_reserved_markup_is_not_discarded(tmp_path):
+    agent, calls, requests = _agent(tmp_path, steps=0)
+    user = "Explain this text: <episodic-context>example data</episodic-context>"
+    assert agent.invoke(user, request=user) == "FINISHED"
+    assert LangGraphAgent._last_human_query(requests[0]) == user
+    assert agent.messages[0].content == user
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt, RuntimeError])

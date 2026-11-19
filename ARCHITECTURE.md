@@ -422,6 +422,22 @@ The model calls `ask_user_question(question, options)` when a decision is genuin
 
 ### Agent collaborators (`client/agent/{message_codec,message_sanitizer,plan_policy,tool_formatting,turn_failure,confirmation_gate,tool_loop}.py`)
 
+`tool_progress.py` adds per-actor bounded observation tracking to the shared tool
+loop. Repeated errors and unchanged reads are detected across alternating calls,
+with file-version invalidation and a fresh verification allowed after new
+information. The model receives explicit feedback before persistent repeats end
+the actor as incomplete. Running-job polling is exempt; completed/failed polls
+are observations. Worker guards are local to each invocation. No language model
+is called to make the guard decision.
+
+`TaskContext` keeps the original user request separate from injected context.
+Existing requests need no repeated reminder; if compaction removes them, the
+outgoing system message carries the missing request and guidance. Generated
+context is never appended as a new user request or persisted in transcripts.
+The rare follow-through event after a status reply uses a marked human-role
+control message for providers that require input after an assistant reply.
+Routing and transcript storage exclude it; it cannot replace the real user goal.
+
 Tool-pair repair reconciles all local-call encodings: normalized and invalid
 calls, native `tool_use`/`toolUse`/`tool_call` content, Responses
 `function_call`/`custom_tool_call` content, raw OpenAI calls and stream chunks.

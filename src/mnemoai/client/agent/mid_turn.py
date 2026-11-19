@@ -143,6 +143,9 @@ def drain(agent) -> List[BaseMessage]:
     task = getattr(agent, "_task_context", None)
     if task is not None:
         task.add_guidance(texts)
+    guard = getattr(agent, "_tool_loop_guard", None)
+    if guard is not None:
+        guard.reset()
     capture = getattr(agent, "_review_capture", None)
     if capture is not None:
         capture.add_instructions(texts)

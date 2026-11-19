@@ -70,8 +70,16 @@ parameter names differ: `fs_write` takes `path`, `file_edit` takes `file_path`.
 | --------------- | ------------------------ | ---------------------------------------------------------------------------------------------------- |
 | `"create"`      | `file_text`              | Creates parent directories and **overwrites** an existing file.                                      |
 | `"str_replace"` | `old_str`, `new_str`     | Fails if the text is absent, and fails if it appears more than once. There is no `replace_all` here. |
-| `"insert"`      | `insert_line`, `new_str` | Inserts **after** the given line. `0` prepends; the maximum is the file's line count.                |
-| `"append"`      | `new_str`                | Appends, inserting a leading newline if the file doesn't end with one.                               |
+| `"insert"`      | `insert_line`, `new_str` or `file_text` | Inserts **after** the given line. `0` prepends; the maximum is the file's line count.                |
+| `"append"`      | `new_str` or `file_text` | Appends, inserting a leading newline if the file doesn't end with one.                               |
+
+For `fs_write`, use `file_text` for `create`, and explicit `old_str` plus
+`new_str` for `str_replace` (`new_str: ""` deletes the matched text).
+`append` and `insert` accept either `new_str` or `file_text`; supplying conflicting
+values is an error. Append requires nonempty text. Insert permits an explicitly
+empty string to insert a blank line. Invalid arguments do not modify the file.
+Creating a file whose content already matches returns `changed: false` and
+preserves its existing metadata.
 
 ### `file_edit` matching
 

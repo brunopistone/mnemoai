@@ -3,11 +3,13 @@
 import io
 import json
 import os
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import clean_path_syntax
+from mnemoai.utils.write_request import write_text
 
 from ..error_handler import tool_error_handler
 from .file_encoding import decode_to_lf, encode_from_lf
@@ -62,10 +64,10 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
     @serialized_mutation("path", _resolve_path)
     def fs_write(
         path: str,
-        command: str,
-        file_text: str = "",
+        command: Literal["create", "str_replace", "insert", "append"],
+        file_text: str | None = None,
         old_str: str = "",
-        new_str: str = "",
+        new_str: str | None = None,
         insert_line: int = 0,
         summary: str = "",
     ) -> str:
@@ -96,11 +98,11 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
         - append: Add content to the end of an existing file
 
         Args:
-            path: Full path where to create/modify the file (REQUIRED)
+            path: File path: absolute, ~, or relative to the working directory (REQUIRED)
             command: Operation type - "create", "str_replace", "insert", or "append" (REQUIRED)
-            file_text: Complete file content for "create" command
+            file_text: Complete content for create; also accepted as the text for append/insert
             old_str: Exact text to replace (for "str_replace" command)
-            new_str: New text to insert/replace with
+            new_str: Text for append/insert, or replacement for str_replace (explicit "" deletes)
             insert_line: Line number to insert after (for "insert" command)
             summary: Brief description of what the change does
 
@@ -114,6 +116,10 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
         )
 
         try:
+            try:
+                text = write_text(command, file_text, old_str, new_str, insert_line)
+            except ValueError as error:
+                return json.dumps({"error": True, "invalid_arguments": True, "message": str(error)})
             # Resolve path using intelligent logic
             resolved_path = _resolve_path(path)
 
@@ -140,13 +146,13 @@ def register_fs_write_tools(mcp: FastMCP) -> None:
                 return json.dumps(read_verdict)
 
             if command == "create":
-                result = _create_file(resolved_path, file_text, summary)
+                result = _create_file(resolved_path, text, summary)
             elif command == "str_replace":
-                result = _str_replace(resolved_path, old_str, new_str, summary)
+                result = _str_replace(resolved_path, old_str, text, summary)
             elif command == "insert":
-                result = _insert_line(resolved_path, insert_line, new_str, summary)
+                result = _insert_line(resolved_path, insert_line, text, summary)
             elif command == "append":
-                result = _append_file(resolved_path, new_str, summary)
+                result = _append_file(resolved_path, text, summary)
             else:
                 return json.dumps(
                     {
@@ -183,14 +189,23 @@ def _create_file(path: str, content: str, summary: str) -> str:
         JSON string with result
     """
     try:
+        data = content.encode("utf-8")
+        if os.path.isfile(path) and os.path.getsize(path) == len(data):
+            with open(path, "rb") as existing:
+                if existing.read() == data:
+                    return json.dumps({
+                        "success": True, "changed": False, "operation": "create", "path": path,
+                        "message": "File already contains the requested content.", "summary": summary,
+                    })
         # Create directory if it doesn't exist
         os.makedirs(os.path.dirname(path), exist_ok=True)
 
-        write_bytes(path, content.encode("utf-8"))
+        write_bytes(path, data)
 
         return json.dumps(
             {
                 "success": True,
+                "changed": True,
                 "operation": "create",
                 "path": path,
                 "message": f"File created successfully",
@@ -251,6 +266,7 @@ def _str_replace(path: str, old_str: str, new_str: str, summary: str) -> str:
         return json.dumps(
             {
                 "success": True,
+                "changed": True,
                 "operation": "str_replace",
                 "path": path,
                 "message": "Text replaced successfully",
@@ -310,6 +326,7 @@ def _insert_line(path: str, line_number: int, content: str, summary: str) -> str
         return json.dumps(
             {
                 "success": True,
+                "changed": True,
                 "operation": "insert",
                 "path": path,
                 "message": f"Content inserted after line {line_number}",
@@ -335,6 +352,8 @@ def _append_file(path: str, content: str, summary: str) -> str:
     Returns:
         JSON string with result
     """
+    if not content:
+        return json.dumps({"error": True, "message": "append requires nonempty text. No file was changed."})
     if not os.path.exists(path):
         return json.dumps({"error": True, "message": f"File does not exist: {path}"})
 
@@ -354,6 +373,7 @@ def _append_file(path: str, content: str, summary: str) -> str:
         return json.dumps(
             {
                 "success": True,
+                "changed": True,
                 "operation": "append",
                 "path": path,
                 "message": "Content appended successfully",

@@ -63,6 +63,11 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
 
         This tool efficiently reads and processes various file types including text files, code files, CSV data, JSON data, PDF documents, and DOCX documents.
 
+        Line mode prefixes each displayed line with its number and a TAB.
+        Those prefixes are not file content: do not copy them into edits.
+        total_lines counts logical lines, including a final line without a newline;
+        wc -l counts newline characters and can therefore be one smaller.
+
         MODES (choose the appropriate one):
         - Line: Read text files, code files, markdown, etc. (DEFAULT - use this for most files)
         - Search: Find specific patterns or text within files
@@ -73,7 +78,7 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
         - DOCX: Extract text content from Word documents
 
         Args:
-            path: Full path to the file or directory (REQUIRED)
+            path: File/directory path: absolute, ~, or relative to the working directory (REQUIRED)
             mode: Reading mode - "Line" for most files, "CSV" for spreadsheets, "JSON" for data files, "PDF" for PDFs, "DOCX" for Word docs
             start_line: Starting line number (1-indexed, default: 1)
             end_line: Ending line number (-1 for entire file, default: -1)

@@ -73,7 +73,7 @@ def test_first_turn_activates_external_tools_before_calling_the_agent(monkeypatc
     monkeypatch.setattr(client_mod, "LangGraphAgent", type(client.agent))
     steps = []
     client.refresh_tools = lambda **kwargs: steps.append(("tools", kwargs))
-    client.agent.side_effect = lambda prompt: steps.append(("model", prompt)) or "answer"
+    client.agent.invoke.side_effect = lambda prompt, **kw: steps.append(("model", prompt)) or "answer"
     assert client.query("question") == "answer"
     assert steps == [("tools", {"wait": True}), ("model", "question")]
     client.agent._cancel_event.clear.assert_called_once()

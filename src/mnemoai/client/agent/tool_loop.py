@@ -37,6 +37,7 @@ an override on a bare ``__new__`` test stub still intercepts — the
 ``plan_policy``/``confirmation_gate`` collaborator pattern.
 """
 
+import json
 from typing import Any, Dict, List, Optional, Sequence
 
 from langchain_core.messages import BaseMessage, ToolMessage
@@ -47,7 +48,7 @@ from mnemoai.client.agent.agent_activity import ActivitySink
 from mnemoai.utils import execution_context
 from mnemoai.utils.logger import logger
 from mnemoai.utils.review_protocol import ReviewStopped
-from mnemoai.utils.tool_results import is_error_result
+from mnemoai.utils.tool_results import is_error_result, is_unchanged_result
 
 
 def run_tool_calls(
@@ -60,6 +61,7 @@ def run_tool_calls(
     spawn_results: Optional[Dict[str, str]] = None,
     log_label: str = "Tool execution",
     strict_tools: bool = False,
+    guard=None,
 ) -> None:
     """Run ``tool_calls``, appending one ToolMessage each to ``messages``."""
     capture = getattr(agent, "_review_capture", None)
@@ -76,6 +78,10 @@ def run_tool_calls(
                 args = {**args, key: workspace.resolve(args[key])}
 
         def reply(content, status="blocked", evidence=None):
+            if guard is not None:
+                notice = guard.observe(name, args, content, status)
+                if notice:
+                    content = _with_progress(content, notice)
             _reply(messages, tool_id, name, content, status)
             if capture is not None:
                 capture.record(name, args, content if evidence is None else evidence, status)
@@ -104,6 +110,10 @@ def run_tool_calls(
                       "Use foreground tools or a foreground sub-agent within the same budget.")
                 continue
 
+        if guard is not None and (guard.exhausted or guard.repeated(name, args)):
+            reply(guard.refuse(name), "stalled")
+            continue
+
         if strict_tools and not any(t.name == name for t in tools):
             # Give interactive tools their precise refusal without dispatching
             # ANY executable handler ahead of the worker's allowlist.
@@ -123,6 +133,12 @@ def run_tool_calls(
         # handled client-side, not via MCP, so they're never looked up below.
         client_msg = agent._client_side_tool_message(name, args, tool_id, spawn_results)
         if client_msg is not None:
+            if guard is not None:
+                notice = guard.observe(
+                    name, args, client_msg.content, "failed" if client_msg.status == "error" else "client_result",
+                )
+                if notice:
+                    client_msg = client_msg.model_copy(update={"content": _with_progress(client_msg.content, notice)})
             messages.append(client_msg)
             if capture is not None:
                 capture.record(name, args, client_msg.content, "client_result")
@@ -186,7 +202,7 @@ def run_tool_calls(
             # Note the file this call touched, for /files and /diff. AFTER the
             # call, so a refused or failed one leaves no trace.
             failed_result = is_error_result(result)
-            if not failed_result:
+            if not failed_result and not is_unchanged_result(result):
                 agent._record_file_activity(name, args)
             content = agent._truncate_tool_result(str(result))
             event = hooks.POST_TOOL_USE_FAILURE if failed_result else hooks.POST_TOOL_USE
@@ -210,6 +226,17 @@ def run_tool_calls(
                 hooks.POST_TOOL_USE_FAILURE, name, args, str(e) or repr(e), quiet=quiet
             )
             reply(_with_context(agent._tool_error_message(name, e), failed), "failed")
+
+
+def _with_progress(content, notice):
+    """Keep structured success/error fields intact when adding recovery advice."""
+    try:
+        data = json.loads(content) if isinstance(content, str) else content
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        return json.dumps({**data, "progress_notice": notice}, ensure_ascii=False)
+    return f"{content}\n\n[Tool progress] {notice}"
 
 
 def _with_context(content: str, outcome) -> str:

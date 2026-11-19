@@ -7,6 +7,25 @@ the project aims to follow [Semantic Versioning](https://semver.org/): until
 from 1.0.0 on, breaking changes to the public surface (config keys, the
 `mcp.json` schema, CLI commands, the package/CLI name) bump the major version.
 
+## [Unreleased]
+
+## [1.31.3] — 2026-11-19
+
+### Fixed
+
+- Make file-write payloads unambiguous: append/insert accept `new_str` or
+  `file_text`, reject conflicting/missing payloads, and require an explicit
+  replacement for `str_replace`. Identical creates report `changed: false`
+  without rewriting the file or recording a false edit.
+- Keep greetings free of episodic and playbook tool-use hints. Treat retrieved
+  episodes as historical data, retain the raw user request for routing and task
+  continuation, and restore missing task context through temporary system
+  instructions rather than synthetic user messages.
+- Detect repeated tool failures and unchanged observations within each agent.
+  Give the model recovery feedback before stopping a persistent loop as
+  incomplete. Preserve completed results, valid polling, independent workers
+  and long tasks that continue making progress.
+
 ## [1.31.2] — 2026-11-18
 
 ### Fixed
@@ -5554,7 +5573,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.2...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.3...HEAD
+[1.31.3]: https://github.com/brunopistone/mnemoai/compare/v1.31.2...v1.31.3
 [1.31.2]: https://github.com/brunopistone/mnemoai/compare/v1.31.1...v1.31.2
 [1.31.1]: https://github.com/brunopistone/mnemoai/compare/v1.31.0...v1.31.1
 [1.31.0]: https://github.com/brunopistone/mnemoai/compare/v1.30.3...v1.31.0

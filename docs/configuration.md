@@ -976,7 +976,7 @@ LLM:
   # eviction layer (below).
   # EVICTED_TOOL_RESULT_CHARS: 500 # Char cap an OLD tool result is shrunk to
   # before any LLM summary. 0 disables the layer.
-  RECURSION_LIMIT: 200 # Max model<->tool steps per query (runaway guard)
+  RECURSION_LIMIT: 200 # Max model<->tool steps per execution segment
   MCP_CALL_TIMEOUT: 300 # Transport-layer timeout for one MCP tool call (s)
 ```
 
@@ -986,6 +986,13 @@ The footer, `/context`, `/usage`'s context line and restore preflight share this
 full-input estimate: live system prompt, steering/plan instructions, tool
 definitions, message text, reasoning, tool calls and approximate framing.
 Estimates are marked `~` in the footer and context notices.
+
+Repeated tool failures and unchanged reads are also checked before another
+execution: after three matching observations, the model is told to reuse the
+result or change approach. New information, file changes or user guidance allow
+recovery. Three further attempts without new information stop that actor
+as incomplete, preserving completed work. Successful mutations and active job
+polling remain available; a worker's stop does not cancel its parent.
 
 When available, `usage_metadata.input_tokens` is the provider-reported size of
 the **last request**, not a measurement of an unsent next request. `/usage`'s
