@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessageChunk, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 
 from mnemoai.client.agent.agent import INTERRUPTED_MARKER, LangGraphAgent
 from mnemoai.client.agent.task_continuation import IncompleteResult
@@ -227,3 +227,26 @@ def test_recovery_advice_preserves_result_classification():
     assert json.loads(error)["message"] == "Denied"
     unchanged = _with_progress('{"success":true,"changed":false}', "Already satisfied")
     assert is_unchanged_result(unchanged) and not is_error_result(unchanged)
+
+
+def test_guard_stop_retains_results_of_workers_already_run_in_the_batch(tmp_path):
+    agent = LangGraphAgent(RepeatingModel(), [Read()], "SYS", verbose=False)
+    guard = agent._tool_loop_guard = ToolProgressGuard()
+    args = {"path": str(tmp_path / "file")}
+    for _ in range(3):
+        guard.observe("fs_read", args, '{"content":"unchanged"}')
+    guard.refuse("fs_read")
+    guard.refuse("fs_read")
+    # Foreground spawn batches execute before the sequential tool reply loop.
+    completed = {"worker-1": "Completed first worker", "worker-2": "Completed second worker"}
+    agent._run_spawn_batch = lambda calls: completed
+    calls = [
+        {"id": "read", "name": "fs_read", "args": args},
+        *[{"id": key, "name": "spawn_agent", "args": {"prompt": key}} for key in completed],
+    ]
+    result = agent._execute_tools({"messages": [AIMessage(content="", tool_calls=calls)]})
+    replies = {m.tool_call_id: m.content for m in result["messages"] if isinstance(m, ToolMessage)}
+    assert agent._last_turn_stopped
+    assert "not executed" in replies["read"]
+    for key, content in completed.items():
+        assert replies[key] == content

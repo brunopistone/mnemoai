@@ -110,7 +110,11 @@ def run_tool_calls(
                       "Use foreground tools or a foreground sub-agent within the same budget.")
                 continue
 
-        if guard is not None and (guard.exhausted or guard.repeated(name, args)):
+        # Batched workers may already have completed before an earlier call in
+        # this reply loop exhausts the guard. Preserve their results without
+        # executing anything again or claiming that they were never started.
+        precomputed = name == "spawn_agent" and spawn_results is not None and tool_id in spawn_results
+        if not precomputed and guard is not None and (guard.exhausted or guard.repeated(name, args)):
             reply(guard.refuse(name), "stalled")
             continue
 
