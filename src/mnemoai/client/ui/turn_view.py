@@ -11,6 +11,7 @@ import time
 
 from mnemoai.utils.formatting.code_formatter import CodeFormatter
 from mnemoai.utils.review_protocol import feedback_summary, is_feedback
+from mnemoai.utils.write_request import write_text
 
 _GREEN = "\033[32m"
 _GRAY = "\033[90m"
@@ -296,11 +297,18 @@ def render_fs_write(args: dict) -> str:
     """Style block for fs_write: ``Create file`` with numbered content, or an
     ``Update(path)`` diff for str_replace/insert/append."""
     path = _short_path(args.get("path", ""))
-    command = str(args.get("command", "create")).lower()
+    command = str(args.get("command", "create"))
+    try:
+        payload = write_text(
+            command, args.get("file_text"), args.get("old_str", ""),
+            args.get("new_str"), args.get("insert_line", 0),
+        )
+    except ValueError as error:
+        return f"{_HEADER}fs_write{_RESET}\n  {_GRAY}{error}{_RESET}"
 
     if command == "create":
         header = f"{_HEADER}{_BOLD}Create file{_RESET}"
-        text = str(args.get("file_text", ""))
+        text = payload
         body = text.split("\n")
         # Trim a trailing empty line from a final newline so the count is clean.
         if body and body[-1] == "":
@@ -316,13 +324,13 @@ def render_fs_write(args: dict) -> str:
             path,
             "replaced text",
             str(args.get("old_str", "")),
-            str(args.get("new_str", "")),
+            payload,
         )
 
     # insert / append: show the added text as green lines.
     verb = "Insert" if command == "insert" else "Append"
     header = f"{_HEADER}{_BOLD}{verb}{_RESET}{_HEADER}({path}){_RESET}"
-    added = str(args.get("new_str", "") or args.get("file_text", ""))
+    added = payload
     lines = [header]
     for line in added.split("\n"):
         lines.append(f"  {_ADD}+ {line}{_RESET}")

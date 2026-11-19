@@ -509,6 +509,7 @@ class LangGraphClient:
 
     def query(self, prompt: str) -> str:
         """Send a query to the agent and return its response."""
+        user_request = prompt
         if not self.agent:
             raise RuntimeError("Client not started. Call start() first.")
         if isinstance(self.agent, LangGraphAgent):
@@ -613,7 +614,10 @@ class LangGraphClient:
                     except Exception:
                         logger.warning("Could not record playbook exposure", exc_info=True, extra={"console": False})
                 try:
-                    response = self.agent(prompt)
+                    response = (
+                        self.agent.invoke(prompt, request=user_request)
+                        if isinstance(self.agent, LangGraphAgent) else self.agent(prompt)
+                    )
                 finally:
                     self.agent._completion_supervisor = None
                     if review_work is not None:

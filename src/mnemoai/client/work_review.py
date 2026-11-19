@@ -14,16 +14,8 @@ from mnemoai.client.agent import mid_turn, supervised_turn
 from mnemoai.client.agent.reasoning_utils import extract_visible_text
 from mnemoai.client.review_evidence import Capture, text
 from mnemoai.utils.config import config
+from mnemoai.utils.request_intent import obvious_conversation
 from mnemoai.utils.review_protocol import DATA_MARKER, FEEDBACK_PREFIX, ReviewStopped
-
-_SOCIAL = re.compile(
-    r"^(?:hi|hello|hey|thanks|thank you|bye|goodbye|ciao|salve|grazie|buongiorno|"
-    r"buonasera|arrivederci)[\s!.?]*$", re.IGNORECASE,
-)
-
-
-def obvious_conversation(prompt):
-    return not prompt.strip() or bool(_SOCIAL.fullmatch(prompt.strip()))
 
 
 def parse_strategy(response):

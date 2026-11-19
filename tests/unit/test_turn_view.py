@@ -9,6 +9,8 @@ text and tool args survive verbatim and that empty inputs collapse to nothing.
 import re
 import time
 
+import pytest
+
 from mnemoai.client.ui.turn_view import (
     ReasoningStatus,
     StepStatus,
@@ -344,6 +346,18 @@ class TestFileOpRendering:
             "file_path": f"{home}/proj/file.py", "old_string": "a", "new_string": "b"})
         assert "~/proj/file.py" in out
         assert home not in out.replace("~/proj/file.py", "")  # no full home path
+
+    def test_conflicting_append_payload_is_not_shown_as_an_edit(self):
+        out = render_tool_call("fs_write", {
+            "path": "file", "command": "append", "file_text": "one", "new_str": "two",
+        })
+        assert "conflicting" in out
+        assert "+ one" not in out and "+ two" not in out
+
+    @pytest.mark.parametrize("key", ["new_str", "file_text"])
+    def test_append_preview_uses_the_same_payload_as_the_server(self, key):
+        out = render_tool_call("fs_write", {"path": "file", "command": "append", key: ".claude/\n.codex/"})
+        assert "+ .claude/" in out and "+ .codex/" in out
 
 
 class TestLineLevelDiff:

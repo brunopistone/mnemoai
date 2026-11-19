@@ -34,6 +34,77 @@ def tools():
     read_state.reset()
 
 
+@pytest.mark.parametrize("argument", ["new_str", "file_text"])
+@pytest.mark.parametrize("raw,encoding", [
+    (b"existing/\n", "utf-8"),
+    (b"existing/\r\n", "utf-8"),
+    ("existing/\r\n".encode("utf-16"), "utf-16"),
+])
+def test_append_contract_preserves_content_encoding_and_read_baseline(tools, tmp_path, argument, raw, encoding):
+    target = tmp_path / ".gitignore"
+    target.write_bytes(raw)
+    read_state.record_read(str(target))
+    result = json.loads(tools["fs_write"](str(target), "append", **{argument: ".claude/\n.codex/\n"}))
+    assert result["success"] and result["changed"]
+    assert target.read_bytes().decode(encoding).replace("\r\n", "\n") == "existing/\n.claude/\n.codex/\n"
+    assert read_state.check_write_allowed(str(target)) is None
+    if b"\r\n" in raw or encoding == "utf-16":
+        assert "\r\n.claude/" in target.read_bytes().decode(encoding)
+
+
+@pytest.mark.parametrize("command,arguments", [
+    ("append", {}),
+    ("append", {"new_str": ""}),
+    ("append", {"new_str": "one", "file_text": "two"}),
+    ("append", {"new_str": "new", "old_str": "ignored"}),
+    ("insert", {}),
+    ("str_replace", {"old_str": "existing/"}),
+    ("str_replace", {"old_str": "existing/", "new_str": "existing/"}),
+    ("str_replace", {"old_str": "existing/", "new_str": "new/", "file_text": "ignored"}),
+    ("create", {"new_str": "wrong payload field"}),
+])
+def test_invalid_write_arguments_never_touch_the_file(tools, tmp_path, command, arguments):
+    target = tmp_path / ".gitignore"
+    target.write_text("existing/\n")
+    read_state.record_read(str(target))
+    before = read_state.current_version(str(target))
+    result = json.loads(tools["fs_write"](str(target), command, **arguments))
+    assert result["error"] and result["invalid_arguments"]
+    assert target.read_text() == "existing/\n"
+    assert read_state.current_version(str(target)) == before
+
+
+def test_explicit_empty_replacement_and_blank_insert_are_preserved(tools, tmp_path):
+    target = tmp_path / "sample"
+    target.write_text("delete me\nkeep\n")
+    read_state.record_read(str(target))
+    assert json.loads(tools["fs_write"](str(target), "str_replace", old_str="delete me\n", new_str=""))["changed"]
+    assert target.read_text() == "keep\n"
+    assert json.loads(tools["fs_write"](str(target), "insert", insert_line=0, new_str=""))["changed"]
+    assert target.read_text() == "\nkeep\n"
+
+
+def test_identical_create_is_explicitly_unchanged_and_does_not_replace_file(tools, tmp_path):
+    target = tmp_path / "sample"
+    target.write_text("already correct")
+    read_state.record_read(str(target))
+    before = read_state.current_version(str(target))
+    result = json.loads(tools["fs_write"](str(target), "create", file_text="already correct"))
+    assert result["success"] and result["changed"] is False
+    assert read_state.current_version(str(target)) == before
+
+
+@pytest.mark.parametrize("new_str", [None, "", "one addition\n"])
+def test_append_alias_does_not_duplicate_text(tools, tmp_path, new_str):
+    target = tmp_path / "sample"
+    target.write_text("existing\n")
+    read_state.record_read(str(target))
+    result = json.loads(tools["fs_write"](
+        str(target), "append", file_text="one addition\n", new_str=new_str,
+    ))
+    assert result["changed"]
+    assert target.read_text() == "existing\none addition\n"
+
 @pytest.mark.parametrize("second_tool", ["file_edit", "fs_write"])
 def test_mutations_share_a_canonical_path_lock(tools, tmp_path, monkeypatch, second_tool):
     source = tmp_path / "file"

@@ -8,9 +8,10 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from mnemoai.utils.tool_results import is_error_result
+from mnemoai.utils.request_intent import obvious_conversation
+from mnemoai.utils.tool_results import is_error_result, is_unchanged_result
 
 
 class IncompleteResult(str):
@@ -66,6 +67,8 @@ class TaskContext:
     revision: int = 0
     had_tools: bool = False
     needs_follow_through: bool = False
+    context: str = ""
+    explicit_request: bool = False
 
     def add_guidance(self, texts):
         self.guidance += tuple(texts)
@@ -78,6 +81,9 @@ class TaskContext:
 
     def follow_through(self):
         self.needs_follow_through = False
+        # A new input event is required after an assistant status reply by
+        # providers that forbid assistant prefilling. This is control traffic,
+        # never a new user goal and never stored as a user message.
         return HumanMessage(content=(
             "<task-continuation>\n"
             "You have addressed a message sent during ongoing work. Now finish the "
@@ -87,18 +93,23 @@ class TaskContext:
             "If the work is already complete or genuinely blocked, conclude with "
             "that result; otherwise continue executing it.\n"
             "</task-continuation>"
-        ))
+        ), additional_kwargs={"mnemoai_control": True})
 
     def reminder(self, messages):
-        if not self.request:
+        if obvious_conversation(self.request):
             return ""
-        humans = [m.content for m in messages if isinstance(m, HumanMessage) and isinstance(m.content, str)]
+        humans = [
+            m.content for m in messages if isinstance(m, HumanMessage)
+            and isinstance(m.content, str) and not m.additional_kwargs.get("mnemoai_control")
+        ]
         missing = []
         if not any(self.request in text for text in humans):
             missing.append("Original request:\n" + self.request)
         for index, text in enumerate(self.guidance, 1):
             if not any(text in content for content in humans):
                 missing.append(f"User follow-up {index}:\n{text}")
+        if not missing:
+            return ""
         return (
             "<active-task>\n"
             "Continue the active user task through completion. Compaction and execution "
@@ -114,7 +125,27 @@ class TaskContext:
 
     def apply(self, messages):
         reminder = self.reminder(messages)
-        return list(messages) + [HumanMessage(content=reminder)] if reminder else messages
+        additions = [text for text in (self.context, reminder) if text]
+        if not additions:
+            return messages
+        result = list(messages)
+        index = next((i for i, m in enumerate(result) if isinstance(m, SystemMessage)), None)
+        content = result[index].content if index is not None else ""
+        existing = content if isinstance(content, str) else "\n".join(
+            block if isinstance(block, str) else str(block.get("text", "")) for block in content
+        )
+        additions = [text for text in additions if text not in existing]
+        if not additions:
+            return messages
+        extra = "\n\n".join(additions)
+        if index is None:
+            result.insert(0, SystemMessage(content=extra))
+        else:
+            updated = content + "\n\n" + extra if isinstance(content, str) else [
+                *content, {"type": "text", "text": extra},
+            ]
+            result[index] = result[index].model_copy(update={"content": updated})
+        return result
 
 
 @dataclass
@@ -139,11 +170,19 @@ class ProgressLedger:
                 if call is None:
                     continue
                 outcome = message.additional_kwargs.get("execution_outcome", "completed")
-                if outcome != "completed" or message.status == "error" or is_error_result(message.content):
+                if (outcome != "completed" or message.status == "error"
+                        or is_error_result(message.content) or is_unchanged_result(message.content)):
                     continue
                 name, args = call["name"], call["args"]
                 # Fresh job IDs alone must not make repeated spawning look new.
                 result = None if name in {"spawn_agent", "resume_agent", "start_background_task"} else message.content
+                if isinstance(result, str):
+                    try:
+                        decoded = json.loads(result)
+                        if isinstance(decoded, dict):
+                            result = {k: v for k, v in decoded.items() if k != "progress_notice"}
+                    except (TypeError, ValueError):
+                        pass
                 encoded = json.dumps([name, args, result], sort_keys=True, default=str).encode()
                 key = hashlib.sha256(encoded).digest()
                 if key not in self.seen:

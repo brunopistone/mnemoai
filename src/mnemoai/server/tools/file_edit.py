@@ -266,6 +266,7 @@ def register_edit_tools(mcp: FastMCP) -> None:
         return json.dumps(
             {
                 "success": True,
+                "changed": True,
                 "file_path": file_path,
                 "replacements": count if replace_all else 1,
                 "old_lines": old_lines,

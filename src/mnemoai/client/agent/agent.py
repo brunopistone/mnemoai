@@ -38,6 +38,7 @@ from mnemoai.client.agent import (
     task_continuation,
     tool_formatting,
     tool_loop,
+    tool_progress,
     turn_failure,
 )
 from mnemoai.client.agent.agent_activity import ActivitySink, AgentActivityStore
@@ -173,7 +174,7 @@ class LangGraphAgent:
     # compaction never summarizes always-on instructions into a lossy paraphrase
     # (they're re-injected verbatim from disk each turn instead).
     _EPHEMERAL_BLOCK_RE = re.compile(
-        r"<(plan-mode-active|steering)>.*?</\1>\s*", re.DOTALL
+        r"<(plan-mode-active|steering|episodic-context)>.*?</\1>\s*", re.DOTALL
     )
 
     def __init__(
@@ -618,7 +619,10 @@ class LangGraphAgent:
             self._should_continue,
             {"continue": "tools", "deliver": "deliver", "end": END},
         )
-        workflow.add_edge("tools", "agent")
+        workflow.add_conditional_edges(
+            "tools", lambda state: "end" if getattr(self, "_last_turn_stopped", False) else "continue",
+            {"continue": "agent", "end": END},
+        )
         workflow.add_edge("deliver", "agent")
         entries = {name: name for name in ("agent", "tools", "deliver")}
         if self.router:
@@ -648,7 +652,7 @@ class LangGraphAgent:
         if node == "decompose":
             return self._route_after_decompose(state)
         if node in {"tools", "deliver"}:
-            return "agent"
+            return None if getattr(self, "_last_turn_stopped", False) else "agent"
         if node in {"agent", "orchestrator"}:
             return {"continue": "tools", "deliver": "deliver", "end": None}[self._should_continue(state)]
         return None
@@ -674,6 +678,7 @@ class LangGraphAgent:
         fresh = list(self._messages)
         if self.system_prompt:
             fresh = [self._system_message()] + fresh
+        fresh = task_continuation.task_messages(self, fresh)
         self._mid_turn_compaction = (fresh, len(completed))
         return fresh + ([pending] if pending is not None else [])
 
@@ -721,6 +726,10 @@ class LangGraphAgent:
         """
         for msg in reversed(messages or []):
             if isinstance(msg, HumanMessage) and not is_feedback(msg.content):
+                if msg.additional_kwargs.get("mnemoai_control"):
+                    continue
+                if msg.additional_kwargs.get("mnemoai_user_input"):
+                    return str(msg.content).strip()
                 return cls._strip_ephemeral(str(msg.content)).strip()
         return ""
 
@@ -1353,6 +1362,7 @@ class LangGraphAgent:
         progress_ledger = task_continuation.ProgressLedger()
         progress_start = _seed_len
         worker_task = task_continuation.TaskContext(prompt)
+        worker_guard = tool_progress.ToolProgressGuard()
         compacted_context = None
         overflow_retried = False
 
@@ -1518,14 +1528,18 @@ class LangGraphAgent:
                 activity=activity,
                 log_label="Worker tool",
                 strict_tools=True,
+                guard=worker_guard,
             )
+            worker_task.tool_round()
+            if worker_guard.exhausted:
+                break
 
         if not quiet:
             self._stop_spinner()
         saveable = worker_messages[_seed_len:]  # exclude system + injected history
         # Salvage the last visible output and flag the step as truncated.
         partial = self._last_visible_from(worker_messages)
-        truncated_note = (
+        truncated_note = worker_guard.stopped_message() if worker_guard.exhausted else (
             f"(Step stopped after {max_iterations} tool iterations without "
             "finishing.)"
         )
@@ -3180,6 +3194,7 @@ class LangGraphAgent:
         spawn_results: Optional[Dict[str, str]] = None,
         log_label: str = "Tool execution",
         strict_tools: bool = False,
+        guard=None,
     ) -> None:
         """Delegates to :func:`tool_loop.run_tool_calls` (appends in place)."""
         tool_loop.run_tool_calls(
@@ -3192,6 +3207,7 @@ class LangGraphAgent:
             spawn_results=spawn_results,
             log_label=log_label,
             strict_tools=strict_tools,
+            guard=guard if guard is not None else getattr(self, "_tool_loop_guard", None),
         )
 
     def _run_hooks(
@@ -3338,7 +3354,14 @@ class LangGraphAgent:
         # below then just picks up its precomputed result. A single spawn is run
         # inline by the loop (no pool overhead).
         review_budget = supervised_turn.budget_for(self)
-        spawn_results = {} if review_budget is not None else self._run_spawn_batch(last_message.tool_calls)
+        guard = getattr(self, "_tool_loop_guard", None)
+        spawn_calls = [
+            call for call in last_message.tool_calls
+            if guard is None or (
+                not guard.exhausted and not guard.repeated(call["name"], self._normalize_tool_args(call["args"]))
+            )
+        ]
+        spawn_results = {} if review_budget is not None else self._run_spawn_batch(spawn_calls)
 
         tool_results: List[BaseMessage] = []
         try:
@@ -3348,6 +3371,14 @@ class LangGraphAgent:
                 tool_results,
                 spawn_results=spawn_results,
             )
+            if guard is not None and guard.exhausted:
+                self._last_turn_stopped = True
+                self._answer_displayed = False
+                tool_results.extend([
+                    AIMessage(content=turn_failure.STEP_LIMIT_MARKER),
+                    AIMessage(content=guard.stopped_message()),
+                ])
+                return {"messages": tool_results}
             self._start_spinner()
             # All tool replies precede mid-turn guidance; providers require
             # every tool_call_id to be answered before the next human message.
@@ -3408,10 +3439,14 @@ class LangGraphAgent:
         """Remove ephemeral per-turn reminder blocks from a prompt for storage."""
         return cls._EPHEMERAL_BLOCK_RE.sub("", text)
 
-    def invoke(self, prompt: str) -> str:
+    def invoke(self, prompt: str, *, request: str = None) -> str:
         """Run one task with instructions that survive its execution checkpoints."""
-        self._task_context = task_continuation.TaskContext(prompt)
+        context = prompt[:-len(request)] if request and prompt.endswith(request) else ""
+        self._task_context = task_continuation.TaskContext(
+            prompt if request is None else request, context=context, explicit_request=request is not None,
+        )
         self._task_progress = task_continuation.ProgressLedger()
+        self._tool_loop_guard = tool_progress.ToolProgressGuard()
         self._last_turn_stopped = False
         self._last_graph_node = None
         self._resume_node = None
@@ -3436,6 +3471,7 @@ class LangGraphAgent:
         finally:
             mid_turn.close(self)
             self._task_context = None
+            self._tool_loop_guard = None
             self._task_turn_log = None
             self._resume_node = None
 
@@ -3490,7 +3526,8 @@ class LangGraphAgent:
         # mid-turn, which would invalidate any index taken here.
         self._interrupted_node_state = None
 
-        stored_prompt = self._strip_ephemeral(prompt)
+        task = getattr(self, "_task_context", None)
+        stored_prompt = task.request if task is not None and task.explicit_request else self._strip_ephemeral(prompt)
         # What the change index quotes as the cause of this turn's edits: the
         # prompt as STORED, so a tool call fired from a sub-agent or a parallel
         # wave still names the request the user actually made.
@@ -3527,7 +3564,12 @@ class LangGraphAgent:
         if not stored_prompt.strip():
             model_messages = list(self._messages)
         else:
-            model_messages = self._messages[:-1] + [HumanMessage(content=prompt)]
+            task = getattr(self, "_task_context", None)
+            model_prompt = stored_prompt if task is not None and task.context else prompt
+            model_messages = self._messages[:-1] + [HumanMessage(
+                content=model_prompt,
+                additional_kwargs={"mnemoai_user_input": True} if task is not None and task.explicit_request else {},
+            )]
         initial_state: AgentState = {
             "messages": model_messages,
             "thinking": None,
@@ -3539,6 +3581,7 @@ class LangGraphAgent:
             initial_state["messages"] = [self._system_message()] + list(
                 initial_state["messages"]
             )
+        initial_state["messages"] = task_continuation.task_messages(self, initial_state["messages"])
 
         # Where this turn's own messages begin. The graph state only ever grows
         # (operator.add), so this index is what lets a mid-turn compaction reach
@@ -3780,6 +3823,8 @@ class LangGraphAgent:
         ]
         new_messages: List[BaseMessage] = []
         for m in produced:
+            if isinstance(m, HumanMessage) and m.additional_kwargs.get("mnemoai_control"):
+                continue
             if isinstance(m, (SystemMessage, HumanMessage)):
                 if isinstance(m, HumanMessage) and (
                     is_feedback(m.content) or m.additional_kwargs.get("mnemoai_background_report")
