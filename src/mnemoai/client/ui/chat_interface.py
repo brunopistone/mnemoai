@@ -108,7 +108,11 @@ class ChatInterface:
         try:
             custom = self.user_commands.completions()
             names = {name.lower() for name, _ in custom}
-            return [(name, label) for name, label in self._COMMANDS if name.lower() not in names] + custom
+            return [
+                (name, label)
+                for name, label in self._COMMANDS
+                if name.lower() not in names
+            ] + custom
         except Exception:
             return list(self._COMMANDS)
 
@@ -145,51 +149,75 @@ class ChatInterface:
     # the banner read as a wall. Keep any new command in the group whose heading
     # answers why you'd reach for it; split the group before letting one pass ~5.
     _COMMAND_GROUPS = [
-        ("Context", [
-            ("/context", "What's using the context window"),
-            ("/clear", "Clear conversation context"),
-            ("/compact [focus]", "Summarize & shrink context"),
-            ("/rewind", "Undo your last prompt (files untouched)"),
-            ("/usage", "Token usage for this session (per model)"),
-        ]),
-        ("Sessions", [
-            ("/save [path]", "Save conversation (optional file/dir path)"),
-            ("/load [path]", "Load a saved conversation (lists if no path)"),
-            ("/export [md|txt]", "Write a shareable transcript here"),
-            ("/branch [turn]", "Fork this session and continue there"),
-            ("/rename [title]", "Name this session in the --resume picker"),
-        ]),
-        ("Workspace", [
-            ("/files", "Files this session read, changed or attached"),
-            ("/diff [path]", "Uncommitted changes (this session's marked)"),
-            ("/why [path]", "Which prompt asked for a file's changes"),
-            ("/copy [code|N]", "Copy the last answer or its code to clipboard"),
-        ]),
-        ("Modes", [
-            ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
-            ("/auto [tier]", "Skip confirmations: off/edits/writes/all"),
-            ("/review [mode]", "Code/document review: on, off, last"),
-        ]),
-        ("Assistant", [
-            ("/memory [clear]", "View (or clear) persistent memory"),
-            ("/learned [action]", "Inspect, edit or retract tool-use notes"),
-            ("/skills [name]", "List installed skills (or preview one)"),
-            ("/mcp [verbose]", "MCP status (verbose for tools & setup)"),
-            ("/hooks", "List the tool hooks this session runs"),
-        ]),
-        ("Configure", [
-            ("/config", "Full setup; /config playbook|review for limits"),
-            ("/model", "Override one model (LLM/vision/embeds/router…)"),
-            ("/params", "Tune inference params (temp, top_p, …)"),
-            ("/features", "Enable/disable features (RAG, memory, web, …)"),
-        ]),
-        ("Help", [
-            ("/doctor", "Check this install for problems"),
-            ("/help", "This command reference + keyboard keys"),
-        ]),
-        ("Exit", [
-            ("/exit, /quit", "Exit the application"),
-        ]),
+        (
+            "Context",
+            [
+                ("/context", "What's using the context window"),
+                ("/clear", "Clear conversation context"),
+                ("/compact [focus]", "Summarize & shrink context"),
+                ("/rewind", "Undo your last prompt (files untouched)"),
+                ("/usage", "Token usage for this session (per model)"),
+            ],
+        ),
+        (
+            "Sessions",
+            [
+                ("/save [path]", "Save conversation (optional file/dir path)"),
+                ("/load [path]", "Load a saved conversation (lists if no path)"),
+                ("/export [md|txt]", "Write a shareable transcript here"),
+                ("/branch [turn]", "Fork this session and continue there"),
+                ("/rename [title]", "Name this session in the --resume picker"),
+            ],
+        ),
+        (
+            "Workspace",
+            [
+                ("/files", "Files this session read, changed or attached"),
+                ("/diff [path]", "Uncommitted changes (this session's marked)"),
+                ("/why [path]", "Which prompt asked for a file's changes"),
+                ("/copy [code|N]", "Copy the last answer or its code to clipboard"),
+            ],
+        ),
+        (
+            "Modes",
+            [
+                ("/plan", "Toggle read-only plan mode (blocks edits/bash)"),
+                ("/auto [tier]", "Skip confirmations: off/edits/writes/all"),
+                ("/review [mode]", "Code/document review: on, off, last"),
+            ],
+        ),
+        (
+            "Assistant",
+            [
+                ("/memory [clear]", "View (or clear) persistent memory"),
+                ("/learned [action]", "Inspect, edit or retract tool-use notes"),
+                ("/skills [name]", "List installed skills (or preview one)"),
+                ("/mcp [verbose]", "MCP status (verbose for tools & setup)"),
+                ("/hooks", "List the tool hooks this session runs"),
+            ],
+        ),
+        (
+            "Configure",
+            [
+                ("/config", "Full setup; /config playbook|review for limits"),
+                ("/model", "Override one model (LLM/vision/embeds/router…)"),
+                ("/params", "Tune inference params (temp, top_p, …)"),
+                ("/features", "Enable/disable features (RAG, memory, web, …)"),
+            ],
+        ),
+        (
+            "Help",
+            [
+                ("/doctor", "Check this install for problems"),
+                ("/help", "This command reference + keyboard keys"),
+            ],
+        ),
+        (
+            "Exit",
+            [
+                ("/exit, /quit", "Exit the application"),
+            ],
+        ),
     ]
 
     # Slash commands for autocomplete — the actual insertable tokens (the
@@ -229,11 +257,11 @@ class ChatInterface:
 
     # ANSI color codes
     _C = {
-        "border": "\033[90m",   # grey
-        "head": "\033[95m",     # magenta (group headings)
-        "cmd": "\033[92m",      # green (commands)
-        "text": "\033[97m",     # white
-        "dim": "\033[90m",      # dim
+        "border": "\033[90m",  # grey
+        "head": "\033[95m",  # magenta (group headings)
+        "cmd": "\033[92m",  # green (commands)
+        "text": "\033[97m",  # white
+        "dim": "\033[90m",  # dim
         "reset": "\033[0m",
     }
 
@@ -311,14 +339,17 @@ class ChatInterface:
         gutter_w = max(vlen(h) for h, _ in groups)
         widest = max(
             gutter_w + 2 + cmd_w + 2 + vlen(desc)
-            for _, items in groups for _, desc in items
+            for _, items in groups
+            for _, desc in items
         )
         W = max(64, widest, *(vlen(f) for f in footer)) if footer else max(64, widest)
 
         def row(content: str = "") -> str:
             """One framed row, padded to the visible inner width."""
             pad = " " * max(0, W - vlen(content))
-            return f"{C['border']}│{C['reset']} {content}{pad} {C['border']}│{C['reset']}"
+            return (
+                f"{C['border']}│{C['reset']} {content}{pad} {C['border']}│{C['reset']}"
+            )
 
         lines = [f"{C['border']}╭{'─' * (W + 2)}╮{C['reset']}"]
 
@@ -399,12 +430,14 @@ class ChatInterface:
         # Keys, not commands: nothing else surfaces them once the banner is gone,
         # and Esc-to-interrupt in particular is the one a user needs mid-turn.
         keys = [
-            ("Enter", "submit"),
+            ("Enter", "submit / guide the running turn"),
+            ("Tab", "queue a separate turn while busy (or complete a menu)"),
+            ("Ctrl+Q", "pending messages (↑↓ select · Delete remove · Esc close)"),
             ("Ctrl+J", "new line"),
             ("↑ / ↓", "history"),
             ("/", "command menu"),
             ("@", "attach a file or directory (completes as you type)"),
-            ("Esc", "interrupt the current turn"),
+            ("Esc", "interrupt current turn / close focused view"),
             ("Ctrl+A", "agents panel (↑↓ move · Enter view · x stop · Esc leave)"),
             ("Ctrl+O", "expand/collapse peer-review details (Esc closes)"),
             ("Ctrl+X Ctrl+K", "stop every running agent"),
@@ -571,14 +604,22 @@ class ChatInterface:
         if refresh is not None:
             refresh()
         members = getattr(getattr(self.client, "mcp_client", None), "_members", [])
-        snapshot = getattr(getattr(self.client, "mcp_client", None), "startup_status", None)
+        snapshot = getattr(
+            getattr(self.client, "mcp_client", None), "startup_status", None
+        )
         tools = getattr(self.client, "tools", None) or []
-        print("\n" + render_mcp_status(
-            members, tools, verbose=verbose,
-            config_path=mcp_config_path() if verbose else None,
-            width=shutil.get_terminal_size((88, 24)).columns,
-            startup=snapshot() if snapshot is not None else (),
-        ) + "\n")
+        print(
+            "\n"
+            + render_mcp_status(
+                members,
+                tools,
+                verbose=verbose,
+                config_path=mcp_config_path() if verbose else None,
+                width=shutil.get_terminal_size((88, 24)).columns,
+                startup=snapshot() if snapshot is not None else (),
+            )
+            + "\n"
+        )
 
     def _select_saved_conversation(self):
         """List saved conversations (newest first) and let the user pick one via
@@ -721,7 +762,11 @@ class ChatInterface:
             print("Could not create the branch.")
             return
         dropped = len(turns) - through
-        note = f" ({dropped} later turn{'s' if dropped != 1 else ''} left behind)" if dropped else ""
+        note = (
+            f" ({dropped} later turn{'s' if dropped != 1 else ''} left behind)"
+            if dropped
+            else ""
+        )
         print(
             f"Branched after turn {through}{note}. You're now in the branch — the "
             "original session is untouched and still resumable with --resume."
@@ -738,7 +783,9 @@ class ChatInterface:
 
         if not raw:
             if current:
-                print(f'This session is named "{current}". /rename <title> to change it.')
+                print(
+                    f'This session is named "{current}". /rename <title> to change it.'
+                )
             else:
                 print(
                     "This session has no name — the --resume picker labels it with its "
@@ -864,7 +911,9 @@ class ChatInterface:
         reader = getattr(self, "_pinned_reader", None)
         if self._restart_work_pending():
             self._pending_restart_notice = notice or ""
-            print("\n\033[90mSettings saved. Restarting after pending work finishes.\033[0m")
+            print(
+                "\n\033[90mSettings saved. Restarting after pending work finishes.\033[0m"
+            )
             return
         self._pending_restart_notice = None
         try:
@@ -888,7 +937,9 @@ class ChatInterface:
                 try:
                     log.discard_if_empty()
                 except Exception:
-                    logger.debug("Empty-session cleanup before restart failed", exc_info=True)
+                    logger.debug(
+                        "Empty-session cleanup before restart failed", exc_info=True
+                    )
         try:
             self.client.mcp_client.shutdown()
         except Exception as e:
@@ -899,7 +950,9 @@ class ChatInterface:
         except Exception:
             pass
         try:
-            os.execv(sys.executable, [sys.executable] + restart_state.argv(sys.argv, path))
+            os.execv(
+                sys.executable, [sys.executable] + restart_state.argv(sys.argv, path)
+            )
         except OSError as error:
             print_error(
                 f"Restart failed: {one_line(error)}. Conversation preserved at {path}. "
@@ -1025,7 +1078,13 @@ class ChatInterface:
         # /branch is here only for its bare form (it opens a turn picker);
         # `/branch 3` still routes through the same handler, which skips the dialog.
         dialog_cmds = (
-            "/load", "/config", "/model", "/params", "/features", "/memory", "/branch",
+            "/load",
+            "/config",
+            "/model",
+            "/params",
+            "/features",
+            "/memory",
+            "/branch",
             "/learned",
         )
 
@@ -1037,14 +1096,14 @@ class ChatInterface:
             status.begin_turn()
             try:
                 if first in dialog_cmds and not self._is_review_control(line):
+
                     def in_dialog():
                         result = self._dispatch(line)
                         if result is not self._EXIT:
                             self._finish_pending_restart(in_dialog=True)
                         return result
-                    result = self._pinned_reader.run_dialog(
-                        in_dialog
-                    )
+
+                    result = self._pinned_reader.run_dialog(in_dialog)
                 else:
                     result = self._dispatch(line)
                     if result is not self._EXIT:
@@ -1081,6 +1140,11 @@ class ChatInterface:
             reclaim = getattr(agent, "reclaim_mid_turn", None) if agent else None
             return reclaim() if reclaim is not None else []
 
+        def _withdraw_mid_turn(message_id: str) -> bool:
+            agent = getattr(self.client, "agent", None)
+            withdraw = getattr(agent, "withdraw_mid_turn", None)
+            return bool(withdraw(message_id)) if withdraw is not None else False
+
         def _agents_snapshot():
             agent = getattr(self.client, "agent", None)
             store = getattr(agent, "_activity", None) if agent else None
@@ -1105,7 +1169,9 @@ class ChatInterface:
             """Current turn, so the live panel glances at THIS turn's agents."""
             agent = getattr(self.client, "agent", None)
             store = getattr(agent, "_activity", None) if agent else None
-            return int(getattr(store, "current_turn", 0) or 0) if store is not None else 0
+            return (
+                int(getattr(store, "current_turn", 0) or 0) if store is not None else 0
+            )
 
         # Persistent footer: model · provider, launch dir, context meter. Model and
         # directory are read once — /model and /config re-exec the process, so they
@@ -1154,7 +1220,9 @@ class ChatInterface:
             return review_view.current_display(reviewer)
 
         def _toolbar():
-            snapshot = getattr(getattr(self.client, "mcp_client", None), "startup_status", None)
+            snapshot = getattr(
+                getattr(self.client, "mcp_client", None), "startup_status", None
+            )
             hint = mcp_startup_hint(snapshot()) if snapshot is not None else ""
             return spinner_toolbar_text(status) or hint
 
@@ -1170,6 +1238,7 @@ class ChatInterface:
             on_cancel=_on_cancel,
             send_mid_turn=_send_mid_turn,
             reclaim_mid_turn=_reclaim_mid_turn,
+            withdraw_mid_turn=_withdraw_mid_turn,
             agents_provider=_agents_snapshot,
             agents_get=_agents_get,
             agents_stop=_agents_stop,
@@ -1177,8 +1246,11 @@ class ChatInterface:
             agents_turn=_agents_turn,
             review_provider=_review_snapshot,
             background_pending=lambda: bool(
-                getattr(getattr(self.client, "agent", None),
-                        "has_undelivered_background", lambda: False)()
+                getattr(
+                    getattr(self.client, "agent", None),
+                    "has_undelivered_background",
+                    lambda: False,
+                )()
             ),
         )
 
@@ -1260,7 +1332,10 @@ class ChatInterface:
         return turn_view.render_turn_end(
             time.monotonic() - started,
             time.time(),
-            stopped=stopped or getattr(getattr(self.client, "agent", None), "_last_turn_stopped", False),
+            stopped=stopped
+            or getattr(
+                getattr(self.client, "agent", None), "_last_turn_stopped", False
+            ),
             files=self._files_changed_since(mark),
             running_agents=running,
             pending_reports=ready,
@@ -1363,7 +1438,8 @@ class ChatInterface:
     def _is_review_control(line):
         parts = line.lower().split()
         return (
-            len(parts) == 3 and parts[:2] == ["/config", "review"]
+            len(parts) == 3
+            and parts[:2] == ["/config", "review"]
             and parts[2] in {"on", "off", "last"}
         )
 
@@ -1405,7 +1481,7 @@ class ChatInterface:
         # Save to conversations/ by default, or to an optional path.
         if query.lower() == "/save" or query.lower().startswith("/save "):
             timestamp = self.client.session_id.split("_", 1)[1]
-            save_path = query[len("/save"):].strip() or None
+            save_path = query[len("/save") :].strip() or None
             self.client.save_conversation(timestamp, path=save_path)
             return None
 
@@ -1418,18 +1494,26 @@ class ChatInterface:
             return None
 
         if query.lower() == "/learned" or query.lower().startswith("/learned "):
-            print("\n" + learned.run(
-                self.client, query[len("/learned"):].strip(),
-                confirm=confirm_inline, edit=_edit_plan_in_editor,
-            ) + "\n")
+            print(
+                "\n"
+                + learned.run(
+                    self.client,
+                    query[len("/learned") :].strip(),
+                    confirm=confirm_inline,
+                    edit=_edit_plan_in_editor,
+                )
+                + "\n"
+            )
             return None
 
         if query.lower() == "/review" or query.lower().startswith("/review "):
             # Preserve the previously documented /review <path> user macro.
             if self.user_commands.get("review") is None:
-                self._review_command(query[len("/review"):])
+                self._review_command(query[len("/review") :])
                 return None
-            print("\nYour /review macro is active; peer-review controls: /config review on|off|last.")
+            print(
+                "\nYour /review macro is active; peer-review controls: /config review on|off|last."
+            )
 
         if query.lower() == "/context":
             print("\n" + self.client.context_report() + "\n")
@@ -1446,27 +1530,27 @@ class ChatInterface:
 
         # /diff [path] — read-only: it never stages, stashes or checks anything out.
         if query.lower() == "/diff" or query.lower().startswith("/diff "):
-            print("\n" + self.client.diff_report(query[len("/diff"):].strip()) + "\n")
+            print("\n" + self.client.diff_report(query[len("/diff") :].strip()) + "\n")
             return None
 
         # /why [path] — which prompt asked for a file's changes. Reads the index
         # only: no model call, and nothing about the working tree is touched.
         if query.lower() == "/why" or query.lower().startswith("/why "):
-            print("\n" + self.client.why_report(query[len("/why"):].strip()) + "\n")
+            print("\n" + self.client.why_report(query[len("/why") :].strip()) + "\n")
             return None
 
         if query.lower() == "/copy" or query.lower().startswith("/copy "):
-            print("\n" + self.client.copy_last(query[len("/copy"):].strip()) + "\n")
+            print("\n" + self.client.copy_last(query[len("/copy") :].strip()) + "\n")
             return None
 
         # /export [md|txt] [path] — a shareable transcript, not a reloadable file.
         if query.lower() == "/export" or query.lower().startswith("/export "):
-            self._handle_export_command(query[len("/export"):].strip())
+            self._handle_export_command(query[len("/export") :].strip())
             return None
 
         # /branch [turn] — fork this session and continue in the copy.
         if query.lower() == "/branch" or query.lower().startswith("/branch "):
-            self._handle_branch_command(query[len("/branch"):].strip())
+            self._handle_branch_command(query[len("/branch") :].strip())
             return None
 
         # /config rewrites config.yaml wholesale, so it restarts in place — the only
@@ -1477,22 +1561,28 @@ class ChatInterface:
             return None
 
         if query.lower().startswith("/config "):
-            section = query[len("/config"):].strip().lower()
+            section = query[len("/config") :].strip().lower()
             if section.startswith("review "):
-                self._review_command(section[len("review"):])
+                self._review_command(section[len("review") :])
             elif section == "review":
                 if run_review_settings() is not None:
                     if self.client.reload_review_settings():
-                        print("\nReview settings applied. This conversation continues.\n")
+                        print(
+                            "\nReview settings applied. This conversation continues.\n"
+                        )
                     else:
-                        print_error("Settings saved, but could not be applied; restart to retry.")
+                        print_error(
+                            "Settings saved, but could not be applied; restart to retry."
+                        )
             elif section != "playbook":
                 print_error("Usage: /config [playbook|review]")
             elif run_playbook_settings() is not None:
                 if self.client.reload_playbook_settings():
                     print("\nPlaybook settings applied. This conversation continues.\n")
                 else:
-                    print_error("Settings saved, but could not be applied; restart to retry.")
+                    print_error(
+                        "Settings saved, but could not be applied; restart to retry."
+                    )
             return None
 
         # /model normally restarts for the same reason: the provider, model name and
@@ -1518,7 +1608,9 @@ class ChatInterface:
             else:
                 # Either a change the running process can't absorb, or a reload that
                 # failed — both leave the restart as the only correct way to apply it.
-                self._restart_in_place(notice=render_model_update(written, applied=False))
+                self._restart_in_place(
+                    notice=render_model_update(written, applied=False)
+                )
             return None
 
         # Chat/area models can reload in place. Vision and embedding controllers
@@ -1526,7 +1618,10 @@ class ChatInterface:
         if query.lower() == "/params":
             written = run_params_override()
             if written is not None:
-                if getattr(written, "section", "MODEL_ID") in {"VISION_MODEL_ID", "EMBED_MODEL_ID"}:
+                if getattr(written, "section", "MODEL_ID") in {
+                    "VISION_MODEL_ID",
+                    "EMBED_MODEL_ID",
+                }:
                     print(
                         "\n\033[90mParameters saved. Restart MnemoAI to apply them to "
                         "the vision/embedding controllers. This conversation continues "
@@ -1548,17 +1643,23 @@ class ChatInterface:
         if query.lower() == "/features":
             written = run_features_override()
             if written is not None:
-                if getattr(written, "changed_features", None) == frozenset({"ENABLE_PLAYBOOK"}):
+                if getattr(written, "changed_features", None) == frozenset(
+                    {"ENABLE_PLAYBOOK"}
+                ):
                     if self.client.reload_playbook_settings():
-                        print("\nLocal learning settings applied. This conversation continues.\n")
+                        print(
+                            "\nLocal learning settings applied. This conversation continues.\n"
+                        )
                     else:
-                        print_error("Settings saved, but local learning could not be applied; see /doctor.")
+                        print_error(
+                            "Settings saved, but local learning could not be applied; see /doctor."
+                        )
                 else:
                     self._restart_in_place()
             return None
 
         if query.lower() == "/mcp" or query.lower().startswith("/mcp "):
-            option = query[len("/mcp"):].strip().lower()
+            option = query[len("/mcp") :].strip().lower()
             if option not in ("", "verbose"):
                 print_error("Usage: /mcp [verbose]")
                 return None
@@ -1575,15 +1676,15 @@ class ChatInterface:
 
         # /rename [title] — label this session in the --resume picker.
         if query.lower() == "/rename" or query.lower().startswith("/rename "):
-            self._handle_rename_command(query[len("/rename"):].strip())
+            self._handle_rename_command(query[len("/rename") :].strip())
             return None
 
         if query.lower() == "/skills" or query.lower().startswith("/skills "):
-            self._handle_skills_command(query[len("/skills"):].strip())
+            self._handle_skills_command(query[len("/skills") :].strip())
             return None
 
         if query.lower() == "/memory" or query.lower().startswith("/memory "):
-            self._handle_memory_command(query[len("/memory"):].strip())
+            self._handle_memory_command(query[len("/memory") :].strip())
             return None
 
         # Toggle enforced, read-only plan mode (mutating/exec tools blocked).
@@ -1610,30 +1711,24 @@ class ChatInterface:
                     "mutating commands are blocked. Type /plan again to exit.\n"
                 )
             else:
-                print(
-                    "\n\033[92m🔓 Plan mode OFF\033[0m — changes allowed again.\n"
-                )
+                print("\n\033[92m🔓 Plan mode OFF\033[0m — changes allowed again.\n")
             return None
 
         # Raise/lower how much runs without a confirmation prompt.
         if query.lower() == "/auto" or query.lower().startswith("/auto "):
-            self._handle_auto_command(query[len("/auto"):].strip())
+            self._handle_auto_command(query[len("/auto") :].strip())
             return None
 
         # /compact [focus instructions]
         if query.lower() == "/compact" or query.lower().startswith("/compact "):
-            focus = query[len("/compact"):].strip()
+            focus = query[len("/compact") :].strip()
             did = self.client.compact_conversation(focus)
-            print(
-                "Conversation compacted."
-                if did
-                else "Nothing to compact yet."
-            )
+            print("Conversation compacted." if did else "Nothing to compact yet.")
             return None
 
         # /load: no path → pick from saved list; with a path → load directly.
         if query.lower() == "/load" or query.lower().startswith("/load "):
-            file_path = query[len("/load"):].strip()
+            file_path = query[len("/load") :].strip()
             if not file_path:
                 file_path = self._select_saved_conversation()
                 if not file_path:
@@ -1670,12 +1765,20 @@ class ChatInterface:
                     response = self.client.query("")  # delivery-only turn
                     stopped = response == "Operation was cancelled."
                     print("\n" + self._turn_end_line(started, mark, stopped=stopped))
-                    if not stopped and not getattr(agent, "_last_turn_stopped", False) and not any(self._background_status()):
+                    if (
+                        not stopped
+                        and not getattr(agent, "_last_turn_stopped", False)
+                        and not any(self._background_status())
+                    ):
                         notify.notify_turn_end(time.monotonic() - started)
                 except KeyboardInterrupt:
                     print(self._turn_end_line(started, mark, stopped=True))
                 except Exception as e:
-                    logger.error("Background report delivery failed", exc_info=True, extra={"console": False})
+                    logger.error(
+                        "Background report delivery failed",
+                        exc_info=True,
+                        extra={"console": False},
+                    )
                     print_error(
                         f"{type(e).__name__}: {one_line(e)}. "
                         "Could not finish the background update; send a message to retry."
@@ -1718,7 +1821,12 @@ class ChatInterface:
                     try:
                         self.client.reflect_and_learn(query)
                     except Exception as e:
-                        logger.warning("Local learning failed (non-fatal): %s", e, exc_info=True, extra={"console": False})
+                        logger.warning(
+                            "Local learning failed (non-fatal): %s",
+                            e,
+                            exc_info=True,
+                            extra={"console": False},
+                        )
 
                 # Auto-distill durable facts into MEMORY.md (opt-in; runs in the
                 # background so it never blocks the turn). getattr-guarded so a
@@ -1747,7 +1855,9 @@ class ChatInterface:
                 # …and, if the turn ran long enough that the user has plausibly
                 # looked away, ring the terminal. Deliberately NOT on the
                 # cancelled path above: their hand is already on the keyboard.
-                if not getattr(getattr(self.client, "agent", None), "_last_turn_stopped", False) and not any(self._background_status()):
+                if not getattr(
+                    getattr(self.client, "agent", None), "_last_turn_stopped", False
+                ) and not any(self._background_status()):
                     notify.notify_turn_end(time.monotonic() - started)
         except KeyboardInterrupt:
             # The cancel landed in this frame instead of being turned into a

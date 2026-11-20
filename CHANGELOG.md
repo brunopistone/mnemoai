@@ -9,6 +9,22 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.32.0] — 2026-11-20
+
+### Added
+
+- Press Tab while a turn is running to queue a separate turn, while Enter sends
+  guidance at the next checkpoint. Ctrl+Q opens pending messages for individual
+  removal with Delete/Backspace, without cancelling the running task or clearing
+  the draft. Pending guidance can be withdrawn before model delivery; submission
+  identities protect duplicate messages and delayed delivery notifications.
+
+### Fixed
+
+- Removing the last queued prompt still wakes delivery of completed background
+  agent reports. Cancelling the running turn continues to prioritize the next
+  queued prompt without dispatching simultaneous turns.
+
 ## [1.31.3] — 2026-11-19
 
 ### Fixed
@@ -5573,7 +5589,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.31.3...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.32.0...HEAD
+[1.32.0]: https://github.com/brunopistone/mnemoai/compare/v1.31.3...v1.32.0
 [1.31.3]: https://github.com/brunopistone/mnemoai/compare/v1.31.2...v1.31.3
 [1.31.2]: https://github.com/brunopistone/mnemoai/compare/v1.31.1...v1.31.2
 [1.31.1]: https://github.com/brunopistone/mnemoai/compare/v1.31.0...v1.31.1

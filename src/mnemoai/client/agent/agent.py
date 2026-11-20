@@ -527,6 +527,10 @@ class LangGraphAgent:
         Delegates to :func:`mid_turn.reclaim`."""
         return mid_turn.reclaim(self)
 
+    def withdraw_mid_turn(self, message_id: str) -> bool:
+        """Withdraw one input only if it has not reached a model drain point."""
+        return mid_turn.withdraw(self, message_id)
+
     def _deliver_mid_turn(self, state: AgentState) -> Dict[str, Any]:
         """Graph node: hand the model what the user sent as the turn was ending.
 

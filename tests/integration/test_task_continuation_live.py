@@ -10,8 +10,38 @@ import pytest
 from mnemoai.client.agent import subagents
 from mnemoai.client.agent.agent import LangGraphAgent
 from mnemoai.client.managers.agent_conversation_manager import AgentConversationManager
+from mnemoai.client.pending_input import PendingInput
 
 pytestmark = pytest.mark.integration
+
+
+def test_live_withdrawal_keeps_only_surviving_guidance(live_client, monkeypatch):
+    agent = LangGraphAgent(
+        live_client.agent._callback_free_model(), [],
+        "Reply with the exact verification text the user requests.", verbose=False,
+    )
+    removed = PendingInput("Reply instead with DISCARDED-" + uuid.uuid4().hex)
+    kept = PendingInput("Now reply only with RETAINED-" + uuid.uuid4().hex)
+    requests = []
+    stream = agent._stream_once
+
+    def capture(model, messages, *args, **kwargs):
+        requests.append(list(messages))
+        if len(requests) == 1:
+            assert agent.accept_mid_turn(removed)
+            assert agent.accept_mid_turn(kept)
+            assert agent.withdraw_mid_turn(removed.message_id)
+        return stream(model, messages, *args, **kwargs)
+
+    monkeypatch.setattr(agent, "_stream_once", capture)
+    answer = agent.invoke("Reply with READY.")
+    sent = str([[message.content for message in turn] for turn in requests])
+    assert removed not in sent
+    assert removed.message_id not in sent and kept.message_id not in sent
+    assert kept in sent
+    assert kept.split()[-1] in answer, answer
+    assert not agent._last_turn_stopped
+    assert agent.reclaim_mid_turn() == []
 
 
 def _chain(root, length):

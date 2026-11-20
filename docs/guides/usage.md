@@ -294,12 +294,21 @@ silences only the turn-end half, keeping the ones that are waiting on you.
 - `Ctrl+O`: Expand/collapse peer-review details when available; Esc closes the
   focused detail pane. The grey pinned review row is also clickable.
 - `Enter`: Submit the message. **While the assistant is working**, a submitted
-  message is **queued** (shown as a dim `> … (queued)` line) and runs as its own
-  turn after the current one finishes — it's never folded into the running turn
-  and never starts a second query in parallel.
-- `Esc`: Cancel the turn that's currently running
-- `Ctrl+C`: Cancel the running turn; when nothing is running, press twice (or
-  `Ctrl+D`) to exit
+  message goes to the running turn at its next checkpoint. If that turn can no
+  longer accept guidance, the message waits for its own turn. Slash commands
+  always wait for their own turn.
+- `Tab`: **While the assistant is working**, queue the typed message as a separate
+  turn after the current one finishes. It is not sent as guidance to the current
+  turn. When a completion menu is open, Tab still completes the selection; when
+  idle, normal completion behavior is unchanged.
+- `Ctrl+Q`: Open pending messages. Use ↑/↓ to select one and `Delete` or
+  `Backspace` to remove it. `Esc`, `Enter` or `Ctrl+Q` closes the view, preserving
+  your draft and leaving the running task alone. Guidance can be removed only
+  before the running turn takes it; a message already sent cannot be withdrawn.
+- `Esc`: Cancel the turn that's currently running when the normal input has
+  focus. In the pending-message or review view, Esc closes that view instead.
+- `Ctrl+C`: Close a focused pending-message or review view; otherwise cancel the
+  running turn. When nothing is running, press twice (or `Ctrl+D`) to exit.
 - `/` then a letter: shows a slash-command completion menu (↑/↓ to move,
   `Enter`/`Tab` to accept)
 - `@` then part of a path: completes files and directories anywhere in the line —
