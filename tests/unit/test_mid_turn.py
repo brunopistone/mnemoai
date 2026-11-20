@@ -21,6 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from mnemoai.client.agent import mid_turn
 from mnemoai.client.agent.agent import LangGraphAgent
+from mnemoai.client.pending_input import PendingInput
 
 
 def _agent():
@@ -31,6 +32,60 @@ def _agent():
     a._mid_turn_open = False
     a._on_mid_turn_delivered = None
     return a
+
+
+def test_withdrawal_identifies_duplicate_submissions_and_never_cancels_the_turn():
+    agent = _agent()
+    mid_turn.open_window(agent)
+    first, second = PendingInput("  same request  "), PendingInput("  same request  ")
+    assert agent.accept_mid_turn(first) and agent.accept_mid_turn(second)
+    assert agent.withdraw_mid_turn(second.message_id)
+    assert not agent.withdraw_mid_turn(second.message_id)
+    reclaimed = agent.reclaim_mid_turn()
+    assert reclaimed == ["same request"]
+    assert reclaimed[0].message_id == first.message_id
+
+
+def test_withdrawal_after_drain_cannot_remove_a_new_identical_message():
+    agent = _agent()
+    mid_turn.open_window(agent)
+    first = PendingInput("same")
+    mid_turn.accept(agent, first)
+    notices = []
+    agent._on_mid_turn_delivered = notices.extend
+    delivered = mid_turn.drain(agent)
+    second = PendingInput("same")
+    mid_turn.accept(agent, second)
+    assert not mid_turn.withdraw(agent, first.message_id)
+    assert notices[0].message_id == first.message_id
+    assert first.message_id not in delivered[0].content
+    assert mid_turn.reclaim(agent)[0].message_id == second.message_id
+
+
+def test_withdraw_and_drain_have_exactly_one_winner():
+    from concurrent.futures import ThreadPoolExecutor
+
+    for _ in range(20):
+        agent = _agent()
+        mid_turn.open_window(agent)
+        message = PendingInput("do this once")
+        mid_turn.accept(agent, message)
+        ready = threading.Barrier(2)
+
+        def remove():
+            ready.wait(timeout=2)
+            return mid_turn.withdraw(agent, message.message_id)
+
+        def deliver():
+            ready.wait(timeout=2)
+            return mid_turn.drain(agent)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            removed, delivered = pool.submit(remove), pool.submit(deliver)
+            assert removed.result() == (delivered.result() == [])
+        assert not mid_turn.has_pending(agent)
+        assert mid_turn.accept(agent, "the original turn still accepts guidance")
+        assert mid_turn.reclaim(agent) == ["the original turn still accepts guidance"]
 
 
 class _Tool:

@@ -52,6 +52,7 @@ from prompt_toolkit.widgets import (
 from mnemoai.client import file_mentions
 from mnemoai.client.agent import ask_user
 from mnemoai.client.agent.agent_activity import glance_runs
+from mnemoai.client.pending_input import PendingInput
 from mnemoai.client.ui import notify, review_view, turn_view
 from mnemoai.utils.radio_select import commit_paging, highlighted_value
 
@@ -218,7 +219,9 @@ class PinnedPromptReader:
     required because ``client.query()`` calls ``asyncio.run()``, which raises on a
     thread already owning a loop. A second Enter is offered to the RUNNING turn
     first (``send_mid_turn``) and queued FIFO only if it isn't taken — never
-    running a concurrent query either way. Default interactive UI on a TTY.
+    running a concurrent query either way. Tab explicitly queues a separate
+    turn; Ctrl+Q manages pending input without cancelling the dispatch thread.
+    Default interactive UI on a TTY.
     """
 
     def __init__(
@@ -235,6 +238,7 @@ class PinnedPromptReader:
         on_cancel: Optional[Callable[[], None]] = None,
         send_mid_turn: Optional[Callable[[str], bool]] = None,
         reclaim_mid_turn: Optional[Callable[[], list]] = None,
+        withdraw_mid_turn: Optional[Callable[[str], bool]] = None,
         agents_provider: Optional[Callable[[], list]] = None,
         agents_get: Optional[Callable[[str], Any]] = None,
         agents_stop: Optional[Callable[[str], bool]] = None,
@@ -270,6 +274,8 @@ class PinnedPromptReader:
             reclaim_mid_turn: ``reclaim()`` -> the texts the finished turn never
                 delivered, taken back so they run as their own turns — what makes
                 a cancelled turn's mid-turn message survive the cancel.
+            withdraw_mid_turn: ``withdraw(message_id)`` -> True only if that
+                submission was removed before the running turn drained it.
             agents_provider: Returns the current list of hidden sub-agent activity
                 runs (ActivityRun snapshots) for the live bottom "agents" panel.
             agents_get: ``get(run_id)`` -> one run's frozen copy for the detail view.
@@ -295,6 +301,9 @@ class PinnedPromptReader:
         # them) → every submission is queued FIFO, the pre-existing behavior.
         self._send_mid_turn = send_mid_turn
         self._reclaim_mid_turn = reclaim_mid_turn
+        self._withdraw_mid_turn = withdraw_mid_turn
+        self._queue_nav = False
+        self._queue_selected = None
         # Live sub-agent activity: provider() -> list of ActivityRun snapshots for
         # the bottom "agents" panel; get(run_id) -> one run for the detail view;
         # stop(run_id)/stop_all() -> ask a running agent (or all) to stop.
@@ -360,6 +369,9 @@ class PinnedPromptReader:
             height=Dimension(min=3, preferred=8, max=10),
             style="class:pinned-review",
         )
+        self._queue_control = FormattedTextControl(
+            self._queued_text, focusable=True, show_cursor=False,
+        )
         self._app = self._build_app()
 
     # --- layout / app construction -------------------------------------------
@@ -382,14 +394,17 @@ class PinnedPromptReader:
         Two groups with a header each, because what happens to them differs and
         that is the only thing the user can act on: a mid-turn message goes to the
         RUNNING turn at its next drain point, a queued line runs as a turn of its
-        own once this one ends. Either way Esc ends the wait — it interrupts the
-        turn, which sends the pending text immediately — so the header says so
-        while a turn is running.
+        own once this one ends. Ctrl+Q opens removal controls; Esc in that view
+        closes it without interrupting the running turn.
 
         Each message is one ``↳`` row (the window wraps, so a long one stays
         readable) and leaves the block as soon as it's been handed over.
         """
         lines = []
+        if self._queue_nav:
+            lines.append(("class:pinned-queued-label", "Pending messages · ↑/↓ select · Delete remove · Esc close"))
+        elif self._queued_lines or self._mid_turn_lines:
+            lines.append(("class:pinned-queued-label", "Ctrl+Q: manage pending messages"))
 
         def group(header: str, rows: list) -> None:
             if not rows:
@@ -397,12 +412,13 @@ class PinnedPromptReader:
             if lines:
                 lines.append(("class:pinned-queued", "\n"))
             lines.append(("class:pinned-queued-label", header))
-            if self._busy:
-                lines.append(
-                    ("class:pinned-queued", "  (esc to interrupt and send now)")
-                )
             for row in rows:
-                lines.append(("class:pinned-queued", f"\n  ↳ {row}"))
+                selected = self._queue_nav and getattr(row, "message_id", None) == self._queue_selected
+                lines.append(("class:pinned-queued", "\n"))
+                if selected:
+                    lines.append(("[SetCursorPosition]", ""))
+                style = "class:pinned-panel-sel" if selected else "class:pinned-queued"
+                lines.append((style, f"  ↳ {row}"))
 
         plural = "s" if len(self._mid_turn_lines) > 1 else ""
         group(
@@ -416,7 +432,80 @@ class PinnedPromptReader:
             else "Message queued to run as its own turn",
             self._queued_lines,
         )
+        if self._queue_nav and not (self._queued_lines or self._mid_turn_lines):
+            lines.append(("class:pinned-queued", "\nNo pending messages."))
         return lines
+
+    def _pending_inputs(self):
+        return [*self._mid_turn_lines, *self._queued_lines]
+
+    def _toggle_queue(self):
+        if self._confirm_pending or self._pending_dialog is not None:
+            return
+        if self._queue_nav:
+            self._close_queue()
+            return
+        self._close_review()
+        self._nav_mode = False
+        rows = self._pending_inputs()
+        self._queue_selected = getattr(rows[0], "message_id", None) if rows else None
+        self._queue_nav = True
+        self._app.layout.focus(self._queue_control)
+
+    def _close_queue(self):
+        if getattr(self, "_queue_nav", False):
+            self._queue_nav = False
+            self._queue_selected = None
+            self._app.layout.focus(self._buffer)
+
+    def _move_queue_selection(self, delta):
+        rows = self._pending_inputs()
+        ids = [getattr(row, "message_id", None) for row in rows]
+        if not ids:
+            self._queue_selected = None
+            return
+        index = ids.index(self._queue_selected) if self._queue_selected in ids else -1
+        self._queue_selected = ids[max(0, min(len(ids) - 1, index + delta))]
+
+    def _remove_pending_input(self, message_id):
+        """Event-loop only: cancel a pending submission, never the current task."""
+        if not message_id:
+            return False
+        for index, row in enumerate(self._queued_lines):
+            if getattr(row, "message_id", None) == message_id:
+                # Leave a tombstone in asyncio.Queue. Its consumer balances
+                # task_done without dispatch/echo, preserving FIFO and join().
+                row.cancelled = True
+                del self._queued_lines[index]
+                self._pending = max(0, self._pending - 1)
+                return True
+        for index, row in enumerate(self._mid_turn_lines):
+            if getattr(row, "message_id", None) == message_id:
+                if self._withdraw_mid_turn is None or not self._withdraw_mid_turn(message_id):
+                    return False  # the model drain won the race
+                del self._mid_turn_lines[index]
+                return True
+        return False
+
+    def _remove_selected_input(self):
+        rows = self._pending_inputs()
+        ids = [getattr(row, "message_id", None) for row in rows]
+        index = ids.index(self._queue_selected) if self._queue_selected in ids else 0
+        try:
+            removed = self._remove_pending_input(self._queue_selected)
+        except Exception:
+            self._notice("Could not confirm removal of this message.")
+            return
+        if removed:
+            rows = self._pending_inputs()
+            self._queue_selected = getattr(rows[min(index, len(rows) - 1)], "message_id", None) if rows else None
+            self._notice("Removed pending message.")
+        else:
+            self._notice("This message has already been sent or cannot be removed.")
+
+    def _input_hint(self):
+        tab = "complete" if self._buffer.complete_state is not None else "queue for later"
+        return f"Enter: send after step · Tab: {tab} · Ctrl+Q: pending messages"
 
     def _footer_text(self):
         """Styled segments for the persistent footer, sized to the terminal.
@@ -672,6 +761,7 @@ class PinnedPromptReader:
         display = self._review_display()
         if display is None or self._confirm_pending or self._pending_dialog is not None:
             return
+        self._close_queue()
         if text is not None:
             display = review_view.ReviewDisplay(
                 display.key, "Peer review · details", "", review_view.plain(text),
@@ -746,8 +836,9 @@ class PinnedPromptReader:
         )
         queued_window = ConditionalContainer(
             Window(
-                FormattedTextControl(self._queued_text),
+                self._queue_control,
                 dont_extend_height=True,
+                height=Dimension(max=8),
                 # A submitted message is usually a sentence, not a fragment: with
                 # wrapping off the row was silently cut at the terminal edge, so
                 # the user couldn't read back what they had just sent.
@@ -755,8 +846,15 @@ class PinnedPromptReader:
                 style="class:pinned-queued",
             ),
             filter=Condition(
-                lambda: bool(self._queued_lines or self._mid_turn_lines)
+                lambda: self._queue_nav or bool(self._queued_lines or self._mid_turn_lines)
             ),
+        )
+        input_hint_window = ConditionalContainer(
+            Window(FormattedTextControl(self._input_hint), dont_extend_height=True, wrap_lines=True,
+                   style="class:pinned-queued"),
+            filter=Condition(lambda: self._busy and not (
+                self._confirm_pending or self._queue_nav or self._nav_mode or self._review_expanded
+            )),
         )
         # Live reasoning (styled block) shown transiently above the status line;
         # the final block commits to scrollback when the answer starts.
@@ -822,6 +920,7 @@ class PinnedPromptReader:
                     review_details,
                     status_window,
                     input_window,
+                    input_hint_window,
                     agents_window,
                     footer_window,
                 ]
@@ -850,6 +949,21 @@ class PinnedPromptReader:
 
     def _make_bindings(self) -> KeyBindings:
         kb = KeyBindings()
+
+        queue_submit = Condition(lambda: (
+            self._busy and bool(self._buffer.text.strip()) and self._queue is not None
+            and not self._confirm_pending and self._pending_dialog is None
+            and not self._queue_nav and not self._nav_mode
+            and self._app.layout.has_focus(self._buffer)
+            and self._buffer.complete_state is None
+        ))
+
+        @kb.add("tab", filter=queue_submit, eager=True)
+        def _(event) -> None:
+            buff = event.current_buffer
+            buff.append_to_history()
+            self._submit_input(buff.text, queue_only=True)
+            buff.reset()
 
         @kb.add("c-j")
         def _(event) -> None:
@@ -936,6 +1050,32 @@ class PinnedPromptReader:
             if not event.current_buffer.text:
                 event.app.exit(exception=EOFError)
 
+        queue_ok = Condition(lambda: not self._confirm_pending and self._pending_dialog is None)
+        queue_open = queue_ok & Condition(lambda: self._queue_nav)
+
+        @kb.add("c-q", eager=True)
+        def _(event) -> None:
+            self._toggle_queue()
+
+        @kb.add("up", filter=queue_open, eager=True)
+        def _(event) -> None:
+            self._move_queue_selection(-1)
+
+        @kb.add("down", filter=queue_open, eager=True)
+        def _(event) -> None:
+            self._move_queue_selection(1)
+
+        @kb.add("delete", filter=queue_open, eager=True)
+        @kb.add("backspace", filter=queue_open, eager=True)
+        def _(event) -> None:
+            self._remove_selected_input()
+
+        @kb.add("escape", filter=queue_open)
+        @kb.add("c-c", filter=queue_open, eager=True)
+        @kb.add("enter", filter=queue_open, eager=True)
+        def _(event) -> None:
+            self._close_queue()
+
         # While a Proceed? prompt is pending, y/n/a answer it (eager, so they win
         # over self-insert and never reach the input buffer).
         confirming = Condition(lambda: self._confirm_pending)
@@ -1011,6 +1151,7 @@ class PinnedPromptReader:
         @kb.add("c-a", filter=nav_toggle_ok)
         def _(event) -> None:
             self._close_review()
+            self._close_queue()
             self._nav_mode = not self._nav_mode
             if self._nav_mode:
                 # Land on the OLDEST still-running agent — the one the tail-
@@ -1171,14 +1312,18 @@ class PinnedPromptReader:
         and is echoed to scrollback only when it is actually handed over, so each
         ``>`` sits above the answer that addresses it.
         """
-        text = buff.text
+        return self._submit_input(buff.text)
+
+    def _submit_input(self, text: str, *, queue_only: bool = False) -> bool:
+        """Submit once, preserving identity through pastes, delivery and removal."""
         if not text.strip() or self._queue is None:
             return False
+        text = PendingInput(text)
 
-        steerable = self._busy and self._send_mid_turn is not None
+        steerable = not queue_only and self._busy and self._send_mid_turn is not None
         if steerable and not text.lstrip().startswith("/"):
             try:
-                if self._send_mid_turn(self._expand_pastes(text)):
+                if self._send_mid_turn(text.with_text(self._expand_pastes(text))):
                     self._mid_turn_lines.append(text)
                     if self._app is not None:
                         self._app.invalidate()
@@ -1191,6 +1336,15 @@ class PinnedPromptReader:
         self._queue.put_nowait(text)
         return False
 
+    def _pop_pending_row(self, rows, text):
+        """Match tracked submissions by ID, with a legacy string-hook fallback."""
+        ident = getattr(text, "message_id", None)
+        for index, row in enumerate(rows):
+            if (getattr(row, "message_id", None) == ident if ident is not None
+                    else self._expand_pastes(row).strip() == str(text).strip()):
+                return rows.pop(index)
+        return None
+
     def notify_mid_turn_delivered(self, texts: list) -> None:
         """The running turn took the pending mid-turn message(s) (worker thread).
 
@@ -1200,9 +1354,9 @@ class PinnedPromptReader:
         rather than appearing out of nowhere in the answer.
 
         Marshalled onto the event loop: the pinned state and ``run_in_terminal``
-        both belong to it (the :meth:`notify_background_complete` pattern). Only
-        the FIRST ``len(texts)`` rows leave the block — a message accepted between
-        the drain and this callback is still pending and must stay visible.
+        both belong to it (the :meth:`notify_background_complete` pattern).
+        Submission IDs prevent a delayed callback from removing a newer message
+        with identical text, or a row that moved after a withdrawal.
         """
         loop = self._loop
         if loop is None:
@@ -1221,13 +1375,10 @@ class PinnedPromptReader:
                     pass
 
         def _delivered() -> None:
-            n = max(1, len(texts or []))
-            rows = self._mid_turn_lines[:n]
-            del self._mid_turn_lines[:n]
-            if not rows:
-                # Raced (a reclaim already took the rows): echo the delivered text
-                # itself rather than let the answer stand over nothing.
-                rows = list(texts or [])
+            rows = []
+            for text in texts or []:
+                row = self._pop_pending_row(self._mid_turn_lines, text)
+                rows.append(text if row is None else row)
             if rows:
                 loop.create_task(_echo(rows))
             if self._app is not None:
@@ -1241,9 +1392,8 @@ class PinnedPromptReader:
         The turn either folds a mid-turn message in or hands it back — a turn
         cancelled with Esc, or one that died, leaves its pending message here and
         the user's words must not vanish with it. Re-queued FIFO, so it runs as
-        its own turn immediately: that is what makes "esc to interrupt and send
-        now" true, and it is also what keeps an undelivered message out of an
-        UNRELATED later turn.
+        its own turn, keeping an undelivered message out of an unrelated later
+        turn. Withdrawn submissions are absent from the agent's reclaimed list.
         """
         if self._reclaim_mid_turn is None:
             self._mid_turn_lines.clear()
@@ -1254,10 +1404,13 @@ class PinnedPromptReader:
             texts = []
         shown = self._mid_turn_lines[:]
         self._mid_turn_lines.clear()
-        for i, text in enumerate(texts):
+        for text in texts:
             # Prefer the row as typed (pastes still collapsed) — the reclaimed
             # text is the expanded form the turn was offered.
-            line = shown[i] if i < len(shown) else text
+            row = self._pop_pending_row(shown, text)
+            line = text if row is None else row
+            if not isinstance(line, PendingInput):
+                line = PendingInput(line)
             self._pending += 1
             self._queued_lines.append(line)
             if self._queue is not None:
@@ -1345,6 +1498,7 @@ class PinnedPromptReader:
             # silent), but never let it stop the prompt from being painted.
             try:
                 self._close_review()  # focus returns to the real approval channel
+                self._close_queue()
                 await run_in_terminal(echo)
             except Exception:
                 pass
@@ -1598,6 +1752,10 @@ class PinnedPromptReader:
 
         while True:
             line = await self._queue.get()
+            if isinstance(line, PendingInput) and line.cancelled:
+                self._queue.task_done()
+                self._enqueue_background_delivery()
+                continue
             self._pending = max(0, self._pending - 1)
             if not line.strip() and not self._background_pending():
                 # A queued user turn or /clear may already have consumed/retired
@@ -1606,13 +1764,7 @@ class PinnedPromptReader:
                 continue
             # Remove from the live "queued" list — it's about to be committed to
             # scrollback for real, so it shouldn't also show as pending.
-            if self._queued_lines and self._queued_lines[0] == line:
-                self._queued_lines.pop(0)
-            else:
-                try:
-                    self._queued_lines.remove(line)
-                except ValueError:
-                    pass
+            self._pop_pending_row(self._queued_lines, line)
             self._busy = True
             self._cancelled = False
             self._ctrl_c_while_busy = False
@@ -1620,7 +1772,7 @@ class PinnedPromptReader:
             # The MODEL gets the FULL expanded paste (echo=False); the SCROLLBACK
             # echo gets a capped, gray, head+tail rendering (echo=True) so a huge
             # paste can't flood scrollback or overrun the pinned-app repaint.
-            dispatched = self._expand_pastes(line)
+            dispatched = str(self._expand_pastes(line))
             echoed = self._expand_pastes(line, echo=True)
             # Echo NOW (at dispatch, not submit) so a queued line's `>` prints
             # directly above its own answer. An empty line is a delivery-only

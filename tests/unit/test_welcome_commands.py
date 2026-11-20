@@ -205,7 +205,7 @@ class TestHelpScreen:
         rendered = _ANSI.sub("", self._rendered())
         # Esc (interrupt) and Ctrl+A (agents panel) have no slash command at all,
         # so /help is the only place they are ever shown.
-        for key in ("Enter", "Ctrl+J", "Esc", "Ctrl+A", "Ctrl+C"):
+        for key in ("Enter", "Tab", "Ctrl+Q", "Ctrl+J", "Esc", "Ctrl+A", "Ctrl+C"):
             assert key in rendered, f"{key} is undocumented"
 
     def test_help_is_itself_listed(self):

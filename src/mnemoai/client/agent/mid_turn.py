@@ -37,6 +37,8 @@ from typing import List
 
 from langchain_core.messages import BaseMessage, HumanMessage
 
+from mnemoai.client.pending_input import PendingInput
+
 # The framing block. Public because the agent's ephemeral-block regex and
 # _commit_turn both key on it, and a rename in one place would silently stop the
 # stripping (the model-facing framing would then be stored as the user's words).
@@ -110,9 +112,12 @@ def accept(agent, text: str) -> bool:
     False means the caller keeps it (no turn running, the window has closed, or
     the text is empty) and must queue it as a turn of its own.
     """
+    original = text
     text = (text or "").strip()
     if not text:
         return False
+    if isinstance(original, PendingInput):
+        text = original.with_text(text)
     lock = getattr(agent, "_mid_turn_lock", None)
     if lock is None:
         if not getattr(agent, "_mid_turn_open", False):
@@ -124,6 +129,30 @@ def accept(agent, text: str) -> bool:
             return False
         agent._mid_turn_queue.append(text)
         return True
+
+
+def withdraw(agent, message_id: str) -> bool:
+    """Remove only this submission, atomically against the model's next drain.
+
+    False means it has already been taken (or was never pending). Never signal
+    cancellation of the running task and never remove another equal-text input.
+    """
+    if not message_id:
+        return False
+
+    def remove():
+        pending = getattr(agent, "_mid_turn_queue", [])
+        for index, text in enumerate(pending):
+            if getattr(text, "message_id", None) == message_id:
+                del pending[index]
+                return True
+        return False
+
+    lock = getattr(agent, "_mid_turn_lock", None)
+    if lock is None:
+        return remove()
+    with lock:
+        return remove()
 
 
 def has_pending(agent) -> bool:

@@ -11,9 +11,13 @@ be verified on a real terminal. These protect FIFO order, one-at-a-time dispatch
 import asyncio
 import io
 import sys
+import threading
+from types import SimpleNamespace
 
 import pytest
 
+from mnemoai.client.agent import mid_turn
+from mnemoai.client.pending_input import PendingInput
 from mnemoai.client.ui.spinner import Spinner, SpinnerStatus, spinner_toolbar_text
 from mnemoai.client.ui.tui import PinnedPromptReader, _ExitRepl
 
@@ -70,6 +74,345 @@ def _reader(dispatch):
     # without a TTY. The queue is created by _drive() below.
     r._app = _FakeApp()
     return r
+
+
+def _key(reader, name):
+    """Use the final active application binding, as prompt_toolkit does."""
+    aliases = {"tab": "c-i", "enter": "c-m", "backspace": "c-h"}
+    name = aliases.get(name, name)
+    found = [
+        b for b in reader._make_bindings().bindings
+        if tuple(getattr(k, "value", k) for k in b.keys) == (name,) and b.filter()
+    ]
+    assert found, name
+    found[-1].handler(SimpleNamespace(current_buffer=reader._buffer, app=reader._app))
+
+
+def test_tab_queues_while_enter_steers_and_keeps_history_once():
+    sent = []
+    reader = PinnedPromptReader(
+        prompt_text=lambda: "> ", commands=[], dispatch=lambda text: None,
+        send_mid_turn=lambda text: sent.append(text) or True,
+    )
+    reader._queue = asyncio.Queue()
+    reader._busy = True
+    reader._buffer.text = "separate task"
+    _key(reader, "tab")
+    assert reader._buffer.text == ""
+    assert reader._queued_lines == ["separate task"] and sent == []
+    assert reader._history.get_strings() == ["separate task"]
+    reader._buffer.text = "guidance for the active task"
+    reader._buffer.validate_and_handle()
+    assert sent == ["guidance for the active task"]
+    assert reader._mid_turn_lines == sent
+    assert reader._history.get_strings() == ["separate task", "guidance for the active task"]
+    assert reader.pending == 1
+
+
+@pytest.mark.parametrize("busy,text,completion,confirmation,expected", [
+    (True, "next task", False, False, True),
+    (False, "next task", False, False, False),
+    (True, "", False, False, False),
+    (True, " ", False, False, False),
+    (True, "read @path", True, False, False),
+    (True, "next task", False, True, False),
+])
+def test_tab_preserves_completion_idle_and_confirmation_behavior(busy, text, completion, confirmation, expected):
+    from prompt_toolkit.buffer import CompletionState
+    from prompt_toolkit.completion import Completion
+    from prompt_toolkit.document import Document
+
+    reader = PinnedPromptReader(prompt_text=lambda: "> ", commands=[], dispatch=lambda text: None)
+    reader._queue = asyncio.Queue()
+    reader._busy, reader._confirm_pending = busy, confirmation
+    reader._buffer.text = text
+    if completion:
+        reader._buffer.complete_state = CompletionState(Document(text), [Completion("path")])
+    binding = next(b for b in reader._make_bindings().bindings if tuple(b.keys) == ("c-i",))
+    assert binding.filter() is expected
+
+
+def test_queue_controls_remove_one_duplicate_without_touching_draft_or_running_task(monkeypatch):
+    reader = PinnedPromptReader(prompt_text=lambda: "> ", commands=[], dispatch=lambda text: None)
+    reader._queue = asyncio.Queue()
+    reader._busy = True
+    notices = []
+    monkeypatch.setattr(reader, "_notice", notices.append)
+    monkeypatch.setattr(reader, "_request_cancel", lambda: pytest.fail("must not cancel the active task"))
+    reader._submit_input("same", queue_only=True)
+    reader._submit_input("same", queue_only=True)
+    first, second = reader._queued_lines
+    reader._buffer.text = "unsent draft"
+    _key(reader, "c-q")
+    assert reader._app.layout.has_focus(reader._queue_control)
+    _key(reader, "down")
+    assert reader._queue_selected == second.message_id
+    _key(reader, "delete")
+    assert reader._queued_lines == ["same"]
+    assert reader._queued_lines[0].message_id == first.message_id
+    assert second.cancelled and reader.pending == 1
+    _key(reader, "escape")
+    assert reader._app.layout.has_focus(reader._buffer)
+    assert reader._buffer.text == "unsent draft" and reader._busy
+    assert notices == ["Removed pending message."]
+
+
+def test_removed_messages_are_not_dispatched_or_echoed_and_fifo_join_still_finishes(capsys):
+    seen = []
+    reader = _reader(lambda text: seen.append(text) or (_ExitRepl if text == "/quit" else None))
+
+    async def run():
+        reader._queue = asyncio.Queue()
+        for text in ["first", "discard this", "last", "/quit"]:
+            reader._submit_input(text, queue_only=True)
+        removed = reader._queued_lines[1]
+        assert reader._remove_pending_input(removed.message_id)
+        assert not reader._remove_pending_input(removed.message_id)
+        await asyncio.wait_for(reader._worker(), timeout=5)
+        await asyncio.wait_for(reader._queue.join(), timeout=1)
+        assert reader.pending == 0 and reader._queue.empty() and reader._queued_lines == []
+
+    asyncio.run(run())
+    assert seen == ["first", "last", "/quit"]
+    assert "discard this" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("count", [1, 3])
+def test_removing_all_queued_input_still_delivers_a_waiting_background_report(count, monkeypatch):
+    seen = []
+    reader = _reader(lambda text: seen.append(text) or _ExitRepl)
+    reader._background_pending = lambda: True
+    monkeypatch.setattr("mnemoai.client.ui.tui.notify.notify", lambda text: None)
+
+    async def run():
+        reader._queue = asyncio.Queue()
+        for _ in range(count):
+            reader._submit_input("remove me", queue_only=True)
+        reader._background_delivery_needed = True
+        reader._enqueue_background_delivery()  # user input currently takes priority
+        for row in list(reader._queued_lines):
+            assert reader._remove_pending_input(row.message_id)
+        await asyncio.wait_for(reader._worker(), timeout=2)
+        await asyncio.wait_for(reader._queue.join(), timeout=1)
+        assert reader.pending == 0 and reader._queue.empty()
+    asyncio.run(run())
+    assert seen == [""]
+
+
+def _identified_reader():
+    agent = SimpleNamespace(_mid_turn_lock=threading.Lock(), _mid_turn_queue=[], _mid_turn_open=True)
+    reader = PinnedPromptReader(
+        prompt_text=lambda: "> ", commands=[], dispatch=lambda text: None,
+        send_mid_turn=lambda text: mid_turn.accept(agent, text),
+        reclaim_mid_turn=lambda: mid_turn.reclaim(agent),
+        withdraw_mid_turn=lambda ident: mid_turn.withdraw(agent, ident),
+    )
+    reader._busy = True
+    reader._queue = asyncio.Queue()
+    agent._on_mid_turn_delivered = reader.notify_mid_turn_delivered
+    return reader, agent
+
+
+def test_delayed_delivery_cannot_remove_a_new_equal_message_after_withdrawal(capsys):
+    reader, agent = _identified_reader()
+
+    async def run():
+        reader._loop = asyncio.get_running_loop()
+        reader._submit_input("same")
+        first = reader._mid_turn_lines[0]
+        assert mid_turn.drain(agent)  # notification awaits the next UI iteration
+        reader._submit_input("same")
+        second = reader._mid_turn_lines[-1]
+        assert reader._remove_pending_input(second.message_id)
+        reader._submit_input("same")
+        third = reader._mid_turn_lines[-1]
+        assert not reader._remove_pending_input(first.message_id)  # already drained
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert [row.message_id for row in reader._mid_turn_lines] == [third.message_id]
+        reader._requeue_undelivered()
+        assert [row.message_id for row in reader._queued_lines] == [third.message_id]
+        assert reader.pending == 1
+
+    asyncio.run(run())
+    assert capsys.readouterr().out.count("same") == 1
+
+
+def test_reclaim_matches_paste_identity_even_before_delivery_callback_runs():
+    reader, agent = _identified_reader()
+    reader.restore_draft("first line\n" * 50)
+    collapsed = reader._buffer.text
+
+    async def run():
+        reader._loop = asyncio.get_running_loop()
+        reader._submit_input("already delivered")
+        mid_turn.drain(agent)
+        reader._submit_input(collapsed)
+        waiting = reader._mid_turn_lines[-1]
+        reader._requeue_undelivered()
+        await asyncio.sleep(0)
+        assert reader._queued_lines == [collapsed]
+        assert reader._queued_lines[0].message_id == waiting.message_id
+        assert reader._expand_pastes(reader._queued_lines[0]) == "first line\n" * 50
+        assert reader._buffer.text == collapsed
+
+    asyncio.run(run())
+
+
+def test_removing_pending_guidance_keeps_the_active_turn_open():
+    reader, agent = _identified_reader()
+    reader._submit_input("withdraw this")
+    pending = reader._mid_turn_lines[0]
+    assert isinstance(pending, PendingInput)
+    assert reader._remove_pending_input(pending.message_id)
+    assert mid_turn.drain(agent) == []
+    reader._requeue_undelivered()
+    assert reader._queued_lines == [] and reader.pending == 0
+    assert reader._busy  # withdrawing does not cancel the dispatch thread
+
+
+def test_real_keyboard_routes_enter_tab_and_pending_removal_without_interrupting(monkeypatch):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    started, release = threading.Event(), threading.Event()
+    seen, instructions, cancelled = [], [], []
+    agent = SimpleNamespace(_mid_turn_lock=threading.Lock(), _mid_turn_queue=[], _mid_turn_open=False)
+
+    def dispatch(text):
+        seen.append(text)
+        if text == "main task":
+            mid_turn.open_window(agent)
+            started.set()
+            assert release.wait(5), "keyboard driver did not release the main task"
+            instructions.extend(mid_turn.drain(agent))
+        return _ExitRepl if text == "/quit" else None
+
+    async def wait_for(predicate):
+        async with asyncio.timeout(4):
+            while not predicate():
+                await asyncio.sleep(0.005)
+
+    async def run():
+        with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+            reader = PinnedPromptReader(
+                prompt_text=lambda: "> ", commands=[], dispatch=dispatch,
+                send_mid_turn=lambda text: mid_turn.accept(agent, text),
+                reclaim_mid_turn=lambda: mid_turn.reclaim(agent),
+                withdraw_mid_turn=lambda ident: mid_turn.withdraw(agent, ident),
+                on_cancel=lambda: cancelled.append(True),
+            )
+            # Escape must close the queue view, never reach the thread interrupt.
+            monkeypatch.setattr(reader, "_request_cancel", lambda: pytest.fail("interrupted main task"))
+            task = asyncio.create_task(reader._run_async())
+            try:
+                await wait_for(lambda: reader._app.is_running)
+                keys.send_text("main task\r")
+                await wait_for(started.is_set)
+                keys.send_text("guidance to withdraw\r")
+                await wait_for(lambda: len(reader._mid_turn_lines) == 1)
+                keys.send_text("keep for later\t")
+                await wait_for(lambda: reader.pending == 1)
+                keys.send_text("discard for later\t")
+                await wait_for(lambda: reader.pending == 2)
+                keys.send_text("unsent draft\x11")  # Ctrl+Q
+                await wait_for(lambda: reader._queue_nav)
+                keys.send_text("\x1b[B\x1b[B\x1b[3~")  # Down, Down, Delete
+                await wait_for(lambda: reader.pending == 1)
+                keys.send_text("\x1b[A\x7f")  # Up, Backspace: withdraw guidance
+                await wait_for(lambda: not reader._mid_turn_lines)
+                keys.send_text("\x1b")
+                await wait_for(lambda: not reader._queue_nav)
+                assert seen == ["main task"] and reader._busy
+                assert reader._buffer.text == "unsent draft"
+                release.set()
+                await wait_for(lambda: seen == ["main task", "keep for later"] and not reader._busy)
+                assert reader.pending == 0 and reader._queue.empty()
+                assert not cancelled and instructions == []
+                keys.send_text("\x15/quit\r")  # Ctrl+U clears the preserved draft
+                await asyncio.wait_for(task, timeout=4)
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+    assert seen == ["main task", "keep for later", "/quit"]
+
+
+def test_queue_escape_does_not_replace_normal_running_turn_cancellation(monkeypatch):
+    reader = PinnedPromptReader(prompt_text=lambda: "> ", commands=[], dispatch=lambda text: None)
+    reader._busy = True
+    cancelled = []
+    monkeypatch.setattr(reader, "_request_cancel", lambda: cancelled.append(True))
+    _key(reader, "c-q")
+    _key(reader, "escape")
+    assert cancelled == []
+    _key(reader, "escape")
+    assert cancelled == [True]
+
+
+def test_real_escape_interrupts_current_turn_then_dispatches_queued_turn():
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    started, stopped, cleanup = threading.Event(), threading.Event(), threading.Event()
+    seen, cancelled = [], []
+
+    def dispatch(text):
+        seen.append(text)
+        if text == "main task":
+            started.set()
+            try:
+                while not cleanup.wait(0.02):
+                    pass
+            finally:
+                stopped.set()
+        else:
+            assert text == "queued priority" and stopped.is_set()
+            return _ExitRepl
+
+    async def wait_for(predicate):
+        async with asyncio.timeout(4):
+            while not predicate():
+                await asyncio.sleep(0.005)
+
+    async def run():
+        with create_pipe_input() as keys, create_app_session(input=keys, output=DummyOutput()):
+            reader = PinnedPromptReader(
+                prompt_text=lambda: "> ", commands=[], dispatch=dispatch,
+                on_cancel=lambda: cancelled.append(True),
+                send_mid_turn=lambda text: pytest.fail("Tab must not send guidance"),
+            )
+            task = asyncio.create_task(reader._run_async())
+            try:
+                await wait_for(lambda: reader._app.is_running)
+                keys.send_text("main task\r")
+                await wait_for(started.is_set)
+                keys.send_text("queued priority\t")
+                await wait_for(lambda: reader.pending == 1)
+                keys.send_text("unsent draft\x1b")
+                await asyncio.wait_for(task, timeout=4)
+                assert reader._buffer.text == "unsent draft"
+                assert reader.pending == 0 and reader._queue.empty()
+                assert not reader._busy
+            finally:
+                cleanup.set()
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+    assert seen == ["main task", "queued priority"] and cancelled == [True]
+
+
+def test_queue_shortcut_does_not_take_focus_from_a_confirmation():
+    reader = PinnedPromptReader(prompt_text=lambda: "> ", commands=[], dispatch=lambda text: None)
+    reader._confirm_pending = True
+    _key(reader, "c-q")
+    assert not reader._queue_nav
+    assert reader._app.layout.has_focus(reader._buffer)
 
 
 def _drive(reader, lines):
@@ -695,8 +1038,8 @@ class TestMidTurnDelivery:
         assert "after the current step" in rendered
         assert "run as its own turn" in rendered
         assert "↳ to the running turn" in rendered and "↳ its own turn" in rendered
-        # While a turn runs, Esc is the way to stop waiting for the drain point.
-        assert "esc to interrupt and send now" in rendered
+        assert "Ctrl+Q: manage pending messages" in rendered
+        assert "esc to interrupt and send now" not in rendered
 
     def test_the_esc_hint_is_dropped_once_no_turn_is_running(self):
         # Nothing to interrupt: the queued line is about to run on its own.
