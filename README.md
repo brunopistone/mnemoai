@@ -12,12 +12,10 @@
 A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG capabilities, and intelligent conversation management. Built on LangGraph with LangChain for multi-provider LLM support (Ollama, MLX, Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic, Nebius Token Factory, Amazon SageMaker AI, LiteLLM).
 
 <p align="center">
-  <video src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo.mp4" poster="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" controls preload="none" width="720">
-    <a href="https://github.com/brunopistone/mnemoai/blob/main/images/demo.mp4"><img src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" alt="Watch the MnemoAI terminal walkthrough" width="720"></a>
-  </video>
+  <a href="https://brunopistone.github.io/mnemoai/#walkthrough"><img src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" alt="Watch the MnemoAI terminal walkthrough" width="720"></a>
 </p>
 
-[Watch the walkthrough](https://github.com/brunopistone/mnemoai/blob/main/images/demo.mp4): planning, code and tests, memory, queued messages and cancellation, and background agents.
+[Watch the walkthrough](https://brunopistone.github.io/mnemoai/#walkthrough): planning, code and tests, memory, queued messages and cancellation, and background agents.
 
 ## 📖 Documentation
 
