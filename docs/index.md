@@ -7,10 +7,12 @@ A local agentic AI assistant for developers and power users. Mnemo AI runs in yo
 It supports local and hosted model providers: **Ollama**, **MLX** (Apple Silicon), **Amazon Bedrock**, **Bedrock Mantle**, **OpenAI**, **Anthropic**, **Amazon SageMaker AI**, and **LiteLLM**.
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb" controls width="720">
-    <a href="https://github.com/user-attachments/assets/344440f1-2c7a-4f2f-a022-99cda7be5adb"><img src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" alt="▶️ Watch the demo" width="720"></a>
+  <video src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo.mp4" poster="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" controls preload="none" width="720">
+    <a href="https://github.com/brunopistone/mnemoai/blob/main/images/demo.mp4"><img src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" alt="Watch the MnemoAI terminal walkthrough" width="720"></a>
   </video>
 </p>
+
+[Watch the walkthrough](https://github.com/brunopistone/mnemoai/blob/main/images/demo.mp4): planning, code and tests, memory, queued messages and cancellation, and background agents.
 
 ## Quick start
 
