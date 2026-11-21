@@ -104,7 +104,7 @@ packages = ["src/mnemoai"]
 # The sdist otherwise carries every non-gitignored file, which meant shipping
 # the 10.5 MB demo GIF in `images/` — 96% of the archive, for a file nothing in
 # the distribution reads. What README.md and docs/index.md do load out of
-# `images/` — the logo and the demo poster — they reference by absolute
+# `images/` — the logo, demo video and poster — they reference by absolute
 # raw.githubusercontent.com URL, so PyPI's rendered page still shows them; the
 # files just live in the repo instead of in every download. MkDocs uses its own
 # copy under docs/assets/. The wheel never contained any of it.

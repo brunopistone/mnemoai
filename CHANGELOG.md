@@ -9,6 +9,12 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+### Documentation
+
+- Replace the demo video and preview on the README and documentation homepage
+  with a terminal walkthrough covering planning, code edits and tests, memory,
+  queued messages, cancellation, and background agents.
+
 ## [1.32.0] — 2026-11-20
 
 ### Added
