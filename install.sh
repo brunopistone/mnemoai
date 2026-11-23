@@ -106,7 +106,7 @@ select_python() {
         --no-python-downloads "cpython$python_requirement" 2>/dev/null) || python_request=
     if [ -n "$python_request" ] && python_version=$("$python_request" -I -c '
 import sys
-if sys.implementation.name != "cpython" or sys.version_info < (3, 11) or sys.version_info.releaselevel != "final":
+if sys.implementation.name != "cpython" or sys.version_info < (3, 11, 5) or sys.version_info.releaselevel != "final":
     sys.exit(1)
 print(".".join(map(str, sys.version_info[:3])))
 ' 2>/dev/null); then
@@ -188,7 +188,7 @@ main() {
     expected_version=
     installer_tmp=
     release_stage=
-    python_requirement='>=3.11'
+    python_requirement='>=3.11.5'
     fallback_python=3.12
     case "${1:-}" in
         --help|-h) usage; return ;;

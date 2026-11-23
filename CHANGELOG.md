@@ -11,6 +11,15 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [1.32.1] — 2026-11-23
 
+### Security
+
+- Require patched Soup Sieve, OAuthLib, and OpenTelemetry API versions in package
+  metadata and the lockfile. This addresses CSS-selector denial-of-service
+  issues, device-code grant validation, and trace-context parsing, including
+  trace metadata carried by MCP requests.
+- Raise the minimum Python patch version to 3.11.5 for patched Soup Sieve.
+  The installer selects managed Python 3.12 when an older interpreter is found.
+
 ### Changed
 
 - Reduce Python startup work by running built-in tools over in-memory MCP,

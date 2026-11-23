@@ -5,7 +5,7 @@
 <h1 align="center">Mnemo AI</h1>
 
 [![PyPI](https://img.shields.io/pypi/v/mnemoai-assistant.svg)](https://pypi.org/project/mnemoai-assistant/)
-[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python Version](https://img.shields.io/badge/python-3.11.5%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
@@ -38,7 +38,7 @@ mnemoai                          # verbose (shows thinking); --no-verbose to hid
 
 macOS/Linux: the installer selects the latest stable **GitHub release**, verifies
 its wheel checksum and installed version, and installs into an isolated Python
-environment. It reuses compatible CPython (3.11+) on PATH, or downloads managed
+environment. It reuses compatible CPython (3.11.5+) on PATH, or downloads managed
 Python 3.12 when none is available. Global Python packages stay separate.
 Re-run the same command to update, even if PyPI publication is still pending.
 Follow its PATH hint if needed. Existing configuration and conversations stay in

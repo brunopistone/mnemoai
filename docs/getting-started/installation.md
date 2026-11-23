@@ -7,7 +7,7 @@ This guide takes you from a fresh machine to a working `mnemoai` command.
 Required:
 
 - macOS or glibc-based Linux (arm64/x86_64), with `curl` and `tar`
-- Python 3.11+ only for manual installs; the one-command installer manages Python 3.12
+- Python 3.11.5+ only for manual installs; the one-command installer manages Python 3.12
 - Access to at least one chat model provider
 
 Choose one provider to start:
@@ -49,7 +49,7 @@ bundled fork overwrote them, it reinstalls the selected LiteLLM version and
 verifies the files again before reporting success.
 
 The installer uses `uv` with an isolated package environment. It first looks for
-an existing stable CPython 3.11+ on PATH, outside project virtual environments.
+an existing stable CPython 3.11.5+ on PATH, outside project virtual environments.
 If none is available, it uses a private managed Python 3.12 runtime, downloading
 it when needed. Reusing an interpreter does not import or change its global
 packages. The installer displays the selected interpreter and the installed

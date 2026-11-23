@@ -11,7 +11,7 @@ name = "mnemoai-assistant"
 version = "1.32.1"
 description = "Mnemo AI — a local agentic AI assistant (LangGraph + MCP) that learns and remembers, with multi-provider model support."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11.5"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Bruno Pistone" }]
@@ -60,10 +60,10 @@ dependencies = [
     "multidict>=6.9.1",
     "nltk>=3.10.4",
     "numpy>=2.4.4",
-    "oauthlib>=4.0.0",
+    "oauthlib>=4.0.1",
     "ollama>=0.6.1",
     "openai>=2.30.0",
-    "opentelemetry-api>=1.45.1",
+    "opentelemetry-api>=1.45.2",
     "Pillow>=13.0.0",
     "prompt_toolkit>=3.0.52",
     "psutil>=7.2.2",
@@ -73,6 +73,7 @@ dependencies = [
     "pypdf>=6.21.4",
     "python-docx>=1.2.0",
     "qdrant-client>=1.17.1",
+    "soupsieve>=4.0.0",
     "tiktoken>=0.12.0",
     "urllib3>=2.8.0",
 ]
