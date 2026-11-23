@@ -97,33 +97,28 @@ class LangGraphClient:
         self._steering_state = SteeringState()
         self._steering_revision = 0
 
-        # The MCP server runs as a subprocess (`python -m mnemoai.server.server`).
-        # Prepend the package's parent dir to PYTHONPATH so the child can import
-        # mnemoai from a checkout (<repo>/src) or an install (site-packages).
+        # Keep standalone server parameters available to callers that explicitly
+        # need stdio. The interactive client uses the same tools in-process.
         import mnemoai
 
-        pkg_parent = os.path.dirname(
-            os.path.dirname(os.path.abspath(mnemoai.__file__))
-        )
+        pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(mnemoai.__file__)))
         # Pin this instance's id BEFORE copying the env so the MCP subprocess
         # inherits the same MNEMOAI_INSTANCE_ID — both halves then resolve the
         # same per-instance session-pointer file (multiple tabs don't clobber).
         instance_id()
         env = os.environ.copy()
         existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = (
-            pkg_parent + (os.pathsep + existing if existing else "")
-        )
+        env["PYTHONPATH"] = pkg_parent + (os.pathsep + existing if existing else "")
 
         self.server_params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "mnemoai.server.server"],
             env=env,
         )
-        # Built-in server always launched; servers in ~/.mnemoai/mcp.json are
-        # launched alongside it and their tools merged.
+        # Built-ins use memory transport; external servers retain their own
+        # processes and their tools are merged as before.
         external_servers = load_external_servers()
-        self.mcp_client = MultiMCPClient(self.server_params, external_servers)
+        self.mcp_client = MultiMCPClient(None, external_servers)
 
         # Snapshot the tool hooks now: any complaint about the file belongs at
         # startup, not in the middle of a turn, and the snapshot is what runs for
@@ -149,7 +144,9 @@ class LangGraphClient:
         # restored only for an internal configuration restart; an ordinary new
         # run starts back at "off".
         self.auto_approve_mode: str = auto_approve.DEFAULT_MODE
-        self.reviewer = review.Reviewer(enabled=config.get("ENABLE_REVIEW", False) is True)
+        self.reviewer = review.Reviewer(
+            enabled=config.get("ENABLE_REVIEW", False) is True
+        )
 
         # Set by the pinned UI, which shows the context size in its footer: the
         # per-turn `[Context: N tokens]` line then has nothing left to add and is
@@ -292,7 +289,11 @@ class LangGraphClient:
         except Exception as e:
             self.reflector = self.playbook = None
             self._playbook_error = str(e)
-            logger.warning("Playbook unavailable; conversation remains available: %s", e, extra={"console": False})
+            logger.warning(
+                "Playbook unavailable; conversation remains available: %s",
+                e,
+                extra={"console": False},
+            )
 
     def _open_playbook(self) -> None:
         """Open optional learning stores; the caller owns graceful degradation."""
@@ -396,11 +397,13 @@ class LangGraphClient:
                 )
                 background_tools = (
                     self.mcp_client.start_background()
-                    if isinstance(self.mcp_client, MultiMCPClient) else None
+                    if isinstance(self.mcp_client, MultiMCPClient)
+                    else None
                 )
                 with self.mcp_client:
                     self.tools = (
-                        background_tools if background_tools is not None
+                        background_tools
+                        if background_tools is not None
                         else self.mcp_client.list_tools_sync()
                     )
                     logger.info(f"Loaded {len(self.tools)} tools from MCP server")
@@ -475,7 +478,9 @@ class LangGraphClient:
                     # until the call's deadline — up to ten minutes on a long tool.
                     probe = getattr(self.mcp_client, "set_cancel_probe", None)
                     if probe is not None:
-                        probe(lambda: self.agent is not None and self.agent._cancelled())
+                        probe(
+                            lambda: self.agent is not None and self.agent._cancelled()
+                        )
 
             finally:
                 # Nothing left to join: the result was either collected above
@@ -498,7 +503,9 @@ class LangGraphClient:
             return
         if self.mcp_client._startup is None:
             return
-        if wait and any(s.state == "connecting" for s in self.mcp_client.startup_status()):
+        if wait and any(
+            s.state == "connecting" for s in self.mcp_client.startup_status()
+        ):
             self.spinner.set_label("Connecting external tools")
         tools = self.mcp_client.finish_startup(wait=wait)
         if wait:
@@ -540,45 +547,72 @@ class LangGraphClient:
                 if not delivery_only and not work_review.obvious_conversation(prompt):
                     try:
                         if isinstance(self.agent, LangGraphAgent):
-                            review_work = work_review.WorkReview(self, prompt, review_context)
+                            review_work = work_review.WorkReview(
+                                self, prompt, review_context
+                            )
                         else:
                             # Compatibility for embedded agents without lifecycle hooks.
                             review_capture = reviewer.begin(prompt)
                             self._publish_review("waiting", announce=False)
-                        review_context.append({
-                            "id": "initial-policy", "kind": "execution_constraints",
-                            "text": f"At task start: plan mode={self.plan_mode_active}; "
-                                    f"auto tier={getattr(self, 'auto_approve_mode', 'off')}.",
-                        })
+                        review_context.append(
+                            {
+                                "id": "initial-policy",
+                                "kind": "execution_constraints",
+                                "text": f"At task start: plan mode={self.plan_mode_active}; "
+                                f"auto tier={getattr(self, 'auto_approve_mode', 'off')}.",
+                            }
+                        )
                         for message in list(self.agent.messages)[-6:]:
                             kind = getattr(message, "type", "")
-                            if kind in {"human", "ai"} and getattr(message, "content", None):
+                            if kind in {"human", "ai"} and getattr(
+                                message, "content", None
+                            ):
                                 visible = extract_visible_text(message.content)
                                 if kind == "human":
                                     visible = turn_view.user_prompt_text(visible)
                                 if not visible:
                                     continue
-                                review_context.append({
-                                    "id": f"prior-{len(review_context) + 1}",
-                                    "kind": "prior_user_request" if kind == "human" else "prior_actor_statement",
-                                    "text": visible,
-                                })
+                                review_context.append(
+                                    {
+                                        "id": f"prior-{len(review_context) + 1}",
+                                        "kind": (
+                                            "prior_user_request"
+                                            if kind == "human"
+                                            else "prior_actor_statement"
+                                        ),
+                                        "text": visible,
+                                    }
+                                )
                     except Exception as e:
-                        logger.error("Review evidence unavailable (%s)", type(e).__name__,
-                                     exc_info=True, extra={"console": False})
-                        reviewer.incomplete("Evidence capture unavailable; no review performed.")["unavailable"] = True
+                        logger.error(
+                            "Review evidence unavailable (%s)",
+                            type(e).__name__,
+                            exc_info=True,
+                            extra={"console": False},
+                        )
+                        reviewer.incomplete(
+                            "Evidence capture unavailable; no review performed."
+                        )["unavailable"] = True
                         self._publish_review("complete", reviewer.last)
                 else:
                     reviewer.reset(clear_task=False)
             self.agent._work_review = review_work
             self.agent._review_capture = review_capture
             self.agent._completion_supervisor = (
-                lambda state, steps: self._supervise_turn(review_capture, state, review_context, steps)
-            ) if review_capture is not None else None
+                (
+                    lambda state, steps: self._supervise_turn(
+                        review_capture, state, review_context, steps
+                    )
+                )
+                if review_capture is not None
+                else None
+            )
             self._reflection_messages = []
             if getattr(self, "playbook", None):
                 self.refresh_playbook_context()
-                self._playbook_exposed_ids = list(getattr(self, "_playbook_selected_ids", []))
+                self._playbook_exposed_ids = list(
+                    getattr(self, "_playbook_selected_ids", [])
+                )
                 log = getattr(self.agent, "session_log", None)
                 self._learning_turn = getattr(self, "_learning_turn", 0) + 1
                 self._reflection_source = {
@@ -589,7 +623,9 @@ class LangGraphClient:
                 try:
                     prompt = self._inject_episodic_context(prompt)
                 except Exception as e:
-                    logger.warning("Episodic recall unavailable; continuing this request: %s", e)
+                    logger.warning(
+                        "Episodic recall unavailable; continuing this request: %s", e
+                    )
 
             # Plan mode: remind the model per-turn that it's read-only (the
             # system prompt is frozen at session start).
@@ -604,7 +640,13 @@ class LangGraphClient:
                 if steering:
                     prompt = steering + prompt
                     if review_capture is not None or review_work is not None:
-                        review_context.append({"id": "steering", "kind": "user_steering", "text": steering})
+                        review_context.append(
+                            {
+                                "id": "steering",
+                                "kind": "user_steering",
+                                "text": steering,
+                            }
+                        )
 
             with self.mcp_client:
                 before = list(self.agent.messages)
@@ -612,20 +654,29 @@ class LangGraphClient:
                     try:
                         self.playbook.record_exposure(self._playbook_exposed_ids)
                     except Exception:
-                        logger.warning("Could not record playbook exposure", exc_info=True, extra={"console": False})
+                        logger.warning(
+                            "Could not record playbook exposure",
+                            exc_info=True,
+                            extra={"console": False},
+                        )
                 try:
                     response = (
                         self.agent.invoke(prompt, request=user_request)
-                        if isinstance(self.agent, LangGraphAgent) else self.agent(prompt)
+                        if isinstance(self.agent, LangGraphAgent)
+                        else self.agent(prompt)
                     )
                 finally:
                     self.agent._completion_supervisor = None
                     if review_work is not None:
                         review_capture = review_work.capture
-                    if getattr(self, "reflector", None) and self.agent.messages != before:
+                    if (
+                        getattr(self, "reflector", None)
+                        and self.agent.messages != before
+                    ):
                         turn = getattr(self.agent, "_last_turn_messages", None)
                         self._reflection_messages = (
-                            list(turn) if isinstance(turn, list)
+                            list(turn)
+                            if isinstance(turn, list)
                             else current_turn_messages(self.agent.messages)
                         )
                 if review_capture is not None:
@@ -633,12 +684,16 @@ class LangGraphClient:
                         review_work.finalize()
                     if self.reviewer.last is None:
                         if isinstance(self.agent, LangGraphAgent):
-                            self.reviewer.incomplete("The actor stopped before normal completion; no correction was started.")
+                            self.reviewer.incomplete(
+                                "The actor stopped before normal completion; no correction was started."
+                            )
                             self._save_review_report(self.reviewer.last)
                             self._publish_review("complete", self.reviewer.last)
                         else:
                             # An embedded/custom agent may not implement the turn hook.
-                            self._finish_review(review_capture, response, review_context)
+                            self._finish_review(
+                                review_capture, response, review_context
+                            )
                     else:
                         self._save_review_report(self.reviewer.last)
                 elif review_work is not None and self.reviewer.last is not None:
@@ -651,10 +706,18 @@ class LangGraphClient:
                     # Drafts may have streamed before the verdict was known. End
                     # with the returned actor answer, never with reviewer prose.
                     try:
-                        pending = any(getattr(self.agent, "background_status", lambda: (0, 0))())
-                        print("\n" + review_view.final_answer(
-                            response, self.reviewer.last, pending_agents=pending,
-                        ), flush=True)
+                        pending = any(
+                            getattr(self.agent, "background_status", lambda: (0, 0))()
+                        )
+                        print(
+                            "\n"
+                            + review_view.final_answer(
+                                response,
+                                self.reviewer.last,
+                                pending_agents=pending,
+                            ),
+                            flush=True,
+                        )
                     except Exception:
                         logger.debug("Could not render reviewed answer", exc_info=True)
 
@@ -676,7 +739,9 @@ class LangGraphClient:
                             )
                         )
                     except CompactionError as e:
-                        logger.warning("Post-answer compaction failed; keeping the answer: %s", e)
+                        logger.warning(
+                            "Post-answer compaction failed; keeping the answer: %s", e
+                        )
 
                     self._profile_turn()
                 finally:
@@ -703,8 +768,13 @@ class LangGraphClient:
             if review_work is not None and review_capture is None:
                 self.reviewer.view = None
             if review_capture is not None:
-                self._publish_review("complete", self.reviewer.incomplete(
-                    "Actor execution cancelled; completed work is retained.", preserve=True))
+                self._publish_review(
+                    "complete",
+                    self.reviewer.incomplete(
+                        "Actor execution cancelled; completed work is retained.",
+                        preserve=True,
+                    ),
+                )
                 self._save_review_report(self.reviewer.last)
             return "Operation was cancelled."
 
@@ -715,14 +785,22 @@ class LangGraphClient:
             with self.spinner_lock:
                 self.spinner.stop()
             if review_capture is not None:
-                self._publish_review("complete", self.reviewer.incomplete(
-                    "Actor execution failed; completed work is retained.", preserve=True))
+                self._publish_review(
+                    "complete",
+                    self.reviewer.incomplete(
+                        "Actor execution failed; completed work is retained.",
+                        preserve=True,
+                    ),
+                )
                 self._save_review_report(self.reviewer.last)
             # ONE report per failure: the print below IS the user-facing error,
             # so the record is file-only — a second red line about the same
             # exception is noise. The traceback never leaves the log file.
-            logger.error(f"Query failed: {exception_line(e)}", exc_info=True,
-                         extra={"console": False})
+            logger.error(
+                f"Query failed: {exception_line(e)}",
+                exc_info=True,
+                extra={"console": False},
+            )
             # NAME the recovery rather than implying it. Which command actually
             # unsticks this depends on the failure (see turn_failure), and a turn
             # that dies without saying leaves the user to guess between /rewind,
@@ -756,14 +834,18 @@ class LangGraphClient:
 
     def _supervise_turn(self, capture, state, context, steps, time_limit=None):
         """The hook runs before the agent commits this single user turn."""
-        fresh = state["messages"][getattr(self.agent, "_turn_seed_len", 0):]
+        fresh = state["messages"][getattr(self.agent, "_turn_seed_len", 0) :]
         response = self.agent._last_visible_from(fresh)
         if not response or mid_turn.has_pending(self.agent):
-            self.reviewer.incomplete("No completed answer, or new user guidance is pending; supervision stopped.")
+            self.reviewer.incomplete(
+                "No completed answer, or new user guidance is pending; supervision stopped."
+            )
             self._publish_review("complete", self.reviewer.last)
             return
         self.agent._emit_answer(response)
-        self._finish_review(capture, response, context, state=state, steps=steps, time_limit=time_limit)
+        self._finish_review(
+            capture, response, context, state=state, steps=steps, time_limit=time_limit
+        )
 
     def _save_review_report(self, report):
         log = getattr(self.agent, "session_log", None)
@@ -771,7 +853,9 @@ class LangGraphClient:
             try:
                 log.log_review(report)
             except Exception:
-                logger.warning("Could not persist the peer-review record; report remains available.")
+                logger.warning(
+                    "Could not persist the peer-review record; report remains available."
+                )
 
     def _publish_review(self, phase, report=None, revision=0, *, announce=True):
         """Publish bounded display text without changing review decisions or history."""
@@ -784,7 +868,10 @@ class LangGraphClient:
             generation = reviewer._generation
             previous = reviewer.view
             display = review_view.snapshot(
-                (id(reviewer), generation), phase, report, revision,
+                (id(reviewer), generation),
+                phase,
+                report,
+                revision,
                 details=review.render(report) if report else "",
             )
             if generation != reviewer._generation:
@@ -792,16 +879,26 @@ class LangGraphClient:
             reviewer.view = display
             if report and report.get("unavailable"):
                 if announce and reviewer.unavailable_notice():
-                    print("\n\033[90mPeer review unavailable; continuing without it.\033[0m", flush=True)
+                    print(
+                        "\n\033[90mPeer review unavailable; continuing without it.\033[0m",
+                        flush=True,
+                    )
                 return
             repeated = (
-                phase == "complete" and previous is not None
-                and previous.label == display.label and previous.summary == display.summary
+                phase == "complete"
+                and previous is not None
+                and previous.label == display.label
+                and previous.summary == display.summary
             )
             if announce and not repeated:
-                print("\n" + review_view.compact(
-                    display, shutil.get_terminal_size().columns,
-                ), flush=True)
+                print(
+                    "\n"
+                    + review_view.compact(
+                        display,
+                        shutil.get_terminal_size().columns,
+                    ),
+                    flush=True,
+                )
         except Exception:
             logger.debug("Could not render peer-review status", exc_info=True)
 
@@ -811,7 +908,9 @@ class LangGraphClient:
             overrides = area_models.reviewer_overrides()
             usage_name = str(overrides.get("NAME") or self.llm_controller.model_name)
             label = area_models.label(
-                overrides, self.llm_controller.model_name, self.llm_controller.model_type,
+                overrides,
+                self.llm_controller.model_name,
+                self.llm_controller.model_type,
             )
         except Exception:
             usage_name = "reviewer unavailable"
@@ -820,24 +919,36 @@ class LangGraphClient:
         usage_epoch = getattr(self, "_review_usage_epoch", 0)
 
         def account(result):
-            if tracker is not None and usage_epoch == getattr(self, "_review_usage_epoch", 0):
+            if tracker is not None and usage_epoch == getattr(
+                self, "_review_usage_epoch", 0
+            ):
                 tracker.record(result, usage_name)
 
         event = getattr(self.agent, "_cancel_event", None)
+
         def policy_context():
-            return [*context, {
-                "id": "current-policy", "kind": "execution_constraints",
-                "text": f"At {checkpoint}: plan mode={self.plan_mode_active}; "
-                        f"auto tier={getattr(self, 'auto_approve_mode', 'off')}. "
-                        "Refused/pending actions are not approved by this review.",
-            }]
+            return [
+                *context,
+                {
+                    "id": "current-policy",
+                    "kind": "execution_constraints",
+                    "text": f"At {checkpoint}: plan mode={self.plan_mode_active}; "
+                    f"auto tier={getattr(self, 'auto_approve_mode', 'off')}. "
+                    "Refused/pending actions are not approved by this review.",
+                },
+            ]
+
         return dict(
-            model_factory=lambda: self._area_model("REVIEWER"), model_label=label,
-            context=policy_context, cancel=(lambda: event.is_set()) if event is not None else None,
+            model_factory=lambda: self._area_model("REVIEWER"),
+            model_label=label,
+            context=policy_context,
+            cancel=(lambda: event.is_set()) if event is not None else None,
             usage=account,
         )
 
-    def _finish_review(self, capture, response, context, *, state=None, steps=0, time_limit=None):
+    def _finish_review(
+        self, capture, response, context, *, state=None, steps=0, time_limit=None
+    ):
         """Completion review, including bounded corrections by the foreground actor."""
         self._publish_review("reviewing", announce=False)
         with self.spinner_lock:
@@ -845,32 +956,50 @@ class LangGraphClient:
         try:
             options = self._review_options(context)
             if state is None:
-                report = self.reviewer.finish(capture, response, time_limit=time_limit, **options)
+                report = self.reviewer.finish(
+                    capture, response, time_limit=time_limit, **options
+                )
                 self._save_review_report(report)
             else:
+
                 def progress(kind, item, revision):
                     with self.spinner_lock:
                         self.spinner.stop()
                     if kind == "review":
                         self._publish_review("feedback", item, revision)
                     else:
-                        self._publish_review("correcting", item, revision, announce=False)
+                        self._publish_review(
+                            "correcting", item, revision, announce=False
+                        )
                         print(
                             f"\n\033[90mChat model · draft correction {revision} "
-                            "(review pending)\033[0m\n", flush=True,
+                            "(review pending)\033[0m\n",
+                            flush=True,
                         )
 
                 self.reviewer.supervise(
-                    capture, response, steps=steps,
-                    actor=lambda feedback, budget: supervised_turn.continue_work(self.agent, state, feedback, budget),
-                    progress=progress, time_limit=time_limit, **options,
+                    capture,
+                    response,
+                    steps=steps,
+                    actor=lambda feedback, budget: supervised_turn.continue_work(
+                        self.agent, state, feedback, budget
+                    ),
+                    progress=progress,
+                    time_limit=time_limit,
+                    **options,
                 )
                 report = self.reviewer.last
         except Exception as exc:
             # Optional review must not turn a completed answer into a query failure.
-            logger.error("Review unavailable (%s); answer preserved", type(exc).__name__,
-                         exc_info=True, extra={"console": False})
-            report = self.reviewer.incomplete(f"Review unavailable ({type(exc).__name__}); task continues.")
+            logger.error(
+                "Review unavailable (%s); answer preserved",
+                type(exc).__name__,
+                exc_info=True,
+                extra={"console": False},
+            )
+            report = self.reviewer.incomplete(
+                f"Review unavailable ({type(exc).__name__}); task continues."
+            )
             report["unavailable"] = True
         finally:
             with self.spinner_lock:
@@ -1014,7 +1143,9 @@ class LangGraphClient:
                     overrides=area_models.overrides_for("SUMMARY") or None
                 )
             except Exception as e:
-                logger.warning(f"Non-reasoning summary model unavailable, using main model: {e}")
+                logger.warning(
+                    f"Non-reasoning summary model unavailable, using main model: {e}"
+                )
                 cached = self.model
             self._summary_model_cached = cached
         return cached
@@ -1036,20 +1167,26 @@ class LangGraphClient:
         if getattr(self, "reviewer", None) is not None:
             self.reviewer.reset()
 
-    def _compact_worker_context(self, messages, *, force=False, cancelled=lambda: False):
+    def _compact_worker_context(
+        self, messages, *, force=False, cancelled=lambda: False
+    ):
         """Summarize a worker's private context without changing the parent.
 
         Summaries share the existing summary model/accounting. Serialize worker
         compactions so each worker cannot independently fan out a full map pool.
         No memory learning, tool execution or parent history mutation occurs.
         """
-        manager = AgentConversationManager(max_tokens=self.conversation_manager.max_tokens)
+        manager = AgentConversationManager(
+            max_tokens=self.conversation_manager.max_tokens
+        )
         encoded = messages_to_dict_list(messages)
         before = manager.count_tokens(encoded)
         if not force and before < int(manager.max_tokens * 0.7):
             return None
-        system = messages[:1] if messages and isinstance(messages[0], SystemMessage) else []
-        body = messages[len(system):]
+        system = (
+            messages[:1] if messages and isinstance(messages[0], SystemMessage) else []
+        )
+        body = messages[len(system) :]
         split = manager._split_keep_recent(body, 6)
         if split < 2:
             return None
@@ -1067,30 +1204,53 @@ class LangGraphClient:
 
             class CheckedModel:
                 def __getattr__(self, name):
-                    return getattr(model, name)
+                    method = getattr(model, name)
+                    # Advertise only call methods the underlying provider has.
+                    if name == "ainvoke":
 
-                async def ainvoke(self, *args, **kwargs):
-                    if cancelled():
-                        raise CompactionError("Worker summary was cancelled")
-                    return await model.ainvoke(*args, **kwargs)
+                        async def invoke_async(*args, **kwargs):
+                            if cancelled():
+                                raise CompactionError("Worker summary was cancelled")
+                            return await method(*args, **kwargs)
 
-                def invoke(self, *args, **kwargs):
-                    if cancelled():
-                        raise CompactionError("Worker summary was cancelled")
-                    return model.invoke(*args, **kwargs)
+                        return invoke_async
+                    if name == "invoke":
 
-            summary = asyncio.run(manager.generate_summary(
-                messages_to_dict_list(body[:split]), CheckedModel(),
-                "Preserve the worker's task, constraints, completed actions, failures, "
-                "remaining work and next action. This is a continuation, not task completion.",
-                record_usage=usage_tracker.recorder(
-                    getattr(self.agent, "usage", None), model, getattr(self.agent, "usage_model_name", ""),
-                ),
-            ))
+                        def invoke_sync(*args, **kwargs):
+                            if cancelled():
+                                raise CompactionError("Worker summary was cancelled")
+                            return method(*args, **kwargs)
+
+                        return invoke_sync
+                    return method
+
+            summary = asyncio.run(
+                manager.generate_summary(
+                    messages_to_dict_list(body[:split]),
+                    CheckedModel(),
+                    "Preserve the worker's task, constraints, completed actions, failures, "
+                    "remaining work and next action. This is a continuation, not task completion.",
+                    record_usage=usage_tracker.recorder(
+                        getattr(self.agent, "usage", None),
+                        model,
+                        getattr(self.agent, "usage_model_name", ""),
+                    ),
+                )
+            )
             if cancelled():
                 return None
             recent = self.agent._sanitize_tool_pairs(body[split:])
-            fresh = system + [HumanMessage(content="<worker-context-summary>\n" + summary + "\n</worker-context-summary>")] + recent
+            fresh = (
+                system
+                + [
+                    HumanMessage(
+                        content="<worker-context-summary>\n"
+                        + summary
+                        + "\n</worker-context-summary>"
+                    )
+                ]
+                + recent
+            )
             if manager.count_tokens(messages_to_dict_list(fresh)) >= before:
                 return None
             return fresh
@@ -1163,7 +1323,11 @@ class LangGraphClient:
         """Learn locally from completed tool evidence; never build or invoke a model."""
         if not config.get("ENABLE_PLAYBOOK", True):
             return
-        if not self.reflector or not self.playbook or getattr(self.playbook, "error", None):
+        if (
+            not self.reflector
+            or not self.playbook
+            or getattr(self.playbook, "error", None)
+        ):
             return
 
         if not self.agent:
@@ -1184,9 +1348,14 @@ class LangGraphClient:
             total_before = self.reflector.metrics["total_tool_calls"]
             scope = os.path.realpath(os.getcwd())
             entries = self.reflector.reflect_on_trajectory(
-                messages=messages, task=task, source=source,
-                scope=scope, scope_to_last_turn=False,
-                evidence_filter=lambda evidence: self.playbook.filter_learning_evidence(evidence, scope),
+                messages=messages,
+                task=task,
+                source=source,
+                scope=scope,
+                scope_to_last_turn=False,
+                evidence_filter=lambda evidence: self.playbook.filter_learning_evidence(
+                    evidence, scope
+                ),
             )
             if self.reflector.metrics["total_tool_calls"] > total_before:
                 self.playbook.record_exposure(
@@ -1195,10 +1364,18 @@ class LangGraphClient:
                 )
             if entries:
                 stored = self.playbook.append_batch(entries)
-                logger.debug("Local learning: %d observations; %d records stored/updated", len(entries), stored)
+                logger.debug(
+                    "Local learning: %d observations; %d records stored/updated",
+                    len(entries),
+                    stored,
+                )
         except Exception as e:
-            self.reflector.last_error = f"Local learning unavailable ({type(e).__name__})"
-            logger.error("Local learning failed: %s", e, exc_info=True, extra={"console": False})
+            self.reflector.last_error = (
+                f"Local learning unavailable ({type(e).__name__})"
+            )
+            logger.error(
+                "Local learning failed: %s", e, exc_info=True, extra={"console": False}
+            )
 
     def auto_extract_memory(self, query: str, response: str) -> None:
         """Distill durable facts from the last exchange into MEMORY.md, in the
@@ -1238,9 +1415,7 @@ class LangGraphClient:
             store = MemoryStore()
             existing = store.read().strip() or "(empty)"
             exchange = f"User: {query}\n\nAssistant: {response}"
-            prompt = prompt_template.format(
-                existing_memory=existing, exchange=exchange
-            )
+            prompt = prompt_template.format(existing_memory=existing, exchange=exchange)
 
             raw = self._invoke_model_once(prompt)
             ops = self._parse_memory_ops(raw)
@@ -1310,22 +1485,40 @@ class LangGraphClient:
         if area in cache:
             return cache[area]
         model = None
-        overrides = area_models.reviewer_overrides() if area == "REVIEWER" else area_models.overrides_for(area)
+        overrides = (
+            area_models.reviewer_overrides()
+            if area == "REVIEWER"
+            else area_models.overrides_for(area)
+        )
         if overrides or area == "REVIEWER":
             try:
                 # No callbacks: these calls are internal, and the streaming handler
                 # belongs to the visible turn.
-                actual = {"MAX_TOKENS": review.DEFAULT_OUTPUT_TOKENS, **overrides} if area == "REVIEWER" else overrides
-                model = self.llm_controller.build_model_variant(
-                    actual, callbacks=[], non_reasoning=not bool(overrides),
-                ) if area == "REVIEWER" else self.llm_controller.build_model_variant(overrides)
+                actual = (
+                    {"MAX_TOKENS": review.DEFAULT_OUTPUT_TOKENS, **overrides}
+                    if area == "REVIEWER"
+                    else overrides
+                )
+                model = (
+                    self.llm_controller.build_model_variant(
+                        actual,
+                        callbacks=[],
+                        non_reasoning=not bool(overrides),
+                    )
+                    if area == "REVIEWER"
+                    else self.llm_controller.build_model_variant(overrides)
+                )
                 logger.info(
                     "%s uses %s",
                     area_models.DESCRIPTIONS.get(area, area).capitalize(),
                     area_models.label(overrides, self.llm_controller.model_name),
                 )
             except Exception as e:
-                fallback = "review unavailable" if area == "REVIEWER" else "using the main model"
+                fallback = (
+                    "review unavailable"
+                    if area == "REVIEWER"
+                    else "using the main model"
+                )
                 logger.error(f"{area} model override failed to build; {fallback}: {e}")
         cache[area] = model
         return model
@@ -1346,7 +1539,9 @@ class LangGraphClient:
             pass  # legacy/custom model; do not mutate a shared model in place
         agent = getattr(self, "agent", None)
         record = usage_tracker.recorder(
-            getattr(agent, "usage", None), model, getattr(agent, "usage_model_name", ""),
+            getattr(agent, "usage", None),
+            model,
+            getattr(agent, "usage_model_name", ""),
         )
         if hasattr(model, "invoke"):
             result = None
@@ -1371,9 +1566,7 @@ class LangGraphClient:
                     [{"role": "user", "content": [{"text": prompt}]}]
                 ):
                     delta = (
-                        event.get("contentBlockDelta", {})
-                        .get("delta", {})
-                        .get("text")
+                        event.get("contentBlockDelta", {}).get("delta", {}).get("text")
                     )
                     if delta:
                         text += delta
@@ -1408,7 +1601,9 @@ class LangGraphClient:
             ops = json.loads(text[start : end + 1])
         except (json.JSONDecodeError, ValueError):
             return []
-        return [op for op in ops if isinstance(op, dict)] if isinstance(ops, list) else []
+        return (
+            [op for op in ops if isinstance(op, dict)] if isinstance(ops, list) else []
+        )
 
     def _inject_memory_context(self) -> str:
         """Delegates to :func:`context_injection.inject_memory_context`."""
@@ -1489,7 +1684,9 @@ class LangGraphClient:
         if getattr(self, "status_footer_active", False):
             return
         estimate_mark = "" if context_report.reported_input_tokens(self) else "~"
-        print(f"\n\033[90m[Context: {estimate_mark}{self._count_context_tokens()} tokens]\033[0m")
+        print(
+            f"\n\033[90m[Context: {estimate_mark}{self._count_context_tokens()} tokens]\033[0m"
+        )
 
     def clear_context(self) -> None:
         """Clear conversation history but keep system prompt."""
@@ -1580,7 +1777,9 @@ class LangGraphClient:
                     parent = os.path.dirname(expanded)
                     if parent:
                         os.makedirs(parent, exist_ok=True)
-                    filepath = expanded if expanded.endswith(".json") else expanded + ".json"
+                    filepath = (
+                        expanded if expanded.endswith(".json") else expanded + ".json"
+                    )
             elif self.current_conversation_path:
                 # Overwrite the open conversation rather than spawn a copy.
                 filepath = self.current_conversation_path
@@ -1608,7 +1807,9 @@ class LangGraphClient:
             }
 
             serialized = json.dumps(conversation_data, indent=2, default=str)
-            atomic_write_text(os.path.realpath(filepath), serialized, preserve_mode=True)
+            atomic_write_text(
+                os.path.realpath(filepath), serialized, preserve_mode=True
+            )
 
             # Remember it so a bare /save updates it in place.
             self.current_conversation_path = filepath
@@ -1737,23 +1938,29 @@ class LangGraphClient:
         """Capture the live conversation without saving over a loaded JSON file."""
         messages = [m for m in self.agent.messages if not isinstance(m, SystemMessage)]
         encoded = convert_langchain_messages_to_strands(messages)
-        if len(encoded) != len(messages) or len(self._decode_restored(encoded)) != len(messages):
+        if len(encoded) != len(messages) or len(self._decode_restored(encoded)) != len(
+            messages
+        ):
             raise ValueError("Some conversation messages could not be preserved")
         log = getattr(self.agent, "session_log", None)
         path = getattr(log, "path", None)
         opened = getattr(self, "current_conversation_path", None)
-        return restart_state.validate({
-            "restart_version": 1,
-            "messages": encoded,
-            "summary": getattr(self.conversation_manager, "summary_text", "") or "",
-            "conversation_path": os.path.abspath(opened) if opened else None,
-            "session_path": str(path) if path else None,
-            "label": self.session_label(),
-            "cwd": os.getcwd(),
-            "draft": draft,
-            "auto_mode": auto_approve.normalize(getattr(self, "auto_approve_mode", "off")),
-            "plan_mode": bool(getattr(self, "plan_mode_active", False)),
-        })
+        return restart_state.validate(
+            {
+                "restart_version": 1,
+                "messages": encoded,
+                "summary": getattr(self.conversation_manager, "summary_text", "") or "",
+                "conversation_path": os.path.abspath(opened) if opened else None,
+                "session_path": str(path) if path else None,
+                "label": self.session_label(),
+                "cwd": os.getcwd(),
+                "draft": draft,
+                "auto_mode": auto_approve.normalize(
+                    getattr(self, "auto_approve_mode", "off")
+                ),
+                "plan_mode": bool(getattr(self, "plan_mode_active", False)),
+            }
+        )
 
     def restore_after_restart(self, data: dict) -> bool:
         """Restore current context with the new model and preserve the /save target."""
@@ -1766,13 +1973,20 @@ class LangGraphClient:
         if source:
             try:
                 previous = read_session(source)
-                if previous["messages"] == data["messages"] and previous["summary"] == data["summary"]:
+                if (
+                    previous["messages"] == data["messages"]
+                    and previous["summary"] == data["summary"]
+                ):
                     replayed = self._decode_restored(previous["all_messages"])
             except Exception:
-                logger.debug("Restart replay unavailable; using the live snapshot", exc_info=True)
+                logger.debug(
+                    "Restart replay unavailable; using the live snapshot", exc_info=True
+                )
         self.agent.messages[:] = messages
         self._forget_context_size()
-        applied = self.conversation_manager.apply_restored_summary(self, self.agent, data["summary"])
+        applied = self.conversation_manager.apply_restored_summary(
+            self, self.agent, data["summary"]
+        )
         if data["summary"] and not applied:
             raise ValueError("The saved compaction summary could not be restored")
         self.current_conversation_path = data["conversation_path"]
@@ -1781,8 +1995,10 @@ class LangGraphClient:
         continued = bool(messages or data["summary"])
         if continued:
             self._seed_session_log(
-                replayed, source or data["conversation_path"] or "",
-                label=data["label"], summary=data["summary"],
+                replayed,
+                source or data["conversation_path"] or "",
+                label=data["label"],
+                summary=data["summary"],
                 kept=messages if data["summary"] or replayed != messages else None,
             )
             transcript = turn_view.render_conversation(replayed)
@@ -1907,7 +2123,11 @@ class LangGraphClient:
             return
         try:
             messages_for_profile = convert_langchain_messages_to_strands(
-                [m for m in current_turn_messages(self.agent.messages) if not is_feedback(getattr(m, "content", ""))]
+                [
+                    m
+                    for m in current_turn_messages(self.agent.messages)
+                    if not is_feedback(getattr(m, "content", ""))
+                ]
             )
             self.profile_manager.analyze_conversation(messages_for_profile)
         except Exception as e:  # noqa: BLE001
@@ -1937,7 +2157,8 @@ class LangGraphClient:
         if tracker is None:
             return "Usage tracking is unavailable (no agent running)."
         return usage_tracker.render(
-            tracker, self._count_context_tokens(),
+            tracker,
+            self._count_context_tokens(),
             estimated=not bool(context_report.reported_input_tokens(self)),
         )
 

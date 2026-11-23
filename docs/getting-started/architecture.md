@@ -156,7 +156,7 @@ Each chat session has a unique ID used for:
 
 - RAG document indexing (session-scoped)
 - Chunk caching for file summarization
-- The session transcript that `--resume` restores (see [Resuming a session](../guides/usage.md#resuming-a-session))
+- The session transcript that `--resume` restores (see [Resuming a session](../features/sessions.md#resuming-a-session))
 
 Session data is stored in `~/.mnemoai/{profile_name}/`:
 
@@ -183,7 +183,7 @@ Session data is stored in `~/.mnemoai/{profile_name}/`:
 
 > **Session transcripts vs saved conversations:** `sessions/` is written **automatically**, one append-only file per session, grouped by the directory you launched from — that's what `--resume` reads, and old files expire (`SESSION_MAX_AGE_DAYS`, default 30). `conversations/` is written **only when you ask** (`/save`) and is never expired. The transcript is append-only rather than a snapshot of the live history because [compaction](../guides/memory.md) rewrites that history in place; recording each turn as it happens means a resumed session **shows** the whole conversation, not a summarized stub — while a compaction also records the summary and the window it kept, so resuming **restores** the compacted state rather than re-inflating everything the summary already covers. Sub-agent runs are excluded (they run on their own isolated context, so logging them would interleave a second conversation).
 
-> **Multi-instance isolation:** several `mnemoai` instances (e.g. one per terminal tab) share the profile dir, so the per-session RAG/chunk pointer files are **namespaced per-instance** (`MNEMOAI_INSTANCE_ID`, inherited by each instance's MCP subprocess). One instance uses only its own session's `rag_store_*` / `chunk_cache_*`, and exiting cleans up only its own — never another live tab's. Stale orphans from a crashed instance are pruned at startup on a 7-day age policy.
+> **Multi-instance isolation:** several `mnemoai` instances (e.g. one per terminal tab) share the profile dir, so the per-session RAG/chunk pointer files are **namespaced per-instance** (`MNEMOAI_INSTANCE_ID`, shared with its built-in tool server and inherited by its stdio subprocesses). One instance uses only its own session's `rag_store_*` / `chunk_cache_*`, and exiting cleans up only its own — never another live tab's. Stale orphans from a crashed instance are pruned at startup on a 7-day age policy.
 
 #### Context Compaction
 
@@ -196,6 +196,6 @@ The kept-verbatim window is bounded by **both** a message count and a token budg
 
 The summary preserves topics, decisions, and **tool calls/results** (which tools ran, their inputs, and outcomes), so the agent retains actionable context after compacting.
 
-A compaction is also **recorded in the session transcript** — the messages that stayed live, plus the summary when older turns were summarized away — so `--resume`, `/load` and `/branch` come back to the context size the session ended at instead of restoring the raw history it replaced. The cheaper tool-result eviction pass is recorded the same way, even though it produces no summary. See [Resuming a session](../guides/usage.md#resuming-a-session).
+A compaction is also **recorded in the session transcript** — the messages that stayed live, plus the summary when older turns were summarized away — so `--resume`, `/load` and `/branch` come back to the context size the session ended at instead of restoring the raw history it replaced. The cheaper tool-result eviction pass is recorded the same way, even though it produces no summary. See [Resuming a session](../features/sessions.md#resuming-a-session).
 
 For the full per-file reference, see [`ARCHITECTURE.md`](https://github.com/brunopistone/mnemoai/blob/main/ARCHITECTURE.md) in the repository (a repo-only, agent/contributor-facing reference, not part of this docs site).

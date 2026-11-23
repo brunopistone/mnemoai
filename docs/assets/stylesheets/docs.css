@@ -1,0 +1,113 @@
+/* Topic navigation and quiet landing pages, with MnemoAI's own identity. */
+:root {
+  --md-text-font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+[data-md-color-scheme="default"][data-md-color-primary] {
+  --md-default-bg-color: #fff;
+  --md-default-fg-color: #24242b;
+  --md-default-fg-color--light: #686873;
+  --md-primary-fg-color: #fff;
+  --md-primary-bg-color: #24242b;
+  --md-primary-bg-color--light: #686873;
+  --md-typeset-a-color: #5345c4;
+  --docs-border: #e5e5eb;
+  --docs-soft-bg: #f7f7fa;
+}
+
+[data-md-color-scheme="slate"][data-md-color-primary] {
+  --md-default-bg-color: #19191f;
+  --md-default-fg-color: #ededf2;
+  --md-default-fg-color--light: #b1b1bd;
+  --md-primary-fg-color: #19191f;
+  --md-primary-bg-color: #ededf2;
+  --md-primary-bg-color--light: #b1b1bd;
+  --md-typeset-a-color: #b5abff;
+  --docs-border: #373740;
+  --docs-soft-bg: #22222a;
+}
+
+.md-grid { max-width: 76rem; }
+.md-header { box-shadow: none; border-bottom: 1px solid var(--docs-border); }
+.md-header__title { font-weight: 600; }
+.md-header__button.md-logo img { border-radius: 0.2rem; }
+.md-search__form { background-color: var(--docs-soft-bg); }
+.md-search__input { color: var(--md-default-fg-color); }
+.md-search__input::placeholder { color: var(--md-default-fg-color--light); opacity: 1; }
+.md-tabs {
+  border-bottom: 1px solid var(--docs-border);
+  background: var(--docs-soft-bg);
+  color: var(--md-default-fg-color);
+}
+.md-tabs__link { opacity: 1; color: var(--md-default-fg-color--light); }
+.md-tabs__item--active { border-bottom: 2px solid var(--md-typeset-a-color); }
+.md-tabs__item--active .md-tabs__link { color: var(--md-default-fg-color); }
+.md-nav__link { border-radius: 0.3rem; }
+.md-nav__link--active { font-weight: 600; }
+.md-typeset h1 {
+  color: var(--md-default-fg-color);
+  font-weight: 600;
+  letter-spacing: -0.035em;
+}
+.md-typeset h2 { font-weight: 600; letter-spacing: -0.02em; }
+.md-typeset .md-button {
+  border-radius: 2rem;
+  padding: 0.55em 1.2em;
+  font-size: 0.75rem;
+  color: var(--md-typeset-a-color);
+  border-color: var(--docs-border);
+}
+.md-typeset .md-button--primary {
+  background: var(--md-typeset-a-color);
+  border-color: var(--md-typeset-a-color);
+  color: var(--md-default-bg-color);
+}
+.docs-hero {
+  display: grid;
+  grid-template-columns: 1fr 1.1fr;
+  align-items: center;
+  gap: 2rem;
+  margin: 1rem 0 3rem;
+}
+.docs-hero h1 { margin: 0.3em 0; font-size: clamp(2rem, 4vw, 3rem); }
+.docs-eyebrow {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.md-typeset .docs-preview { margin: 0; max-width: 100%; }
+.docs-preview video {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--docs-border);
+  border-radius: 0.75rem;
+  background: var(--docs-soft-bg);
+}
+.md-typeset .docs-preview figcaption {
+  color: var(--md-default-fg-color--light);
+  font-size: 0.65rem;
+  font-style: normal;
+  text-align: left;
+}
+.md-typeset .grid.cards > ul > li {
+  border: 1px solid var(--docs-border);
+  border-radius: 0.65rem;
+  padding: 1.15rem;
+  box-shadow: none;
+}
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--md-typeset-a-color);
+  box-shadow: none;
+}
+.md-typeset .grid.cards p:last-child { margin-bottom: 0; }
+.md-typeset pre > code { border-radius: 0.4rem; }
+@media (max-width: 76.25em) {
+  .docs-hero { gap: 1.25rem; }
+}
+@media (max-width: 45em) {
+  .docs-hero { grid-template-columns: 1fr; margin-bottom: 2rem; }
+}

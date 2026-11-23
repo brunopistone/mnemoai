@@ -33,8 +33,8 @@ Enter — declines, and the model is told you declined rather than being left to
 retry.
 
 This is a **hard gate enforced client-side**: the prompt fires regardless of what
-the model does, because the client owns the terminal. The MCP server is a piped
-subprocess and cannot prompt you.
+the model does, because the client owns the terminal. Built-in MCP tools use
+the client-owned approval flow; the tools themselves do not prompt you.
 
 | Toggle                        | Default | Gates                                   |
 | ----------------------------- | ------- | --------------------------------------- |

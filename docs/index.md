@@ -1,95 +1,107 @@
-# Mnemo AI
+---
+hide:
+  - toc
+---
 
-<p align="center"><img src="assets/mnemoai-logo.png" width="120"></p>
+<div class="docs-hero" markdown>
+<div markdown>
 
-A local agentic AI assistant for developers and power users. Mnemo AI runs in your terminal, connects to tools through MCP (Model Context Protocol), can read and edit files, use shell/git safely, search documents with RAG, and remember useful context across sessions.
+<p class="docs-eyebrow">Mnemo AI documentation</p>
 
-It supports local and hosted model providers: **Ollama**, **MLX** (Apple Silicon), **Amazon Bedrock**, **Bedrock Mantle**, **OpenAI**, **Anthropic**, **Amazon SageMaker AI**, and **LiteLLM**.
+# Overview { #mnemo-ai }
 
-<a id="walkthrough"></a>
+Bring a task to your terminal. MnemoAI can gather context, work with your files,
+run tools, and carry useful knowledge into the next conversation.
 
-<p align="center">
-  <video src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo.mp4" poster="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" controls preload="none" width="720">
-    <a href="https://github.com/brunopistone/mnemoai/blob/main/images/demo.mp4"><img src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" alt="Watch the MnemoAI terminal walkthrough" width="720"></a>
+Use a local model or connect a hosted provider. You choose the models,
+the context they receive, and the actions they can take.
+
+[Quickstart](getting-started/index.md){ .md-button .md-button--primary }
+[Explore use cases](use-cases/index.md){ .md-button }
+
+</div>
+<figure class="docs-preview" id="walkthrough">
+  <video src="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo.mp4" poster="https://raw.githubusercontent.com/brunopistone/mnemoai/main/images/demo-poster.png" controls playsinline preload="none" aria-label="MnemoAI terminal walkthrough">
+    <a href="https://github.com/brunopistone/mnemoai/blob/main/images/demo.mp4">Watch the MnemoAI terminal walkthrough</a>
   </video>
-</p>
+  <figcaption>Planning, code and tests, memory, queued messages, and cancellation.</figcaption>
+</figure>
+</div>
 
-[Watch the walkthrough](https://github.com/brunopistone/mnemoai/blob/main/images/demo.mp4): planning, code and tests, memory, queued messages and cancellation, and background agents.
+<a id="quick-start"></a>
+<a id="typical-workflow"></a>
 
-## Quick start
+## Get started
+
+Install MnemoAI, choose a provider, and try a first task in your project.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/brunopistone/mnemoai/main/install.sh | sh
 mnemoai
 ```
 
-On first run, Mnemo AI launches an interactive setup wizard and writes your user config to:
+The first-run wizard creates your configuration. For a local setup, install
+[Ollama](https://ollama.com) and download a chat model first.
+See [installation](getting-started/installation.md) for requirements and alternatives.
 
-```text
-~/.mnemoai/config/config.yaml
-```
+<a id="what-mnemo-ai-can-do"></a>
+<a id="choose-your-path"></a>
 
-On macOS/Linux, the installer manages Python for you; follow its PATH hint if needed.
-You need access to at least one model provider. For the easiest local setup, install
-[Ollama](https://ollama.ai) and pull a chat model before running Mnemo AI.
+## Explore the docs
 
-## What Mnemo AI can do
+<div class="grid cards" markdown>
 
-- **Use multiple LLM providers** — a local runner (Ollama, or an MLX server on Apple Silicon) or hosted providers such as Bedrock, OpenAI, Anthropic, SageMaker AI, and LiteLLM.
-- **Work with your files** — read, search, write, and precisely edit text, code, CSV, JSON, PDF, and DOCX files.
-- **Use developer tools safely** — shell execution, git safety checks, todo tracking, plan mode, and background tasks.
-- **Search and ingest knowledge** — RAG over documents, web crawling, and optional Brave web search.
-- **Learn over time** — persistent memory, user profiling, episodic memory, ACE playbook strategies, and authored agent skills.
-- **Handle multimodal tasks** — optional vision model support for image analysis.
+- **Features**
 
-## Choose your path
+    Manage conversations, queue work, use files and tools, and learn from past tasks.
 
-| Goal                                                                         | Start here                                                                                  |
-| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Install and use Mnemo AI from scratch                                        | [Getting Started](getting-started/installation.md)                                          |
-| Fix a setup or runtime problem                                               | [Troubleshooting](development/troubleshooting.md)                                           |
-| Learn the chat commands and feature toggles                                  | [Usage](guides/usage.md)                                                                    |
-| Configure providers, models, prompts, RAG, and memory                        | [Configuration](configuration.md)                                                           |
-| Orchestrate complex tasks: query routing, workers, and sub-agents            | [Orchestration & sub-agents](guides/orchestration.md)                                       |
-| Give the assistant memory: profiles, MEMORY.md, steering, episodic, playbook | [Memory & learning](guides/memory.md)                                                       |
-| Add knowledge: RAG, web search, and web crawling                             | [Knowledge & web tools](guides/knowledge-and-web.md)                                        |
-| Connect external MCP servers                                                 | [External MCP servers](guides/mcp.md)                                                       |
-| Use todos, fast search, precise edits, and background tasks                  | [Everyday tools](guides/productivity-tools.md)                                              |
-| Control what runs without asking, and what is refused outright               | [Safety & permissions](guides/safety.md)                                                    |
-| Look up a tool's exact parameters                                            | [Tools reference](reference/tools.md)                                                       |
-| Find where config, memory, and session state live on disk                    | [The `~/.mnemoai` directory](getting-started/mnemoai-directory.md)                          |
-| Contribute or run tests                                                      | [Development](development/index.md)                                                         |
-| Understand the internal design                                               | [Architecture](getting-started/architecture.md)                                             |
-| Browse the detailed per-file map (repo-only, agent/contributor reference)    | [Architecture Reference](https://github.com/brunopistone/mnemoai/blob/main/ARCHITECTURE.md) |
+    [Explore features →](features/index.md)
 
-## Typical workflow
+- **Configuration**
 
-1. Install Mnemo AI.
-2. Run `mnemoai` and complete the first-run wizard.
-3. Ask a simple question or request a file operation, for example:
+    Choose providers and models, set defaults, and add skills, hooks, or MCP servers.
 
-   ```text
-   What files are in this directory?
-   ```
+    [Configure MnemoAI →](configuration.md)
 
-4. Enable optional features as needed:
-   - RAG/document search needs an embedding model.
-   - Web search needs a Brave Search API key.
-   - Vision needs a vision-capable model.
-   - External MCP tools are configured in `~/.mnemoai/mcp/mcp.json`.
+- **Developers**
 
-## Where configuration lives
+    Understand the architecture, run tests, and add a tool or model provider.
 
-For normal installs, edit:
+    [Build with MnemoAI →](development/index.md)
 
-```text
-~/.mnemoai/config/config.yaml
-```
+- **Security**
 
-You can override this with:
+    Understand permissions, plan mode, local data, and what reaches a provider.
 
-```bash
-MNEMOAI_CONFIG=/path/to/config.yaml mnemoai
-```
+    [Review security controls →](security/index.md)
 
-The first run also seeds readable examples under `~/.mnemoai/config/` and `~/.mnemoai/mcp/`.
+- **Use cases**
+
+    Follow practical workflows for coding, document research, and ongoing work.
+
+    [Find a workflow →](use-cases/index.md)
+
+- **Resources**
+
+    Find commands, exact tool parameters, troubleshooting, and release notes.
+
+    [Browse resources →](resources/index.md)
+
+</div>
+
+## What's new
+
+**Queue the next task while the current one runs.** Use Tab to queue,
+Enter to steer, and Ctrl+Q to manage pending messages.
+[Learn queue and cancellation controls](features/queue.md).
+
+For published changes, see [releases and project links](resources/releases.md).
+
+<a id="where-configuration-lives"></a>
+
+## Make it yours
+
+Your usual configuration file is `~/.mnemoai/config/config.yaml`.
+Use `MNEMOAI_CONFIG=/path/to/config.yaml mnemoai` to select another one.
+The [configuration guide](configuration.md) explains providers, feature controls,
+and the files created during setup.

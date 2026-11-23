@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
+from mnemoai.server import tool_state
 from mnemoai.utils.bm25 import BM25
 from mnemoai.utils.config import config
 from mnemoai.utils.embedding_integrity import require_clean_vectors
@@ -32,37 +33,49 @@ _rag_session = None
 _rag_session_lock = threading.RLock()
 
 
+def _cached_session():
+    state = tool_state.current()
+    return state.rag_session if state is not None else _rag_session
+
+
+def _cache_session(session):
+    global _rag_session
+    state = tool_state.current()
+    if state is not None:
+        state.rag_session = session
+    else:
+        _rag_session = session
+
+
 def set_rag_session(session: Optional[Any]) -> None:
     """Set the RAG session instance (called by chat_interface).
 
     Args:
         session: SessionRAG instance or None to clear
     """
-    global _rag_session
-    _rag_session = session
+    _cache_session(session)
     logger.debug(f"RAG session set: {session.session_id if session else 'None'}")
 
 
 def get_rag_session() -> Optional[Any]:
     """Get the current RAG session instance.
 
-    In MCP subprocess, reads session_id from file and creates session if needed.
+    Reads the instance's session pointer and opens its store when needed.
 
     Returns:
         SessionRAG instance or None
     """
-    global _rag_session
-
     # If already set (same process), return it
-    if _rag_session is not None:
+    session = _cached_session()
+    if session is not None:
         pointer = rag_session_pointer_path()
         try:
             wanted = pointer.read_text().strip() if pointer.is_file() else ""
         except OSError:
             wanted = ""
-        if not wanted or wanted == _rag_session.session_id:
-            return _rag_session
-        _rag_session = None
+        if not wanted or wanted == session.session_id:
+            return session
+        _cache_session(None)
 
     # MCP subprocess: read session_id from file and create session. The pointer
     # file is per-instance (namespaced by MNEMOAI_INSTANCE_ID, inherited from the
@@ -77,14 +90,16 @@ def get_rag_session() -> Optional[Any]:
 
             embed_model_config = config.get("RAG", {}).get("EMBED_MODEL_ID", {})
             with _rag_session_lock:
-                if _rag_session is None or _rag_session.session_id != session_id:
-                    _rag_session = SessionRAG(
+                session = _cached_session()
+                if session is None or session.session_id != session_id:
+                    session = SessionRAG(
                         embed_model_config=embed_model_config,
                         session_id=session_id,
                         rag_dir=rag_dir,
                     )
-            logger.debug(f"RAG session created in subprocess: {session_id}")
-            return _rag_session
+                    _cache_session(session)
+            logger.debug(f"RAG session opened for tool server: {session_id}")
+            return session
     except Exception as e:
         logger.warning(f"Failed to create RAG session in subprocess: {e}")
 
@@ -93,10 +108,10 @@ def get_rag_session() -> Optional[Any]:
 
 def reset_session_rag() -> None:
     """Reset the session RAG instance (called on /clear or app exit)."""
-    global _rag_session
-    if _rag_session is not None:
-        logger.debug(f"Closing RAG session: {_rag_session.session_id}")
-        _rag_session = None
+    session = _cached_session()
+    if session is not None:
+        logger.debug(f"Closing RAG session: {session.session_id}")
+        _cache_session(None)
 
     # Also remove THIS instance's pointer file (never another tab's).
     session_file = rag_session_pointer_path()
@@ -167,7 +182,9 @@ class SessionRAG:
                 self.dim = detected_dim
                 self.embeddings_controller.dim = self.dim
                 self.store = VectorStoreController(
-                    self.dim, session_id=session_id, rag_dir=rag_dir,
+                    self.dim,
+                    session_id=session_id,
+                    rag_dir=rag_dir,
                     embedding_identity=lambda: self.embeddings_controller.fingerprint(),
                 )
                 logger.debug(f"Loaded existing vector store with dim={self.dim}")
@@ -289,7 +306,9 @@ class SessionRAG:
             if self.store is None:
                 self.dim = batch_dim
                 self.store = VectorStoreController(
-                    batch_dim, session_id=self.session_id, rag_dir=self.rag_dir,
+                    batch_dim,
+                    session_id=self.session_id,
+                    rag_dir=self.rag_dir,
                     embedding_identity=lambda: self.embeddings_controller.fingerprint(),
                 )
                 logger.debug(
@@ -358,7 +377,9 @@ class SessionRAG:
                 sem_candidates[_chunk_key(meta)] = (score, meta)
         except Exception as e:
             degraded = True
-            logger.warning("Semantic document search unavailable; using BM25 only: %s", e)
+            logger.warning(
+                "Semantic document search unavailable; using BM25 only: %s", e
+            )
 
         # --- Keyword candidates + merge (shared with the episodic stores) ---
         bm25_candidates = normalized_bm25_candidates(

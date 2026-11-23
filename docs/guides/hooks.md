@@ -137,7 +137,7 @@ So a hook's **`deny` is honored anywhere**, but its **`allow` reaches exactly on
 gate**: it satisfies the confirmation prompt for that one call. It cannot unblock a
 tool [plan mode](safety.md#investigate-before-changing-anything) has blocked, and it
 cannot reach the [server-side safety floor](safety.md#understand-the-safety-floor),
-which runs inside the MCP subprocess and still refuses a catastrophic command. A
+which runs in tool-server dispatch under either transport and still refuses a catastrophic command. A
 config file is not a way to widen what the app is allowed to do — only to narrow
 it, or to waive one prompt you'd have answered `y` to anyway.
 
@@ -237,5 +237,5 @@ Give the model something to act on when a tool fails:
 ## See also
 
 - [Safety & permissions](safety.md): the confirmation prompt, plan mode, and the floor a hook sits below
-- [Usage & commands](usage.md#commands): `/hooks`, and `/doctor` for checking an install
+- [Usage & commands](../reference/commands.md#commands): `/hooks`, and `/doctor` for checking an install
 - [Tools reference](../reference/tools.md): the tool names to match on

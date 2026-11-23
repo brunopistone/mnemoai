@@ -52,7 +52,9 @@ _CANCEL_POLL_INTERVAL = 0.2
 _MAX_DERIVED_TIMEOUT = 3600
 
 
-def _call_deadline(arguments: Dict[str, Any], default: float = MCP_CALL_TIMEOUT) -> float:
+def _call_deadline(
+    arguments: Dict[str, Any], default: float = MCP_CALL_TIMEOUT
+) -> float:
     """Transport deadline for one call: the tool's own timeout + headroom, or the default.
 
     A single global cap is wrong for tools that are *asked* to wait: the client
@@ -125,7 +127,9 @@ class MCPToolWrapper(BaseTool):
 
     def _build_args_schema(self, mcp_tool: MCPTool) -> dict:
         """Preserve the complete JSON Schema; the MCP server validates arguments."""
-        return copy.deepcopy(mcp_tool.inputSchema or {"type": "object", "properties": {}})
+        return copy.deepcopy(
+            mcp_tool.inputSchema or {"type": "object", "properties": {}}
+        )
 
     def _run(
         self,
@@ -235,7 +239,9 @@ class MCPClientWrapper:
         asyncio.set_event_loop(self._loop)
         self._loop.run_forever()
 
-    def _run_coroutine(self, coro, timeout: float = MCP_CALL_TIMEOUT, cancellable: bool = True):
+    def _run_coroutine(
+        self, coro, timeout: float = MCP_CALL_TIMEOUT, cancellable: bool = True
+    ):
         """Run a coroutine on the background loop and wait, cancellably.
 
         Waits in short slices rather than one ``future.result(timeout)`` call,
@@ -267,9 +273,13 @@ class MCPClientWrapper:
         # work to an already-stopped loop or resurrect its subprocess.
         with getattr(self, "_lifecycle_lock", contextlib.nullcontext()):
             closing = getattr(self, "_shutdown_requested", None)
-            if self._loop is None or (cancellable and closing is not None and closing.is_set()):
+            if self._loop is None or (
+                cancellable and closing is not None and closing.is_set()
+            ):
                 coro.close()
-                raise RuntimeError("MCP client is closed or its background loop is not started")
+                raise RuntimeError(
+                    "MCP client is closed or its background loop is not started"
+                )
             future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         deadline = time.monotonic() + timeout
         try:
@@ -283,7 +293,9 @@ class MCPClientWrapper:
                     if future.done():
                         # A completed coroutine's TimeoutError is not a polling
                         # timeout. Surface it immediately rather than busy-looping.
-                        raise MCPCallTimeout("The MCP request reported a timeout") from future.exception()
+                        raise MCPCallTimeout(
+                            "The MCP request reported a timeout"
+                        ) from future.exception()
                     # This slice expired, not the call. Check for a cancel, then
                     # keep waiting — the loop's own deadline check ends it.
                     if cancellable and self._cancel_requested():
@@ -323,6 +335,29 @@ class MCPClientWrapper:
         except Exception:  # noqa: BLE001 — a broken probe must not break the call
             return False
 
+    @contextlib.asynccontextmanager
+    async def _open_session(self):
+        """Own a stdio transport and an initialized MCP session."""
+        errlog = None
+        try:
+            try:
+                errlog = open_mcp_log()
+            except OSError as e:
+                logger.debug(f"Could not open MCP stderr log ({e}); using default")
+            client_cm = (
+                stdio_client(self.server_params, errlog=errlog)
+                if errlog is not None
+                else stdio_client(self.server_params)
+            )
+            async with client_cm as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+        finally:
+            if errlog is not None:
+                with contextlib.suppress(OSError):
+                    errlog.close()
+
     async def _serve_session(self, ready: "asyncio.Future") -> None:
         """Own the stdio + session contexts for the WHOLE life of the connection.
 
@@ -342,33 +377,14 @@ class MCPClientWrapper:
         contexts at all: they resolve ``ready`` to learn the session is usable,
         and set ``_close`` to ask for teardown.
         """
-        errlog = None
         try:
-            # Route the subprocess's stderr to a log file instead of the terminal,
-            # so its noise (e.g. `npm notice` from an npx server) can't corrupt the
-            # pinned UI, while staying available for debugging a startup failure.
-            try:
-                errlog = open_mcp_log()  # size-rotated, line-buffered
-            except OSError as e:
-                logger.debug(f"Could not open MCP stderr log ({e}); using default")
-
-            client_cm = (
-                stdio_client(self.server_params, errlog=errlog)
-                if errlog is not None
-                else stdio_client(self.server_params)
-            )
-            async with client_cm as (read, write):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    self._session = session
-                    self._connected = True
-                    if not ready.done():
-                        ready.set_result(True)
-                    # Park here for the connection's lifetime. Everything the
-                    # caller does happens on OTHER tasks against `self._session`;
-                    # this task exists purely to hold the contexts open so that
-                    # the eventual `__aexit__` runs where `__aenter__` did.
-                    await self._close.wait()
+            async with self._open_session() as session:
+                self._session = session
+                self._connected = True
+                if not ready.done():
+                    ready.set_result(True)
+                # Keep transport entry and teardown on this same owning task.
+                await self._close.wait()
         except BaseException as e:  # noqa: BLE001 — must reach the waiter
             # A startup failure (missing binary, server that exits immediately)
             # has to surface on the caller's thread, not vanish into a task
@@ -380,11 +396,6 @@ class MCPClientWrapper:
         finally:
             self._connected = False
             self._session = None
-            if errlog is not None:
-                try:
-                    errlog.close()
-                except OSError:
-                    pass
             self._errlog = None
             # Unblock anyone waiting on teardown of a task that died on its own.
             if not ready.done():
@@ -469,7 +480,8 @@ class MCPClientWrapper:
         seen = set()
         while True:
             result = await (
-                self._session.list_tools(cursor=cursor) if cursor is not None
+                self._session.list_tools(cursor=cursor)
+                if cursor is not None
                 else self._session.list_tools()
             )
             discovered.extend(result.tools)
@@ -477,7 +489,9 @@ class MCPClientWrapper:
             if cursor is None:
                 break
             if not isinstance(cursor, str) or cursor in seen:
-                raise RuntimeError("MCP tool discovery returned an invalid or repeated pagination cursor")
+                raise RuntimeError(
+                    "MCP tool discovery returned an invalid or repeated pagination cursor"
+                )
             seen.add(cursor)
         self._tools = [
             MCPToolWrapper(mcp_tool=tool, mcp_client=self) for tool in discovered
@@ -496,7 +510,9 @@ class MCPClientWrapper:
         """
         deadline = _call_deadline(arguments)
         try:
-            return self._run_coroutine(self.call_tool(name, arguments), timeout=deadline)
+            return self._run_coroutine(
+                self.call_tool(name, arguments), timeout=deadline
+            )
         except MCPCallTimeout as e:
             # Name the tool and the knob. Deliberately NOT retried: the request
             # was already delivered, so the tool may well have run — replaying it
@@ -550,6 +566,20 @@ class MCPClientWrapper:
         Returns:
             Tool execution result as string
         """
+        closing = getattr(self, "_shutdown_requested", None)
+        if closing is not None and closing.is_set():
+            raise RuntimeError("MCP client is closed")
+        loop = getattr(self, "_loop", None)
+        if loop is not None and asyncio.get_running_loop() is not loop:
+            # Memory streams and the session's response events belong to their
+            # owning loop. Async LangChain callers may run on another loop.
+            with self._lifecycle_lock:
+                if self._shutdown_requested.is_set():
+                    raise RuntimeError("MCP client is closed")
+                future = asyncio.run_coroutine_threadsafe(
+                    self.call_tool(name, arguments), loop
+                )
+            return await asyncio.wrap_future(future)
         if not self._session:
             await self._reconnect_current(None)
 
@@ -559,9 +589,10 @@ class MCPClientWrapper:
             workspace = execution_context.current()
             metadata = (
                 {"meta": {execution_context.META_KEY: {"cwd": workspace.cwd}}}
-                if getattr(self, "_builtin", False) and workspace is not None else {}
+                if getattr(self, "_builtin", False) and workspace is not None
+                else {}
             )
-            result = await session.call_tool(name, arguments, **metadata)
+            result = await self._request_tool(session, name, arguments, metadata)
         except (asyncio.CancelledError, KeyboardInterrupt):
             raise
         except Exception as e:
@@ -578,6 +609,9 @@ class MCPClientWrapper:
 
         return self._parse_tool_result(result)
 
+    async def _request_tool(self, session, name, arguments, metadata):
+        return await session.call_tool(name, arguments, **metadata)
+
     @staticmethod
     def _parse_tool_result(result: Any) -> str:
         """Convert an MCP tool result into a plain string.
@@ -590,10 +624,13 @@ class MCPClientWrapper:
         """
         if getattr(result, "isError", False):
             details = "\n".join(
-                str(getattr(block, "text", block)) for block in getattr(result, "content", [])
+                str(getattr(block, "text", block))
+                for block in getattr(result, "content", [])
             )
             raise ToolException(details or "MCP tool reported an error")
-        if getattr(result, "structuredContent", None) is not None and not getattr(result, "content", None):
+        if getattr(result, "structuredContent", None) is not None and not getattr(
+            result, "content", None
+        ):
             return json.dumps(result.structuredContent, default=str)
         if hasattr(result, "content"):
             content = result.content
@@ -706,15 +743,21 @@ class MultiMCPClient:
     names so the app's core tools are never shadowed.
     """
 
-    def __init__(self, builtin_params, external_servers=None) -> None:
+    def __init__(self, builtin_params=None, external_servers=None) -> None:
         """Initialize with the built-in server params and optional externals.
 
         Args:
-            builtin_params: StdioServerParameters for mnemoai's own server.
+            builtin_params: Explicit stdio parameters, or None for in-process tools.
             external_servers: list of ExternalServer (name, params) from mcp.json.
         """
         # (display_name, wrapper). The built-in server has no namespace prefix.
-        self._members = [("builtin", MCPClientWrapper(builtin_params))]
+        if builtin_params is None:
+            from mnemoai.client.local_mcp import LocalMCPClient
+
+            builtin = LocalMCPClient()
+        else:
+            builtin = MCPClientWrapper(builtin_params)
+        self._members = [("builtin", builtin)]
         self._members[0][1]._builtin = True
         for server in external_servers or []:
             self._members.append((server.name, MCPClientWrapper(server.params)))
@@ -771,8 +814,10 @@ class MultiMCPClient:
             # Discovery outlives a cancelled first turn; tool calls become
             # cancellable once the schemas have been published.
             wrapper._cancel_probe = (
-                None if getattr(self, "_startup", None) is not None
-                and not self._startup_merged else probe
+                None
+                if getattr(self, "_startup", None) is not None
+                and not self._startup_merged
+                else probe
             )
 
     def __enter__(self):
@@ -839,9 +884,7 @@ class MultiMCPClient:
         """
         if getattr(self, "_startup", None) is not None:
             return self.finish_startup()
-        results = _in_parallel(
-            self._members, lambda wrapper: wrapper.list_tools_sync()
-        )
+        results = _in_parallel(self._members, lambda wrapper: wrapper.list_tools_sync())
         self._tools = self._merge_tools(results)
         return self._tools
 
@@ -866,7 +909,9 @@ class MultiMCPClient:
                         suffix += 1
                     logger.info(
                         "Tool name collision: '%s' from '%s' exposed as '%s'.",
-                        tool.name, name, display,
+                        tool.name,
+                        name,
+                        display,
                     )
                 tool = copy.copy(tool)
                 tool.name = display
@@ -901,9 +946,13 @@ class MultiMCPClient:
         One report: the record is file-only (``console: False``) and the red line
         below IS the user-facing error, with the pointer to the rest of it.
         """
-        logger.error("%s: %s", what, exception_line(exc),
-                     exc_info=(type(exc), exc, exc.__traceback__),
-                     extra={"console": False})
+        logger.error(
+            "%s: %s",
+            what,
+            exception_line(exc),
+            exc_info=(type(exc), exc, exc.__traceback__),
+            extra={"console": False},
+        )
         details = log_file_hint()
         print_error(
             f"{what}; skipping. ({exception_line(exc)})"

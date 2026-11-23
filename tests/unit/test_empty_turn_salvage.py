@@ -23,7 +23,11 @@ def test_last_tool_result_returns_most_recent():
     msgs = [
         HumanMessage(content="run it"),
         ToolMessage(content="first result", tool_call_id="1", name="x"),
-        ToolMessage(content='{"error": true, "message": "timed out"}', tool_call_id="2", name="execute_bash"),
+        ToolMessage(
+            content='{"error": true, "message": "timed out"}',
+            tool_call_id="2",
+            name="execute_bash",
+        ),
         AIMessage(content=""),
     ]
     assert "timed out" in a._last_tool_result(msgs)
@@ -53,6 +57,7 @@ def test_stream_error_reraises_no_blocking_fallback():
         def __init__(self):
             self.content = ""
             self.tool_calls = []
+
         def __add__(self, other):
             return self
 
@@ -104,7 +109,12 @@ def _msg(meta):
 def test_truncation_detected_responses_incomplete():
     # Reasoning model on the Responses API runs out of tokens mid-reasoning.
     assert LangGraphAgent._was_truncated_by_tokens(
-        _msg({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}})
+        _msg(
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            }
+        )
     )
 
 
@@ -114,6 +124,11 @@ def test_truncation_detected_chat_length_finish():
 
 def test_truncation_detected_bedrock_max_tokens():
     assert LangGraphAgent._was_truncated_by_tokens(_msg({"stop_reason": "max_tokens"}))
+
+
+def test_truncation_detected_ollama_done_reason():
+    assert LangGraphAgent._was_truncated_by_tokens(_msg({"done_reason": "length"}))
+    assert not LangGraphAgent._was_truncated_by_tokens(_msg({"done_reason": "stop"}))
 
 
 def test_truncation_not_detected_on_normal_completion():
@@ -298,7 +313,7 @@ def test_marker_prepended_to_first_answer_bytes():
     assert "●" in out
     # Marker comes before the answer text, on the same line (no newline between).
     assert out.index("●") < out.index("Hello")
-    assert "\n" not in out[out.index("●"):out.index("Hello")]
+    assert "\n" not in out[out.index("●") : out.index("Hello")]
 
 
 def test_spinner_kept_running_through_hidden_reasoning():
@@ -318,7 +333,8 @@ def test_spinner_kept_running_through_hidden_reasoning():
     stops = []
     a._stop_spinner = lambda: stops.append(streamed["text"])
     a._extract_content = lambda ch: (
-        getattr(ch, "content", ""), getattr(ch, "reasoning", "")
+        getattr(ch, "content", ""),
+        getattr(ch, "reasoning", ""),
     )
 
     class _RC(_Chunk):
@@ -390,9 +406,9 @@ def test_spinner_kept_running_through_buffered_reasoning_styled():
 
     # One stop, and only after the answer arrived (not during buffered reasoning).
     assert len(stop_state) == 1
-    assert stop_state[0]["answer"] is True, (
-        "spinner stopped during buffered reasoning (dead pause)"
-    )
+    assert (
+        stop_state[0]["answer"] is True
+    ), "spinner stopped during buffered reasoning (dead pause)"
     assert "the answer" in buf.getvalue()
 
 
@@ -413,7 +429,8 @@ def test_reasoning_sink_fed_live_then_stopped():
     appended = []
     a.reasoning_sink.append = lambda t: appended.append(t)
     a._extract_content = lambda ch: (
-        getattr(ch, "content", ""), getattr(ch, "reasoning", "")
+        getattr(ch, "content", ""),
+        getattr(ch, "reasoning", ""),
     )
 
     class _RC(_Chunk):
@@ -667,7 +684,9 @@ def test_continue_gives_up_after_cap_keeps_partial():
     # (never a dead-end), so the user sees partial progress, not a blank stop.
     a = _continue_agent(retries=2)
     a._stream_response = lambda *args, **kw: (_truncated("more"), False)
-    out = a._continue_truncated_turn(["m"], _truncated("start"), "start", None, object(), {})
+    out = a._continue_truncated_turn(
+        ["m"], _truncated("start"), "start", None, object(), {}
+    )
     assert out is not None
     assert out["messages"][0].content.startswith("startmore")
 
@@ -690,6 +709,8 @@ def test_continue_handles_context_overflow_gracefully():
 
     a._stream_response = _boom
     # Partial text exists → returned despite the overflow on continuation.
-    out = a._continue_truncated_turn(["m"], _truncated("kept"), "kept", None, object(), {})
+    out = a._continue_truncated_turn(
+        ["m"], _truncated("kept"), "kept", None, object(), {}
+    )
     assert out is not None
     assert out["messages"][0].content == "kept"

@@ -9,7 +9,47 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.32.1] — 2026-11-23
+
+### Changed
+
+- Reduce Python startup work by running built-in tools over in-memory MCP,
+  while keeping external MCP servers and the standalone stdio entry point.
+  Local servers retain independent read permissions, shell directories,
+  background jobs, and RAG caches.
+- Keep local tool cancellation and shutdown responsive, stop foreground shell
+  process groups, and discard cancelled reads and late document-summary replies.
+- Load provider SDKs, browser support, PDF/DOCX readers, and unused tokenizers
+  when needed. Memory and local learning remain enabled.
+
+### Fixed
+
+- Apply auxiliary reasoning controls to the actual SDK request, including
+  Ollama models whose thinking mode defaults to `None` or an effort level.
+  Strategy preparation, default reviews and compaction use independent models
+  without changing the main chat model's settings.
+- Reuse provider clients safely across successive conversation compactions.
+  Normalize structured response content and reasoning blocks, and retain the
+  original history when a provider truncates a summary. Cancellation releases
+  the wait even when a synchronous provider request is still blocked.
+- Recognize Ollama's `done_reason` when detecting output-token truncation.
+- Keep historical messages and previous summaries in a data packet during
+  compaction, so quoted requests cannot become new execution instructions.
+- Use valid JSON examples and native schema constraints where supported for
+  strategy/review responses, while retaining strict evidence validation.
+  Retry an invalid review response once within the original budget. Present
+  file-read line numbers as separate review metadata, preserving source
+  indentation, so display gutters cannot be mistaken for file contents.
+- Do not treat read-only shell inspection as an artifact change, and clear
+  review coverage gaps when later file evidence resolves them.
+- Refuse to report a successful plan exit or grant its command permissions
+  when the actual plan-mode flag remains active.
+
 ### Documentation
+
+- Organize documentation into Overview, Features, Configuration, Developers,
+  Security, Use cases, and Resources, with focused topic pages, preserved
+  section links, and responsive landing pages.
 
 - Replace the demo video and preview on the README and documentation homepage
   with a terminal walkthrough covering planning, code edits and tests, memory,
@@ -5595,7 +5635,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.32.0...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.32.1...HEAD
+[1.32.1]: https://github.com/brunopistone/mnemoai/compare/v1.32.0...v1.32.1
 [1.32.0]: https://github.com/brunopistone/mnemoai/compare/v1.31.3...v1.32.0
 [1.31.3]: https://github.com/brunopistone/mnemoai/compare/v1.31.2...v1.31.3
 [1.31.2]: https://github.com/brunopistone/mnemoai/compare/v1.31.1...v1.31.2

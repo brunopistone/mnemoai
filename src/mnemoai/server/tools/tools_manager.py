@@ -24,7 +24,7 @@ class ToolManager:
     def __init__(self) -> None:
         """Initialize tool manager."""
         self.model_id = config.get("VISION_MODEL_ID")
-        self.encoder = tiktoken.encoding_for_model(MODEL_ID)
+        self._encoder = None
 
         self._vision_model_controller = None
         self._vision_model = None
@@ -33,6 +33,16 @@ class ToolManager:
         # worker threads that the SDK dispatches CONCURRENTLY — two parallel
         # describe_image calls would otherwise each build their own controller.
         self._vision_lock = threading.Lock()
+
+    @property
+    def encoder(self):
+        if self._encoder is None:
+            self._encoder = tiktoken.encoding_for_model(MODEL_ID)
+        return self._encoder
+
+    @encoder.setter
+    def encoder(self, value):
+        self._encoder = value
 
     def _ensure_vision(self) -> None:
         """Initialize the vision model on first use, at most once.
@@ -187,7 +197,7 @@ class ToolManager:
         if self.model_id:
             from .describe_image import register_image_tools
 
-            register_image_tools(mcp)
+            register_image_tools(mcp, manager=self)
 
         if config.get("ENABLE_MEMORY", True):
             register_memory_tools(mcp)

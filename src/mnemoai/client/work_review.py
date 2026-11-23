@@ -13,9 +13,20 @@ from mnemoai.client import review
 from mnemoai.client.agent import mid_turn, supervised_turn
 from mnemoai.client.agent.reasoning_utils import extract_visible_text
 from mnemoai.client.review_evidence import Capture, text
+from mnemoai.models.structured_output import with_json_schema
 from mnemoai.utils.config import config
 from mnemoai.utils.request_intent import obvious_conversation
 from mnemoai.utils.review_protocol import DATA_MARKER, FEEDBACK_PREFIX, ReviewStopped
+
+STRATEGY_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["strategy", "kind"],
+    "properties": {
+        "strategy": {"type": "string", "maxLength": 8000},
+        "kind": {"type": "string", "enum": ["artifact", "none"]},
+    },
+}
 
 
 def parse_strategy(response):
@@ -29,7 +40,7 @@ def parse_strategy(response):
     result = json.loads(raw)
     if not isinstance(result, dict) or set(result) != {"kind", "strategy"}:
         raise ValueError("Invalid strategy response")
-    if result["kind"] not in {"code", "document", "none"}:
+    if result["kind"] not in {"artifact", "code", "document", "none"}:
         raise ValueError("Invalid review task kind")
     plan = result["strategy"]
     if not isinstance(plan, str) or len(plan) > 8_000:
@@ -38,6 +49,10 @@ def parse_strategy(response):
         raise ValueError("Artifact strategy is empty")
     if any(not c.isprintable() and not c.isspace() for c in plan):
         raise ValueError("Invalid strategy control characters")
+    # Historical/custom prompts may still return the old cosmetic labels.
+    # Code and prose share one review lifecycle and permission policy.
+    if result["kind"] != "none":
+        result["kind"] = "artifact"
     return result
 
 
@@ -103,22 +118,35 @@ class WorkReview:
         self.checkpoints.append(copy.deepcopy(report))
         # UI and audit retain the checkpoint sequence, but not recursive copies.
         self.reviewer.last = {
-            **report, "checkpoints": copy.deepcopy(self.checkpoints),
-            "strategy": self.strategy, "task_kind": self.kind,
+            **report,
+            "checkpoints": copy.deepcopy(self.checkpoints),
+            "strategy": self.strategy,
+            "task_kind": self.kind,
         }
 
     def _feedback(self, report, checkpoint):
-        cited = {ref for finding in report.get("findings", []) for ref in finding["evidence_ids"]}
+        cited = {
+            ref
+            for finding in report.get("findings", [])
+            for ref in finding["evidence_ids"]
+        }
         data = {
-            "checkpoint": checkpoint, "strategy": self.strategy,
-            "summary": report["summary"], "verdict": report["verdict"],
+            "checkpoint": checkpoint,
+            "strategy": self.strategy,
+            "summary": report["summary"],
+            "verdict": report["verdict"],
             "findings": report.get("findings", []),
             "reviewer": report.get("reviewer", ""),
-            "evidence": [item for item in self.reviewer._last_evidence if item["id"] in cited],
+            "evidence": [
+                item for item in self.reviewer._last_evidence if item["id"] in cited
+            ],
         }
         return HumanMessage(
-            content=FEEDBACK_PREFIX + "\n" + config.require_prompt("WORK_REVIEW_FEEDBACK_PROMPT")
-            + DATA_MARKER + json.dumps(data, ensure_ascii=True),
+            content=FEEDBACK_PREFIX
+            + "\n"
+            + config.require_prompt("WORK_REVIEW_FEEDBACK_PROMPT")
+            + DATA_MARKER
+            + json.dumps(data, ensure_ascii=True),
             name="reviewer",
         )
 
@@ -127,40 +155,66 @@ class WorkReview:
         context = []
         for item in self.context:
             value, clipped = text(item.get("text", ""), 1200)
-            context.append({"kind": item.get("kind"), "text": value, "truncated": clipped})
+            context.append(
+                {"kind": item.get("kind"), "text": value, "truncated": clipped}
+            )
         task, clipped = text(self.task, 8000)
         previous, previous_clipped = text(self.previous_task, 4000)
-        payload = {"request": task, "request_truncated": clipped,
-                   "context": context, "previous_artifact_task": previous,
-                   "previous_task_truncated": previous_clipped}
+        payload = {
+            "request": task,
+            "request_truncated": clipped,
+            "context": context,
+            "previous_artifact_task": previous,
+            "previous_task_truncated": previous_clipped,
+        }
         if feedback:
             payload.update(strategy=self.strategy, reviewer_feedback=feedback)
         instruction = config.require_prompt("WORK_STRATEGY_PROMPT")
         serialized = json.dumps(payload, ensure_ascii=True)
-        while context and review.estimated_input_tokens(instruction, serialized) > self.options["MAX_INPUT_TOKENS"]:
+        while (
+            context
+            and review.estimated_input_tokens(instruction, serialized)
+            > self.options["MAX_INPUT_TOKENS"]
+        ):
             context.pop()
             payload["context_truncated"] = True
             serialized = json.dumps(payload, ensure_ascii=True)
-        if review.estimated_input_tokens(instruction, serialized) > self.options["MAX_INPUT_TOKENS"]:
-            payload.update(previous_artifact_task="", previous_task_truncated=bool(previous))
+        if (
+            review.estimated_input_tokens(instruction, serialized)
+            > self.options["MAX_INPUT_TOKENS"]
+        ):
+            payload.update(
+                previous_artifact_task="", previous_task_truncated=bool(previous)
+            )
             serialized = json.dumps(payload, ensure_ascii=True)
-        if review.estimated_input_tokens(instruction, serialized) > self.options["MAX_INPUT_TOKENS"]:
+        if (
+            review.estimated_input_tokens(instruction, serialized)
+            > self.options["MAX_INPUT_TOKENS"]
+        ):
             raise ValueError("Strategy input exceeds the review input budget")
         messages = [
             SystemMessage(content=instruction),
             HumanMessage(content=serialized),
         ]
         model = self.agent._callback_free_model()
+        direct = self.agent._non_reasoning(model)
+        if direct is not None:
+            model = direct
         if model is self.agent.model and getattr(model, "callbacks", None):
             raise RuntimeError("Cannot isolate strategy model callbacks")
+        model = with_json_schema(model, STRATEGY_SCHEMA)
         budget = review.LoopBudget(
-            min(self.options["TIMEOUT"], self.remaining), 1,
-            cancel=self.agent._cancelled, current=self._current,
+            min(self.options["TIMEOUT"], self.remaining),
+            1,
+            cancel=self.agent._cancelled,
+            current=self._current,
         )
         response = None
         with self._charged(), supervised_turn.budget_scope(self.agent, budget):
             self.actor_steps += 1
-            response, _ = self.agent._stream_response(messages, {}, model=model, quiet=True)
+            response, _ = self.agent._stream_response(
+                messages, {}, model=model, quiet=True
+            )
             # _stream_response records failed/discarded attempts itself. Only
             # its returned final response belongs to this caller.
             self.agent._record_usage(response)
@@ -172,7 +226,9 @@ class WorkReview:
         try:
             with self._charged():
                 report = self.reviewer.finish(
-                    self.capture, answer, checkpoint=checkpoint,
+                    self.capture,
+                    answer,
+                    checkpoint=checkpoint,
                     time_limit=self.remaining,
                     **self.client._review_options(self.context, checkpoint),
                 )
@@ -206,7 +262,11 @@ class WorkReview:
                 return self.actor_steps
             self.kind, self.strategy = plan["kind"], plan["strategy"]
             self.client._publish_review("strategy", announce=False)
-            strategy_context = {"id": "strategy", "kind": "actor_strategy", "text": self.strategy}
+            strategy_context = {
+                "id": "strategy",
+                "kind": "actor_strategy",
+                "text": self.strategy,
+            }
             self.context.append(strategy_context)
             self.reviewer.artifact_task = self.task
             self.capture = Capture(self.task)
@@ -218,23 +278,35 @@ class WorkReview:
                 if report is None:
                     # Retain the actor's plan even when the judge is down, without
                     # turning an unavailable verdict into an approval or warning loop.
-                    state["messages"].append(self._feedback({
-                        "verdict": "inconclusive", "summary": "Chat-model strategy for this task.",
-                        "findings": [], "reviewer": "unavailable",
-                    }, "strategy"))
+                    state["messages"].append(
+                        self._feedback(
+                            {
+                                "verdict": "inconclusive",
+                                "summary": "Chat-model strategy for this task.",
+                                "findings": [],
+                                "reviewer": "unavailable",
+                            },
+                            "strategy",
+                        )
+                    )
                     break
                 state["messages"].append(self._feedback(report, "strategy"))
                 if (
-                    report["verdict"] == "pass" or not report.get("valid_verdict")
-                    or not report.get("findings") or report.get("stale")
+                    report["verdict"] == "pass"
+                    or not report.get("valid_verdict")
+                    or not report.get("findings")
+                    or report.get("stale")
                     or revision == self.options["MAX_STRATEGY_ROUNDS"]
                     or self.actor_steps >= step_limit - 1
                 ):
                     break
-                plan = self._strategy_call({
-                    "summary": report["summary"], "findings": report["findings"],
-                })
-                if plan["kind"] not in {"code", "document"}:
+                plan = self._strategy_call(
+                    {
+                        "summary": report["summary"],
+                        "findings": report["findings"],
+                    }
+                )
+                if plan["kind"] != "artifact":
                     break
                 self.strategy = plan["strategy"]
                 strategy_context["text"] = self.strategy
@@ -246,7 +318,10 @@ class WorkReview:
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            self._unavailable(f"Strategy review unavailable ({type(exc).__name__}); task continues.", "strategy")
+            self._unavailable(
+                f"Strategy review unavailable ({type(exc).__name__}); task continues.",
+                "strategy",
+            )
         finally:
             self.agent._stop_spinner()
         return self.actor_steps
@@ -254,8 +329,11 @@ class WorkReview:
     def after_batch(self, messages, *, wave=False):
         """Review completed edit batches, never in a worker or during corrections."""
         if (
-            self.disabled or self.capture is None or not self._current()
-            or threading.get_ident() != self.owner or self.agent._cancelled()
+            self.disabled
+            or self.capture is None
+            or not self._current()
+            or threading.get_ident() != self.owner
+            or self.agent._cancelled()
             or supervised_turn.budget_for(self.agent) is not None
             or self.change_reviews >= self.options["MAX_CHANGE_REVIEWS"]
         ):
@@ -268,17 +346,26 @@ class WorkReview:
             self._writes, self._shells = writes, shells
             if not changed:
                 now = self.capture._git()
-                changed = now is None or (now or {}).get("revision") != self._git_revision
+                changed = (
+                    now is None or (now or {}).get("revision") != self._git_revision
+                )
             if not changed:
                 return []
             self.change_reviews += 1
-            answer = self.agent._last_visible_from(messages) or "An implementation batch has completed."
+            answer = (
+                self.agent._last_visible_from(messages)
+                or "An implementation batch has completed."
+            )
             report = self._check("changes", answer)
             self._git_revision = (self.capture.after or {}).get("revision")
             if report is None:
                 return []
             self.capture.reopen()
-            if report.get("valid_verdict") and not report.get("stale") and report.get("findings"):
+            if (
+                report.get("valid_verdict")
+                and not report.get("stale")
+                and report.get("findings")
+            ):
                 note = self._feedback(report, "changes")
                 if wave:
                     self.wave_notes.append(note)
@@ -286,7 +373,10 @@ class WorkReview:
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            self._unavailable(f"Change review unavailable ({type(exc).__name__}); task continues.", "changes")
+            self._unavailable(
+                f"Change review unavailable ({type(exc).__name__}); task continues.",
+                "changes",
+            )
         return []
 
     def complete(self, state, steps):
@@ -296,21 +386,35 @@ class WorkReview:
             self.finished = True
             with self._charged():
                 self.client._supervise_turn(
-                    self.capture, state, self.context, steps, time_limit=self.remaining,
+                    self.capture,
+                    state,
+                    self.context,
+                    steps,
+                    time_limit=self.remaining,
                 )
             if self.reviewer.last is not None:
                 report = dict(self.reviewer.last)
                 report.pop("checkpoints", None)
                 self._remember(report)
-                self.client._publish_review("complete", self.reviewer.last, announce=False)
+                self.client._publish_review(
+                    "complete", self.reviewer.last, announce=False
+                )
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            self._unavailable(f"Completion review unavailable ({type(exc).__name__}); task continues.", "completion")
+            self._unavailable(
+                f"Completion review unavailable ({type(exc).__name__}); task continues.",
+                "completion",
+            )
 
     def finalize(self):
         """A strategy pass must never masquerade as final artifact verification."""
-        if not self.finished and not self.disabled and self.capture is not None and self._current():
+        if (
+            not self.finished
+            and not self.disabled
+            and self.capture is not None
+            and self._current()
+        ):
             report = self.reviewer.incomplete(
                 "The actor stopped before final artifact review; completed work is retained."
             )

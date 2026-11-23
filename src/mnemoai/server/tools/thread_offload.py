@@ -1,6 +1,6 @@
 """Keep blocking tool bodies OFF the MCP server's event loop.
 
-The server is ONE stdio subprocess with ONE event loop, and the SDK dispatches
+Each server connection has ONE event loop, and the SDK dispatches
 every incoming request concurrently (``tg.start_soon(self._handle_message, …)``
 in ``mcp.server.lowlevel.server``). So parallel agents — orchestrator waves,
 ``spawn_agent`` sub-agents — genuinely have several tool calls in flight at
@@ -40,8 +40,26 @@ import inspect
 from typing import Any, Callable
 
 import anyio.to_thread
+from mcp.server.fastmcp.exceptions import ToolError
 
+from mnemoai.server import tool_state
 from mnemoai.utils import execution_context
+
+
+async def run_blocking(fn: Callable, *args: Any) -> Any:
+    """Keep local request cancellation independent of an uninterruptible call."""
+
+    def invoke():
+        # Cancellation may arrive while waiting for a worker slot.
+        tool_state.check_cancelled()
+        return fn(*args)
+
+    result = await anyio.to_thread.run_sync(
+        invoke,
+        abandon_on_cancel=tool_state.current() is not None,
+    )
+    tool_state.check_cancelled()
+    return result
 
 
 def offload_blocking(fn: Callable) -> Callable:
@@ -63,7 +81,7 @@ def offload_blocking(fn: Callable) -> Callable:
     async def _threaded(*args: Any, **kwargs: Any) -> Any:
         # anyio (not asyncio.to_thread): the SDK's server runs on anyio, so this
         # uses its capacity limiter and works under either backend.
-        return await anyio.to_thread.run_sync(functools.partial(fn, *args, **kwargs))
+        return await run_blocking(functools.partial(fn, *args, **kwargs))
 
     return _threaded
 
@@ -95,6 +113,7 @@ class ThreadedToolServer:
             @functools.wraps(fn)
             async def scoped(*args, **kwargs):
                 workspace = None
+                meta = None
                 get_context = getattr(self._mcp, "get_context", None)
                 if get_context is not None:
                     try:
@@ -104,8 +123,29 @@ class ThreadedToolServer:
                     raw = getattr(meta, execution_context.META_KEY, None)
                     if isinstance(raw, dict) and isinstance(raw.get("cwd"), str):
                         workspace = execution_context.Workspace(raw["cwd"])
-                with execution_context.use(workspace):
-                    return await offloaded(*args, **kwargs)
+                state = tool_state.current()
+                token = getattr(meta, tool_state.CANCEL_META_KEY, None)
+                event = (
+                    state.calls.get(token)
+                    if state is not None and isinstance(token, str)
+                    else None
+                )
+                if state is not None and isinstance(token, str) and event is None:
+                    raise ToolError("Tool request is no longer active")
+                cancellation = event
+                try:
+                    with (
+                        execution_context.use(workspace),
+                        tool_state.request_scope(event) as cancellation,
+                    ):
+                        tool_state.check_cancelled()
+                        result = await offloaded(*args, **kwargs)
+                        tool_state.check_cancelled()
+                        return result
+                except KeyboardInterrupt:
+                    if cancellation is not None and cancellation.is_set():
+                        raise ToolError("Tool request cancelled") from None
+                    raise
 
             decorate(scoped)
             return fn

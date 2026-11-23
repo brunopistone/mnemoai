@@ -1,7 +1,8 @@
 """In-process read-state registry: read-before-write + staleness gate.
 
-The MCP server is one long-lived stdio subprocess, so this module-level dict
-persists across tool calls for the whole session. We record the on-disk version
+Each local MCP server has its own registry; a standalone stdio server uses the
+module-level fallback. Records persist across tool calls for that connection.
+We record the on-disk version
 of every file the model reads (via ``fs_read``) and, before mutating an
 EXISTING file (``fs_write`` / ``file_edit``), require that it was read at its
 current identity/modification stamp. It refuses to edit a file that was never read, or that changed
@@ -23,11 +24,17 @@ Config-independent (only ``os`` + logger) so it stays unit-testable.
 import os
 from typing import Optional
 
+from mnemoai.server import tool_state
 from mnemoai.utils.logger import logger
 
 # A preserved mtime alone does not identify a file after replacement.
 FileVersion = tuple[int, int, int, int, int]
 _read_versions: dict[str, FileVersion] = {}
+
+
+def _versions():
+    state = tool_state.current()
+    return state.read_versions if state is not None else _read_versions
 
 
 def _key(path: str) -> str:
@@ -63,12 +70,19 @@ def record_read(path: str, expected_version: Optional[FileVersion] = None) -> bo
     immediately-following edit in the same turn isn't flagged stale). A path
     that can't be stat'd is silently ignored.
     """
+    cancelled = tool_state.cancel_event()
+    if cancelled is not None and cancelled.is_set():
+        return False
     version = current_version(path)
-    if version is None or (expected_version is not None and version != expected_version):
+    if version is None or (
+        expected_version is not None and version != expected_version
+    ):
         return False
     # Store the observed version, not another later stat which could bless a
     # concurrent writer's unseen content.
-    _read_versions[_key(path)] = expected_version if expected_version is not None else version
+    _versions()[_key(path)] = (
+        expected_version if expected_version is not None else version
+    )
     return True
 
 
@@ -90,7 +104,7 @@ def check_write_allowed(path: str) -> Optional[dict]:
         return None
 
     current = _version(info)
-    seen = _read_versions.get(_key(path))
+    seen = _versions().get(_key(path))
     if seen is None:
         logger.info("read-gate: %s modified without a prior read", path)
         return {
@@ -125,9 +139,9 @@ def check_write_allowed(path: str) -> Optional[dict]:
 
 def forget(path: str) -> None:
     """Drop any recorded read-state for ``path`` (e.g. after deletion)."""
-    _read_versions.pop(_key(path), None)
+    _versions().pop(_key(path), None)
 
 
 def reset() -> None:
     """Clear all recorded read-state (new session / test isolation)."""
-    _read_versions.clear()
+    _versions().clear()

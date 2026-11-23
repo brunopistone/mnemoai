@@ -20,6 +20,27 @@ def _agent():
 
 
 class TestExitPlanModeVerdict:
+    def test_exit_cannot_claim_success_if_plan_mode_remains_active(self):
+        for apply_approval in (None, lambda plan: None):
+            a = _agent()
+            a._plan_mode_provider = lambda: True
+            a._exit_plan_mode_provider = apply_approval
+            out = a._handle_exit_plan_mode("Create the requested file", ["touch file"])
+            assert out.startswith("Blocked:")
+            assert "APPROVED" not in out
+            assert not getattr(a, "_execute_plan_route", False)
+            assert not getattr(a, "_preapproved_bash", [])
+
+    def test_success_requires_the_plan_transition_to_take_effect(self):
+        a = _agent()
+        state = {"planning": True}
+        a._plan_mode_provider = lambda: state["planning"]
+        a._plan_approval_ui = lambda plan: ("approve", plan)
+        a._exit_plan_mode_provider = lambda plan: state.update(planning=False)
+        out = a._handle_exit_plan_mode("Run the approved check", ["pytest"])
+        assert not state["planning"]
+        assert "APPROVED" in out and a._preapproved_bash == ["pytest"]
+
     def test_no_ui_auto_approves(self):
         # Bare object (non-TTY/tests): no _plan_approval_ui → auto-approve.
         a = _agent()
@@ -40,7 +61,9 @@ class TestExitPlanModeVerdict:
         a = _agent()
         called = {"n": 0}
         a._plan_approval_ui = lambda plan: ("keep_planning", plan)
-        a._exit_plan_mode_provider = lambda plan: called.__setitem__("n", called["n"] + 1)
+        a._exit_plan_mode_provider = lambda plan: called.__setitem__(
+            "n", called["n"] + 1
+        )
         out = a._handle_exit_plan_mode("draft")
         assert called["n"] == 0  # plan mode stays ON — provider not called
         assert "keep planning" in out.lower()
@@ -62,7 +85,8 @@ class TestPreApprovedBash:
         shown = []
         a._preapproved_bash = ["obsolete"]
         a._plan_approval_ui = lambda plan: (
-            shown.append(plan) or "approve", "Only inspect source. Do not run tests."
+            shown.append(plan) or "approve",
+            "Only inspect source. Do not run tests.",
         )
         a._handle_exit_plan_mode("Run tests", ["pytest"])
         assert "Shell command permissions" in shown[0] and "`pytest`" in shown[0]
@@ -107,8 +131,12 @@ class TestIsPreApprovedBash:
         a = _agent()
         a._preapproved_bash = ["pytest"]
         for command in (
-            "pytest && touch example", "pytest ; touch example", "pytest > example",
-            "pytest `touch example`", "pytest $(touch example)", "pytest\n touch example",
+            "pytest && touch example",
+            "pytest ; touch example",
+            "pytest > example",
+            "pytest `touch example`",
+            "pytest $(touch example)",
+            "pytest\n touch example",
         ):
             assert not a._is_preapproved_bash(command), command
 

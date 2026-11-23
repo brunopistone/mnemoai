@@ -70,7 +70,7 @@ class _FakeBrave:
 @pytest.fixture
 def web_search(monkeypatch):
     monkeypatch.setenv("BRAVE_API_KEY", "test-key")
-    monkeypatch.setattr(ws, "BraveSearch", _FakeBrave)
+    monkeypatch.setattr("brave_search_python_client.BraveSearch", _FakeBrave)
     # WebSearchRequest: capture kwargs it's constructed with.
     captured = {}
 
@@ -79,7 +79,7 @@ def web_search(monkeypatch):
         captured.update(kwargs)
         return object()
 
-    monkeypatch.setattr(ws, "WebSearchRequest", _fake_request)
+    monkeypatch.setattr("brave_search_python_client.WebSearchRequest", _fake_request)
     mcp = _CapturingMCP()
     ws.register_web_search_tools(mcp)
     fn = mcp.registered["web_search"]
@@ -160,7 +160,7 @@ class _FakeCrawler:
 
 @pytest.fixture
 def web_crawler(monkeypatch):
-    monkeypatch.setattr(wc, "AsyncWebCrawler", _FakeCrawler)
+    monkeypatch.setattr("crawl4ai.AsyncWebCrawler", _FakeCrawler)
     # Default: RAG disabled so the inline path is exercised.
     monkeypatch.setattr(wc.config, "get", lambda key, default=None: default)
     mcp = _CapturingMCP()
@@ -178,7 +178,7 @@ class TestWebCrawler:
                 seen.append(sys.stdout is original)
                 return _FakeResult("page")
 
-        monkeypatch.setattr(wc, "AsyncWebCrawler", Crawler)
+        monkeypatch.setattr("crawl4ai.AsyncWebCrawler", Crawler)
         run(web_crawler("https://example.com"))
         assert seen == [True]
         assert sys.stdout is original
@@ -190,11 +190,17 @@ class TestWebCrawler:
         seen = []
         _FakeCrawler._markdown = "large page " * 20
         monkeypatch.setattr(
-            wc.config, "get",
-            lambda key, default=None: True if key == "ENABLE_RAG"
-            else {"MAX_TOKENS": 1} if key == "RAG" else default,
+            wc.config,
+            "get",
+            lambda key, default=None: (
+                True
+                if key == "ENABLE_RAG"
+                else {"MAX_TOKENS": 1} if key == "RAG" else default
+            ),
         )
-        rag = SimpleNamespace(ingest=lambda *args, **kwargs: seen.append(threading.get_ident()) or 1)
+        rag = SimpleNamespace(
+            ingest=lambda *args, **kwargs: seen.append(threading.get_ident()) or 1
+        )
         monkeypatch.setattr(wc, "_rag_session", lambda: lambda: rag)
         result = json.loads(run(web_crawler("https://example.com")))
         assert result["chunks_indexed"] == 1
@@ -220,7 +226,7 @@ class TestWebCrawler:
         assert _FakeCrawler.last_config.page_timeout == 60000
 
     def test_page_timeout_from_config_override(self, monkeypatch):
-        monkeypatch.setattr(wc, "AsyncWebCrawler", _FakeCrawler)
+        monkeypatch.setattr("crawl4ai.AsyncWebCrawler", _FakeCrawler)
 
         def _cfg(key, default=None):
             if key == "WEB_CRAWL":

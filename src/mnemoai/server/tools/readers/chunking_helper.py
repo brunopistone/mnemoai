@@ -13,10 +13,12 @@ import os
 import sqlite3
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import datetime
 
 import tiktoken
 
+from mnemoai.server import tool_state
 from mnemoai.utils import tokenization
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
@@ -244,17 +246,7 @@ def __summarize_with_model(text: str, context: str = "") -> str:
         Summarized text
     """
     try:
-        # Deferred: importing the controller pulls BaseChatModel→transformers/
-        # torch (+litellm), ~3s — kept off the server's tool-registration path
-        # (fs_read always registers this module). Summarization is rare.
-        from mnemoai.models.controllers.llm_controller import LangChainLLMController
-
-        llm_controller = LangChainLLMController()
-        llm_controller.initialize_model()
-        model = llm_controller.get_model()
-
-        if not model:
-            return text[:2000] + "...[model initialization failed]"
+        tool_state.check_cancelled()
 
         prompt = f"""
         <instructions>
@@ -281,11 +273,23 @@ def __summarize_with_model(text: str, context: str = "") -> str:
 
         prompt = textwrap.dedent(prompt).strip()
 
-        # Use LangChain model's invoke method
-        from langchain_core.messages import HumanMessage
+        def invoke():
+            from langchain_core.messages import HumanMessage
 
-        messages = [HumanMessage(content=prompt)]
-        response = model.invoke(messages)
+            from mnemoai.models.controllers.llm_controller import LangChainLLMController
+
+            llm_controller = LangChainLLMController()
+            llm_controller.initialize_model()
+            model = llm_controller.get_model()
+            return model.invoke([HumanMessage(content=prompt)]) if model else None
+
+        # Only the stateless provider wait is abandoned. A late response cannot
+        # reach the chunk cache after its tool request has been cancelled.
+        from mnemoai.client.agent.stream_policy import cancellable_call
+
+        response = cancellable_call(invoke, tool_state.cancel_event())
+        if response is None:
+            return text[:2000] + "...[model initialization failed]"
 
         response_text = (
             response.content if hasattr(response, "content") else str(response)
@@ -300,9 +304,7 @@ def __summarize_with_model(text: str, context: str = "") -> str:
         return text[:2000] + "...[summarization failed]"
 
 
-def process_large_content(
-    content: str, chunk_size: int = 1024 * 8
-) -> tuple[str, dict]:
+def process_large_content(content: str, chunk_size: int = 1024 * 8) -> tuple[str, dict]:
     """Process large content with chunking and summarization.
 
     Args:
@@ -346,6 +348,7 @@ def process_large_content(
         Returns:
             Summary text
         """
+        tool_state.check_cancelled()
         # Compute a stable key for this chunk
         key = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
 
@@ -358,6 +361,7 @@ def process_large_content(
         logger.info(f"[CHUNKING] Processing chunk {index+1}")
         context = f"Part {index+1} of {len(chunks)}"
         summary = __summarize_with_model(chunk_text, context)
+        tool_state.check_cancelled()
 
         # Cache summary (best-effort)
         try:
@@ -367,11 +371,13 @@ def process_large_content(
 
         return f"=== Part {index+1}/{len(chunks)} ===\n{summary}"
 
-    # map() keeps the results in chunk order — the parts are joined positionally.
+    # Carry the request's cancellation and server state into each worker.
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        summaries = list(
-            pool.map(lambda pair: _summarize_chunk(*pair), enumerate(chunks))
-        )
+        futures = [
+            pool.submit(copy_context().run, _summarize_chunk, index, chunk)
+            for index, chunk in enumerate(chunks)
+        ]
+        summaries = [future.result() for future in futures]
     combined = "\n\n".join(summaries)
     combined_tokens = __count_tokens(combined)
 

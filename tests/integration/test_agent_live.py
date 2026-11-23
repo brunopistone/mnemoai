@@ -6,6 +6,8 @@ routing, tool invocation, and that no query returns a silent empty turn.
 """
 
 import json
+import shlex
+import sys
 
 import pytest
 from langchain_core.messages import AIMessage, ToolMessage
@@ -55,6 +57,15 @@ class TestAgentEndToEnd:
 
 
 class TestBashTimeoutLive:
+    def test_multiline_python_command_is_preserved(self, live_client):
+        """Exercise the real transport without asking a model to retype code."""
+        script = "try:\n    raise ValueError('fixture')\nexcept ValueError:\n    print('MULTILINE_OK')\n"
+        command = f"{shlex.quote(sys.executable)} -B -c {shlex.quote(script)}"
+        tool = next(tool for tool in live_client.tools if tool.name == "execute_bash")
+        result = json.loads(tool.invoke({"command": command}))
+        assert result["exit_status"] == 0, result
+        assert result["stdout"].strip() == "MULTILINE_OK"
+
     def test_bash_timeout_does_not_hang(self, live_client, monkeypatch):
         # The agent should report back rather than hang when a command exceeds
         # its timeout (process-group kill + prompt return).

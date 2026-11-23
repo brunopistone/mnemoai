@@ -60,7 +60,12 @@ WARN = "warn"
 FAIL = "fail"
 INFO = "info"
 
-_MARKS = {OK: ("✓", "\033[92m"), WARN: ("!", "\033[93m"), FAIL: ("✗", "\033[91m"), INFO: ("·", "\033[90m")}
+_MARKS = {
+    OK: ("✓", "\033[92m"),
+    WARN: ("!", "\033[93m"),
+    FAIL: ("✗", "\033[91m"),
+    INFO: ("·", "\033[90m"),
+}
 _GRAY = "\033[90m"
 _BOLD = "\033[1m"
 _RESET = "\033[0m"
@@ -190,7 +195,9 @@ def _config_checks() -> List[Check]:
         )
     else:
         detail = _short(prompts)
-        if Path(prompts) != Path(prompts_path()) and not os.environ.get("MNEMOAI_PROMPTS"):
+        if Path(prompts) != Path(prompts_path()) and not os.environ.get(
+            "MNEMOAI_PROMPTS"
+        ):
             detail += f"  (NOT {_short(prompts_path())})"
         out.append(Check("Configuration", "prompts.yaml", OK, detail))
     return out
@@ -228,8 +235,15 @@ def _provider_checks() -> List[Check]:
     protocol = str(section.get("API_PROTOCOL", "") or "")
     if protocol:
         label += f" ({protocol})"
-    out.append(Check("Provider", "model", OK if name else WARN, label,
-                     "" if name else "Set MODEL_ID.NAME."))
+    out.append(
+        Check(
+            "Provider",
+            "model",
+            OK if name else WARN,
+            label,
+            "" if name else "Set MODEL_ID.NAME.",
+        )
+    )
 
     out.append(_credentials_check(provider, section))
 
@@ -238,7 +252,9 @@ def _provider_checks() -> List[Check]:
     policy = prompt_cache.policy(section)
     if policy.control:
         out.append(
-            Check("Provider", "prompt cache", OK, f"on, {prompt_cache.ttl(section)} TTL")
+            Check(
+                "Provider", "prompt cache", OK, f"on, {prompt_cache.ttl(section)} TTL"
+            )
         )
     else:
         out.append(
@@ -295,8 +311,9 @@ def _credentials_check(provider: str, section: dict) -> Check:
     if provider == "ollama":
         host = str(section.get("HOST", "localhost") or "localhost")
         port = int(section.get("PORT", 11434) or 11434)
-        return _probe_port("Provider", "ollama server", host, port,
-                           "Start it with `ollama serve`.")
+        return _probe_port(
+            "Provider", "ollama server", host, port, "Start it with `ollama serve`."
+        )
 
     if provider == "mlx":
         base = section.get("API_BASE") or section.get("ENDPOINT_URL")
@@ -305,8 +322,13 @@ def _credentials_check(provider: str, section: dict) -> Check:
             return Check("Provider", "endpoint", OK, str(base))
         host = str(section.get("HOST", "127.0.0.1") or "127.0.0.1")
         port = int(section.get("PORT", 8000) or 8000)
-        return _probe_port("Provider", "mlx server", host, port,
-                           "Start it with `mlx-openai-server launch`.")
+        return _probe_port(
+            "Provider",
+            "mlx server",
+            host,
+            port,
+            "Start it with `mlx-openai-server launch`.",
+        )
 
     if provider in ("bedrock", "mantle", "sagemaker"):
         return _aws_credentials_check(provider, section)
@@ -318,16 +340,28 @@ def _credentials_check(provider: str, section: dict) -> Check:
         "litellm": "",
     }
     env_key = env_keys.get(provider, "")
-    has_key = bool(section.get("API_KEY")) or (bool(env_key) and bool(os.environ.get(env_key)))
-    if provider == "openai" and (section.get("API_BASE") or section.get("ENDPOINT_URL")):
+    has_key = bool(section.get("API_KEY")) or (
+        bool(env_key) and bool(os.environ.get(env_key))
+    )
+    if provider == "openai" and (
+        section.get("API_BASE") or section.get("ENDPOINT_URL")
+    ):
         # A local OpenAI-compatible server usually wants no key at all.
-        return Check("Provider", "endpoint", OK,
-                     str(section.get("API_BASE") or section.get("ENDPOINT_URL")))
+        return Check(
+            "Provider",
+            "endpoint",
+            OK,
+            str(section.get("API_BASE") or section.get("ENDPOINT_URL")),
+        )
     if has_key:
         return Check("Provider", "credentials", OK, "an API key is set (not shown)")
     if not env_key:
-        return Check("Provider", "credentials", INFO,
-                     f"not checked for {provider} — it manages its own auth")
+        return Check(
+            "Provider",
+            "credentials",
+            INFO,
+            f"not checked for {provider} — it manages its own auth",
+        )
     return Check(
         "Provider",
         "credentials",
@@ -342,7 +376,11 @@ def _aws_credentials_check(provider: str, section: dict) -> Check:
     key = (
         section.get("API_KEY") or os.environ.get("BEDROCK_API_KEY")
         if provider == "mantle"
-        else os.environ.get("AWS_BEARER_TOKEN_BEDROCK") if provider == "bedrock" else None
+        else (
+            os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+            if provider == "bedrock"
+            else None
+        )
     )
     if key:
         return Check("Provider", "credentials", OK, "an API key is set (not shown)")
@@ -360,8 +398,13 @@ def _aws_credentials_check(provider: str, section: dict) -> Check:
             f"`pip install boto3` — {provider} cannot be called without it.",
         )
     except Exception as e:  # noqa: BLE001 — a profile/config error, not a crash
-        return Check("Provider", "aws credentials", WARN, f"could not be resolved: {e}",
-                     "Run `aws configure`.")
+        return Check(
+            "Provider",
+            "aws credentials",
+            WARN,
+            f"could not be resolved: {e}",
+            "Run `aws configure`.",
+        )
     if creds is None:
         return Check(
             "Provider",
@@ -374,8 +417,13 @@ def _aws_credentials_check(provider: str, section: dict) -> Check:
     if region:
         detail += f", region {region}"
     else:
-        return Check("Provider", "aws credentials", WARN, "resolved, but no REGION is set",
-                     "Set MODEL_ID.REGION (or AWS_REGION).")
+        return Check(
+            "Provider",
+            "aws credentials",
+            WARN,
+            "resolved, but no REGION is set",
+            "Set MODEL_ID.REGION (or AWS_REGION).",
+        )
     return Check("Provider", "aws credentials", OK, detail)
 
 
@@ -416,7 +464,7 @@ def _tool_checks(client: Any) -> List[Check]:
                 "MCP tools",
                 FAIL,
                 "none registered — the built-in server did not come up",
-                "Check the log (LOG_LEVEL=DEBUG) for the server subprocess's error.",
+                "Check the application and MCP logs (LOG_LEVEL=DEBUG) for server errors.",
             )
         )
 
@@ -443,25 +491,43 @@ def _external_mcp_checks(client: Any) -> List[Check]:
         pending = [n for n in declared if states.get(n) == "connecting"]
         failed = [n for n in declared if states.get(n) not in {"ready", "connecting"}]
         if pending or failed:
-            detail = "; ".join(filter(None, [
-                "connecting: " + ", ".join(pending) if pending else "",
-                "not running: " + ", ".join(failed) if failed else "",
-            ]))
-            return [Check("Tools", "external MCP servers", WARN if failed else INFO, detail)]
+            detail = "; ".join(
+                filter(
+                    None,
+                    [
+                        "connecting: " + ", ".join(pending) if pending else "",
+                        "not running: " + ", ".join(failed) if failed else "",
+                    ],
+                )
+            )
+            return [
+                Check("Tools", "external MCP servers", WARN if failed else INFO, detail)
+            ]
 
     # `_members` holds only the servers that actually connected (MultiMCPClient
     # prunes the failures in __enter__), with the built-in one first.
     members = getattr(getattr(client, "mcp_client", None), "_members", None)
     if members is None:
         return [
-            Check("Tools", "external MCP servers", INFO,
-                  f"{len(declared)} declared in {_short(mcp_config_path())} (not checked)")
+            Check(
+                "Tools",
+                "external MCP servers",
+                INFO,
+                f"{len(declared)} declared in {_short(mcp_config_path())} (not checked)",
+            )
         ]
 
     live = [name for name, _ in members if name != "builtin"]
     missing = [name for name in declared if name not in live]
     if not missing:
-        return [Check("Tools", "external MCP servers", OK, f"{len(live)} connected: " + ", ".join(live))]
+        return [
+            Check(
+                "Tools",
+                "external MCP servers",
+                OK,
+                f"{len(live)} connected: " + ", ".join(live),
+            )
+        ]
     return [
         Check(
             "Tools",
@@ -498,13 +564,19 @@ def _feature_checks() -> List[Check]:
     out: List[Check] = []
     stores = set()
     if config.get("ENABLE_RAG", False):
-        stores.add(str(
-            ((config.get("RAG", {}) or {}).get("VECTOR_STORE", {}) or {}).get("TYPE", "faiss")
-        ).lower())
+        stores.add(
+            str(
+                ((config.get("RAG", {}) or {}).get("VECTOR_STORE", {}) or {}).get(
+                    "TYPE", "faiss"
+                )
+            ).lower()
+        )
     if config.get("ENABLE_EPISODIC_MEMORY", False):
-        stores.add(str(
-            (config.get("EPISODIC_MEMORY", {}) or {}).get("STORE_TYPE", "chromadb")
-        ).lower())
+        stores.add(
+            str(
+                (config.get("EPISODIC_MEMORY", {}) or {}).get("STORE_TYPE", "chromadb")
+            ).lower()
+        )
     for store in sorted(stores):
         module = "faiss" if "faiss" in store else "chromadb"
         out.append(_import_check("Features", f"{module} ({store})", module))
@@ -528,7 +600,9 @@ def _import_check(section: str, label: str, module: str) -> Check:
     try:
         __import__(module)
         return Check(section, label, OK, "installed")
-    except Exception as e:  # noqa: BLE001 — a broken install raises more than ImportError
+    except (
+        Exception
+    ) as e:  # noqa: BLE001 — a broken install raises more than ImportError
         return Check(
             section,
             label,
@@ -547,12 +621,22 @@ def _state_checks(client: Any) -> List[Check]:
         or getattr(getattr(client, "reflector", None), "last_error", None)
         or getattr(getattr(client, "playbook", None), "error", None)
     )
-    out.append(Check(
-        "State", "local learning", WARN if enabled and learning_error else INFO,
-        str(learning_error) if enabled and learning_error else (
-            "enabled; local tool observations, no model or embedding calls" if enabled else "disabled"
-        ),
-    ))
+    out.append(
+        Check(
+            "State",
+            "local learning",
+            WARN if enabled and learning_error else INFO,
+            (
+                str(learning_error)
+                if enabled and learning_error
+                else (
+                    "enabled; local tool observations, no model or embedding calls"
+                    if enabled
+                    else "disabled"
+                )
+            ),
+        )
+    )
 
     days = config.get("SESSION_MAX_AGE_DAYS", 30)
     try:
@@ -647,8 +731,10 @@ def _log_check() -> Check:
         size = path.stat().st_size if path.is_file() else 0
     except OSError:
         size = 0
-    where = f"{_short(path)} — {size // 1024} KB, {kept}" if size else (
-        f"{_short(path)} — empty, {kept}"
+    where = (
+        f"{_short(path)} — {size // 1024} KB, {kept}"
+        if size
+        else (f"{_short(path)} — empty, {kept}")
     )
     return Check("State", "logs", INFO, where)
 
@@ -687,7 +773,8 @@ def _size_checks(client=None) -> List[Check]:
 
     try:
         snapshot = (
-            context_injection.steering_snapshot(client) if client is not None
+            context_injection.steering_snapshot(client)
+            if client is not None
             else SteeringStore().snapshot()
         )
     except Exception as e:  # noqa: BLE001
@@ -711,7 +798,14 @@ def _size_checks(client=None) -> List[Check]:
         )
     for notice in snapshot.notices if snapshot is not None else ():
         if notice.kind != "truncated":
-            out.append(Check("State", "steering", WARN, f"{_short(notice.path)} — {notice.detail}"))
+            out.append(
+                Check(
+                    "State",
+                    "steering",
+                    WARN,
+                    f"{_short(notice.path)} — {notice.detail}",
+                )
+            )
     return out
 
 
@@ -719,7 +813,9 @@ def _steering_entry(entry: Any) -> Tuple[Optional[str], int]:
     """``(path, chars)`` from a ``SteeringStore.sizes()`` row ``(Path, text)``."""
     if isinstance(entry, (tuple, list)) and len(entry) >= 2:
         second = entry[1]
-        return str(entry[0]), len(second) if isinstance(second, str) else int(second or 0)
+        return str(entry[0]), (
+            len(second) if isinstance(second, str) else int(second or 0)
+        )
     return None, 0
 
 
@@ -738,26 +834,46 @@ def collect(client: Any = None) -> List[Check]:
     checks.extend(_feature_checks())
     checks.extend(_state_checks(client))
     reviewer = getattr(client, "reviewer", None)
-    enabled = reviewer.enabled if reviewer is not None else config.get("ENABLE_REVIEW", False) is True
+    enabled = (
+        reviewer.enabled
+        if reviewer is not None
+        else config.get("ENABLE_REVIEW", False) is True
+    )
     try:
         options = review.settings()
         overrides = area_models.reviewer_overrides()
-        label = area_models.label(overrides, config.get("MODEL_ID", {}).get("NAME", "?"))
+        label = area_models.label(
+            overrides, config.get("MODEL_ID", {}).get("NAME", "?")
+        )
         cached = getattr(client, "_area_model_cache", {}) if client else {}
         unavailable = "REVIEWER" in cached and cached["REVIEWER"] is None
-        checks.append(Check(
-            "Features", "peer review", WARN if enabled and unavailable else INFO,
-            f"{'on' if enabled else 'off'}; code/documents; {label}; "
-            f"{options['MAX_STRATEGY_ROUNDS']} strategy revisions; "
-            f"{options['MAX_CHANGE_REVIEWS']} change reviews; "
-            f"{options['MAX_ROUNDS']} final correction rounds; overhead {options['TOTAL_TIMEOUT']}s; "
-            f"review wait {options['TIMEOUT']}s; input estimate ≤{options['MAX_INPUT_TOKENS']} tokens",
-            "Reviewer unavailable; /model → Reviewer to reconfigure." if unavailable else
-            "/review on|off; /config review; /features controls the startup default.",
-        ))
+        checks.append(
+            Check(
+                "Features",
+                "peer review",
+                WARN if enabled and unavailable else INFO,
+                f"{'on' if enabled else 'off'}; code/documents; {label}; "
+                f"{options['MAX_STRATEGY_ROUNDS']} strategy revisions; "
+                f"{options['MAX_CHANGE_REVIEWS']} change reviews; "
+                f"{options['MAX_ROUNDS']} final correction rounds; overhead {options['TOTAL_TIMEOUT']}s; "
+                f"review wait {options['TIMEOUT']}s; input estimate ≤{options['MAX_INPUT_TOKENS']} tokens",
+                (
+                    "Reviewer unavailable; /model → Reviewer to reconfigure."
+                    if unavailable
+                    else "/review on|off; /config review; /features controls the startup default."
+                ),
+            )
+        )
     except (TypeError, ValueError):
-        checks.append(Check("Features", "peer review", WARN, "invalid review configuration",
-                            "Use /config review and /model → Reviewer; no fallback approval."))
+        checks.append(
+            Check(
+                "Features",
+                "peer review",
+                WARN,
+                "invalid review configuration",
+                "Use /config review and /model → Reviewer; no fallback approval.",
+            )
+        )
     return checks
 
 

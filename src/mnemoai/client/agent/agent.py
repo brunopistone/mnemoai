@@ -127,8 +127,14 @@ class LangGraphAgent:
     # this"), describe_image (any query may reference an image), fs_read
     # (universal read), use_skill (a skill-matching query may be simple_qa).
     _ALWAYS_AVAILABLE_TOOLS = {
-        "memory", "describe_image", "fs_read", "use_skill", "exit_plan_mode",
-        "spawn_agent", "resume_agent", "ask_user_question",
+        "memory",
+        "describe_image",
+        "fs_read",
+        "use_skill",
+        "exit_plan_mode",
+        "spawn_agent",
+        "resume_agent",
+        "ask_user_question",
     }
 
     # Aliases keeping the historical class-attribute surface (used by unit tests
@@ -328,7 +334,9 @@ class LangGraphAgent:
         # Segment size for progress-checked continuation; a hard limit when
         # AUTO_CONTINUE_TASKS is disabled. Compaction bounds the request context.
         self.recursion_limit = config.get("LLM", {}).get("RECURSION_LIMIT", 200)
-        self._auto_continue_tasks = config.get("LLM", {}).get("AUTO_CONTINUE_TASKS", True)
+        self._auto_continue_tasks = config.get("LLM", {}).get(
+            "AUTO_CONTINUE_TASKS", True
+        )
         # Some endpoints (Bedrock Mantle reasoning models on the Responses API)
         # intermittently return a fully empty response; a retry recovers it.
         self._empty_response_retries = max(
@@ -412,11 +420,10 @@ class LangGraphAgent:
             # external_tools so the orchestrator doesn't re-describe them.
             always_tools = [t for t in tools if t.name in self._ALWAYS_AVAILABLE_TOOLS]
             # Any tool not in a route allowlist and not a meta tool is external.
-            known_names = {
-                n for names in tool_routes.values() if names for n in names
-            }
+            known_names = {n for names in tool_routes.values() if names for n in names}
             external_tools = [
-                t for t in tools
+                t
+                for t in tools
                 if t.name not in known_names
                 and t.name not in self._ALWAYS_AVAILABLE_TOOLS
             ]
@@ -584,11 +591,18 @@ class LangGraphAgent:
         workflow = StateGraph(AgentState)
 
         if self.router:
-            workflow.add_node("classifier", self._tracked_node("classifier", self._classify))
+            workflow.add_node(
+                "classifier", self._tracked_node("classifier", self._classify)
+            )
 
             if self.orchestrator_enabled:
-                workflow.add_node("decompose", self._tracked_node("decompose", self._decompose))
-                workflow.add_node("orchestrator", self._tracked_node("orchestrator", self._orchestrate))
+                workflow.add_node(
+                    "decompose", self._tracked_node("decompose", self._decompose)
+                )
+                workflow.add_node(
+                    "orchestrator",
+                    self._tracked_node("orchestrator", self._orchestrate),
+                )
                 # The classifier decides WHETHER to decompose (a non-trivial
                 # 'full' task); trivial/plan turns skip straight to the streaming
                 # agent and never pay the decompose LLM call.
@@ -617,14 +631,19 @@ class LangGraphAgent:
         # the user sent during the final, tool-call-free model call has no tool
         # results to ride along with, so it gets a node of its own and one more
         # pass through the model (see mid_turn.py).
-        workflow.add_node("deliver", self._tracked_node("deliver", self._deliver_mid_turn))
+        workflow.add_node(
+            "deliver", self._tracked_node("deliver", self._deliver_mid_turn)
+        )
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
             {"continue": "tools", "deliver": "deliver", "end": END},
         )
         workflow.add_conditional_edges(
-            "tools", lambda state: "end" if getattr(self, "_last_turn_stopped", False) else "continue",
+            "tools",
+            lambda state: (
+                "end" if getattr(self, "_last_turn_stopped", False) else "continue"
+            ),
             {"continue": "agent", "end": END},
         )
         workflow.add_edge("deliver", "agent")
@@ -643,6 +662,7 @@ class LangGraphAgent:
             result = run(state)
             self._last_graph_node = name
             return result
+
         return tracked
 
     def _graph_entry(self, state):
@@ -652,13 +672,19 @@ class LangGraphAgent:
     def _next_checkpoint_node(self, state):
         node = getattr(self, "_last_graph_node", None)
         if node == "classifier":
-            return self._route_after_classify(state) if self.orchestrator_enabled else "agent"
+            return (
+                self._route_after_classify(state)
+                if self.orchestrator_enabled
+                else "agent"
+            )
         if node == "decompose":
             return self._route_after_decompose(state)
         if node in {"tools", "deliver"}:
             return None if getattr(self, "_last_turn_stopped", False) else "agent"
         if node in {"agent", "orchestrator"}:
-            return {"continue": "tools", "deliver": "deliver", "end": None}[self._should_continue(state)]
+            return {"continue": "tools", "deliver": "deliver", "end": None}[
+                self._should_continue(state)
+            ]
         return None
 
     def _checkpoint_context(self, state, turn_log, *, pending=None, force=False):
@@ -699,7 +725,7 @@ class LangGraphAgent:
         node = self._next_checkpoint_node(state)
         if node is None:
             return None
-        self._task_progress.observe(state["messages"][self._turn_seed_len:])
+        self._task_progress.observe(state["messages"][self._turn_seed_len :])
         if not self._task_progress.take_progress():
             return None
         pending = state["messages"][-1] if node == "tools" else None
@@ -708,12 +734,17 @@ class LangGraphAgent:
         self._turn_seed_len = len(fresh) - int(pending is not None)
         self._mid_turn_compaction = None
         self._resume_node = node
-        if node == "agent" and (mid_turn.has_pending(self) or self.has_undelivered_background()):
+        if node == "agent" and (
+            mid_turn.has_pending(self) or self.has_undelivered_background()
+        ):
             self._resume_node = "deliver"
         mid_turn.open_window(self, reset=False)
         if not getattr(self, "_continuation_announced", False):
             self._stop_spinner()
-            print("\n\033[90mContinuing the task from the current step…\033[0m", flush=True)
+            print(
+                "\n\033[90mContinuing the task from the current step…\033[0m",
+                flush=True,
+            )
             self._continuation_announced = True
         return {**state, "messages": fresh}
 
@@ -817,7 +848,9 @@ class LangGraphAgent:
         history = list(messages)
         # Drop the trailing current-query HumanMessage (passed separately).
         for i in range(len(history) - 1, -1, -1):
-            if isinstance(history[i], HumanMessage) and not is_feedback(history[i].content):
+            if isinstance(history[i], HumanMessage) and not is_feedback(
+                history[i].content
+            ):
                 del history[i]
                 break
         # Drop the leading system prompt(s) / any stray SystemMessage.
@@ -850,7 +883,9 @@ class LangGraphAgent:
 
     def _orchestrate(self, state: AgentState) -> Dict[str, Any]:
         """Decompose the task into subtasks, run a worker per subtask, aggregate."""
-        self._last_input_tokens = None  # worker/aggregator prompts are not the parent context
+        self._last_input_tokens = (
+            None  # worker/aggregator prompts are not the parent context
+        )
         # An orchestrated turn has no drain point — each subtask worker runs on its
         # own isolated context and the aggregator answers a fixed prompt — so stop
         # accepting mid-turn messages here. The UI then queues one as its own turn,
@@ -932,7 +967,7 @@ class LangGraphAgent:
         """Publish completed worker evidence even if the scheduling node never returns."""
         recovered = list(state["messages"])
         for _, entry in sorted(getattr(self, "_orchestration_journal", {}).items()):
-            recovered.extend(entry.get("messages", [])[entry.get("seed", 0):])
+            recovered.extend(entry.get("messages", [])[entry.get("seed", 0) :])
         self._interrupted_node_state = {**state, "messages": recovered}
 
     def _run_subtasks_scheduled(
@@ -974,7 +1009,8 @@ class LangGraphAgent:
                 if self._cancelled():
                     raise KeyboardInterrupt
                 ready = [
-                    i for i in sorted(remaining)
+                    i
+                    for i in sorted(remaining)
                     if all(d in results for d in subtasks[i].get("depends_on", []))
                 ]
                 if not ready:  # broken/cyclic deps — force the rest so we never hang
@@ -1068,10 +1104,13 @@ class LangGraphAgent:
                 work_review = getattr(self, "_work_review", None)
                 if work_review is not None and remaining:
                     completed_messages = [
-                        message for i in ready for message in results[i].get("messages", [])
+                        message
+                        for i in ready
+                        for message in results[i].get("messages", [])
                     ]
                     notes = work_review.after_batch(
-                        list(review_history or []) + completed_messages, wave=True,
+                        list(review_history or []) + completed_messages,
+                        wave=True,
                     )
                     if notes:
                         if review_history is None:
@@ -1105,8 +1144,7 @@ class LangGraphAgent:
             return
         self._stop_spinner()
         print(
-            "\n"
-            + turn_view.render_step_list(descriptions, running=running, done=done),
+            "\n" + turn_view.render_step_list(descriptions, running=running, done=done),
             flush=True,
         )
 
@@ -1188,8 +1226,13 @@ class LangGraphAgent:
             # subtask, so a context-dependent subtask resolves its references.
             with execution_context.fork(self):
                 result, worker_msgs = self._run_worker_loop(
-                    worker_model, worker_tools, worker_prompt, quiet=True,
-                    history=history, activity=sink, journal=journal,
+                    worker_model,
+                    worker_tools,
+                    worker_prompt,
+                    quiet=True,
+                    history=history,
+                    activity=sink,
+                    journal=journal,
                 )
             sink.finish_ok(result)
         except KeyboardInterrupt:
@@ -1198,7 +1241,7 @@ class LangGraphAgent:
         except Exception as e:
             logger.error(f"Worker for subtask {i + 1} failed: {e}")
             result = f"(This step could not be completed: {e})"
-            worker_msgs = journal.get("messages", [])[journal.get("seed", 0):]
+            worker_msgs = journal.get("messages", [])[journal.get("seed", 0) :]
             worker_msgs.append(AIMessage(content=result))
             sink.finish("failed")
         finally:
@@ -1231,7 +1274,7 @@ class LangGraphAgent:
         tools_list = "\n".join(lines)
         return (
             "\n\n  <external_tools>\n"
-            "  These additional tools are available via category \"full\" "
+            '  These additional tools are available via category "full" '
             "(which binds every tool):\n"
             f"{tools_list}\n"
             "  For any subtask that needs one of these tools, set its category "
@@ -1330,7 +1373,7 @@ class LangGraphAgent:
         touches no shared display state (via ``_stream_once_quiet``): no reasoning/
         tool markers, no ``print``, no shared ``_code_formatter``/spinner. So the
         sub-agent's trace stays out of the terminal (display isolation) AND it is
-        safe to run several concurrently. Which streams sub-agent calls under 
+        safe to run several concurrently. Which streams sub-agent calls under
         the hood and merely drops the delta events. ``progress(label)`` is an optional
         callback invoked per tool call so a caller can drive a live "N tool calls…" line.
 
@@ -1361,7 +1404,9 @@ class LangGraphAgent:
         # shared spinner (on_llm_new_token/on_tool_start → spinner.stop), so a
         # quiet stream would tear down the batch's "N running…" toolbar and race
         # sibling sub-agents. Empty config keeps the sub-agent's stream silent.
-        config = {} if quiet else ({"callbacks": self.callbacks} if self.callbacks else {})
+        config = (
+            {} if quiet else ({"callbacks": self.callbacks} if self.callbacks else {})
+        )
         tool_calls_made = 0
         progress_ledger = task_continuation.ProgressLedger()
         progress_start = _seed_len
@@ -1378,18 +1423,28 @@ class LangGraphAgent:
 
         def outgoing_messages():
             messages = request_messages()
-            return worker_task.apply(messages) if getattr(self, "_auto_continue_tasks", False) else messages
+            return (
+                worker_task.apply(messages)
+                if getattr(self, "_auto_continue_tasks", False)
+                else messages
+            )
 
         def compact_worker_context(force):
             try:
                 return task_continuation.compact_worker(
-                    getattr(self, "_worker_compact_provider", None), request_messages(),
+                    getattr(self, "_worker_compact_provider", None),
+                    request_messages(),
                     force=force,
-                    cancelled=lambda: self._cancelled() or (activity is not None and activity.is_cancelled()),
+                    cancelled=lambda: self._cancelled()
+                    or (activity is not None and activity.is_cancelled()),
                     timeout=getattr(self, "_stream_first_token_timeout", 600) or 600,
                 )
             except KeyboardInterrupt:
-                if activity is not None and activity.is_cancelled() and not self._cancelled():
+                if (
+                    activity is not None
+                    and activity.is_cancelled()
+                    and not self._cancelled()
+                ):
                     return None  # the worker's stop must not cancel its parent
                 raise
             except Exception:
@@ -1437,18 +1492,31 @@ class LangGraphAgent:
                 stream_options = {"model": worker_model, "quiet": quiet}
                 if activity is not None:
                     stream_options["stop_requested"] = activity.is_cancelled
-                response, _ = self._stream_response(outgoing_messages(), config, **stream_options)
+                response, _ = self._stream_response(
+                    outgoing_messages(), config, **stream_options
+                )
             except KeyboardInterrupt:
-                if activity is not None and activity.is_cancelled() and not self._cancelled():
+                if (
+                    activity is not None
+                    and activity.is_cancelled()
+                    and not self._cancelled()
+                ):
                     # Stopping one worker must not interrupt its parent turn.
                     if not quiet:
                         self._stop_spinner()
                     partial = self._last_visible_from(worker_messages)
                     note = "(Worker stopped; preceding results are partial.)"
-                    return (f"{partial}\n\n{note}" if partial else note, worker_messages[_seed_len:])
+                    return (
+                        f"{partial}\n\n{note}" if partial else note,
+                        worker_messages[_seed_len:],
+                    )
                 raise
             except _ContextOverflow as overflow:
-                if getattr(self, "_auto_continue_tasks", False) and review_budget is None and not overflow_retried:
+                if (
+                    getattr(self, "_auto_continue_tasks", False)
+                    and review_budget is None
+                    and not overflow_retried
+                ):
                     fresh = compact_worker_context(True)
                     if fresh is not None:
                         compacted_context = (fresh, len(worker_messages))
@@ -1476,11 +1544,14 @@ class LangGraphAgent:
             if response is None:
                 self._record_usage(None, model=worker_model)
                 if review_budget is not None:
-                    raise ReviewStopped("Sub-agent returned no usable response within supervision")
+                    raise ReviewStopped(
+                        "Sub-agent returned no usable response within supervision"
+                    )
                 # Fallback invoke bypasses _stream_response, so scrub here too.
                 response = self._invoke_accounted(
                     worker_model,
-                    self._strip_malformed_reasoning(outgoing_messages()), config=config
+                    self._strip_malformed_reasoning(outgoing_messages()),
+                    config=config,
                 )
             else:
                 # Private worker usage must never replace the parent's context size.
@@ -1543,9 +1614,13 @@ class LangGraphAgent:
         saveable = worker_messages[_seed_len:]  # exclude system + injected history
         # Salvage the last visible output and flag the step as truncated.
         partial = self._last_visible_from(worker_messages)
-        truncated_note = worker_guard.stopped_message() if worker_guard.exhausted else (
-            f"(Step stopped after {max_iterations} tool iterations without "
-            "finishing.)"
+        truncated_note = (
+            worker_guard.stopped_message()
+            if worker_guard.exhausted
+            else (
+                f"(Step stopped after {max_iterations} tool iterations without "
+                "finishing.)"
+            )
         )
         result = task_continuation.IncompleteResult(
             f"{partial}\n\n{truncated_note}" if partial else truncated_note
@@ -1683,7 +1758,9 @@ class LangGraphAgent:
             if rebuilt is not None:
                 messages = rebuilt
                 try:
-                    response, _ = self._stream_response(messages, config, mark_answer=True)
+                    response, _ = self._stream_response(
+                        messages, config, mark_answer=True
+                    )
                     if response is None:
                         self._record_usage(None)
                 except _ContextOverflow:
@@ -1692,8 +1769,7 @@ class LangGraphAgent:
         if response is None:
             # Fallback invoke bypasses _stream_response's reasoning scrub.
             response = self._invoke_accounted(
-                self.model,
-                self._strip_malformed_reasoning(messages), config=config
+                self.model, self._strip_malformed_reasoning(messages), config=config
             )
         else:
             self._record_usage(response)
@@ -1739,7 +1815,9 @@ class LangGraphAgent:
         block (thinking-only scrub, no tool-pair repair)."""
         return message_sanitizer.strip_malformed_reasoning(messages)
 
-    def _capture_input_tokens(self, response: Any, *, record_usage: bool = True) -> None:
+    def _capture_input_tokens(
+        self, response: Any, *, record_usage: bool = True
+    ) -> None:
         """Record the provider's exact prompt-token count from a response's
         ``usage_metadata`` (LangChain normalizes it across Anthropic/OpenAI/
         Bedrock). This is ground truth for the current context size — far more
@@ -1774,21 +1852,29 @@ class LangGraphAgent:
         tracker = getattr(self, "usage", None)
         if tracker is None:
             return  # bare test stub built via __new__
-        tracker.record(response, usage_tracker.model_name(
-            model, getattr(self, "usage_model_name", "") or "",
-        ))
+        tracker.record(
+            response,
+            usage_tracker.model_name(
+                model,
+                getattr(self, "usage_model_name", "") or "",
+            ),
+        )
 
     def _invoke_accounted(self, model, messages, config=None, cancel_event=None):
         """Record exactly one non-streamed attempt, including failed requests."""
         record = usage_tracker.recorder(
-            getattr(self, "usage", None), model, getattr(self, "usage_model_name", ""),
+            getattr(self, "usage", None),
+            model,
+            getattr(self, "usage_model_name", ""),
         )
         response = None
         attempted = False
+
         def invoke():
             nonlocal attempted
             attempted = True
             return model.invoke(messages, config=config or {})
+
         try:
             response = stream_policy.cancellable_call(invoke, cancel_event)
             return response
@@ -1856,15 +1942,21 @@ class LangGraphAgent:
         except _ContextOverflow as overflow:
             self._last_input_tokens = None
             if supervised_turn.budget_for(self) is not None:
-                raise ReviewStopped("Correction exceeded the model context; compact before retrying") from overflow
+                raise ReviewStopped(
+                    "Correction exceeded the model context; compact before retrying"
+                ) from overflow
             # The prompt exceeded the context window. Compact history and retry
             # ONCE on the shrunken prompt so the in-flight task continues instead
             # of dead-ending. If it still overflows (or nothing could be
             # compacted), surface a terminal message rather than loop.
             turn_log = getattr(self, "_task_turn_log", None)
-            if turn_log is not None and callable(getattr(self, "_compact_provider", None)):
+            if turn_log is not None and callable(
+                getattr(self, "_compact_provider", None)
+            ):
                 rebuilt = self._checkpoint_context(state, turn_log, force=True)
-                if sum(len(str(m.content)) for m in rebuilt) >= sum(len(str(m.content)) for m in messages):
+                if sum(len(str(m.content)) for m in rebuilt) >= sum(
+                    len(str(m.content)) for m in messages
+                ):
                     rebuilt = None
             else:
                 rebuilt = self._compact_and_rebuild(messages)
@@ -1933,7 +2025,9 @@ class LangGraphAgent:
             # then re-runs on a fresh connection). Tailor the wording per family.
             self._stop_spinner()
             if supervised_turn.budget_for(self) is not None:
-                raise ReviewStopped(f"Chat model correction failed ({type(e).__name__})") from e
+                raise ReviewStopped(
+                    f"Chat model correction failed ({type(e).__name__})"
+                ) from e
             self._last_turn_stopped = True
             if isinstance(e, _StreamIdleTimeout) or self._is_transient_network_error(e):
                 # The line names the CAUSE (the prose below can't — it's the turn's
@@ -1983,7 +2077,9 @@ class LangGraphAgent:
             self._last_input_tokens = None
             self._record_usage(None)
             if supervised_turn.budget_for(self) is not None:
-                raise ReviewStopped("Chat model returned no correction or counterevidence")
+                raise ReviewStopped(
+                    "Chat model returned no correction or counterevidence"
+                )
             response = self._invoke_accounted(active_model, messages, config=config)
             self._capture_input_tokens(response, record_usage=False)
         else:
@@ -1996,8 +2092,12 @@ class LangGraphAgent:
         # authoritative non-streaming invoke to get definitive content + metadata.
         if not visible and not response.tool_calls:
             if supervised_turn.budget_for(self) is not None:
-                raise ReviewStopped("Chat model returned no visible correction or counterevidence")
-            authoritative = self._invoke_accounted(active_model, messages, config=config)
+                raise ReviewStopped(
+                    "Chat model returned no visible correction or counterevidence"
+                )
+            authoritative = self._invoke_accounted(
+                active_model, messages, config=config
+            )
             self._capture_input_tokens(authoritative, record_usage=False)
             if authoritative is not None:
                 response = authoritative
@@ -2265,7 +2365,9 @@ class LangGraphAgent:
         """
         active_model = model or self.model_with_tools
         record_discarded = usage_tracker.recorder(
-            getattr(self, "usage", None), active_model, getattr(self, "usage_model_name", ""),
+            getattr(self, "usage", None),
+            active_model,
+            getattr(self, "usage_model_name", ""),
         )
         # Provider-agnostic egress guard: repair any invalid reasoning block before
         # it's re-fed (see message_sanitizer.strip_malformed_reasoning). This is
@@ -2282,14 +2384,24 @@ class LangGraphAgent:
             try:
                 request_messages = (
                     subagent_runner.with_background_status(
-                        self, task_continuation.task_messages(self, messages),
+                        self,
+                        task_continuation.task_messages(self, messages),
                     )
-                    if mark_answer and not quiet else messages
+                    if mark_answer and not quiet
+                    else messages
                 )
                 response, had_reasoning = self._stream_once(
-                    active_model, request_messages, config, print_reasoning, mark_answer,
+                    active_model,
+                    request_messages,
+                    config,
+                    print_reasoning,
+                    mark_answer,
                     quiet=quiet,
-                    **({"stop_requested": stop_requested} if stop_requested is not None else {}),
+                    **(
+                        {"stop_requested": stop_requested}
+                        if stop_requested is not None
+                        else {}
+                    ),
                 )
             except ReviewStopped:
                 raise
@@ -2310,7 +2422,10 @@ class LangGraphAgent:
                 logger.warning(
                     "Stream connection failed (%s); retrying turn on a fresh "
                     "connection in %.1fs (attempt %d/%d)",
-                    e, delay, attempt + 1, attempts,
+                    e,
+                    delay,
+                    attempt + 1,
+                    attempts,
                 )
                 # Abortable backoff: wait ON the cancel event, not time.sleep — so
                 # Esc/Ctrl+C wakes it INSTANTLY (an async KeyboardInterrupt can't
@@ -2319,8 +2434,12 @@ class LangGraphAgent:
                 remaining = delay
                 while True:
                     if stop_requested is not None and stop_requested():
-                        raise KeyboardInterrupt("sub-agent stopped during retry backoff")
-                    interval = min(remaining, 0.1) if stop_requested is not None else remaining
+                        raise KeyboardInterrupt(
+                            "sub-agent stopped during retry backoff"
+                        )
+                    interval = (
+                        min(remaining, 0.1) if stop_requested is not None else remaining
+                    )
                     if self._sleep_or_cancel(interval):
                         raise KeyboardInterrupt("cancelled during retry backoff")
                     remaining -= interval
@@ -2336,7 +2455,9 @@ class LangGraphAgent:
                 raise KeyboardInterrupt("cancelled before accepting the model response")
             if not self._is_empty_response(response) or attempt == attempts - 1:
                 return response, had_reasoning
-            record_discarded(response)  # only discarded attempts; caller records the final response
+            record_discarded(
+                response
+            )  # only discarded attempts; caller records the final response
             logger.debug(
                 "Empty model response (attempt %d/%d); retrying",
                 attempt + 1,
@@ -2444,7 +2565,9 @@ class LangGraphAgent:
         llm = config.get("LLM", {})
         return stream_policy.call_with_transient_retry(
             lambda: self._invoke_accounted(
-                model, messages, config={"callbacks": []},
+                model,
+                messages,
+                config={"callbacks": []},
                 cancel_event=getattr(self, "_cancel_event", None),
             ),
             attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),
@@ -2463,7 +2586,9 @@ class LangGraphAgent:
         if budget is not None:
             budget.check()
             delay = min(delay, budget.remaining())
-        cancelled = stream_policy.sleep_or_cancel(getattr(self, "_cancel_event", None), delay)
+        cancelled = stream_policy.sleep_or_cancel(
+            getattr(self, "_cancel_event", None), delay
+        )
         if budget is not None:
             budget.check()
         return cancelled
@@ -2490,7 +2615,9 @@ class LangGraphAgent:
             return False
         return True
 
-    def _iter_stream_with_idle_timeout(self, active_model, messages, config, stop_requested=None):
+    def _iter_stream_with_idle_timeout(
+        self, active_model, messages, config, stop_requested=None
+    ):
         """Yield stream chunks, but raise :class:`_StreamIdleTimeout` if no chunk
         arrives within ``self._stream_idle_timeout`` seconds.
 
@@ -2512,11 +2639,22 @@ class LangGraphAgent:
         review_budget = supervised_turn.budget_for(self)
         if review_budget is not None:
             review_budget.check()
-            idle = min(idle, review_budget.remaining()) if idle > 0 else review_budget.remaining()
-        def cancelled():
-            return self._cancelled() or (stop_requested is not None and stop_requested())
+            idle = (
+                min(idle, review_budget.remaining())
+                if idle > 0
+                else review_budget.remaining()
+            )
 
-        if idle <= 0 and stop_requested is None and getattr(self, "_cancel_event", None) is None:
+        def cancelled():
+            return self._cancelled() or (
+                stop_requested is not None and stop_requested()
+            )
+
+        if (
+            idle <= 0
+            and stop_requested is None
+            and getattr(self, "_cancel_event", None) is None
+        ):
             messages = refresh_playbook_messages(
                 messages, getattr(self, "_playbook_context_provider", None)
             )
@@ -2584,7 +2722,11 @@ class LangGraphAgent:
                         f"{budget:.0f}s (connection likely dropped)"
                     )
                 try:
-                    wait = min(poll, review_budget.remaining()) if review_budget is not None else poll
+                    wait = (
+                        min(poll, review_budget.remaining())
+                        if review_budget is not None
+                        else poll
+                    )
                     item, chunk = q.get(timeout=max(0.001, wait))
                 except queue.Empty:
                     continue
@@ -2600,7 +2742,9 @@ class LangGraphAgent:
                 fresh = started or stream_policy.chunk_has_payload(chunk)
                 if fresh:
                     if not started:
-                        logger.info("First model payload received", extra={"console": False})
+                        logger.info(
+                            "First model payload received", extra={"console": False}
+                        )
                     started, budget = True, idle
                 yield chunk
                 if fresh:
@@ -2610,7 +2754,9 @@ class LangGraphAgent:
         finally:
             abandoned.set()
 
-    def _stream_once_quiet(self, active_model, messages: list, config: dict, stop_requested=None) -> tuple:
+    def _stream_once_quiet(
+        self, active_model, messages: list, config: dict, stop_requested=None
+    ) -> tuple:
         """Stream a turn SILENTLY, accumulating the response with no display.
 
         Used by quiet (spawned) sub-agents: it drives the same idle-timeout stream
@@ -2622,8 +2768,14 @@ class LangGraphAgent:
         response = None
         try:
             for chunk in self._iter_stream_with_idle_timeout(
-                active_model, messages, config,
-                **({"stop_requested": stop_requested} if stop_requested is not None else {}),
+                active_model,
+                messages,
+                config,
+                **(
+                    {"stop_requested": stop_requested}
+                    if stop_requested is not None
+                    else {}
+                ),
             ):
                 response = chunk if response is None else response + chunk
         except Exception as e:
@@ -2653,8 +2805,14 @@ class LangGraphAgent:
         """
         if quiet:
             return self._stream_once_quiet(
-                active_model, messages, config,
-                **({"stop_requested": stop_requested} if stop_requested is not None else {}),
+                active_model,
+                messages,
+                config,
+                **(
+                    {"stop_requested": stop_requested}
+                    if stop_requested is not None
+                    else {}
+                ),
             )
         self._code_formatter = CodeFormatter()
         first_token = True
@@ -2671,8 +2829,14 @@ class LangGraphAgent:
 
         try:
             for chunk in self._iter_stream_with_idle_timeout(
-                active_model, messages, config,
-                **({"stop_requested": stop_requested} if stop_requested is not None else {}),
+                active_model,
+                messages,
+                config,
+                **(
+                    {"stop_requested": stop_requested}
+                    if stop_requested is not None
+                    else {}
+                ),
             ):
                 chunk_content, reasoning_content = self._extract_content(chunk)
 
@@ -2680,7 +2844,9 @@ class LangGraphAgent:
                 # buffers reasoning (nothing shows until the answer), so reasoning
                 # there must keep the spinner running — else a dead pause.
                 will_show_reasoning = bool(
-                    reasoning_content and self.verbose and print_reasoning
+                    reasoning_content
+                    and self.verbose
+                    and print_reasoning
                     and not styled
                 )
                 if (
@@ -2702,9 +2868,7 @@ class LangGraphAgent:
                         if sink is not None:
                             sink.append(reasoning_content)
                     else:
-                        print(
-                            f"\033[90m{reasoning_content}\033[0m", end="", flush=True
-                        )
+                        print(f"\033[90m{reasoning_content}\033[0m", end="", flush=True)
                     had_reasoning = True
 
                 # Tool-arg chunks carry no visible content — a long silent stretch
@@ -3031,8 +3195,12 @@ class LangGraphAgent:
             plan_active=self._plan_mode_provider(),
             readonly_hint=any(
                 t.name == tool_name
-                and getattr(getattr(getattr(t, "mcp_tool", None), "annotations", None),
-                            "readOnlyHint", False) is True
+                and getattr(
+                    getattr(getattr(t, "mcp_tool", None), "annotations", None),
+                    "readOnlyHint",
+                    False,
+                )
+                is True
                 for t in getattr(self, "tools", [])
             ),
         )
@@ -3091,6 +3259,12 @@ class LangGraphAgent:
             except Exception as e:
                 logger.error(f"exit_plan_mode approval provider failed: {e}")
                 return "Blocked: the approved plan could not be applied. Plan permissions were not granted."
+        if getattr(self, "_plan_mode_provider", lambda: False)():
+            return (
+                "Blocked: plan mode is still ON. The approval transition did not take effect, "
+                "so no execution permissions were granted. Present the plan and explain that "
+                "user approval is still needed. Do not execute it or repeat this approval request."
+            )
         # Pin the full toolset for the execution turns: routing must not narrow
         # tools now that the model may edit/run anything to carry out the plan.
         self._execute_plan_route = True
@@ -3123,13 +3297,21 @@ class LangGraphAgent:
         return subagent_runner.run_spawn_batch(self, tool_calls)
 
     def _handle_spawn_agent(
-        self, agent_type: str, prompt: str, description: str = "",
-        in_batch: bool = False, run_in_background: bool = False,
+        self,
+        agent_type: str,
+        prompt: str,
+        description: str = "",
+        in_batch: bool = False,
+        run_in_background: bool = False,
     ) -> str:
         """Delegates to :func:`subagent_runner.handle_spawn_agent`."""
         return subagent_runner.handle_spawn_agent(
-            self, agent_type, prompt, description,
-            in_batch=in_batch, run_in_background=run_in_background,
+            self,
+            agent_type,
+            prompt,
+            description,
+            in_batch=in_batch,
+            run_in_background=run_in_background,
         )
 
     @staticmethod
@@ -3174,7 +3356,11 @@ class LangGraphAgent:
         return subagent_runner.subagent_base_model(self, agent)
 
     def _run_one_subagent(
-        self, agent, prompt: str, label: str, drive_spinner: bool = True,
+        self,
+        agent,
+        prompt: str,
+        label: str,
+        drive_spinner: bool = True,
         kind: str = "spawn",
     ) -> str:
         """Delegates to :func:`subagent_runner.run_one_subagent` (``agent`` here
@@ -3211,7 +3397,9 @@ class LangGraphAgent:
             spawn_results=spawn_results,
             log_label=log_label,
             strict_tools=strict_tools,
-            guard=guard if guard is not None else getattr(self, "_tool_loop_guard", None),
+            guard=(
+                guard if guard is not None else getattr(self, "_tool_loop_guard", None)
+            ),
         )
 
     def _run_hooks(
@@ -3333,8 +3521,14 @@ class LangGraphAgent:
         else:
             return None
         return ToolMessage(
-            content=content, tool_call_id=tool_id, name=tool_name,
-            status="error" if isinstance(content, task_continuation.IncompleteResult) else "success",
+            content=content,
+            tool_call_id=tool_id,
+            name=tool_name,
+            status=(
+                "error"
+                if isinstance(content, task_continuation.IncompleteResult)
+                else "success"
+            ),
         )
 
     def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
@@ -3360,12 +3554,19 @@ class LangGraphAgent:
         review_budget = supervised_turn.budget_for(self)
         guard = getattr(self, "_tool_loop_guard", None)
         spawn_calls = [
-            call for call in last_message.tool_calls
-            if guard is None or (
-                not guard.exhausted and not guard.repeated(call["name"], self._normalize_tool_args(call["args"]))
+            call
+            for call in last_message.tool_calls
+            if guard is None
+            or (
+                not guard.exhausted
+                and not guard.repeated(
+                    call["name"], self._normalize_tool_args(call["args"])
+                )
             )
         ]
-        spawn_results = {} if review_budget is not None else self._run_spawn_batch(spawn_calls)
+        spawn_results = (
+            {} if review_budget is not None else self._run_spawn_batch(spawn_calls)
+        )
 
         tool_results: List[BaseMessage] = []
         try:
@@ -3378,10 +3579,12 @@ class LangGraphAgent:
             if guard is not None and guard.exhausted:
                 self._last_turn_stopped = True
                 self._answer_displayed = False
-                tool_results.extend([
-                    AIMessage(content=turn_failure.STEP_LIMIT_MARKER),
-                    AIMessage(content=guard.stopped_message()),
-                ])
+                tool_results.extend(
+                    [
+                        AIMessage(content=turn_failure.STEP_LIMIT_MARKER),
+                        AIMessage(content=guard.stopped_message()),
+                    ]
+                )
                 return {"messages": tool_results}
             self._start_spinner()
             # All tool replies precede mid-turn guidance; providers require
@@ -3393,7 +3596,9 @@ class LangGraphAgent:
             tool_results.extend(mid_turn.drain(self))
             work_review = getattr(self, "_work_review", None)
             if work_review is not None:
-                tool_results.extend(work_review.after_batch(list(state["messages"]) + tool_results))
+                tool_results.extend(
+                    work_review.after_batch(list(state["messages"]) + tool_results)
+                )
                 tool_results.extend(mid_turn.drain(self))
             return {"messages": tool_results}
         except BaseException:
@@ -3402,7 +3607,7 @@ class LangGraphAgent:
             raise
 
     def _should_continue(self, state: AgentState) -> str:
-        """"continue" if the last AI message has tool calls, "deliver" if the turn
+        """ "continue" if the last AI message has tool calls, "deliver" if the turn
         still owes the user a mid-turn message, else "end".
 
         A cancelled turn ends immediately even with pending tool calls — else the
@@ -3426,7 +3631,8 @@ class LangGraphAgent:
         task = getattr(self, "_task_context", None)
         if (
             getattr(self, "_auto_continue_tasks", False)
-            and task is not None and task.needs_follow_through
+            and task is not None
+            and task.needs_follow_through
             and supervised_turn.budget_for(self) is None
         ):
             return "deliver"
@@ -3445,9 +3651,13 @@ class LangGraphAgent:
 
     def invoke(self, prompt: str, *, request: str = None) -> str:
         """Run one task with instructions that survive its execution checkpoints."""
-        context = prompt[:-len(request)] if request and prompt.endswith(request) else ""
+        context = (
+            prompt[: -len(request)] if request and prompt.endswith(request) else ""
+        )
         self._task_context = task_continuation.TaskContext(
-            prompt if request is None else request, context=context, explicit_request=request is not None,
+            prompt if request is None else request,
+            context=context,
+            explicit_request=request is not None,
         )
         self._task_progress = task_continuation.ProgressLedger()
         self._tool_loop_guard = tool_progress.ToolProgressGuard()
@@ -3464,10 +3674,13 @@ class LangGraphAgent:
             # Preflight compaction occurs before the graph's error handler.
             # It must not leave accepted user input absent from the transcript.
             if not self._task_logged and self._task_turn_log:
-                marker = AIMessage(content=(
-                    INTERRUPTED_MARKER if isinstance(error, KeyboardInterrupt)
-                    else turn_failure.failure_marker(error)
-                ))
+                marker = AIMessage(
+                    content=(
+                        INTERRUPTED_MARKER
+                        if isinstance(error, KeyboardInterrupt)
+                        else turn_failure.failure_marker(error)
+                    )
+                )
                 self._messages.append(marker)
                 self._task_turn_log.append(marker)
                 self._log_turn(self._task_turn_log)
@@ -3531,7 +3744,11 @@ class LangGraphAgent:
         self._interrupted_node_state = None
 
         task = getattr(self, "_task_context", None)
-        stored_prompt = task.request if task is not None and task.explicit_request else self._strip_ephemeral(prompt)
+        stored_prompt = (
+            task.request
+            if task is not None and task.explicit_request
+            else self._strip_ephemeral(prompt)
+        )
         # What the change index quotes as the cause of this turn's edits: the
         # prompt as STORED, so a tool call fired from a sub-agent or a parallel
         # wave still names the request the user actually made.
@@ -3553,10 +3770,10 @@ class LangGraphAgent:
         if callable(begin_turn):
             begin_turn(turn_log)
 
-        # Pre-flight compaction: shrink the accumulated history before it seeds this 
-        # turn's graph run if it's over the high-water mark. The client provider owns 
-        # the token-budget check and summarizes older turns into the system prompt. 
-        # In-turn growth is bounded by the per-result cap (_truncate_tool_result) and 
+        # Pre-flight compaction: shrink the accumulated history before it seeds this
+        # turn's graph run if it's over the high-water mark. The client provider owns
+        # the token-budget check and summarizes older turns into the system prompt.
+        # In-turn growth is bounded by the per-result cap (_truncate_tool_result) and
         # the overflow backstop.
         compact = getattr(self, "_compact_provider", None)
         if compact is not None:
@@ -3569,11 +3786,19 @@ class LangGraphAgent:
             model_messages = list(self._messages)
         else:
             task = getattr(self, "_task_context", None)
-            model_prompt = stored_prompt if task is not None and task.context else prompt
-            model_messages = self._messages[:-1] + [HumanMessage(
-                content=model_prompt,
-                additional_kwargs={"mnemoai_user_input": True} if task is not None and task.explicit_request else {},
-            )]
+            model_prompt = (
+                stored_prompt if task is not None and task.context else prompt
+            )
+            model_messages = self._messages[:-1] + [
+                HumanMessage(
+                    content=model_prompt,
+                    additional_kwargs=(
+                        {"mnemoai_user_input": True}
+                        if task is not None and task.explicit_request
+                        else {}
+                    ),
+                )
+            ]
         initial_state: AgentState = {
             "messages": model_messages,
             "thinking": None,
@@ -3585,7 +3810,9 @@ class LangGraphAgent:
             initial_state["messages"] = [self._system_message()] + list(
                 initial_state["messages"]
             )
-        initial_state["messages"] = task_continuation.task_messages(self, initial_state["messages"])
+        initial_state["messages"] = task_continuation.task_messages(
+            self, initial_state["messages"]
+        )
 
         # Where this turn's own messages begin. The graph state only ever grows
         # (operator.add), so this index is what lets a mid-turn compaction reach
@@ -3616,8 +3843,12 @@ class LangGraphAgent:
             work_review = getattr(self, "_work_review", None)
             if work_review is not None:
                 result = initial_state  # preserve strategy/guidance if interrupted before graph execution
-                preparation_steps = work_review.prepare(initial_state, self.recursion_limit)
-                run_config["recursion_limit"] = max(1, self.recursion_limit - preparation_steps)
+                preparation_steps = work_review.prepare(
+                    initial_state, self.recursion_limit
+                )
+                run_config["recursion_limit"] = max(
+                    1, self.recursion_limit - preparation_steps
+                )
             if streamer is None:
                 result = self.graph.invoke(initial_state, config=run_config)
                 steps_used = 1
@@ -3626,7 +3857,9 @@ class LangGraphAgent:
                 while True:
                     steps_used = 0
                     try:
-                        for snapshot in streamer(segment, config=run_config, stream_mode="values"):
+                        for snapshot in streamer(
+                            segment, config=run_config, stream_mode="values"
+                        ):
                             result = snapshot
                             steps_used += 1
                         steps_used = max(0, steps_used - 1)
@@ -3635,7 +3868,8 @@ class LangGraphAgent:
                         if (
                             getattr(self, "_auto_continue_tasks", False)
                             and self.graph is getattr(self, "_checkpoint_graph", None)
-                            and getattr(self, "_last_graph_node", None) in {"agent", "orchestrator"}
+                            and getattr(self, "_last_graph_node", None)
+                            in {"agent", "orchestrator"}
                             and not self._cancelled()
                             and self._next_checkpoint_node(result) is None
                         ):
@@ -3643,14 +3877,22 @@ class LangGraphAgent:
                             # that produced the final answer. Nothing is pending.
                             steps_used = max(0, steps_used - 1)
                             break
-                        segment = self._continue_checkpoint(result, turn_log) if result else None
+                        segment = (
+                            self._continue_checkpoint(result, turn_log)
+                            if result
+                            else None
+                        )
                         if segment is None:
                             raise
                         run_config = {"recursion_limit": self.recursion_limit}
                         preparation_steps = 0
             steps_used += preparation_steps
             supervisor = getattr(self, "_completion_supervisor", None)
-            if supervisor is not None and result is not None and not self._last_turn_stopped:
+            if (
+                supervisor is not None
+                and result is not None
+                and not self._last_turn_stopped
+            ):
                 if self._cancelled():
                     raise KeyboardInterrupt
                 supervisor(result, max(0, self.recursion_limit - steps_used))
@@ -3827,11 +4069,14 @@ class LangGraphAgent:
         ]
         new_messages: List[BaseMessage] = []
         for m in produced:
-            if isinstance(m, HumanMessage) and m.additional_kwargs.get("mnemoai_control"):
+            if isinstance(m, HumanMessage) and m.additional_kwargs.get(
+                "mnemoai_control"
+            ):
                 continue
             if isinstance(m, (SystemMessage, HumanMessage)):
                 if isinstance(m, HumanMessage) and (
-                    is_feedback(m.content) or m.additional_kwargs.get("mnemoai_background_report")
+                    is_feedback(m.content)
+                    or m.additional_kwargs.get("mnemoai_background_report")
                 ):
                     if m not in self._messages:
                         new_messages.append(m)

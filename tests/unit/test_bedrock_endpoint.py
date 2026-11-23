@@ -405,7 +405,9 @@ class TestStandardBedrockEndpoint:
             def __init__(self, **kw):
                 captured.update(kw)
 
-        monkeypatch.setattr(mod, "ChatOllamaWrapper", _FakeOllama)
+        monkeypatch.setattr(
+            "mnemoai.models.chat_models.chat_ollama_wrapper.ChatOllamaWrapper", _FakeOllama
+        )
 
         def fake_get(key, default=None):
             if key == "MODEL_ID":

@@ -176,7 +176,7 @@ The episodic memory system learns from successful task completions and retrieves
 - ChromaDB: `~/.mnemoai/{profile}/models/{model}/episodic_memory/`
 
 For the full config reference (all thresholds, hybrid search weights, and
-cleanup limits) see [Episodic Memory Configuration](../configuration.md#episodic-memory-configuration).
+cleanup limits) see [Episodic Memory Configuration](../configuration/episodic-memory.md#episodic-memory-configuration).
 
 ## ACE Playbook (Agentic Context Engineering)
 

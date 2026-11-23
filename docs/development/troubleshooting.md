@@ -7,7 +7,7 @@ Diagnose the failures you're most likely to hit, by symptom.
 its endpoint answers, whether `rg`/`git`/`bash` are on `PATH`, how many MCP tools
 came up and whether every declared server connected, and whether an enabled
 feature is missing its dependency. Most of the sections below start with a check
-it already performed for you ([details](../guides/usage.md#checking-your-install)).
+it already performed for you ([details](../resources/diagnostics.md#checking-your-install)).
 
 | Symptom                                                     | Go to                                                                             |
 | ----------------------------------------------------------- | --------------------------------------------------------------------------------- |
@@ -23,12 +23,14 @@ it already performed for you ([details](../guides/usage.md#checking-your-install
 
 ## The assistant starts but has no tools
 
-The MCP server runs as a subprocess (`python -m mnemoai.server.server`). If it
-fails to start, the client still comes up — but the model has nothing to call.
+Built-in tools run over in-memory MCP. If their initialization fails, startup
+fails rather than presenting a working prompt without essential tools. External
+MCP servers retain their separate processes.
 
-1. Run with `LOG_LEVEL=DEBUG mnemoai` and look for the server's stderr.
-2. Check the MCP transport log at `~/.mnemoai/logs/mcp.log`, which captures the
-   subprocess's own output across runs.
+1. Run with `LOG_LEVEL=DEBUG mnemoai` and check `~/.mnemoai/logs/mnemoai.log`
+   for built-in initialization errors.
+2. For external servers, check `~/.mnemoai/logs/mcp.log`, which captures their
+   subprocess output across runs.
 3. Confirm the interpreter running `mnemoai` can import the package:
    `python -c "import mnemoai; print(mnemoai.__file__)"`. A mismatch here is the
    usual cause when the app was installed into one environment and launched from
@@ -111,7 +113,7 @@ Tool execution error: 'glob_search' did not respond within 300s. The call was no
 
 The number is `LLM.MCP_CALL_TIMEOUT`, and the tool named in the message is
 usually the **victim**, not the cause — especially when its real work takes
-milliseconds. The MCP server is one subprocess with one event loop, so a tool
+milliseconds. Each MCP server connection has one event loop, so a tool
 whose body blocks that loop holds up every other agent's call behind it until
 their timeouts fire. Expect it in bursts, while several agents are working in
 parallel.
@@ -385,8 +387,8 @@ LOG_LEVEL=INFO mnemoai   # lifecycle events
 mnemoai                  # warnings and errors only, one line each
 ```
 
-The MCP subprocess writes separately to `~/.mnemoai/logs/mcp.log`, which is the
-right place to look when startup fails before the prompt appears.
+External MCP subprocesses write separately to `~/.mnemoai/logs/mcp.log`.
+Built-in tool and initialization failures are recorded in the application log.
 
 ## See also
 

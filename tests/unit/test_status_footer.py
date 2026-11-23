@@ -7,7 +7,9 @@ print survives — gated on one flag, in one place. These tests pin the gate, th
 single print site, and the wiring that sets the flag.
 """
 
+import ast
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 from mnemoai.client.client import LangGraphClient
@@ -51,22 +53,54 @@ class TestPrintContextSize:
 class TestSinglePrintSite:
     """Every path that reported the context size goes through the gate."""
 
-    def test_no_ungated_context_print_remains(self):
-        src = inspect.getsource(LangGraphClient)
-        printed = [
-            line for line in src.split("\n")
-            if "[Context:" in line and "print(" in line
-        ]
-        # Exactly one: the f-string inside _print_context_size itself.
-        assert len(printed) == 1, printed
-        assert printed[0] in inspect.getsource(
-            LangGraphClient._print_context_size
+    @staticmethod
+    def _methods():
+        module = ast.parse(Path(inspect.getfile(LangGraphClient)).read_text())
+        client = next(
+            node
+            for node in module.body
+            if isinstance(node, ast.ClassDef) and node.name == "LangGraphClient"
         )
+        return {
+            node.name: node for node in client.body if isinstance(node, ast.FunctionDef)
+        }
+
+    def test_no_ungated_context_print_remains(self):
+        methods = self._methods()
+        printed = [
+            node
+            for method in methods.values()
+            for node in ast.walk(method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "print"
+            and any(
+                isinstance(part, ast.Constant)
+                and isinstance(part.value, str)
+                and "[Context:" in part.value
+                for part in ast.walk(node)
+            )
+        ]
+        # Exactly one actual call, independent of formatting or line numbers.
+        assert len(printed) == 1, printed
+        assert printed[0] in ast.walk(methods["_print_context_size"])
 
     def test_turn_resume_and_load_all_use_it(self):
-        for name in ("query", "resume_session", "load_conversation", "restore_after_restart"):
-            src = inspect.getsource(getattr(LangGraphClient, name))
-            assert "_print_context_size()" in src, name
+        methods = self._methods()
+        for name in (
+            "query",
+            "resume_session",
+            "load_conversation",
+            "restore_after_restart",
+        ):
+            assert any(
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_print_context_size"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "self"
+                for node in ast.walk(methods[name])
+            ), name
 
 
 class TestResumeSaysNothingAboutTheSummary:

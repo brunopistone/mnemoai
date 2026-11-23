@@ -21,15 +21,13 @@ A local agentic AI assistant with MCP (Model Context Protocol) integration, RAG 
 
 Full documentation is available at **https://brunopistone.github.io/mnemoai/**
 
-- [Getting Started](https://brunopistone.github.io/mnemoai/getting-started/)
-- [Usage & commands](https://brunopistone.github.io/mnemoai/guides/usage/)
+- [Overview and quickstart](https://brunopistone.github.io/mnemoai/)
+- [Features](https://brunopistone.github.io/mnemoai/features/)
 - [Configuration](https://brunopistone.github.io/mnemoai/configuration/)
-- [Orchestration & sub-agents](https://brunopistone.github.io/mnemoai/guides/orchestration/)
-- [Memory & learning](https://brunopistone.github.io/mnemoai/guides/memory/)
-- [Supervisor peer review](https://brunopistone.github.io/mnemoai/guides/peer-review/)
-- [Everyday tools](https://brunopistone.github.io/mnemoai/guides/productivity-tools/)
-- [Architecture](https://brunopistone.github.io/mnemoai/getting-started/architecture/)
-- [Development](https://brunopistone.github.io/mnemoai/development/)
+- [Developers](https://brunopistone.github.io/mnemoai/development/)
+- [Security](https://brunopistone.github.io/mnemoai/security/)
+- [Use cases](https://brunopistone.github.io/mnemoai/use-cases/)
+- [Resources](https://brunopistone.github.io/mnemoai/resources/)
 
 ## 🚀 Quick Start
 
@@ -80,7 +78,7 @@ with the package manager/environment that installed them.
 
 ## ✨ Key Features
 
-- **🤖 Multi-Model Support**: Ollama (local), MLX (local, Apple Silicon), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), [Nebius Token Factory](https://brunopistone.github.io/mnemoai/configuration/#nebius-token-factory), Amazon SageMaker AI (chat only — no tool calling), LiteLLM (100+ providers)
+- **🤖 Multi-Model Support**: Ollama (local), MLX (local, Apple Silicon), Amazon Bedrock, Bedrock Mantle, OpenAI, Anthropic (Claude), [Nebius Token Factory](https://brunopistone.github.io/mnemoai/configuration/models/#nebius-token-factory), Amazon SageMaker AI (chat only — no tool calling), LiteLLM (100+ providers)
 - **🔧 MCP Tool System**: Extensible tool architecture via Model Context Protocol
 - **📚 RAG**: Automatic document indexing and semantic (hybrid) search
 - **🧠 User Profile Learning**: Personalized responses learned from interactions
@@ -93,10 +91,10 @@ with the package manager/environment that installed them.
 - **📋 Todo Tracking, 📝 Plan Mode & 🔄 Background Tasks**: Multi-step task management
 - **⚡ Bash Execution & 🛡️ Git Safety**: Shell commands with smart error handling and guardrails
 - **🪝 Tool Hooks**: Your own commands run before/after any tool call — format writes, deny paths, auto-approve safe commands ([docs](https://brunopistone.github.io/mnemoai/guides/hooks/))
-- **⌨️ Your Own Slash Commands**: A markdown file per prompt you retype — `commands/review.md` becomes `/review <path>` ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#your-own-slash-commands))
-- **📎 `@`-File Mentions**: Type `@` to complete a path anywhere in your prompt; the file is read and sent with the question ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#attaching-a-file-with))
-- **⟲ Take Back a Prompt**: `/rewind` drops your last prompt and everything the turn produced — the conversation only, files on disk untouched ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#taking-back-your-last-prompt))
-- **🗂️ Workspace Reports**: `/files` lists what the session read, changed or attached; `/diff` shows uncommitted changes with this session's edits marked; `/why <path>` names the prompt behind each change to a file, across sessions; `/copy` puts the last answer on the clipboard without the terminal's wrapping ([docs](https://brunopistone.github.io/mnemoai/guides/usage/#what-this-session-touched))
+- **⌨️ Your Own Slash Commands**: A markdown file per prompt you retype — `commands/review.md` becomes `/review <path>` ([docs](https://brunopistone.github.io/mnemoai/configuration/slash-commands/#your-own-slash-commands))
+- **📎 `@`-File Mentions**: Type `@` to complete a path anywhere in your prompt; the file is read and sent with the question ([docs](https://brunopistone.github.io/mnemoai/features/files/#attaching-a-file-with))
+- **⟲ Take Back a Prompt**: `/rewind` drops your last prompt and everything the turn produced — the conversation only, files on disk untouched ([docs](https://brunopistone.github.io/mnemoai/features/sessions/#taking-back-your-last-prompt))
+- **🗂️ Workspace Reports**: `/files` lists what the session read, changed or attached; `/diff` shows uncommitted changes with this session's edits marked; `/why <path>` names the prompt behind each change to a file, across sessions; `/copy` puts the last answer on the clipboard without the terminal's wrapping ([docs](https://brunopistone.github.io/mnemoai/features/changes/#what-this-session-touched))
 
 ## 📄 License
 

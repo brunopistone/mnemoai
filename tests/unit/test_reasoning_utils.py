@@ -1,8 +1,11 @@
 """Unit tests for reasoning model helpers (client/reasoning_utils.py)."""
 
+import pytest
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel
 
 from mnemoai.client.agent.reasoning_utils import (
+    disable_boolean_reasoning,
     disable_reasoning,
     extract_visible_text,
     restore_reasoning,
@@ -55,10 +58,14 @@ class FakeResponsesSummaryModel:
 
     def __init__(self, reasoning=None):
         self.use_responses_api = True
-        self.reasoning = reasoning if reasoning is not None else {
-            "effort": "high",
-            "summary": "auto",
-        }
+        self.reasoning = (
+            reasoning
+            if reasoning is not None
+            else {
+                "effort": "high",
+                "summary": "auto",
+            }
+        )
         self.reasoning_effort = None
 
 
@@ -79,6 +86,36 @@ class FakePlainModel:
 
 
 class TestDisableRestoreOllama:
+    def test_boolean_control_does_not_invent_an_effort_for_other_model_families(self):
+        class ObjectReasoningModel(BaseModel):
+            reasoning: dict | None = None
+            reasoning_effort: str | None = None
+            use_responses_api: bool = True
+
+        model = ObjectReasoningModel()
+        assert disable_boolean_reasoning(model) == {}
+        assert model.reasoning is None and model.reasoning_effort is None
+
+    @pytest.mark.parametrize("initial", [None, True, False, "high"])
+    def test_auxiliary_twin_explicitly_disables_provider_default_thinking(
+        self, initial
+    ):
+        model = ChatOllamaWrapper(model="unused", reasoning=initial)
+        peer = without_reasoning(model)
+        assert (
+            peer._chat_params([HumanMessage("Return a short answer")])["think"] is False
+        )
+        assert model.reasoning == initial
+
+    def test_unset_object_reasoning_is_not_replaced_with_a_boolean(self):
+        class ObjectReasoningModel(BaseModel):
+            reasoning: dict | None = None
+            use_responses_api: bool = False
+
+        model = ObjectReasoningModel()
+        assert without_reasoning(model).reasoning is None
+        assert model.reasoning is None
+
     def test_disables_then_restores_reasoning(self):
         model = FakeOllamaModel(reasoning=True)
         saved = disable_reasoning(model)

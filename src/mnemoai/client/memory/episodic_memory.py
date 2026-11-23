@@ -31,7 +31,7 @@ class EpisodicMemoryManager:
         if not embeddings_controller:
             raise ValueError("embeddings_controller is required for episodic memory")
 
-        self.encoder = tiktoken.encoding_for_model("gpt-4")  # For token counting
+        self._encoder = None
 
         # Load configuration
         self.config = config.get("EPISODIC_MEMORY", {})
@@ -54,6 +54,16 @@ class EpisodicMemoryManager:
             from mnemoai.client.memory.chroma_store import ChromaEpisodicStore
 
             self.store = ChromaEpisodicStore(persist_path, embeddings_controller)
+
+    @property
+    def encoder(self):
+        if self._encoder is None:
+            self._encoder = tiktoken.encoding_for_model("gpt-4")
+        return self._encoder
+
+    @encoder.setter
+    def encoder(self, value):
+        self._encoder = value
 
     def count_tokens(self, text: str) -> int:
         """Count tokens with model-specific approximation.
@@ -116,7 +126,8 @@ class EpisodicMemoryManager:
         # Check for near-duplicate episodes (configurable threshold)
         similar = self.store.search(query=task, top_k=1)
         if (
-            similar and similar[0].get("retrieval_method") != "bm25"
+            similar
+            and similar[0].get("retrieval_method") != "bm25"
             and similar[0].get("similarity", 0) > self.duplicate_threshold
         ):
             logger.debug(
@@ -254,8 +265,12 @@ def is_task_successful(
         if isinstance(msg, dict):
             if msg.get("role") == "tool" and is_error_result(msg.get("content")):
                 return False
-            for block in msg.get("content", []) if isinstance(msg.get("content"), list) else []:
-                if not isinstance(block, dict) or not isinstance(block.get("toolResult"), dict):
+            for block in (
+                msg.get("content", []) if isinstance(msg.get("content"), list) else []
+            ):
+                if not isinstance(block, dict) or not isinstance(
+                    block.get("toolResult"), dict
+                ):
                     continue
                 result = block["toolResult"]
                 if is_error_result(result):
