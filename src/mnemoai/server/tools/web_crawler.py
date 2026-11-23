@@ -1,15 +1,15 @@
 import json
 import sys
 from functools import partial
+from importlib import import_module
 
-import anyio.to_thread
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 
 from .safety import classify_url
+from .thread_offload import run_blocking
 
 
 def _rag_session():
@@ -24,6 +24,7 @@ def _rag_session():
         logger.debug("RAG module not available")
         return None
     return get_rag_session
+
 
 # crawl4ai drives a headless Chromium via Playwright. The browser binary is a
 # separate download that pip / `uv tool install` don't fetch, so the first
@@ -93,7 +94,7 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
         # Scheme + destination check. The fetched page becomes model input, so an
         # internal address (localhost, RFC1918, 169.254.169.254) must not be
         # reachable from a prompt. Resolves DNS before fetching.
-        url_verdict = await anyio.to_thread.run_sync(classify_url, url)
+        url_verdict = await run_blocking(classify_url, url)
         if url_verdict.blocked:
             logger.warning("web_crawler blocked url=%s: %s", url, url_verdict.reason)
             return json.dumps(
@@ -109,14 +110,17 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
             page_timeout_ms = int(web_crawl_cfg.get("PAGE_TIMEOUT_MS", 60000))
         except (AttributeError, TypeError, ValueError):
             page_timeout_ms = 60000
-        run_config = CrawlerRunConfig(page_timeout=page_timeout_ms)
 
         async def _crawl():
             """Configure quiet logging without changing another task's stdout."""
-            async with AsyncWebCrawler(config=BrowserConfig(verbose=False)) as crawler:
+            async with crawl4ai.AsyncWebCrawler(
+                config=crawl4ai.BrowserConfig(verbose=False)
+            ) as crawler:
                 return await crawler.arun(url=url, config=run_config)
 
         try:
+            crawl4ai = await run_blocking(import_module, "crawl4ai")
+            run_config = crawl4ai.CrawlerRunConfig(page_timeout=page_timeout_ms)
             global _browser_install_attempted
             try:
                 result = await _crawl()
@@ -129,14 +133,16 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                     # blocking call left inside a genuinely-async tool — run on
                     # the event loop it would freeze every other agent's tool
                     # call for minutes (see thread_offload).
-                    if await anyio.to_thread.run_sync(_install_playwright_chromium):
+                    if await run_blocking(_install_playwright_chromium):
                         result = await _crawl()
                     else:
-                        return json.dumps({
-                            "error": True,
-                            "message": "Web crawling needs the Playwright browser. "
-                            "Run: python -m playwright install chromium",
-                        })
+                        return json.dumps(
+                            {
+                                "error": True,
+                                "message": "Web crawling needs the Playwright browser. "
+                                "Run: python -m playwright install chromium",
+                            }
+                        )
                 else:
                     raise
 
@@ -157,11 +163,13 @@ def register_web_crawler_tools(mcp: FastMCP) -> None:
                 tokens = count_tokens(content)
                 if tokens > config.get("RAG", {}).get("MAX_TOKENS", 1024 * 8):
                     try:
-                        rag = await anyio.to_thread.run_sync(get_rag_session)
+                        rag = await run_blocking(get_rag_session)
                         if rag is not None:
-                            num_chunks = await anyio.to_thread.run_sync(
+                            num_chunks = await run_blocking(
                                 partial(
-                                    rag.ingest, url, content,
+                                    rag.ingest,
+                                    url,
+                                    content,
                                     chunk_size_tokens=int(
                                         config.get("RAG", {}).get("CHUNK_TOKENS", 1024)
                                     ),

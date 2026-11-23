@@ -165,7 +165,7 @@ def test_install_and_rerun_use_private_managed_runtime(installer, shell):
     assert not list(Path(env["TMPDIR"]).glob("mnemoai-install.*"))
 
 
-@pytest.mark.parametrize("version", [(3, 11, 14), (3, 12, 15), (3, 13, 9), (3, 14, 0)])
+@pytest.mark.parametrize("version", [(3, 11, 5), (3, 11, 14), (3, 12, 15), (3, 13, 9), (3, 14, 0)])
 @pytest.mark.parametrize("mode", ["latest", "version", "wheel"])
 def test_compatible_existing_python_is_reused_for_lookup_and_install(installer, tmp_path, version, mode):
     env, executable, run = installer
@@ -207,12 +207,14 @@ def test_compatible_existing_python_is_reused_for_lookup_and_install(installer, 
         assert "--no-env-file" in lookup and "--isolated" in lookup
 
 
-@pytest.mark.parametrize("kind", ["too-old", "prerelease", "broken"])
+@pytest.mark.parametrize("kind", ["too-old", "patch-too-old", "prerelease", "broken"])
 def test_unsuitable_existing_python_falls_back_without_installing_into_it(installer, tmp_path, kind):
     env, executable, run = installer
     fake_uv(executable)
     candidate = tmp_path / "unsuitable-python"
     version = (3, 10, 19, "final", 0) if kind == "too-old" else (3, 15, 0, "alpha", 1)
+    if kind == "patch-too-old":
+        version = (3, 11, 4, "final", 0)
     candidate.write_text(
         f"#!{sys.executable}\n"
         "import collections, sys\n"

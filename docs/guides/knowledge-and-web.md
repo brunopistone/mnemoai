@@ -37,7 +37,7 @@ The RAG system automatically indexes documents for semantic search with **hybrid
 During an embedding outage, existing documents remain searchable with
 **BM25-only keyword ranking**, explicitly labeled in results. New ingestion fails
 without adding fabricated vectors. Episodic recall and storage follow the same
-read/write split. The [embedding configuration](../configuration.md#embeddings-configuration)
+read/write split. The [embedding configuration](../configuration/embeddings.md#embeddings-configuration)
 describes legacy config compatibility and recovery backups for old synthetic vectors.
 
 **How it works:**
@@ -59,4 +59,4 @@ describes legacy config compatibility and recovery backups for old synthetic vec
 - Independent candidate retrieval from both BM25 and embeddings, merged and re-ranked
 
 For config keys — chunk size, vector store choice (ChromaDB/FAISS), and
-hybrid search weights — see [RAG Configuration](../configuration.md#rag-configuration).
+hybrid search weights — see [RAG Configuration](../configuration/retrieval.md#rag-configuration).

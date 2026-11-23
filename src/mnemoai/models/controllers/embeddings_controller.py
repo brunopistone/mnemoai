@@ -3,10 +3,7 @@ import json
 import time
 from typing import Any, List, Optional
 
-import boto3
 import numpy as np
-import ollama
-from openai import OpenAI
 
 from mnemoai.models import nebius
 from mnemoai.models.controllers.base_model_controller import BaseModelController
@@ -116,7 +113,8 @@ class EmbeddingsController(BaseModelController):
         # Generous — transient runner EOFs are handled by retry below.
         cfg_chars = self.embed_model_config.get("MAX_INPUT_CHARS")
         self.max_input_chars = int(
-            cfg_chars if cfg_chars is not None
+            cfg_chars
+            if cfg_chars is not None
             else embeddings_config.get("MAX_INPUT_CHARS", 200000)
         )
         # Token cap: the real guard against overflowing the embed model's context
@@ -321,9 +319,7 @@ class EmbeddingsController(BaseModelController):
                 uncached_indices.append(i)
 
         if cached_embeddings:
-            logger.debug(
-                f"Cache hit: {len(cached_embeddings)}/{len(texts)} embeddings"
-            )
+            logger.debug(f"Cache hit: {len(cached_embeddings)}/{len(texts)} embeddings")
 
         if not uncached_texts:
             return np.vstack([emb for _, emb in sorted(cached_embeddings)])
@@ -420,6 +416,8 @@ class EmbeddingsController(BaseModelController):
         """One Ollama embed call at the configured HOST/PORT; raises on failure.
 
         Recovery (retry/shrink) is handled generically by the caller."""
+        import ollama
+
         # Honor HOST/PORT instead of letting bare ollama.embed() fall back to
         # $OLLAMA_HOST (which could hijack the call to a different server).
         host = "http://{}:{}".format(
@@ -430,9 +428,7 @@ class EmbeddingsController(BaseModelController):
         # truncate=True asks the runner to clamp to context as a backstop; inputs
         # are already token-capped in _truncate (some runners honor this, some
         # EOF instead — the caller's shrink loop covers the latter).
-        resp = client.embed(
-            model=self.embed_model_name, input=texts, truncate=True
-        )
+        resp = client.embed(model=self.embed_model_name, input=texts, truncate=True)
         emb = self._extract_embeddings_from_response(resp)
         return np.array(emb, dtype=np.float32)
 
@@ -455,6 +451,8 @@ class EmbeddingsController(BaseModelController):
           - **Amazon Titan** (``amazon.titan-embed-*``) and anything else: per-text
             ``{"inputText":text}`` → ``{"embedding":[…]}`` (the widest default).
         """
+        import boto3
+
         client = boto3.client("bedrock-runtime", region_name=self.region)
         name = (self.embed_model_name or "").lower()
 
@@ -518,13 +516,17 @@ class EmbeddingsController(BaseModelController):
     def _embed_nebius(self, texts: List[str]) -> np.ndarray:
         """Create real Nebius embeddings; generic retry/outage handling stays above."""
         kwargs = {
-            "model": self.embed_model_name, "input": texts, "encoding_format": "float",
+            "model": self.embed_model_name,
+            "input": texts,
+            "encoding_format": "float",
         }
         if self._configured_dim is not None:
             kwargs["dimensions"] = self._configured_dim
         extra = extra_params(self.embed_model_config)
         if extra:
             kwargs["extra_body"] = extra
+        from openai import OpenAI
+
         with OpenAI(
             base_url=self.api_base,
             api_key=nebius.api_key(self.embed_model_config),
@@ -535,7 +537,10 @@ class EmbeddingsController(BaseModelController):
             client.project = None
             response = client.embeddings.create(**kwargs)
         return np.asarray(
-            [item.embedding for item in sorted(response.data, key=lambda item: item.index)],
+            [
+                item.embedding
+                for item in sorted(response.data, key=lambda item: item.index)
+            ],
             dtype=np.float32,
         )
 
@@ -553,10 +558,10 @@ class EmbeddingsController(BaseModelController):
         elif self.api_base:
             # Local servers ignore auth; placeholder key so the client builds.
             client_kwargs["api_key"] = "sk-local"
+        from openai import OpenAI
+
         client = OpenAI(**client_kwargs)
-        response = client.embeddings.create(
-            model=self.embed_model_name, input=texts
-        )
+        response = client.embeddings.create(model=self.embed_model_name, input=texts)
         embeddings = [item.embedding for item in response.data]
         return np.array(embeddings, dtype=np.float32)
 
@@ -576,6 +581,8 @@ class EmbeddingsController(BaseModelController):
             base_url = f"http://{host}:{port}/v1"
         # The server ignores auth; a placeholder key keeps OPENAI_API_KEY from
         # the environment out of the picture.
+        from openai import OpenAI
+
         client = OpenAI(base_url=base_url, api_key=self.api_key or "sk-local")
 
         kwargs = {"model": self.embed_model_name, "input": texts}
@@ -589,6 +596,8 @@ class EmbeddingsController(BaseModelController):
 
     def _embed_sagemaker(self, texts: List[str]) -> np.ndarray:
         """One AWS SageMaker embed call; raises on failure (caller handles recovery)."""
+        import boto3
+
         client = boto3.client("sagemaker-runtime", region_name=self.region)
         response = client.invoke_endpoint(
             EndpointName=self.embed_model_name,

@@ -82,8 +82,12 @@ class TestChatConnection:
     def test_host_port_becomes_the_v1_base_url(self, patch_chat_openai, monkeypatch):
         ctrl = _llm(
             monkeypatch,
-            {"NAME": "qwen-agentcoder", "TYPE": "mlx", "HOST": "192.168.1.9",
-             "PORT": 8123},
+            {
+                "NAME": "qwen-agentcoder",
+                "TYPE": "mlx",
+                "HOST": "192.168.1.9",
+                "PORT": 8123,
+            },
         )
         ctrl.initialize_model()
         assert patch_chat_openai["base_url"] == "http://192.168.1.9:8123/v1"
@@ -97,8 +101,13 @@ class TestChatConnection:
     def test_api_base_wins_over_host_port(self, patch_chat_openai, monkeypatch):
         ctrl = _llm(
             monkeypatch,
-            {"NAME": "m", "TYPE": "mlx", "HOST": "ignored", "PORT": 1,
-             "API_BASE": "https://mac.internal/mlx/v1"},
+            {
+                "NAME": "m",
+                "TYPE": "mlx",
+                "HOST": "ignored",
+                "PORT": 1,
+                "API_BASE": "https://mac.internal/mlx/v1",
+            },
         )
         ctrl.initialize_model()
         assert patch_chat_openai["base_url"] == "https://mac.internal/mlx/v1"
@@ -112,7 +121,9 @@ class TestChatConnection:
         assert patch_chat_openai["api_key"] == "sk-local"
 
     def test_explicit_api_key_is_honored(self, patch_chat_openai, monkeypatch):
-        ctrl = _llm(monkeypatch, {"NAME": "m", "TYPE": "mlx", "API_KEY": "shared-secret"})
+        ctrl = _llm(
+            monkeypatch, {"NAME": "m", "TYPE": "mlx", "API_KEY": "shared-secret"}
+        )
         ctrl.initialize_model()
         assert patch_chat_openai["api_key"] == "shared-secret"
 
@@ -126,11 +137,17 @@ class TestChatParams:
         ctrl = _llm(
             monkeypatch,
             {
-                "NAME": "m", "TYPE": "mlx",
-                "TEMPERATURE": 0.6, "TOP_P": 0.95, "MAX_TOKENS": 4096,
+                "NAME": "m",
+                "TYPE": "mlx",
+                "TEMPERATURE": 0.6,
+                "TOP_P": 0.95,
+                "MAX_TOKENS": 4096,
                 "STOP": ["<|im_end|>"],
-                "PRESENCE_PENALTY": 0.1, "FREQUENCY_PENALTY": 0.2,
-                "TOP_K": 20, "MIN_P": 0.05, "REPETITION_PENALTY": 1.15,
+                "PRESENCE_PENALTY": 0.1,
+                "FREQUENCY_PENALTY": 0.2,
+                "TOP_K": 20,
+                "MIN_P": 0.05,
+                "REPETITION_PENALTY": 1.15,
             },
         )
         ctrl.initialize_model()
@@ -143,7 +160,9 @@ class TestChatParams:
         # Not part of the OpenAI API -> nested body passthrough, never
         # model_kwargs (which the typed SDK method would reject).
         assert patch_chat_openai["extra_body"] == {
-            "top_k": 20, "min_p": 0.05, "repetition_penalty": 1.15
+            "top_k": 20,
+            "min_p": 0.05,
+            "repetition_penalty": 1.15,
         }
         assert "model_kwargs" not in patch_chat_openai
 
@@ -174,12 +193,17 @@ class TestChatParams:
     def test_extra_params_merge_into_the_body(self, patch_chat_openai, monkeypatch):
         ctrl = _llm(
             monkeypatch,
-            {"NAME": "m", "TYPE": "mlx", "TOP_K": 20,
-             "EXTRA_PARAMS": {"repetition_context_size": 256}},
+            {
+                "NAME": "m",
+                "TYPE": "mlx",
+                "TOP_K": 20,
+                "EXTRA_PARAMS": {"repetition_context_size": 256},
+            },
         )
         ctrl.initialize_model()
         assert patch_chat_openai["extra_body"] == {
-            "top_k": 20, "repetition_context_size": 256
+            "top_k": 20,
+            "repetition_context_size": 256,
         }
 
     def test_stream_is_honored(self, patch_chat_openai, monkeypatch):
@@ -205,9 +229,13 @@ class TestParamsReachTheRequestBody:
     """
 
     PAYLOAD_PARAMS = {
-        "NAME": "qwen-agentcoder", "TYPE": "mlx",
-        "TEMPERATURE": 0.6, "TOP_P": 0.95,
-        "TOP_K": 20, "MIN_P": 0.05, "REPETITION_PENALTY": 1.15,
+        "NAME": "qwen-agentcoder",
+        "TYPE": "mlx",
+        "TEMPERATURE": 0.6,
+        "TOP_P": 0.95,
+        "TOP_K": 20,
+        "MIN_P": 0.05,
+        "REPETITION_PENALTY": 1.15,
         "KEEP_ALIVE": "30m",
     }
 
@@ -219,7 +247,9 @@ class TestParamsReachTheRequestBody:
         assert payload["model"] == "qwen-agentcoder"
         assert payload["temperature"] == 0.6 and payload["top_p"] == 0.95
         assert payload["extra_body"] == {
-            "top_k": 20, "min_p": 0.05, "repetition_penalty": 1.15,
+            "top_k": 20,
+            "min_p": 0.05,
+            "repetition_penalty": 1.15,
             "keep_alive": "30m",
         }
 
@@ -313,11 +343,17 @@ class TestEmbeddings:
                     captured["input"] = input
                     captured["request"] = kwargs
                     return type(
-                        "R", (), {"data": [type("D", (), {"embedding": [0.1, 0.2]})()
-                                           for _ in input]}
+                        "R",
+                        (),
+                        {
+                            "data": [
+                                type("D", (), {"embedding": [0.1, 0.2]})()
+                                for _ in input
+                            ]
+                        },
                     )()
 
-        monkeypatch.setattr(ec, "OpenAI", lambda **kw: _FakeClient(**kw))
+        monkeypatch.setattr("openai.OpenAI", lambda **kw: _FakeClient(**kw))
         ctrl = ec.EmbeddingsController(cfg)
         ctrl.cache_enabled = False
         return ctrl, captured
@@ -328,7 +364,8 @@ class TestEmbeddings:
         )
         out = ctrl._embed_mlx(["hello"])
         assert cap["client"] == {
-            "base_url": "http://127.0.0.1:8000/v1", "api_key": "sk-local"
+            "base_url": "http://127.0.0.1:8000/v1",
+            "api_key": "sk-local",
         }
         assert cap["model"] == "qwen3-embedding"
         assert isinstance(out, np.ndarray) and out.shape == (1, 2)
@@ -344,8 +381,13 @@ class TestEmbeddings:
     def test_api_base_wins_and_key_is_honored(self, monkeypatch):
         ctrl, cap = self._controller(
             monkeypatch,
-            {"NAME": "e", "TYPE": "mlx", "HOST": "ignored",
-             "API_BASE": "http://box:9/v1", "API_KEY": "k"},
+            {
+                "NAME": "e",
+                "TYPE": "mlx",
+                "HOST": "ignored",
+                "API_BASE": "http://box:9/v1",
+                "API_KEY": "k",
+            },
         )
         ctrl._embed_mlx(["x"])
         assert cap["client"] == {"base_url": "http://box:9/v1", "api_key": "k"}
@@ -416,8 +458,12 @@ class TestEndpointUrlAlias:
     def test_api_base_wins_over_the_alias(self, patch_chat_openai, monkeypatch):
         ctrl = _llm(
             monkeypatch,
-            {"NAME": "m", "TYPE": "mlx", "API_BASE": "http://canonical/v1",
-             "ENDPOINT_URL": "http://alias/v1"},
+            {
+                "NAME": "m",
+                "TYPE": "mlx",
+                "API_BASE": "http://canonical/v1",
+                "ENDPOINT_URL": "http://alias/v1",
+            },
         )
         ctrl.initialize_model()
         assert patch_chat_openai["base_url"] == "http://canonical/v1"

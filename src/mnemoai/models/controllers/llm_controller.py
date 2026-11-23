@@ -8,8 +8,6 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from mnemoai.models import nebius
 from mnemoai.models.chat_models.bedrock_stream_compat import harden_converse_stream
-from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
-from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
 from mnemoai.models.controllers.base_model_controller import BaseModelController
 from mnemoai.models.provider_params import build_kwargs, connection_keys, extra_params
 from mnemoai.utils.config import config
@@ -19,7 +17,13 @@ from mnemoai.utils.logger import logger
 def _without_reasoning(params):
     """Remove configured reasoning overrides on an independent auxiliary-model copy."""
     cleaned = deepcopy(params)
-    for key in ("thinking", "reasoning", "reasoning_effort", "thinking_budget", "thinking_budget_tokens"):
+    for key in (
+        "thinking",
+        "reasoning",
+        "reasoning_effort",
+        "thinking_budget",
+        "thinking_budget_tokens",
+    ):
         cleaned.pop(key, None)
     for key in ("think", "enable_thinking"):
         if key in cleaned:
@@ -29,7 +33,12 @@ def _without_reasoning(params):
         output.pop("effort", None)
         if not output:
             cleaned.pop("output_config")
-    for key in ("additional_model_request_fields", "extra_body", "model_kwargs", "chat_template_kwargs"):
+    for key in (
+        "additional_model_request_fields",
+        "extra_body",
+        "model_kwargs",
+        "chat_template_kwargs",
+    ):
         if isinstance(cleaned.get(key), dict):
             cleaned[key] = _without_reasoning(cleaned[key])
             if not cleaned[key]:
@@ -216,6 +225,8 @@ class LangChainLLMController(BaseModelController):
 
     def _initialize_ollama_model(self, callbacks: list = None) -> None:
         """Initialize Ollama model using LangChain."""
+        from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
+
         logger.info("Initializing Ollama model...")
 
         host = self.model_id.get("HOST", "localhost")
@@ -306,7 +317,11 @@ class LangChainLLMController(BaseModelController):
         """Initialize Nebius Token Factory with its own credentials and endpoint."""
         params, body = build_kwargs("MODEL_ID", "nebius", self)
         self.model = nebius.build_model(
-            self.model_id, params, body, streaming=self.stream, callbacks=callbacks,
+            self.model_id,
+            params,
+            body,
+            streaming=self.stream,
+            callbacks=callbacks,
             timeout=float((config.get("LLM", {}) or {}).get("REQUEST_TIMEOUT", 600)),
         )
 
@@ -444,6 +459,7 @@ class LangChainLLMController(BaseModelController):
 
     def _initialize_sagemaker_model(self, callbacks: list = None) -> None:
         """Initialize SageMaker model using ChatSageMaker wrapper."""
+        from mnemoai.models.chat_models.sagemaker_chat import ChatSageMaker
 
         logger.info("Initializing SageMaker model...")
 
@@ -497,8 +513,15 @@ class LangChainLLMController(BaseModelController):
         variant = deepcopy(peer.model_id)
         if overrides:
             connection = connection_keys("MODEL_ID") | {"EXTRA_PARAMS"}
-            if str(overrides.get("TYPE", peer.model_type)).lower() != peer.model_type.lower():
-                variant = {key: value for key, value in variant.items() if key not in connection}
+            if (
+                str(overrides.get("TYPE", peer.model_type)).lower()
+                != peer.model_type.lower()
+            ):
+                variant = {
+                    key: value
+                    for key, value in variant.items()
+                    if key not in connection
+                }
             for key, value in overrides.items():
                 if key in connection and (value is None or value == ""):
                     variant.pop(key, None)
@@ -510,7 +533,15 @@ class LangChainLLMController(BaseModelController):
             variant["EXTRA_PARAMS"] = _without_reasoning(extra_params(variant))
         peer._apply_model_id(variant, peer.max_conversation_tokens)
         peer.initialize_model(callbacks=callbacks)
-        return peer.get_model()
+        model = peer.get_model()
+        if non_reasoning:
+            from mnemoai.client.agent.reasoning_utils import disable_boolean_reasoning
+
+            # Clearing configuration is insufficient when the SDK defaults to
+            # provider-controlled thinking. Disable a declared boolean toggle
+            # without inventing effort values for other model families.
+            disable_boolean_reasoning(model)
+        return model
 
     def build_non_reasoning_model(
         self,
@@ -523,9 +554,10 @@ class LangChainLLMController(BaseModelController):
         ``REASONING`` / ``REASONING_EFFORT`` (self.reasoning_model /
         self.reasoning_effort), so a peer controller with both cleared yields the
         SAME model with reasoning off — no crash for providers that never had it.
-        The Ollama path instead surfaces reasoning via ``verbose_mode`` (sets
-        ``reasoning=True``), so the peer is also built non-verbose to suppress it
-        there. Used for compaction summaries, which don't benefit from a slow
+        The peer is also non-verbose, and the constructed SDK model's supported
+        reasoning controls are explicitly disabled: an unset provider-default
+        toggle must not silently re-enable thinking. Used for compaction summaries,
+        which don't benefit from a slow
         reasoning pass. Returns an independent instance; never mutates this one.
         """
         return self.build_model_variant(

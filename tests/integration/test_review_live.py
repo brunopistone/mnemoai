@@ -287,11 +287,10 @@ def test_live_artifact_authoring_reviews_strategy_changes_and_final_result(
         target = None
     if kind == "code":
         verification = (
-            "from live_clamp import clamp; "
+            "from live_clamp import clamp; from unittest import TestCase; "
             "assert [clamp(x, 0, 10) for x in (-3, 0, 4.5, 10, 15)] == [0, 0, 4.5, 10, 10]; "
             "assert clamp(-4, -3, -1) == -3; assert clamp(7, 2, 2) == 2; "
-            "\ntry: clamp(1, 3, 2)\nexcept ValueError: pass\n"
-            "else: raise AssertionError('inverted bounds must raise ValueError')"
+            "TestCase().assertRaises(ValueError, clamp, 1, 3, 2)"
         )
         command = (
             f"cd {shlex.quote(str(_neutral_root))} && {shlex.quote(sys.executable)} -B -c "
@@ -328,7 +327,7 @@ def test_live_artifact_authoring_reviews_strategy_changes_and_final_result(
     report = live_client.reviewer.last
     assert answer.strip()
     assert report and report["verdict"] == "pass", report
-    assert report["task_kind"] == kind and report["strategy"].strip()
+    assert report["task_kind"] == "artifact" and report["strategy"].strip()
     assert phases[0] == "strategy" and phases[-1] == "completion"
     if target is not None:
         assert "changes" in phases and "fs_write" in tools
@@ -406,7 +405,7 @@ def test_live_document_feedback_corrects_a_seeded_factual_error(
     monkeypatch.setattr(live_client.reviewer, "finish", observe_review)
     answer = live_client.query(document_request(target))
     report = live_client.reviewer.last
-    assert report and report["task_kind"] == "document" and report["verdict"] == "pass", report
+    assert report and report["task_kind"] == "artifact" and report["verdict"] == "pass", report
     checkpoint = "changes" if target is not None else "completion"
     assert any(item["checkpoint"] == checkpoint and item["verdict"] == "revise"
                and item["findings"] for item in observed), observed

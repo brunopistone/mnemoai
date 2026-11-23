@@ -15,11 +15,13 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextvars import copy_context
 from datetime import datetime
 from typing import Dict
 
 from mcp.server.fastmcp import FastMCP
 
+from mnemoai.server import tool_state
 from mnemoai.utils.paths import tasks_dir
 
 from .safety import classify_shell_command, classify_write_path
@@ -28,6 +30,14 @@ from .shell_state import bash_path, current_cwd, resolve_path
 # Store for background tasks
 _background_tasks: Dict[str, dict] = {}
 _task_lock = threading.Lock()
+
+
+def _task_storage():
+    state = tool_state.current()
+    if state is not None:
+        return state.background_tasks, state.task_lock
+    return _background_tasks, _task_lock
+
 
 # Task output directory (under the app home, created on demand)
 TASK_OUTPUT_DIR = str(tasks_dir())
@@ -82,6 +92,7 @@ def get_task_output_file(task_id: str) -> str:
 
 def run_background_command(task_id: str, command: str, cwd: str):
     """Run a command in the background and capture output."""
+    _background_tasks, _task_lock = _task_storage()
     output_file = get_task_output_file(task_id)
 
     try:
@@ -142,6 +153,7 @@ def run_background_command(task_id: str, command: str, cwd: str):
 
 def register_background_tasks_tools(mcp: FastMCP) -> None:
     """Register background task tools."""
+    _background_tasks, _task_lock = _task_storage()
 
     # Startup housekeeping: prune stale task logs left by prior sessions (whose
     # in-memory registry is gone), so the task dir doesn't grow without bound.
@@ -246,7 +258,9 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
 
         # Start background thread
         thread = threading.Thread(
-            target=run_background_command, args=(task_id, command, cwd), daemon=True
+            target=copy_context().run,
+            args=(run_background_command, task_id, command, cwd),
+            daemon=True,
         )
         thread.start()
 
@@ -458,8 +472,7 @@ def register_background_tasks_tools(mcp: FastMCP) -> None:
             {
                 "error": True,
                 "message": (
-                    "Task is still starting (no PID yet). Retry cancel in a "
-                    "moment."
+                    "Task is still starting (no PID yet). Retry cancel in a " "moment."
                 ),
                 "retry": True,
             },

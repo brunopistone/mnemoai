@@ -10,12 +10,14 @@ from mnemoai.utils.logger import logger
 from . import tool_manager, validate_file_path
 
 
-def register_image_tools(mcp: FastMCP) -> None:
+def register_image_tools(mcp: FastMCP, manager=None) -> None:
     """Register image description tools.
 
     Args:
         mcp: FastMCP server instance to register tools with
     """
+
+    manager = manager if manager is not None else tool_manager
 
     @mcp.tool()
     def describe_image(
@@ -71,8 +73,8 @@ def register_image_tools(mcp: FastMCP) -> None:
             # for the life of the process. Deliberately after the cheap
             # validations above, so a bad path or an unsupported format costs no
             # model build at all. See ToolManager._ensure_vision.
-            controller = tool_manager.vision_model_controller
-            model = tool_manager.vision_model
+            controller = manager.vision_model_controller
+            model = manager.vision_model
             if model is None or controller is None:
                 return json.dumps(
                     {

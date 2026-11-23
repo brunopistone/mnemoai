@@ -5,9 +5,11 @@ import os
 import signal
 import subprocess
 import tempfile
+import time
 
 from mcp.server.fastmcp import FastMCP
 
+from mnemoai.server import tool_state
 from mnemoai.utils.logger import logger
 
 from ..error_handler import tool_error_handler
@@ -21,12 +23,36 @@ from .shell_state import (
 )
 
 # Cap the output we RETURN so a chatty command can't blow up the token/context
-# budget or the tool-result JSON. We keep the head and the tail (the start plus 
-# the final status/error lines, which are usually the interesting ones) and drop 
-# the middle. The child's full output is still bounded only by its own behaviour 
-# + the timeout; this guards what leaves the server, ahead of the client's downstream 
+# budget or the tool-result JSON. We keep the head and the tail (the start plus
+# the final status/error lines, which are usually the interesting ones) and drop
+# the middle. The child's full output is still bounded only by its own behaviour
+# + the timeout; this guards what leaves the server, ahead of the client's downstream
 # MAX_TOOL_RESULT_CHARS compaction.
 MAX_OUTPUT_CHARS = 30_000
+
+
+def _communicate(proc, timeout):
+    event = tool_state.cancel_event()
+    if event is None:
+        return proc.communicate(timeout=timeout)
+    deadline = time.monotonic() + timeout
+    while True:
+        tool_state.check_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        try:
+            return proc.communicate(timeout=min(remaining, 0.1))
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                raise
+
+
+def _kill_group(proc):
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
 
 
 def _truncate_output(text: str) -> str:
@@ -127,7 +153,7 @@ def register_execute_bash_tools(mcp: FastMCP) -> None:
             start_new_session=True,
         )
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
+            stdout, stderr = _communicate(proc, timeout)
             # A `cd` only carries over once the command actually finished there.
             ended_in = read_cwd_probe(probe_path)
             if ended_in and ended_in != cwd:
@@ -146,10 +172,7 @@ def register_execute_bash_tools(mcp: FastMCP) -> None:
             # grandchildren, and return whatever partial output we captured. The
             # tracked directory is left alone: a killed command didn't finish
             # anywhere.
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                proc.kill()
+            _kill_group(proc)
             stdout, stderr = proc.communicate()
             return json.dumps(
                 {
@@ -160,6 +183,10 @@ def register_execute_bash_tools(mcp: FastMCP) -> None:
                     "cwd": cwd,
                 }
             )
+        except KeyboardInterrupt:
+            _kill_group(proc)
+            proc.communicate()
+            raise
         except Exception as e:
             logger.error(f"Error executing bash command: {e}")
             proc.kill()

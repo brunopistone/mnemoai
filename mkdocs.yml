@@ -9,6 +9,7 @@ theme:
   name: material
   logo: assets/mnemoai-logo.png
   favicon: assets/mnemoai-logo.png
+  font: false
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -28,6 +29,7 @@ theme:
     - navigation.instant
     - navigation.tracking
     - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
     - navigation.indexes
     - navigation.top
@@ -38,38 +40,106 @@ theme:
     - search.highlight
 
 nav:
-  - Home: index.md
-  - Getting Started:
-      - getting-started/index.md
-      - Installation & first run: getting-started/installation.md
-      - Core concepts:
-          - Architecture: getting-started/architecture.md
-          - The ~/.mnemoai directory: getting-started/mnemoai-directory.md
-  - Guides:
-      - guides/index.md
-      - Everyday use:
-          - Usage & commands: guides/usage.md
-          - Everyday tools: guides/productivity-tools.md
-          - Safety & permissions: guides/safety.md
-          - Agent skills: guides/agent-skills.md
-      - Extending & advanced:
-          - Orchestration & sub-agents: guides/orchestration.md
-          - Memory & learning: guides/memory.md
+  - Overview:
+      - index.md
+      - Get started:
+          - Quickstart: getting-started/index.md
+          - Installation: getting-started/installation.md
+          - Your first conversation: getting-started/first-chat.md
+      - Foundations:
+          - Working with MnemoAI: getting-started/workflows.md
+  - Features:
+      - features/index.md
+      - Workflows:
+          - Sessions and history: features/sessions.md
+          - Queue, steer, and cancel: features/queue.md
+          - Long-running work: features/long-running-work.md
+          - Sub-agents and orchestration: guides/orchestration.md
           - Peer review: guides/peer-review.md
-          - Knowledge & web tools: guides/knowledge-and-web.md
+      - Capabilities:
+          - File attachments: features/files.md
+          - Search, edits, and background tasks: guides/productivity-tools.md
+          - Memory & learning: guides/memory.md
+          - Documents and the web: guides/knowledge-and-web.md
+      - In the terminal:
+          - Terminal controls: features/terminal.md
+          - Context and token usage: features/context.md
+          - Track file changes: features/changes.md
+          - Copy and export: features/sharing.md
+  - Configuration:
+      - configuration.md
+      - Get configured:
+          - Files and profiles: getting-started/mnemoai-directory.md
+          - Example configuration: configuration/sample.md
+          - Feature controls: configuration/features.md
+      - Models:
+          - Model providers: configuration/models.md
+          - Vision models: configuration/vision.md
+          - Models for specific tasks: configuration/area-models.md
+          - Model parameters: configuration/parameters.md
+          - Embedding models: configuration/embeddings.md
+      - Settings:
+          - Runtime settings: configuration/runtime.md
+          - Environment variables: configuration/environment.md
+          - Document retrieval: configuration/retrieval.md
+          - Episodic memory: configuration/episodic-memory.md
+      - Customize and extend:
+          - Prompt templates: configuration/prompts.md
+          - Custom slash commands: configuration/slash-commands.md
+          - Agent skills: guides/agent-skills.md
           - External MCP servers: guides/mcp.md
           - Tool hooks: guides/hooks.md
-  - Reference:
-      - Configuration: configuration.md
-      - Tools reference: reference/tools.md
-  - Development:
+  - Developers:
       - development/index.md
-      - Ollama utilities: development/ollama-utilities.md
-      - Troubleshooting: development/troubleshooting.md
+      - Build and test:
+          - Development setup: development/setup.md
+          - Testing: development/testing.md
+          - Contributing: development/contributing.md
+      - Internals and extensions:
+          - Architecture: getting-started/architecture.md
+          - Add tools and file readers: development/tools.md
+          - Model provider integration: development/providers.md
+      - Project maintenance:
+          - Versioning and releases: development/releases.md
+          - Archived review (October 2026): development/review-2026-10-13.md
+  - Security:
+      - security/index.md
+      - Permissions and safety: guides/safety.md
+      - Data and privacy: security/data.md
+  - Use cases:
+      - use-cases/index.md
+      - Fix and verify code: use-cases/code.md
+      - Research and write with documents: use-cases/documents.md
+      - Manage ongoing work: use-cases/ongoing-work.md
+  - Resources:
+      - resources/index.md
+      - Reference:
+          - Commands: reference/commands.md
+          - Tools: reference/tools.md
+      - Get help:
+          - Check your installation: resources/diagnostics.md
+          - Troubleshooting: development/troubleshooting.md
+          - Ollama utilities: development/ollama-utilities.md
+      - Project:
+          - Releases and project links: resources/releases.md
+
+# Keep published guide URLs available without duplicating them in navigation.
+not_in_nav: |
+  /guides/index.md
+  /guides/usage.md
+
+extra_css:
+  - assets/stylesheets/docs.css
+
+validation:
+  links:
+    not_found: warn
+    anchors: warn
 
 markdown_extensions:
   - admonition
   - attr_list
+  - md_in_html
   - tables
   - toc:
       permalink: true

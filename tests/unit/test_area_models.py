@@ -82,7 +82,9 @@ class TestReadingTheConfig:
             assert area_models.DESCRIPTIONS[area]
 
     def test_label_fills_either_half_from_the_main_model(self):
-        assert area_models.label({"NAME": "small"}, "big", "bedrock") == "small (bedrock)"
+        assert (
+            area_models.label({"NAME": "small"}, "big", "bedrock") == "small (bedrock)"
+        )
         assert area_models.label({"TYPE": "ollama"}, "big") == "big (ollama)"
         assert area_models.label({}, "big") == "big"
 
@@ -117,20 +119,32 @@ class TestBuildingTheVariant:
         monkeypatch.setattr(LangChainLLMController, "_dispatch_provider", _fake)
         return seen
 
-    def test_provider_change_cannot_inherit_main_endpoint_or_credentials(self, monkeypatch):
+    def test_provider_change_cannot_inherit_main_endpoint_or_credentials(
+        self, monkeypatch
+    ):
         from mnemoai.models.chat_models import chat_openai_reasoning
 
         main = {
-            "NAME": "remote", "TYPE": "openai", "API_BASE": "https://wrong.example/v1",
-            "API_KEY": "remote-key", "API_PROTOCOL": "responses",
+            "NAME": "remote",
+            "TYPE": "openai",
+            "API_BASE": "https://wrong.example/v1",
+            "API_KEY": "remote-key",
+            "API_PROTOCOL": "responses",
             "EXTRA_PARAMS": {"base_url": "https://also-wrong.example"},
         }
         ctrl = self._controller(monkeypatch, main)
         seen = {}
-        monkeypatch.setattr(chat_openai_reasoning, "ChatOpenAIReasoning", lambda **kw: seen.update(kw) or "MODEL")
-        assert ctrl.build_model_variant(
-            {"TYPE": "mlx", "NAME": "local", "HOST": "127.0.0.1", "PORT": 8000},
-        ) == "MODEL"
+        monkeypatch.setattr(
+            chat_openai_reasoning,
+            "ChatOpenAIReasoning",
+            lambda **kw: seen.update(kw) or "MODEL",
+        )
+        assert (
+            ctrl.build_model_variant(
+                {"TYPE": "mlx", "NAME": "local", "HOST": "127.0.0.1", "PORT": 8000},
+            )
+            == "MODEL"
+        )
         assert seen["base_url"] == "http://127.0.0.1:8000/v1"
         assert seen["api_key"] == "sk-local"
         assert "extra_body" not in seen
@@ -139,27 +153,54 @@ class TestBuildingTheVariant:
     def test_same_provider_endpoint_can_be_explicitly_cleared(self, monkeypatch):
         from mnemoai.models.chat_models import chat_openai_reasoning
 
-        ctrl = self._controller(monkeypatch, {
-            "TYPE": "openai", "NAME": "main", "API_BASE": "https://old.example",
-        })
-        monkeypatch.setattr(area_models.config, "get", lambda k, d=None: (
-            {"ROUTER": {"API_BASE": None}} if k == "AREA_MODELS"
-            else ctrl.model_id if k == "MODEL_ID" else d
-        ))
+        ctrl = self._controller(
+            monkeypatch,
+            {
+                "TYPE": "openai",
+                "NAME": "main",
+                "API_BASE": "https://old.example",
+            },
+        )
+        monkeypatch.setattr(
+            area_models.config,
+            "get",
+            lambda k, d=None: (
+                {"ROUTER": {"API_BASE": None}}
+                if k == "AREA_MODELS"
+                else ctrl.model_id if k == "MODEL_ID" else d
+            ),
+        )
         seen = {}
-        monkeypatch.setattr(chat_openai_reasoning, "ChatOpenAIReasoning", lambda **kw: seen.update(kw) or "MODEL")
+        monkeypatch.setattr(
+            chat_openai_reasoning,
+            "ChatOpenAIReasoning",
+            lambda **kw: seen.update(kw) or "MODEL",
+        )
         ctrl.build_model_variant(area_models.overrides_for("ROUTER"))
         assert "base_url" not in seen
 
-    @pytest.mark.parametrize("provider,extra", [
-        ("anthropic", {"thinking": {"type": "enabled", "budget_tokens": 4096}}),
-        ("bedrock", {"additional_model_request_fields": {
-            "thinking": {"type": "enabled", "budget_tokens": 4096}, "unrelated": 7,
-        }}),
-    ])
-    def test_non_reasoning_is_authoritative_over_nested_extra_params(self, monkeypatch, provider, extra):
+    @pytest.mark.parametrize(
+        "provider,extra",
+        [
+            ("anthropic", {"thinking": {"type": "enabled", "budget_tokens": 4096}}),
+            (
+                "bedrock",
+                {
+                    "additional_model_request_fields": {
+                        "thinking": {"type": "enabled", "budget_tokens": 4096},
+                        "unrelated": 7,
+                    }
+                },
+            ),
+        ],
+    )
+    def test_non_reasoning_is_authoritative_over_nested_extra_params(
+        self, monkeypatch, provider, extra
+    ):
         main = {
-            "TYPE": provider, "NAME": "claude-sonnet-4-5", "REASONING": True,
+            "TYPE": provider,
+            "NAME": "claude-sonnet-4-5",
+            "REASONING": True,
             "EXTRA_PARAMS": extra,
         }
         ctrl = self._controller(monkeypatch, main)
@@ -174,7 +215,10 @@ class TestBuildingTheVariant:
         assert "thinking" not in str(seen["EXTRA_PARAMS"])
         assert "thinking" in str(main["EXTRA_PARAMS"])
         if provider == "bedrock":
-            assert seen["EXTRA_PARAMS"]["additional_model_request_fields"]["unrelated"] == 7
+            assert (
+                seen["EXTRA_PARAMS"]["additional_model_request_fields"]["unrelated"]
+                == 7
+            )
 
     def test_no_overrides_builds_the_configured_model(self, monkeypatch):
         ctrl = self._controller(monkeypatch, {"NAME": "big", "TYPE": "ollama"})
@@ -235,6 +279,23 @@ class TestBuildingTheVariant:
         assert seen["reasoning"] is False
         assert seen["effort"] is None
         assert seen["verbose"] is False
+
+    def test_non_reasoning_variant_reaches_the_ollama_request(self, monkeypatch):
+        from langchain_core.messages import HumanMessage
+
+        ctrl = self._controller(
+            monkeypatch,
+            {
+                "NAME": "unused",
+                "TYPE": "ollama",
+                "EXTRA_PARAMS": {"reasoning": True},
+            },
+        )
+        main = ctrl.get_model()
+        auxiliary = ctrl.build_non_reasoning_model()
+        messages = [HumanMessage("Return a short summary")]
+        assert auxiliary._chat_params(messages)["think"] is False
+        assert main._chat_params(messages)["think"] is True
 
     def test_the_summary_variant_can_also_swap_the_model(self, monkeypatch):
         ctrl = self._controller(
@@ -378,7 +439,9 @@ class TestTheSummaryArea:
         monkeypatch.setattr("mnemoai.client.client.config.get", _get)
         return c
 
-    def test_without_an_override_the_main_model_is_used_non_reasoning(self, monkeypatch):
+    def test_without_an_override_the_main_model_is_used_non_reasoning(
+        self, monkeypatch
+    ):
         c = self._client(monkeypatch, {})
         assert c._summary_model() == "MODEL:MAIN"
         assert c.llm_controller.asked == [None]
@@ -480,7 +543,9 @@ class TestReloadingOnlyTheAreaModels:
                 # Both are failures, not stubs: MODEL_ID didn't change, so a rebuild
                 # would cost a new provider client for nothing and a rebind would
                 # swap the live conversation's model behind its back.
-                "rebind_model": lambda self, m: pytest.fail("the chat model was rebound"),
+                "rebind_model": lambda self, m: pytest.fail(
+                    "the chat model was rebound"
+                ),
                 "router": type("R", (), {"model": "OLD", "usage_model_name": "old"})(),
                 "usage_model_name": "big",
                 "orchestrator_model": None,
@@ -641,7 +706,9 @@ class TestDecompositionUsesTheAreaModel:
         touched = []
         a._non_reasoning = lambda model=None: None  # force the fallback branch
         a._disable_reasoning = lambda model=None: touched.append(model) or {"x": 1}
-        a._restore_reasoning = lambda saved, model=None: touched.append(("restore", model))
+        a._restore_reasoning = lambda saved, model=None: touched.append(
+            ("restore", model)
+        )
         a._decompose_task("q", "decompose", {"full"})
         assert touched == [area, ("restore", area)]
         assert main.calls == 0

@@ -13,13 +13,13 @@ Start here if you know what you want to change but not where.
 | You want to                                 | Edit                        | Scope               | Reference                                                           |
 | ------------------------------------------- | --------------------------- | ------------------- | ------------------------------------------------------------------- |
 | Change model, provider, or a feature toggle | `config/config.yaml`        | Everything          | [Configuration](../configuration.md)                                |
-| Change how the assistant behaves or speaks  | `config/prompts.yaml`       | Everything          | [Prompts](../configuration.md#prompts-promptsyaml)                  |
+| Change how the assistant behaves or speaks  | `config/prompts.yaml`       | Everything          | [Prompts](../configuration/prompts.md#prompts-promptsyaml)                  |
 | State a rule for **one project**            | `./STEERING.md` in the repo | That directory tree | [Steering](../guides/memory.md#steering-steeringmd)                 |
 | State a rule for **every** project          | `STEERING.md` (this folder) | Everything          | [Steering](../guides/memory.md#steering-steeringmd)                 |
 | Record a durable fact about you             | `<profile>/MEMORY.md`       | One profile         | [Persistent memory](../guides/memory.md#persistent-memory-memorymd) |
 | Add a repeatable procedure                  | `skills/<name>/SKILL.md`    | Everything          | [Agent skills](../guides/agent-skills.md)                           |
 | Define a custom sub-agent                   | `agents/<name>.md`          | Everything          | [Sub-agents](../guides/orchestration.md)                            |
-| Add a slash command you type                | `commands/<name>.md`        | Everything          | [Your own commands](../guides/usage.md#your-own-slash-commands)     |
+| Add a slash command you type                | `commands/<name>.md`        | Everything          | [Your own commands](../configuration/slash-commands.md#your-own-slash-commands)     |
 | Connect an external tool server             | `mcp/mcp.json`              | Everything          | [External MCP servers](../guides/mcp.md)                            |
 | Run a command around every tool call        | `hooks/hooks.json`          | Everything          | [Tool hooks](../guides/hooks.md)                                    |
 
@@ -54,7 +54,7 @@ tool's instructions file is picked up as your always-on rules.
 │   └── <id>.log              # background-task output
 ├── logs/
 │   ├── mnemoai.log           # app log: the tracebacks the chat doesn't show
-│   ├── mcp.log               # MCP subprocess stderr (survives restarts)
+│   ├── mcp.log               # External MCP subprocess stderr (survives restarts)
 │   └── mcp.log.1             # one rotated generation
 └── <profile>/                # "default" unless PROFILE.NAME is set
     ├── MEMORY.md             # ← you may edit; curated persistent memory

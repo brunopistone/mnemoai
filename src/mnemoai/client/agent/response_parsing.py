@@ -91,7 +91,9 @@ def was_truncated_by_tokens(response) -> bool:
     details = meta.get("incomplete_details") or {}
     if isinstance(details, dict) and details.get("reason") == "max_output_tokens":
         return True
-    finish = meta.get("finish_reason") or meta.get("stop_reason")
+    finish = (
+        meta.get("finish_reason") or meta.get("stop_reason") or meta.get("done_reason")
+    )
     return finish in ("length", "max_tokens")
 
 

@@ -6,6 +6,7 @@ import threading
 import uuid
 
 import pytest
+from langchain_core.tools import StructuredTool
 
 from mnemoai.client.agent import subagents
 from mnemoai.client.agent.agent import LangGraphAgent
@@ -44,14 +45,14 @@ def test_live_withdrawal_keeps_only_surviving_guidance(live_client, monkeypatch)
     assert agent.reclaim_mid_turn() == []
 
 
-def _chain(root, length):
+def _chain(root, length, *, filler_lines=60):
     paths = [root / f"{uuid.uuid4().hex}.txt" for _ in range(length)]
     tokens = [f"TOKEN_{uuid.uuid4().hex[:10]}" for _ in paths]
     for index, path in enumerate(paths):
         next_path = str(paths[index + 1]) if index + 1 < length else "END"
         path.write_text(
             f"TOKEN: {tokens[index]}\nNEXT: {next_path}\n"
-            + "Background filler; only TOKEN and NEXT are relevant.\n" * 60
+            + "Background filler; only TOKEN and NEXT are relevant.\n" * filler_lines
         )
     return paths, tokens
 
@@ -110,11 +111,24 @@ def test_live_parent_finishes_after_compaction_and_status_message(
 
 
 def test_live_worker_continues_with_private_summary(live_client, _neutral_root, monkeypatch, record_property):
-    paths, tokens = _chain(_neutral_root, 6)
+    paths, tokens = _chain(_neutral_root, 6, filler_lines=300)
     agent = live_client.agent
     before = list(agent.messages)
     token_count = agent._last_input_tokens
     read_tool = next(t for t in agent.tools if t.name == "fs_read")
+    real_read = read_tool
+
+    def read_complete_file(path: str) -> str:
+        return real_read.invoke({"path": path, "mode": "Line", "start_line": 1, "end_line": 1000})
+
+    # Header-only reads can legitimately keep this tiny chain below the
+    # compaction threshold. Keep real MCP I/O, but force enough context for the
+    # lifecycle behavior this test promises to exercise.
+    read_tool = StructuredTool.from_function(
+        read_complete_file, name="fs_read",
+        description="Read the complete contents of the file at path.",
+    )
+    record_property("context_fixture", "complete real MCP file reads with irrelevant filler")
     monkeypatch.setattr(agent, "_subagent_tools", lambda kind: [read_tool])
     monkeypatch.setattr(agent, "recursion_limit", 2)
     reads, compactions, attempts, planned = [], [], [], []

@@ -34,8 +34,12 @@ SECURITY_FLOORS = [
     ("mcp", "1.30.0", ("1.28.1", "1.29.0")),
     ("multidict", "6.9.1", ("6.7.1", "6.9.0")),
     ("nltk", "3.10.4", ("3.9.4", "3.10.3")),
-    ("oauthlib", "4.0.0", ("3.3.1",)),
-    ("opentelemetry-api", "1.45.1", ("1.44.0", "1.45.0")),
+    # Device-code validation: GHSA-3jp2-3mrg-2vxc.
+    ("oauthlib", "4.0.1", ("3.3.1", "4.0.0")),
+    # Trace-context ReDoS, including JSON/MCP carriers: GHSA-mf5v-w3w3-f6cg.
+    ("opentelemetry-api", "1.45.2", ("1.44.0", "1.45.0", "1.45.1")),
+    # Selector parsing and matching DoS; all four advisories require >=4.0.
+    ("soupsieve", "4.0.0", ("2.9.1", "2.9.2", "2.10.0", "3.0.2", "3.0.4")),
     ("pillow", "13.0.0", ("12.3.0",)),
 ]
 

@@ -12,6 +12,9 @@ default): ``docs/guides/usage.md`` is served at ``/guides/usage/``, and an
 
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCS_DIR = REPO_ROOT / "docs"
@@ -67,7 +70,19 @@ def test_mkdocs_nav_entries_exist():
     on pushes to main that touch docs/ -- so a nav typo on a feature branch is
     otherwise unnoticed until release.
     """
-    nav_text = (REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")
-    referenced = re.findall(r"([\w./-]+\.md)", nav_text)
-    missing = [ref for ref in referenced if not (DOCS_DIR / ref).exists()]
+    config = yaml.safe_load((REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8"))
+
+    def entries(node):
+        if isinstance(node, str):
+            yield node
+            return
+        assert isinstance(node, (dict, list)), f"Unexpected nav entry: {node!r}"
+        for child in node.values() if isinstance(node, dict) else node:
+            yield from entries(child)
+
+    referenced = list(entries(config["nav"]))
+    assert referenced, "mkdocs.yml has no navigation entries"
+    urls = (urlsplit(ref) for ref in referenced)
+    local_paths = [url.path for url in urls if not url.scheme and not url.netloc]
+    missing = [ref for ref in local_paths if not (DOCS_DIR / ref).is_file()]
     assert not missing, f"mkdocs.yml nav references missing files: {missing}"

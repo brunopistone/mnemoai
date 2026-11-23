@@ -3,11 +3,13 @@
 import json
 import os
 from datetime import datetime
+from importlib import import_module
 
-from brave_search_python_client import BraveSearch, WebSafeSearchType, WebSearchRequest
 from mcp.server.fastmcp import FastMCP
 
 from mnemoai.utils.logger import logger
+
+from .thread_offload import run_blocking
 
 
 def register_web_search_tools(mcp: FastMCP) -> None:
@@ -81,7 +83,8 @@ def register_web_search_tools(mcp: FastMCP) -> None:
             num_results = max(1, min(num_results, 20))
 
             # Initialize Brave client
-            brave = BraveSearch(api_key=api_key)
+            sdk = await run_blocking(import_module, "brave_search_python_client")
+            brave = sdk.BraveSearch(api_key=api_key)
 
             # Create search request. Optional region/recency params are only
             # passed when set — empty strings fail Brave's validation.
@@ -89,7 +92,7 @@ def register_web_search_tools(mcp: FastMCP) -> None:
                 "q": query.strip(),
                 "count": num_results,
                 "search_lang": search_lang,
-                "safesearch": WebSafeSearchType.off,
+                "safesearch": sdk.WebSafeSearchType.off,
             }
             if freshness:
                 request_kwargs["freshness"] = freshness
@@ -97,7 +100,7 @@ def register_web_search_tools(mcp: FastMCP) -> None:
                 request_kwargs["country"] = country
             if ui_lang:
                 request_kwargs["ui_lang"] = ui_lang
-            request = WebSearchRequest(**request_kwargs)
+            request = sdk.WebSearchRequest(**request_kwargs)
 
             # Execute search
             search_results = await brave.web(request)

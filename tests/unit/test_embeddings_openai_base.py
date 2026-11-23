@@ -5,6 +5,7 @@ provide embeddings via TYPE: openai + API_BASE — matching the chat controller.
 These tests capture the OpenAI client kwargs without any network call.
 """
 
+import ollama
 import pytest
 
 import mnemoai.models.controllers.embeddings_controller as ec
@@ -36,7 +37,7 @@ class _FakeClient:
 
 
 def _controller(cfg, monkeypatch):
-    monkeypatch.setattr(ec, "OpenAI", lambda **kw: _FakeClient(**kw))
+    monkeypatch.setattr("openai.OpenAI", lambda **kw: _FakeClient(**kw))
     c = EmbeddingsController(cfg)
     # disable cache so _embed_openai is actually exercised
     c.cache_enabled = False
@@ -45,7 +46,11 @@ def _controller(cfg, monkeypatch):
 
 def test_api_base_sets_base_url_and_placeholder_key(monkeypatch):
     c = _controller(
-        {"NAME": "qwen3-embedding", "TYPE": "openai", "API_BASE": "http://localhost:8080/v1"},
+        {
+            "NAME": "qwen3-embedding",
+            "TYPE": "openai",
+            "API_BASE": "http://localhost:8080/v1",
+        },
         monkeypatch,
     )
     out = c._embed_openai(["hello"])
@@ -83,7 +88,9 @@ class TestEmbeddingDimension:
     at the provider's native size)."""
 
     def test_explicit_dimension_wins(self):
-        c = EmbeddingsController({"NAME": "anything", "TYPE": "openai", "DIMENSION": 1536})
+        c = EmbeddingsController(
+            {"NAME": "anything", "TYPE": "openai", "DIMENSION": 1536}
+        )
         assert c.dim == 1536
 
     def test_known_model_lookup_default(self):
@@ -96,17 +103,23 @@ class TestEmbeddingDimension:
 
     @pytest.mark.parametrize("enabled", [True, False])
     @pytest.mark.parametrize("kind", ["sha256", "random", "zeros"])
-    def test_legacy_fallback_options_never_fabricate_vectors(self, monkeypatch, enabled, kind):
+    def test_legacy_fallback_options_never_fabricate_vectors(
+        self, monkeypatch, enabled, kind
+    ):
         monkeypatch.setattr(
-            ec.config, "get",
-            lambda key, default=None: {
-                "EMBEDDINGS": {"FALLBACK_ENABLED": enabled, "FALLBACK_TYPE": kind}
-            } if key == "RAG" else default,
+            ec.config,
+            "get",
+            lambda key, default=None: (
+                {"EMBEDDINGS": {"FALLBACK_ENABLED": enabled, "FALLBACK_TYPE": kind}}
+                if key == "RAG"
+                else default
+            ),
         )
         c = EmbeddingsController({"NAME": "fake", "TYPE": "openai", "DIMENSION": 512})
         c._embed_retries = 1
         monkeypatch.setattr(
-            c, "_embed_raw",
+            c,
+            "_embed_raw",
             lambda texts: (_ for _ in ()).throw(RuntimeError("provider unavailable")),
         )
         with pytest.raises(RuntimeError, match="no vectors were stored"):
@@ -131,13 +144,18 @@ class TestOllamaHost:
             def embed(self, model, input, truncate=None):
                 return {"embeddings": [[0.1, 0.2, 0.3]] * len(input)}
 
-        monkeypatch.setattr(ec.ollama, "Client", _FakeOllamaClient)
+        monkeypatch.setattr("ollama.Client", _FakeOllamaClient)
 
     def test_configured_host_port_used(self, monkeypatch):
         captured = {}
         self._patch_client(monkeypatch, captured)
         c = EmbeddingsController(
-            {"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "HOST": "myhost", "PORT": 9999}
+            {
+                "NAME": "qwen3-embedding:0.6b",
+                "TYPE": "ollama",
+                "HOST": "myhost",
+                "PORT": 9999,
+            }
         )
         c.cache_enabled = False
         c._embed_ollama(["hello"])
@@ -157,7 +175,12 @@ class TestOllamaHost:
         # Even with OLLAMA_HOST pointing elsewhere, the configured host wins.
         monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:56231")
         c = EmbeddingsController(
-            {"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "HOST": "localhost", "PORT": 11434}
+            {
+                "NAME": "qwen3-embedding:0.6b",
+                "TYPE": "ollama",
+                "HOST": "localhost",
+                "PORT": 11434,
+            }
         )
         c.cache_enabled = False
         out = c._embed_ollama(["hello"])
@@ -188,12 +211,14 @@ class TestOllamaRetryAndTruncation:
             def embed(self, model, input, truncate=None):
                 state["calls"] += 1
                 if state["calls"] <= fail_times:
-                    raise ec.ollama.ResponseError("EOF", 400) if hasattr(
-                        ec.ollama, "ResponseError"
-                    ) else RuntimeError("EOF")
+                    raise (
+                        ollama.ResponseError("EOF", 400)
+                        if hasattr(ollama, "ResponseError")
+                        else RuntimeError("EOF")
+                    )
                 return {"embeddings": [[0.1, 0.2, 0.3]] * len(input)}
 
-        monkeypatch.setattr(ec.ollama, "Client", _FlakyClient)
+        monkeypatch.setattr("ollama.Client", _FlakyClient)
         monkeypatch.setattr(ec.time, "sleep", lambda *a: None)  # no real delay
         return state
 
@@ -223,13 +248,15 @@ class TestOllamaRetryAndTruncation:
         c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama"})
         c.cache_enabled = False
         c._embed_retries = 3
-        out = c.embed(["hello"])            # go through the generic recovery loop
-        assert state["calls"] == 3          # retried (shrinking) until success
-        assert out.shape == (1, 3)          # real embedding, not fallback
+        out = c.embed(["hello"])  # go through the generic recovery loop
+        assert state["calls"] == 3  # retried (shrinking) until success
+        assert out.shape == (1, 3)  # real embedding, not fallback
 
     def test_raises_after_exhausting_retries(self, monkeypatch):
         self._patch_client(monkeypatch, fail_times=99)  # always fail
-        c = EmbeddingsController({"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "DIMENSION": 3})
+        c = EmbeddingsController(
+            {"NAME": "qwen3-embedding:0.6b", "TYPE": "ollama", "DIMENSION": 3}
+        )
         c.cache_enabled = False
         c._embed_retries = 3
         with pytest.raises(RuntimeError, match="no vectors were stored"):
@@ -345,25 +372,35 @@ class TestTokenCapAndOverflow:
         # A bare runner EOF / 400 is how llama.cpp rejects an over-length batch —
         # so it counts as probable-overflow and drives shrink-and-retry (the old
         # behavior — resend 3x then permanent fallback — was the reported bug).
-        assert EmbeddingsController._is_overflow_error(
-            Exception("... EOF (status code: 400)")
-        ) is True
+        assert (
+            EmbeddingsController._is_overflow_error(
+                Exception("... EOF (status code: 400)")
+            )
+            is True
+        )
 
     def test_context_length_error_is_overflow(self):
         # An explicit context error IS overflow too.
-        assert EmbeddingsController._is_overflow_error(
-            Exception("the input length exceeds the context length")
-        ) is True
-        assert EmbeddingsController._is_overflow_error(
-            Exception("maximum context length is 8192 tokens")
-        ) is True
+        assert (
+            EmbeddingsController._is_overflow_error(
+                Exception("the input length exceeds the context length")
+            )
+            is True
+        )
+        assert (
+            EmbeddingsController._is_overflow_error(
+                Exception("maximum context length is 8192 tokens")
+            )
+            is True
+        )
 
     def test_transient_non_overflow_error_is_not_overflow(self):
         # A clearly non-size error (auth, model missing) is not overflow — it gets
         # the plain retry, not a shrink.
-        assert EmbeddingsController._is_overflow_error(
-            Exception("model 'x' not found")
-        ) is False
+        assert (
+            EmbeddingsController._is_overflow_error(Exception("model 'x' not found"))
+            is False
+        )
 
     def test_overflow_shrinks_limit_then_raises(self, monkeypatch):
         # An always-overflowing input SHRINKS the token limit each attempt (down
@@ -378,7 +415,7 @@ class TestTokenCapAndOverflow:
                 state["calls"] += 1
                 raise RuntimeError("the input length exceeds the context length")
 
-        monkeypatch.setattr(ec.ollama, "Client", _OverflowClient)
+        monkeypatch.setattr("ollama.Client", _OverflowClient)
         monkeypatch.setattr(ec.time, "sleep", lambda *a: None)
         c = EmbeddingsController({"NAME": "x", "TYPE": "ollama", "DIMENSION": 3})
         c.cache_enabled = False
@@ -386,8 +423,8 @@ class TestTokenCapAndOverflow:
         start = c._resolve_token_limit()
         with pytest.raises(RuntimeError, match="no vectors were stored"):
             c.embed(["hello world " * 100])
-        assert state["calls"] == 3            # tried, shrinking, across the budget
-        assert c._max_input_tokens < start    # limit was lowered by the shrink
+        assert state["calls"] == 3  # tried, shrinking, across the budget
+        assert c._max_input_tokens < start  # limit was lowered by the shrink
         assert c._embedding_cache == {}
 
 
@@ -419,14 +456,22 @@ class TestBedrockEmbedSchemaDispatch:
                     return {"body": _Body({"embeddings": {"float": [[0.1, 0.2]] * n}})}
                 if "nova" in modelId and "multimodal-embed" in modelId:
                     # Per-text; response nests the vector in a typed dict.
-                    return {"body": _Body(
-                        {"embeddings": [{"embeddingType": "TEXT",
-                                         "embedding": [0.5, 0.6, 0.7]}]}
-                    )}
+                    return {
+                        "body": _Body(
+                            {
+                                "embeddings": [
+                                    {
+                                        "embeddingType": "TEXT",
+                                        "embedding": [0.5, 0.6, 0.7],
+                                    }
+                                ]
+                            }
+                        )
+                    }
                 # Titan: one text per call
                 return {"body": _Body({"embedding": [0.3, 0.4]})}
 
-        monkeypatch.setattr(ec.boto3, "client", lambda *a, **k: _Client())
+        monkeypatch.setattr("boto3.client", lambda *a, **k: _Client())
 
     def test_cohere_uses_batched_texts_schema(self, monkeypatch):
         cap = {}
@@ -434,13 +479,13 @@ class TestBedrockEmbedSchemaDispatch:
         c = EmbeddingsController({"NAME": "us.cohere.embed-v4:0", "TYPE": "bedrock"})
         c.cache_enabled = False
         out = c.embed(["a", "b", "c"])
-        assert out.shape == (3, 2)                       # real vectors, not fallback
+        assert out.shape == (3, 2)  # real vectors, not fallback
         req = cap["requests"][0]
-        assert req["texts"] == ["a", "b", "c"]           # batched, not per-text
+        assert req["texts"] == ["a", "b", "c"]  # batched, not per-text
         assert req["input_type"] == "search_document"
         assert req["embedding_types"] == ["float"]
-        assert "inputText" not in req                    # NOT the Titan schema
-        assert len(cap["requests"]) == 1                 # one batched call
+        assert "inputText" not in req  # NOT the Titan schema
+        assert len(cap["requests"]) == 1  # one batched call
 
     def test_titan_uses_input_text_schema(self, monkeypatch):
         cap = {}
@@ -452,7 +497,7 @@ class TestBedrockEmbedSchemaDispatch:
         out = c.embed(["a", "b"])
         assert out.shape == (2, 2)
         assert cap["requests"][0] == {"inputText": "a"}  # per-text Titan schema
-        assert len(cap["requests"]) == 2                 # one call per text
+        assert len(cap["requests"]) == 2  # one call per text
 
     def test_cohere_v3_english_also_uses_cohere_schema(self, monkeypatch):
         # The dispatch keys on "cohere.embed" — v3 english/multilingual too, not
@@ -474,12 +519,12 @@ class TestBedrockEmbedSchemaDispatch:
         )
         c.cache_enabled = False
         out = c.embed(["a", "b"])
-        assert out.shape == (2, 3)                        # 3-dim fake vectors
+        assert out.shape == (2, 3)  # 3-dim fake vectors
         req = cap["requests"][0]
         assert req["taskType"] == "SINGLE_EMBEDDING"
         assert req["singleEmbeddingParams"]["text"]["value"] == "a"
         assert "inputText" not in req and "texts" not in req  # neither other schema
-        assert len(cap["requests"]) == 2                  # per-text
+        assert len(cap["requests"]) == 2  # per-text
 
     def test_cohere_sends_output_dimension_when_configured(self, monkeypatch):
         # DIMENSION must reach the Cohere request as `output_dimension` so the
@@ -507,7 +552,11 @@ class TestBedrockEmbedSchemaDispatch:
         cap = {}
         self._patch_bedrock(monkeypatch, cap)
         c = EmbeddingsController(
-            {"NAME": "amazon.titan-embed-text-v2:0", "TYPE": "bedrock", "DIMENSION": 512}
+            {
+                "NAME": "amazon.titan-embed-text-v2:0",
+                "TYPE": "bedrock",
+                "DIMENSION": 512,
+            }
         )
         c.cache_enabled = False
         c.embed(["a"])

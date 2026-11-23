@@ -9,22 +9,33 @@ keeps the visible content populated.
 
 import copy
 import re
-from typing import Any, Dict
+from typing import Any, Dict, get_args
+
+
+def disable_boolean_reasoning(model) -> Dict[str, Any]:
+    """Disable a declared boolean toggle without adding other provider options."""
+    saved: Dict[str, Any] = {}
+
+    # Boolean-capable SDK fields can default to None (provider default) or an
+    # effort string. Neither means "off": an auxiliary call must send False.
+    # Inspect the declared field so an unset ChatOpenAI reasoning OBJECT is
+    # never replaced with an invalid boolean.
+    reasoning = getattr(model, "reasoning", None)
+    field = getattr(type(model), "model_fields", {}).get("reasoning")
+    annotation = getattr(field, "annotation", None)
+    if (
+        isinstance(reasoning, bool)
+        or annotation is bool
+        or bool in get_args(annotation)
+    ):
+        saved["reasoning"] = reasoning
+        model.reasoning = False
+    return saved
 
 
 def disable_reasoning(model) -> Dict[str, Any]:
     """Temporarily disable reasoning/thinking; returns saved state for restore."""
-    saved: Dict[str, Any] = {}
-
-    # Ollama wrapper / LiteLLM: a boolean `reasoning` toggle. Guard on bool so
-    # this doesn't swallow ChatOpenAI's `reasoning` DICT (handled below as the
-    # Responses-API object) — setting that to False would drop the summary
-    # request and leave a stale flag.
-    reasoning = getattr(model, "reasoning", None)
-    if isinstance(reasoning, bool):
-        saved["reasoning"] = reasoning
-        model.reasoning = False
-
+    saved = disable_boolean_reasoning(model)
     # ChatBedrock (old API)
     if hasattr(model, "model_kwargs") and "thinking" in model.model_kwargs:
         saved["thinking"] = model.model_kwargs.pop("thinking")
@@ -137,13 +148,22 @@ def extract_visible_text(content) -> str:
     Bedrock-style content blocks (list of typed dicts).
     """
     if isinstance(content, list):
-        return "".join(
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ).strip()
+        parts = []
+        for block in content:
+            value = (
+                block
+                if isinstance(block, str)
+                else (
+                    block.get("text")
+                    if isinstance(block, dict) and block.get("type") == "text"
+                    else None
+                )
+            )
+            if isinstance(value, str):
+                parts.append(value)
+        content = "".join(parts)
 
-    text = content or ""
+    text = content if isinstance(content, str) else ""
     text = re.sub(
         r"<think(?:ing)?>.*?</think(?:ing)?>",
         "",

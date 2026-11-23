@@ -27,9 +27,14 @@ class Model:
 
     def invoke(self, messages, config=None):
         self.calls.append((messages, config))
-        return AIMessage(content=json.dumps(self.result), usage_metadata={
-            "input_tokens": 20, "output_tokens": 10, "total_tokens": 30,
-        })
+        return AIMessage(
+            content=json.dumps(self.result),
+            usage_metadata={
+                "input_tokens": 20,
+                "output_tokens": 10,
+                "total_tokens": 30,
+            },
+        )
 
 
 @pytest.fixture
@@ -42,14 +47,21 @@ def state(tmp_path, monkeypatch):
 
 def finish(reviewer, capture, model=None, **kwargs):
     model = model or Model()
-    return reviewer.finish(capture, "The answer", model_factory=lambda: model,
-                           model_label="fixture (separate call)", **kwargs)
+    return reviewer.finish(
+        capture,
+        "The answer",
+        model_factory=lambda: model,
+        model_label="fixture (separate call)",
+        **kwargs,
+    )
 
 
 def test_success_is_advisory_and_uses_an_isolated_tool_free_packet(state):
     reviewer, capture, _ = state
     model, usage = Model(), UsageTracker()
-    report = finish(reviewer, capture, model, usage=lambda result: usage.record(result, "reviewer"))
+    report = finish(
+        reviewer, capture, model, usage=lambda result: usage.record(result, "reviewer")
+    )
     assert report["verdict"] == "pass"
     messages, cfg = model.calls[0]
     assert [m.type for m in messages] == ["system", "human"]
@@ -61,32 +73,148 @@ def test_success_is_advisory_and_uses_an_isolated_tool_free_packet(state):
     assert "Not proof of correctness, permission" in review.render(report)
 
 
-@pytest.mark.parametrize("invalid", [
-    {}, {"verdict": "approve", "summary": "x", "findings": []},
-    verdict("revise"), verdict("pass", [{"issue": "x", "evidence_ids": ["task"], "verification": "check"}]),
-    verdict("revise", [{"issue": "x", "evidence_ids": ["fabricated"], "verification": "check"}]),
-    verdict("revise", [{"issue": "\x1b[2J", "evidence_ids": ["task"], "verification": "check"}]),
-    {"verdict": "pass", "summary": "x", "findings": [], "approved": True},
-])
+def test_invalid_verdict_gets_one_budgeted_repair_without_losing_findings(
+    state, monkeypatch
+):
+    reviewer, capture, _ = state
+    findings = [
+        {
+            "issue": "The answer contradicts the task.",
+            "evidence_ids": ["task", "answer"],
+            "verification": "Check the requested value.",
+        }
+    ]
+
+    class Repairing(Model):
+        def invoke(self, messages, config=None):
+            self.result = verdict("pass" if not self.calls else "revise", findings)
+            return super().invoke(messages, config)
+
+    model, usage = Repairing(), UsageTracker()
+    snapshots = []
+    original = capture.finish
+
+    def snapshot(*args, **kwargs):
+        snapshots.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(capture, "finish", snapshot)
+    report = finish(
+        reviewer,
+        capture,
+        model,
+        usage=lambda response: usage.record(response, "reviewer"),
+    )
+    assert report["verdict"] == "revise" and report["findings"] == findings
+    assert len(model.calls) == 2 and snapshots == [1]
+    assert "contradicts" in model.calls[1][0][0].content
+    for messages, _ in model.calls:
+        assert (
+            review.estimated_input_tokens(messages[0].content, messages[1].content)
+            <= review.settings()["MAX_INPUT_TOKENS"]
+        )
+    assert usage.totals()["calls"] == 2 and usage.totals()["total_tokens"] == 60
+
+
+def test_invalid_verdict_repair_is_bounded_and_never_assumes_success(state):
+    reviewer, capture, _ = state
+    model = Model({"verdict": "approve", "summary": "Invalid", "findings": []})
+    report = finish(reviewer, capture, model)
+    assert len(model.calls) == 2
+    assert report["verdict"] == "inconclusive" and report["unavailable"]
+
+
+def test_verdict_repair_cannot_renew_the_original_deadline(state, monkeypatch):
+    reviewer, capture, _ = state
+    expired = threading.Event()
+    monkeypatch.setattr(
+        review,
+        "time",
+        SimpleNamespace(monotonic=lambda: 60.0 if expired.is_set() else 0.0),
+    )
+
+    def invalid(*args):
+        expired.set()
+        raise ValueError("Invalid response")
+
+    monkeypatch.setattr(review, "parse_verdict", invalid)
+    model = Model()
+    report = finish(reviewer, capture, model)
+    assert len(model.calls) == 1
+    assert report["verdict"] == "inconclusive" and "timed out" in report["summary"]
+
+
+def test_verdict_repair_stops_on_cancellation(state, monkeypatch):
+    reviewer, capture, _ = state
+    cancelled = threading.Event()
+
+    def invalid(*args):
+        cancelled.set()
+        raise ValueError("Invalid response")
+
+    monkeypatch.setattr(review, "parse_verdict", invalid)
+    model = Model()
+    report = finish(reviewer, capture, model, cancel=cancelled.is_set)
+    assert len(model.calls) == 1
+    assert (
+        report["verdict"] == "inconclusive" and "cancelled" in report["summary"].lower()
+    )
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {},
+        {"verdict": "approve", "summary": "x", "findings": []},
+        verdict("revise"),
+        verdict(
+            "pass", [{"issue": "x", "evidence_ids": ["task"], "verification": "check"}]
+        ),
+        verdict(
+            "revise",
+            [{"issue": "x", "evidence_ids": ["fabricated"], "verification": "check"}],
+        ),
+        verdict(
+            "revise",
+            [{"issue": "\x1b[2J", "evidence_ids": ["task"], "verification": "check"}],
+        ),
+        {"verdict": "pass", "summary": "x", "findings": [], "approved": True},
+    ],
+)
 def test_malformed_or_unobserved_verdict_cannot_pass(invalid):
     with pytest.raises(ValueError):
         review.parse_verdict(AIMessage(content=json.dumps(invalid)), {"task"})
 
 
 def test_reviewer_tool_request_is_never_executed():
-    response = AIMessage(content=json.dumps(verdict()), tool_calls=[
-        {"id": "call", "name": "execute_bash", "args": {"command": "touch forbidden"}},
-    ])
+    response = AIMessage(
+        content=json.dumps(verdict()),
+        tool_calls=[
+            {
+                "id": "call",
+                "name": "execute_bash",
+                "args": {"command": "touch forbidden"},
+            },
+        ],
+    )
     with pytest.raises(ValueError, match="tool calls"):
         review.parse_verdict(response, {"task"})
 
 
 def test_supported_findings_remain_suggestions_not_actions(state):
     reviewer, capture, root = state
-    model = Model(verdict("revise", [{
-        "issue": "The answer contradicts the task.", "evidence_ids": ["task", "answer"],
-        "verification": "touch must-not-exist",
-    }]))
+    model = Model(
+        verdict(
+            "revise",
+            [
+                {
+                    "issue": "The answer contradicts the task.",
+                    "evidence_ids": ["task", "answer"],
+                    "verification": "touch must-not-exist",
+                }
+            ],
+        )
+    )
     report = finish(reviewer, capture, model)
     assert report["verdict"] == "revise"
     assert not (root / "must-not-exist").exists()
@@ -108,32 +236,126 @@ def test_actual_file_content_and_stale_report_detection(state):
     assert "historical" in reviewer.current_report()["summary"]
 
 
+def test_review_separates_display_line_numbers_from_actual_indentation(state):
+    from mnemoai.server.tools.readers.line_reader import read_lines
+
+    reviewer, capture, root = state
+    path = root / "document.md"
+    path.write_text("header\n\tindented\n  spaces\n     7\tliteral gutter\n")
+    result = read_lines(str(path), 2, 4)
+    capture.record(
+        "fs_read",
+        {"path": str(path), "mode": "Line", "start_line": 2, "end_line": 4},
+        result,
+        "completed",
+    )
+    model = Model()
+    assert finish(reviewer, capture, model)["verdict"] == "pass"
+    payload = json.loads(model.calls[0][0][1].content)
+    tool = next(i for i in payload["evidence"] if i.get("name") == "fs_read")
+    presented = json.loads(tool["result"])
+    assert presented["source_lines"] == [
+        {"line": 2, "text": "\tindented"},
+        {"line": 3, "text": "  spaces"},
+        {"line": 4, "text": "     7\tliteral gutter"},
+    ]
+    assert "content" not in presented
+    assert presented["start_line"] == 2 and presented["end_line"] == 4
+    assert json.loads(result)["content"].startswith("     2\t\tindented")
+    assert (
+        json.loads(capture.tools[0]["result"])["content"]
+        == json.loads(result)["content"]
+    )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"truncated": True},
+        {"content": "plain text"},
+        {"lines_processed": 2},
+        {"start_line": True},
+    ],
+)
+def test_review_preserves_unrecognized_or_truncated_line_results(change):
+    result = {
+        "content": "     1\ttext",
+        "start_line": 1,
+        "lines_processed": 1,
+        "truncated": False,
+        **change,
+    }
+    item = {
+        "id": "tool-1",
+        "kind": "tool",
+        "name": "fs_read",
+        "status": "completed",
+        "arguments": '{"mode":"Line"}',
+        "result": json.dumps(result),
+    }
+    _, kept, _ = review.packet([item], set(), 6000)
+    assert kept[0]["result"] == item["result"]
+
+
 def test_named_artifact_plus_shell_verification_is_reviewable_without_git(state):
     reviewer, capture, root = state
     path = root / "document.md"
     path.write_text("A complete document.")
     capture.record("fs_read", {"path": str(path)}, path.read_text(), "completed")
-    capture.record("execute_bash", {"command": "verify document"}, {"exit_code": 0}, "completed")
+    capture.record(
+        "execute_bash", {"command": "verify document"}, {"exit_code": 0}, "completed"
+    )
     assert finish(reviewer, capture)["verdict"] == "pass"
 
 
 def test_shell_only_artifacts_without_git_have_explicitly_incomplete_coverage(state):
     reviewer, capture, root = state
     (root / "unobserved.md").write_text("Written only by shell.")
-    capture.record("execute_bash", {"command": "create document"}, {"exit_code": 0}, "completed")
+    capture.record(
+        "execute_bash", {"command": "create document"}, {"exit_code": 0}, "completed"
+    )
     report = finish(reviewer, capture)
     assert report["verdict"] == "inconclusive"
     assert any("Shell-created artifacts" in gap for gap in report["coverage_gaps"])
 
 
-def test_shell_created_untracked_artifact_is_reviewed_and_bound_to_its_version(tmp_path, monkeypatch):
+def test_readonly_shell_inspection_does_not_claim_unobserved_artifacts(state):
+    reviewer, capture, _ = state
+    capture.record("execute_bash", {"command": "pwd"}, {"exit_code": 0}, "completed")
+    assert capture.shell_serial == 0
+    assert finish(reviewer, capture)["verdict"] == "pass"
+
+
+def test_later_file_evidence_resolves_an_earlier_shell_coverage_gap(state):
+    reviewer, capture, root = state
+    path = root / "created.md"
+    path.write_text("Verified document")
+    capture.record(
+        "execute_bash", {"command": "create document"}, {"exit_code": 0}, "completed"
+    )
+    first = finish(reviewer, capture)
+    assert first["verdict"] == "inconclusive"
+    capture.reopen()
+    capture.record("fs_read", {"path": str(path)}, path.read_text(), "completed")
+    second = finish(reviewer, capture)
+    assert second["verdict"] == "pass"
+    assert first[
+        "coverage_gaps"
+    ], "The earlier incomplete report remains historical evidence"
+
+
+def test_shell_created_untracked_artifact_is_reviewed_and_bound_to_its_version(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     subprocess.run(["git", "init", "-q"], check=True)
     reviewer = review.Reviewer(enabled=True)
     capture = reviewer.begin("Create a document.")
     path = tmp_path / "new-document.md"
     path.write_text("Draft document")
-    capture.record("execute_bash", {"command": "create document"}, {"exit_code": 0}, "completed")
+    capture.record(
+        "execute_bash", {"command": "create document"}, {"exit_code": 0}, "completed"
+    )
     model = Model()
     report = finish(reviewer, capture, model)
     assert report["verdict"] == "pass", report
@@ -146,7 +368,9 @@ def test_shell_created_untracked_artifact_is_reviewed_and_bound_to_its_version(t
     assert reviewer.current_report()["verdict"] == "inconclusive"
 
 
-def test_untracked_inventory_over_limit_cannot_receive_a_passing_review(tmp_path, monkeypatch):
+def test_untracked_inventory_over_limit_cannot_receive_a_passing_review(
+    tmp_path, monkeypatch
+):
     monkeypatch.chdir(tmp_path)
     subprocess.run(["git", "init", "-q"], check=True)
     reviewer = review.Reviewer(enabled=True)
@@ -163,22 +387,31 @@ def test_changes_during_review_invalidate_the_verdict(state):
     path = root / "code.py"
     path.write_text("VALUE = 2\n")
     capture.record("file_edit", {"file_path": str(path)}, "Updated", "completed")
+
     class Changing(Model):
         def invoke(self, messages, config=None):
             path.write_text("VALUE = 99\n")
             return super().invoke(messages, config)
+
     assert finish(reviewer, capture, Changing())["verdict"] == "inconclusive"
 
 
 def test_failed_shell_check_cannot_be_voted_into_success(state):
     reviewer, capture, _ = state
-    capture.record("execute_bash", {"command": "pytest"}, {"exit_code": 1, "stderr": "failed"}, "failed")
+    capture.record(
+        "execute_bash",
+        {"command": "pytest"},
+        {"exit_code": 1, "stderr": "failed"},
+        "failed",
+    )
     report = finish(reviewer, capture)
     assert report["verdict"] == "inconclusive"
     assert any("failed shell command" in gap for gap in report["coverage_gaps"])
 
 
-@pytest.mark.parametrize("field", ["exit_status", "exit_code", "return_code", "returncode"])
+@pytest.mark.parametrize(
+    "field", ["exit_status", "exit_code", "return_code", "returncode"]
+)
 def test_observed_successful_rerun_resolves_that_command_only(state, field):
     reviewer, capture, root = state
     subprocess.run(["git", "init", "-q", str(root)], check=True)
@@ -189,8 +422,15 @@ def test_observed_successful_rerun_resolves_that_command_only(state, field):
 
 def test_same_command_in_a_different_directory_does_not_resolve_a_failure(state):
     reviewer, capture, _ = state
-    capture.record("execute_bash", {"command": "pytest"}, {"exit_status": 1, "cwd": "/a"}, "failed")
-    capture.record("execute_bash", {"command": "pytest"}, {"exit_status": 0, "cwd": "/b"}, "completed")
+    capture.record(
+        "execute_bash", {"command": "pytest"}, {"exit_status": 1, "cwd": "/a"}, "failed"
+    )
+    capture.record(
+        "execute_bash",
+        {"command": "pytest"},
+        {"exit_status": 0, "cwd": "/b"},
+        "completed",
+    )
     assert finish(reviewer, capture)["verdict"] == "inconclusive"
 
 
@@ -198,8 +438,12 @@ def test_capture_limits_and_redaction_are_visible(state):
     reviewer, capture, root = state
     private = root / ".env"
     private.write_text("SECRET=do-not-send")
-    capture.record("fs_read", {"path": str(private), "api_key": "do-not-send"},
-                   '{"password":"do-not-send"}', "completed")
+    capture.record(
+        "fs_read",
+        {"path": str(private), "api_key": "do-not-send"},
+        '{"password":"do-not-send"}',
+        "completed",
+    )
     for n in range(30):
         capture.record("fs_read", {"path": f"missing-{n}"}, "ok", "completed")
     model = Model()
@@ -234,11 +478,13 @@ def test_directory_symlink_replacement_cannot_escape_during_open(tmp_path, monke
     outside.mkdir()
     (outside / "data").write_text("private")
     original = os.open
+
     def swap(path, flags, **kwargs):
         if path == "folder" and "dir_fd" in kwargs:
             folder.rename(root / "original-folder")
             folder.symlink_to(outside, target_is_directory=True)
         return original(path, flags, **kwargs)
+
     monkeypatch.setattr(os, "open", swap)
     with pytest.raises(OSError):
         file_state(folder / "data", root)
@@ -256,14 +502,35 @@ def test_workspace_diff_is_real_bounded_and_never_runs_external_diff(tmp_path):
     root = tmp_path / "checkout"
     source = Path(__file__).resolve().parents[2]
     # Reuse existing commits; never create a local commit for a fixture.
-    subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "clone", "--shared", "--quiet",
-                    str(source), str(root)], check=True, timeout=30)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "clone",
+            "--shared",
+            "--quiet",
+            str(source),
+            str(root),
+        ],
+        check=True,
+        timeout=30,
+    )
     before = git_state(root)
     assert before["content"] == ""
     (root / "README.md").write_text("changed\n" * 20_000)
     (root / ".gitattributes").write_text("README.md diff=fixture\n")
-    subprocess.run(["git", "-C", str(root), "config", "diff.fixture.command",
-                    "touch forbidden-diff"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "config",
+            "diff.fixture.command",
+            "touch forbidden-diff",
+        ],
+        check=True,
+    )
     after = git_state(root)
     assert after["content"] and after["truncated"]
     assert len(after["content"]) <= 12_000
@@ -281,7 +548,9 @@ def test_new_user_followups_are_distinct_requirements(state):
 def test_input_budget_can_refuse_the_call_without_hiding_the_limit(state, monkeypatch):
     reviewer, capture, _ = state
     capture.task = "a " * 20_000
-    monkeypatch.setitem(review.config._config_data, "REVIEW", {"MAX_INPUT_TOKENS": 1000})
+    monkeypatch.setitem(
+        review.config._config_data, "REVIEW", {"MAX_INPUT_TOKENS": 1000}
+    )
     model = Model()
     assert finish(reviewer, capture, model)["verdict"] == "inconclusive"
     assert not model.calls
@@ -291,12 +560,16 @@ def test_timeout_during_preparation_never_sends_a_late_request(state, monkeypatc
     reviewer, capture, _ = state
     entered, release = threading.Event(), threading.Event()
     original = capture.finish
+
     def slow(*args):
         entered.set()
         assert release.wait(3)
         return original(*args)
+
     monkeypatch.setattr(capture, "finish", slow)
-    monkeypatch.setattr(review, "settings", lambda: {"TIMEOUT": 0.03, "MAX_INPUT_TOKENS": 6000})
+    monkeypatch.setattr(
+        review, "settings", lambda: {"TIMEOUT": 0.03, "MAX_INPUT_TOKENS": 6000}
+    )
     model = Model()
     try:
         report = finish(reviewer, capture, model)
@@ -314,15 +587,28 @@ def test_timeout_during_preparation_never_sends_a_late_request(state, monkeypatc
 def test_timeout_after_send_counts_once_and_never_publishes_late(state, monkeypatch):
     reviewer, capture, _ = state
     entered, release = threading.Event(), threading.Event()
+
     class Slow(Model):
         def invoke(self, *args, **kwargs):
             entered.set()
             assert release.wait(3)
             return super().invoke(*args, **kwargs)
-    monkeypatch.setattr(review, "settings", lambda: {"TIMEOUT": 0.1, "MAX_INPUT_TOKENS": 6000})
+
+    monkeypatch.setattr(
+        review, "settings", lambda: {"TIMEOUT": 0.1, "MAX_INPUT_TOKENS": 6000}
+    )
+    # This case tests a timeout AFTER invocation, independently of how long
+    # evidence preparation or a cold tokenizer takes on this interpreter.
+    monkeypatch.setattr(
+        review,
+        "time",
+        SimpleNamespace(monotonic=lambda: 1.0 if entered.is_set() else 0.0),
+    )
     usage = UsageTracker()
     try:
-        report = finish(reviewer, capture, Slow(), usage=lambda r: usage.record(r, "reviewer"))
+        report = finish(
+            reviewer, capture, Slow(), usage=lambda r: usage.record(r, "reviewer")
+        )
         assert entered.is_set()
         assert report["verdict"] == "inconclusive"
         assert usage.totals()["calls"] == usage.totals()["calls_without_usage"] == 1
@@ -344,11 +630,14 @@ def test_disabled_or_cancelled_review_does_not_call_the_provider(state, mode):
 
 def test_failed_thread_start_does_not_permanently_disable_reviews(state, monkeypatch):
     reviewer, capture, _ = state
+
     class CannotStart:
         def __init__(self, *a, **kw):
             pass
+
         def start(self):
             raise RuntimeError("thread limit")
+
     with monkeypatch.context() as patched:
         patched.setattr(review.threading, "Thread", CannotStart)
         assert finish(reviewer, capture)["verdict"] == "inconclusive"
@@ -358,8 +647,12 @@ def test_failed_thread_start_does_not_permanently_disable_reviews(state, monkeyp
 @pytest.mark.parametrize("auto_mode", ["off", "edits", "writes", "all"])
 def test_user_controls_do_not_change_actor_permission_state(state, auto_mode):
     reviewer, _, _ = state
-    client = SimpleNamespace(reviewer=reviewer, auto_approve_mode=auto_mode,
-                             plan_mode_active=True, agent=SimpleNamespace(headless=False))
+    client = SimpleNamespace(
+        reviewer=reviewer,
+        auto_approve_mode=auto_mode,
+        plan_mode_active=True,
+        agent=SimpleNamespace(headless=False),
+    )
     for action in ("off", "on", "", "last", "invalid"):
         review.command(client, action)
         assert client.auto_approve_mode == auto_mode and client.plan_mode_active
@@ -370,14 +663,26 @@ def test_user_controls_do_not_change_actor_permission_state(state, auto_mode):
 def test_session_review_record_does_not_enter_restored_chat(tmp_path, monkeypatch):
     monkeypatch.setenv("MNEMOAI_HOME", str(tmp_path))
     log = SessionLog(cwd=str(tmp_path))
-    log.log_review({"verdict": "revise", "summary": "DO NOT INJECT THIS AS AN INSTRUCTION"})
+    log.log_review(
+        {"verdict": "revise", "summary": "DO NOT INJECT THIS AS AN INSTRUCTION"}
+    )
     raw = log.path.read_text()
     assert '"t": "review"' in raw
     assert read_session(log.path)["messages"] == []
 
 
-@pytest.mark.parametrize("raw", [True, [], "x", {"TIMEOUT": 0}, {"TIMEOUT": float("nan")},
-                                {"MAX_INPUT_TOKENS": 1000.5}, {"TIMEOUT": True}])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        True,
+        [],
+        "x",
+        {"TIMEOUT": 0},
+        {"TIMEOUT": float("nan")},
+        {"MAX_INPUT_TOKENS": 1000.5},
+        {"TIMEOUT": True},
+    ],
+)
 def test_invalid_runtime_limits_fail_loudly(raw, monkeypatch):
     monkeypatch.setitem(review.config._config_data, "REVIEW", raw)
     with pytest.raises(ValueError):
@@ -387,16 +692,24 @@ def test_invalid_runtime_limits_fail_loudly(raw, monkeypatch):
 def test_reviewer_retry_backoff_ends_at_checkpoint_deadline(state, monkeypatch):
     reviewer, capture, _ = state
     calls = []
+
     class Down:
         def invoke(self, *args, **kwargs):
             calls.append(1)
             raise RuntimeError("503 service unavailable")
-    monkeypatch.setitem(review.config._config_data, "LLM", {"MAX_RETRIES": 3, "RETRY_DELAY": 30})
-    monkeypatch.setattr(review, "settings", lambda: {"TIMEOUT": 1, "MAX_INPUT_TOKENS": 6000})
+
+    monkeypatch.setitem(
+        review.config._config_data, "LLM", {"MAX_RETRIES": 3, "RETRY_DELAY": 30}
+    )
+    monkeypatch.setattr(
+        review, "settings", lambda: {"TIMEOUT": 1, "MAX_INPUT_TOKENS": 6000}
+    )
     report = finish(reviewer, capture, Down())
     assert report["unavailable"] and report["verdict"] == "inconclusive"
     assert calls == [1]
-    assert reviewer._in_flight.acquire(timeout=1), "backoff must not hold a late retry open"
+    assert reviewer._in_flight.acquire(
+        timeout=1
+    ), "backoff must not hold a late retry open"
     reviewer._in_flight.release()
     assert calls == [1]
 
@@ -404,13 +717,17 @@ def test_reviewer_retry_backoff_ends_at_checkpoint_deadline(state, monkeypatch):
 def test_each_reviewer_retry_is_accounted_exactly_once(state, monkeypatch):
     reviewer, capture, _ = state
     attempts, usage = [], []
+
     class Flaky:
         def invoke(self, *args, **kwargs):
             attempts.append(1)
             if len(attempts) < 3:
                 raise RuntimeError("503 service unavailable")
             return AIMessage(content=json.dumps(verdict()))
-    monkeypatch.setitem(review.config._config_data, "LLM", {"MAX_RETRIES": 3, "RETRY_DELAY": 0})
+
+    monkeypatch.setitem(
+        review.config._config_data, "LLM", {"MAX_RETRIES": 3, "RETRY_DELAY": 0}
+    )
     report = finish(reviewer, capture, Flaky(), usage=usage.append)
     assert report["verdict"] == "pass"
     assert len(usage) == len(attempts) == 3
@@ -427,31 +744,43 @@ def test_changed_file_is_retained_after_tool_capture_limit(state):
     changed.write_text("ACTUAL NEW CODE")
     capture.record("fs_write", {"path": str(changed)}, '{"success":true}', "completed")
     evidence = capture.finish("Done.")
-    assert any(item.get("kind") == "current_file" and "ACTUAL NEW CODE" in item["content"]
-               for item in evidence)
+    assert any(
+        item.get("kind") == "current_file" and "ACTUAL NEW CODE" in item["content"]
+        for item in evidence
+    )
     assert "Tool evidence exceeded the capture limit." in capture.gaps
 
 
 def test_reopening_keeps_write_and_check_evidence_with_stable_ids(state):
     _, capture, root = state
-    capture.record("fs_write", {"path": str(root / "code.py")}, '{"success":true}', "completed")
-    capture.record("execute_bash", {"command": "tests"}, {"exit_status": 0}, "completed")
+    capture.record(
+        "fs_write", {"path": str(root / "code.py")}, '{"success":true}', "completed"
+    )
+    capture.record(
+        "execute_bash", {"command": "tests"}, {"exit_status": 0}, "completed"
+    )
     before = list(capture.tools)
     capture.finish("A batch is complete.")
     capture.reopen()
     assert capture.tools == before
-    capture.record("fs_read", {"path": str(root / "code.py")}, "current code", "completed")
+    capture.record(
+        "fs_read", {"path": str(root / "code.py")}, "current code", "completed"
+    )
     assert [entry["id"] for entry in capture.tools] == ["tool-1", "tool-2", "tool-3"]
 
 
-def test_finished_result_is_published_after_releasing_the_review_slot(state, monkeypatch):
+def test_finished_result_is_published_after_releasing_the_review_slot(
+    state, monkeypatch
+):
     reviewer, capture, _ = state
     original = review.queue.Queue
     published_locked = []
+
     class ObservedQueue(original):
         def put(self, value, *args, **kwargs):
             published_locked.append(reviewer._in_flight.locked())
             return super().put(value, *args, **kwargs)
+
     monkeypatch.setattr(review.queue, "Queue", ObservedQueue)
     assert finish(reviewer, capture)["verdict"] == "pass"
     assert published_locked == [False]
@@ -459,7 +788,12 @@ def test_finished_result_is_published_after_releasing_the_review_slot(state, mon
 
 def test_directory_listing_is_tool_evidence_not_a_missing_file_snapshot(state):
     reviewer, capture, root = state
-    capture.record("fs_read", {"path": str(root), "mode": "Directory"}, "Directory entries", "completed")
+    capture.record(
+        "fs_read",
+        {"path": str(root), "mode": "Directory"},
+        "Directory entries",
+        "completed",
+    )
     report = finish(reviewer, capture)
     assert capture.paths == set()
     assert report["verdict"] == "pass"

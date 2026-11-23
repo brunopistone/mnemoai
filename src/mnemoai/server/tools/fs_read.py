@@ -11,10 +11,8 @@ from .read_state import current_version, record_read
 from .readers import (
     read_csv,
     read_directory,
-    read_docx,
     read_json,
     read_lines,
-    read_pdf,
     search_file,
 )
 from .shell_state import resolve_path as normalize_path
@@ -106,7 +104,9 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             # Normalize path, tolerating shell escaping/quoting (a path the user
             # copied from a terminal as `/Users/me/My\ File.txt` or quoted).
             normalized_path = normalize_path(path)
-            observed_version = current_version(normalized_path) if mode != "Directory" else None
+            observed_version = (
+                current_version(normalized_path) if mode != "Directory" else None
+            )
 
             if mode == "Directory":
                 # A directory listing isn't a file read; nothing to gate later.
@@ -120,8 +120,12 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             elif mode in ["JSON", "JSONL"]:
                 result = read_json(normalized_path, start_line, end_line)
             elif mode == "PDF":
+                from .readers import read_pdf
+
                 result = read_pdf(normalized_path)
             elif mode == "DOCX":
+                from .readers import read_docx
+
                 result = read_docx(normalized_path)
             else:
                 return json.dumps(
@@ -140,13 +144,17 @@ def register_fs_read_tools(mcp: FastMCP) -> None:
             # file the model didn't actually see.
             try:
                 if not json.loads(result).get("error"):
-                    if observed_version is None or not record_read(normalized_path, observed_version):
-                        return json.dumps({
-                            "error": True,
-                            "stale_read": True,
-                            "message": "File changed while being read; read it again before editing.",
-                            "path": normalized_path,
-                        })
+                    if observed_version is None or not record_read(
+                        normalized_path, observed_version
+                    ):
+                        return json.dumps(
+                            {
+                                "error": True,
+                                "stale_read": True,
+                                "message": "File changed while being read; read it again before editing.",
+                                "path": normalized_path,
+                            }
+                        )
             except (ValueError, TypeError):
                 pass
             return result

@@ -15,7 +15,8 @@ Two facts every shell tool needs and neither should re-derive:
   directory a command ENDS in becomes the starting directory of the next one, as
   in an interactive session.
 
-The tracked directory is process-wide (one shell session per server) and
+The tracked directory belongs to one tool server (a process-global fallback for
+standalone stdio) and is
 therefore lock-guarded: the server dispatches tool calls from several agents
 concurrently, so this is read and written from many threads.
 
@@ -28,6 +29,7 @@ import shutil
 import threading
 from typing import Optional
 
+from mnemoai.server import tool_state
 from mnemoai.utils import execution_context
 from mnemoai.utils.logger import logger
 from mnemoai.utils.path_utils import normalize_path
@@ -53,7 +55,9 @@ def bash_path() -> Optional[str]:
     """
     global _bash, _bash_resolved
     if not _bash_resolved:
-        _bash = shutil.which("bash") or ("/bin/bash" if os.path.exists("/bin/bash") else None)
+        _bash = shutil.which("bash") or (
+            "/bin/bash" if os.path.exists("/bin/bash") else None
+        )
         _bash_resolved = True
         if _bash is None:
             logger.warning("bash not found; shell tools fall back to /bin/sh")
@@ -71,13 +75,22 @@ def current_cwd() -> str:
     workspace = execution_context.current()
     if workspace is not None:
         if not os.path.isdir(workspace.cwd):
-            raise FileNotFoundError(f"Execution directory is unavailable: {workspace.cwd}")
+            raise FileNotFoundError(
+                f"Execution directory is unavailable: {workspace.cwd}"
+            )
         return workspace.cwd
     with _lock:
+        state = tool_state.current()
+        if state is not None:
+            if state.cwd is None or not os.path.isdir(state.cwd):
+                state.cwd = state.initial_cwd
+            return state.cwd
         if _cwd is None:
             _cwd = os.getcwd()
         if not os.path.isdir(_cwd):
-            logger.info("Tracked shell cwd %s is gone; resetting to %s", _cwd, os.getcwd())
+            logger.info(
+                "Tracked shell cwd %s is gone; resetting to %s", _cwd, os.getcwd()
+            )
             _cwd = os.getcwd()
         return _cwd
 
@@ -97,7 +110,11 @@ def set_cwd(path: str) -> bool:
         workspace.cwd = candidate
         return True
     with _lock:
-        _cwd = candidate
+        state = tool_state.current()
+        if state is not None:
+            state.cwd = candidate
+        else:
+            _cwd = candidate
     return True
 
 
@@ -110,7 +127,11 @@ def reset_cwd() -> None:
     """Forget the tracked directory (next read re-seeds from the process cwd)."""
     global _cwd
     with _lock:
-        _cwd = None
+        state = tool_state.current()
+        if state is not None:
+            state.cwd = None
+        else:
+            _cwd = None
 
 
 def wrap_with_cwd_probe(command: str, probe_path: str) -> str:

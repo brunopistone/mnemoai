@@ -93,14 +93,78 @@ def _last_line(proc: subprocess.CompletedProcess) -> str:
     return proc.stdout.strip().splitlines()[-1].strip()
 
 
+def test_enabled_tools_register_without_loading_optional_sdks_or_tokenizer():
+    proc = _run("""
+        import asyncio, tiktoken
+        settings = {
+            "ENABLE_WEB_CRAWL": True, "ENABLE_WEB_SEARCH": True,
+            "ENABLE_RAG": True, "BRAVE_API_KEY": "unused-test-key",
+        }
+        before = cfgmod.config.get
+        cfgmod.config.get = lambda k, d=None: settings[k] if k in settings else before(k, d)
+        def forbidden(*args, **kwargs):
+            raise AssertionError("registration constructed an unused tokenizer")
+        tiktoken.encoding_for_model = forbidden
+        from mnemoai.server.factory import create_server
+        server = create_server()
+        names = {tool.name for tool in asyncio.run(server.list_tools())}
+        assert {"web_search", "web_crawler", "fs_read", "describe_image"} <= names
+        assert not {"crawl4ai", "brave_search_python_client", "pypdf", "docx"} & sys.modules.keys()
+        print("ok")
+        """)
+    assert _last_line(proc) == "ok"
+
+
+def test_provider_controllers_do_not_import_unselected_sdks():
+    proc = _run("""
+        from mnemoai.models.controllers.llm_controller import LangChainLLMController
+        from mnemoai.models.controllers.embeddings_controller import EmbeddingsController
+        assert not {"boto3", "openai", "ollama", "langchain_aws", "langchain_ollama"} & sys.modules.keys()
+        module = types.ModuleType("mnemoai.models.chat_models.chat_ollama_wrapper")
+        class Model:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+        module.ChatOllamaWrapper = Model
+        sys.modules[module.__name__] = module
+        before = cfgmod.config.get
+        cfgmod.config.get = lambda k, d=None: (
+            {"TYPE": "ollama", "NAME": "selected"} if k == "MODEL_ID" else before(k, d)
+        )
+        controller = LangChainLLMController()
+        controller.initialize_model()
+        assert controller.model.kwargs["model"] == "selected"
+        assert "mnemoai.models.chat_models.sagemaker_chat" not in sys.modules
+        print("ok")
+        """)
+    assert _last_line(proc) == "ok"
+
+
+def test_tool_tokenizer_is_available_when_first_requested():
+    proc = _run("""
+        import tiktoken
+        calls = []
+        expected = object()
+        tiktoken.encoding_for_model = lambda name: calls.append(name) or expected
+        from mnemoai.server.tools.tools_manager import ToolManager
+        manager = ToolManager()
+        assert calls == []
+        assert manager.get_encoder() is expected
+        assert manager.get_encoder() is expected
+        assert calls == ["gpt-4"]
+        replacement = object()
+        manager.set_encoder(replacement)
+        assert manager.get_encoder() is replacement
+        print("ok")
+        """)
+    assert _last_line(proc) == "ok"
+
+
 def test_importing_tools_package_does_not_initialize_vision():
     """The bare package import must not construct the vision controller."""
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools  # noqa: F401
         print(_events)
-        """
-    )
+        """)
     assert _last_line(proc) == "[]", REASON
 
 
@@ -112,12 +176,10 @@ def test_importing_tools_package_does_not_load_torch():
     chain — including a path that reaches torch without going through the
     controller we stub out.
     """
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools  # noqa: F401
         print("torch" in sys.modules or "transformers" in sys.modules)
-        """
-    )
+        """)
     assert _last_line(proc) == "False", REASON
 
 
@@ -132,8 +194,7 @@ def test_registering_tools_does_not_initialize_vision():
     to construct; this one records construction, and the tool must still be
     registered.
     """
-    proc = _run(
-        """
+    proc = _run("""
         import asyncio
         from mcp.server.fastmcp import FastMCP
         import mnemoai.utils.config as cfgmod
@@ -152,8 +213,7 @@ def test_registering_tools_does_not_initialize_vision():
         t.tool_manager.register_tools(mcp)
         names = sorted(x.name for x in asyncio.run(mcp.list_tools()))
         print([_events, "describe_image" in names])
-        """
-    )
+        """)
     assert _last_line(proc) == "[[], True]", REASON
 
 
@@ -166,8 +226,7 @@ def test_registering_tools_does_not_load_torch():
     → the client package → agent.py → torch). Vacuous where torch isn't
     installed, hence both tests.
     """
-    proc = _run(
-        """
+    proc = _run("""
         from mcp.server.fastmcp import FastMCP
         import mnemoai.utils.config as cfgmod
         import mnemoai.server.tools as t
@@ -181,35 +240,30 @@ def test_registering_tools_does_not_load_torch():
 
         t.tool_manager.register_tools(FastMCP("probe"))
         print("torch" in sys.modules or "transformers" in sys.modules)
-        """
-    )
+        """)
     assert _last_line(proc) == "False", REASON
 
 
 def test_vision_is_initialized_on_first_use():
     """Laziness must still yield a working model when something asks for one."""
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools as t
         before = list(_events)
         model = t.vision_model
         print([before, _events, model])
-        """
-    )
+        """)
     assert _last_line(proc) == "[[], ['construct', 'initialize'], 'STUB_VISION_MODEL']"
 
 
 def test_vision_is_initialized_at_most_once():
     """Repeated access must not rebuild the model."""
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools as t
         t.vision_model
         t.vision_model
         t.vision_model_controller
         print(_events)
-        """
-    )
+        """)
     assert _last_line(proc) == "['construct', 'initialize']"
 
 
@@ -222,12 +276,10 @@ def test_importing_describe_image_does_not_initialize_vision():
     package staying light bought nothing: the server paid the build at boot
     anyway, one frame further down. The names are resolved per call now.
     """
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools.describe_image  # noqa: F401
         print(_events)
-        """
-    )
+        """)
     assert _last_line(proc) == "[]", REASON
 
 
@@ -238,8 +290,7 @@ def test_describe_image_resolves_a_live_model_on_the_call():
     every call with vision correctly configured, which is exactly the failure the
     old import-time binding existed to avoid.
     """
-    proc = _run(
-        """
+    proc = _run("""
         import json, os, tempfile
         from mnemoai.server.tools.describe_image import register_image_tools
 
@@ -269,35 +320,30 @@ def test_describe_image_resolves_a_live_model_on_the_call():
             f.write("not really a png; only the extension is checked")
         out = json.loads(captured["describe_image"](path, "what is it?"))
         print([at_registration, _events, out.get("description")])
-        """
-    )
+        """)
     assert _last_line(proc) == "[[], ['construct', 'initialize'], 'a red square']"
 
 
 def test_vision_exports_are_still_reachable():
     """Laziness must not break the names describe_image imports from the package."""
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools as t
         assert hasattr(t, "vision_model")
         assert hasattr(t, "vision_model_controller")
         print("ok")
-        """
-    )
+        """)
     assert _last_line(proc) == "ok"
 
 
 def test_unknown_package_attribute_still_raises():
     """The __getattr__ hook must not swallow genuine typos."""
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools as t
         try:
             t.no_such_name
         except AttributeError:
             print("raised")
-        """
-    )
+        """)
     assert _last_line(proc) == "raised"
 
 
@@ -312,8 +358,7 @@ def test_a_failed_vision_init_stays_loud():
     the registered set) — that binding is gone, but a silent None still fails
     every call, so the flag goes up only after success and each access re-raises.
     """
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools as t
 
         def boom(self):
@@ -328,15 +373,13 @@ def test_a_failed_vision_init_stays_loud():
             except AttributeError:
                 seen.append("raised")
         print(seen)
-        """
-    )
+        """)
     assert _last_line(proc) == "['raised', 'raised']"
 
 
 def test_a_failed_init_leaves_no_half_built_controller():
     """A raise must not leave a partly-initialized controller for the next caller."""
-    proc = _run(
-        """
+    proc = _run("""
         import mnemoai.server.tools as t
 
         def boom(self):
@@ -348,8 +391,7 @@ def test_a_failed_init_leaves_no_half_built_controller():
         except RuntimeError:
             pass
         print([t.tool_manager._vision_model, t.tool_manager._vision_model_controller])
-        """
-    )
+        """)
     assert _last_line(proc) == "[None, None]"
 
 
@@ -361,8 +403,7 @@ def test_concurrent_first_use_builds_one_controller():
     reach the unbuilt model together. Unguarded, each builds its own controller —
     two provider clients, and two copies of whatever the build loads.
     """
-    proc = _run(
-        """
+    proc = _run("""
         import threading, time
         import mnemoai.server.tools as t
 
@@ -383,8 +424,7 @@ def test_concurrent_first_use_builds_one_controller():
         for th in threads:
             th.join()
         print(_events)
-        """
-    )
+        """)
     assert _last_line(proc) == "['construct', 'initialize']"
 
 

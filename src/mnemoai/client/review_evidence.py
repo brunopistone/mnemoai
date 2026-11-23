@@ -10,6 +10,7 @@ import threading
 import time
 from pathlib import Path
 
+from mnemoai.client.agent.plan_policy import is_readonly_bash
 from mnemoai.client.memory.reflection import redact
 from mnemoai.utils.tool_results import exit_status
 
@@ -17,11 +18,25 @@ _FILE_BYTES = 64_000
 _DIFF_BYTES = 12_000
 _TOOL_LIMIT = 24
 _FILE_LIMIT = 12
-_PRIVATE_NAMES = {".env", ".pypirc", ".netrc", ".aws", ".ssh", "credentials", "id_rsa", "id_ed25519"}
+_PRIVATE_NAMES = {
+    ".env",
+    ".pypirc",
+    ".netrc",
+    ".aws",
+    ".ssh",
+    "credentials",
+    "id_rsa",
+    "id_ed25519",
+}
+_SHELL_COVERAGE_GAP = (
+    "Shell-created artifacts outside Git require explicit file reads for coverage."
+)
 
 
 def digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 
 def text(value, limit, *, structured=False):
@@ -40,7 +55,9 @@ def text(value, limit, *, structured=False):
             return part
         if isinstance(item, (dict, list)):
             result = {} if isinstance(item, dict) else []
-            for key, child in item.items() if isinstance(item, dict) else enumerate(item):
+            for key, child in (
+                item.items() if isinstance(item, dict) else enumerate(item)
+            ):
                 if remaining <= 0:
                     clipped = True
                     break
@@ -66,9 +83,12 @@ def text(value, limit, *, structured=False):
 
 
 def private_path(path):
-    return any(part.lower() in _PRIVATE_NAMES or part.lower().startswith(".env.")
-               or part.lower().endswith((".pem", ".p12", ".pfx"))
-               for part in Path(path).parts)
+    return any(
+        part.lower() in _PRIVATE_NAMES
+        or part.lower().startswith(".env.")
+        or part.lower().endswith((".pem", ".p12", ".pfx"))
+        for part in Path(path).parts
+    )
 
 
 def file_state(path, root):
@@ -90,11 +110,17 @@ def file_state(path, root):
                 child = os.open(part, directory_flags, dir_fd=directory)
                 os.close(directory)
                 directory = child
-            fd = os.open(parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+            fd = os.open(
+                parts[-1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory
+            )
         finally:
             os.close(directory)
     except FileNotFoundError:
-        return {"revision": "missing", "content": "[file is absent]", "truncated": False}
+        return {
+            "revision": "missing",
+            "content": "[file is absent]",
+            "truncated": False,
+        }
     with os.fdopen(fd, "rb") as stream:
         before = os.fstat(stream.fileno())
         if not stat.S_ISREG(before.st_mode):
@@ -112,40 +138,79 @@ def file_state(path, root):
     except UnicodeError as exc:
         raise ValueError("non-UTF-8 file") from exc
     preview, clipped = text(content, 4000)
-    return {"revision": revision, "content": preview,
-            "truncated": clipped or len(raw) > _FILE_BYTES}
+    return {
+        "revision": revision,
+        "content": preview,
+        "truncated": clipped or len(raw) > _FILE_BYTES,
+    }
 
 
 def git_state(root):
     """A bounded tracked diff plus untracked artifacts; not a claim of authorship."""
     try:
-        head = subprocess.check_output(
-            ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
-            stderr=subprocess.DEVNULL, timeout=1,
-        ).decode("ascii").strip()
+        head = (
+            subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                timeout=1,
+            )
+            .decode("ascii")
+            .strip()
+        )
     except subprocess.CalledProcessError:
         try:
             subprocess.check_output(
                 ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-                stderr=subprocess.DEVNULL, timeout=1,
+                stderr=subprocess.DEVNULL,
+                timeout=1,
             )
         except subprocess.CalledProcessError:
             return None
         head = None  # unborn repositories still contain reviewable new files
     args = [
-        "git", "--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-        "-C", str(root), "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all",
-        head, "--", ".",
-        ":(exclude)**/.env*", ":(exclude)**/*.pem", ":(exclude)**/*.p12",
-        ":(exclude)**/*.pfx", ":(exclude)**/credentials", ":(exclude)**/.pypirc",
-        ":(exclude)**/.netrc", ":(exclude)**/id_rsa*", ":(exclude)**/id_ed25519*",
-        ":(exclude)**/.aws/**", ":(exclude)**/.ssh/**",
+        "git",
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        str(root),
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=all",
+        head,
+        "--",
+        ".",
+        ":(exclude)**/.env*",
+        ":(exclude)**/*.pem",
+        ":(exclude)**/*.p12",
+        ":(exclude)**/*.pfx",
+        ":(exclude)**/credentials",
+        ":(exclude)**/.pypirc",
+        ":(exclude)**/.netrc",
+        ":(exclude)**/id_rsa*",
+        ":(exclude)**/id_ed25519*",
+        ":(exclude)**/.aws/**",
+        ":(exclude)**/.ssh/**",
     ]
     raw = _git_bytes(args) if head else b""
-    names = _git_bytes([
-        "git", "-c", "core.fsmonitor=false", "-C", str(root),
-        "ls-files", "--others", "--exclude-standard", "-z", "--", ".",
-    ])
+    names = _git_bytes(
+        [
+            "git",
+            "-c",
+            "core.fsmonitor=false",
+            "-C",
+            str(root),
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ]
+    )
     untracked, omitted = [], len(names) > _DIFF_BYTES
     for raw_name in names.split(b"\0"):
         if not raw_name:
@@ -160,20 +225,34 @@ def git_state(root):
         except (OSError, ValueError):
             omitted = True
     return {
-        "revision": digest([head, raw.hex(), names.hex(),
-                            [(item["path"], item["revision"]) for item in untracked]]),
+        "revision": digest(
+            [
+                head,
+                raw.hex(),
+                names.hex(),
+                [(item["path"], item["revision"]) for item in untracked],
+            ]
+        ),
         "head": head,
         "content": redact(raw[:_DIFF_BYTES].decode("utf-8", "replace")),
         "truncated": len(raw) > _DIFF_BYTES,
-        "untracked": untracked, "untracked_omitted": omitted,
+        "untracked": untracked,
+        "untracked_omitted": omitted,
     }
 
 
 def _git_bytes(args):
     """Bound subprocess output and duration before materializing it."""
     proc = subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_TERMINAL_PROMPT": "0", "GIT_NO_LAZY_FETCH": "1"},
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env={
+            **os.environ,
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_NO_LAZY_FETCH": "1",
+        },
     )
     raw = bytearray()
     try:
@@ -184,7 +263,9 @@ def _git_bytes(args):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not selector.select(remaining):
                     raise subprocess.TimeoutExpired(args, 2)
-                chunk = os.read(proc.stdout.fileno(), min(4096, _DIFF_BYTES + 1 - len(raw)))
+                chunk = os.read(
+                    proc.stdout.fileno(), min(4096, _DIFF_BYTES + 1 - len(raw))
+                )
                 if not chunk:
                     if proc.wait(timeout=max(0.01, remaining)):
                         raise OSError("Workspace diff failed")
@@ -227,10 +308,17 @@ class Capture:
             if not self._closed:
                 for value in texts:
                     if len(self.followups) < 8:
-                        self.followups.append({"id": f"followup-{len(self.followups) + 1}",
-                                               "kind": "user_followup", "text": value})
+                        self.followups.append(
+                            {
+                                "id": f"followup-{len(self.followups) + 1}",
+                                "kind": "user_followup",
+                                "text": value,
+                            }
+                        )
                     else:
-                        self.gaps.add("Additional user instructions exceeded the capture limit.")
+                        self.gaps.add(
+                            "Additional user instructions exceeded the capture limit."
+                        )
 
     def reopen(self):
         """Open the next checkpoint without erasing already observed tool evidence."""
@@ -239,15 +327,22 @@ class Capture:
             self.bindings = {}
             self.after = None
             self._written_paths = set()
-            self.gaps = {gap for gap in self.gaps if not (
-                gap.startswith("Evidence ") or gap.startswith("Named-file inspection incomplete")
-                or gap in {
-                    "Some evidence was omitted to fit the input budget.",
-                    "Some current file content was truncated.", "Workspace diff was truncated.",
-                    "Workspace diff unavailable.",
-                    "A failed shell command has no observed successful rerun of that command.",
-                }
-            )}
+            self.gaps = {
+                gap
+                for gap in self.gaps
+                if not (
+                    gap.startswith("Evidence ")
+                    or gap.startswith("Named-file inspection incomplete")
+                    or gap
+                    in {
+                        "Some evidence was omitted to fit the input budget.",
+                        "Some current file content was truncated.",
+                        "Workspace diff was truncated.",
+                        "Workspace diff unavailable.",
+                        "A failed shell command has no observed successful rerun of that command.",
+                    }
+                )
+            }
 
     def _git(self):
         try:
@@ -265,7 +360,9 @@ class Capture:
                 if status == "completed":
                     if name in {"fs_write", "file_edit"}:
                         self.write_serial += 1
-                    elif name == "execute_bash":
+                    elif name == "execute_bash" and not is_readonly_bash(
+                        str(args.get("command", ""))
+                    ):
                         self.shell_serial += 1
                     if name in {"fs_read", "fs_write", "file_edit"} and not (
                         name == "fs_read" and args.get("mode") == "Directory"
@@ -274,32 +371,52 @@ class Capture:
                         if isinstance(path, str) and path:
                             path = os.path.abspath(os.path.expanduser(path))
                             writing = name in {"fs_write", "file_edit"}
-                            if writing and path not in self.paths and len(self.paths) >= _FILE_LIMIT:
+                            if (
+                                writing
+                                and path not in self.paths
+                                and len(self.paths) >= _FILE_LIMIT
+                            ):
                                 replaceable = self.paths - self._written_paths
                                 if replaceable:
                                     self.paths.remove(sorted(replaceable)[-1])
-                                    self.gaps.add("Some named-file evidence was omitted to prioritize current changes.")
+                                    self.gaps.add(
+                                        "Some named-file evidence was omitted to prioritize current changes."
+                                    )
                             if path in self.paths or len(self.paths) < _FILE_LIMIT:
                                 self.paths.add(path)
                                 if writing:
                                     self._written_paths.add(path)
                             else:
-                                self.gaps.add("Named-file evidence exceeded the capture limit.")
+                                self.gaps.add(
+                                    "Named-file evidence exceeded the capture limit."
+                                )
                 if len(self.tools) >= _TOOL_LIMIT:
                     self.gaps.add("Tool evidence exceeded the capture limit.")
                     return
                 safe_args, safe_result = args, result
                 path = args.get("file_path" if name == "file_edit" else "path")
-                if name in {"fs_read", "fs_write", "file_edit"} and isinstance(path, str) and private_path(path):
-                    safe_args, safe_result = {"path": path}, "[credential-like file content omitted]"
+                if (
+                    name in {"fs_read", "fs_write", "file_edit"}
+                    and isinstance(path, str)
+                    and private_path(path)
+                ):
+                    safe_args, safe_result = {
+                        "path": path
+                    }, "[credential-like file content omitted]"
                     self.gaps.add("Credential-like file evidence was omitted.")
                 arguments, cut_args = text(safe_args, 1200)
                 output, cut_result = text(safe_result, 2400, structured=True)
-                self.tools.append({
-                    "id": f"tool-{len(self.tools) + 1}", "kind": "tool",
-                    "name": name, "arguments": arguments, "result": output, "status": status,
-                    "revision": digest([name, arguments, output, status]),
-                })
+                self.tools.append(
+                    {
+                        "id": f"tool-{len(self.tools) + 1}",
+                        "kind": "tool",
+                        "name": name,
+                        "arguments": arguments,
+                        "result": output,
+                        "status": status,
+                        "revision": digest([name, arguments, output, status]),
+                    }
+                )
                 if cut_args or cut_result:
                     self.gaps.add("Some tool arguments/results were truncated.")
                 if name in {"execute_bash", "start_background_task"}:
@@ -310,7 +427,11 @@ class Capture:
                         except ValueError:
                             payload = {}
                     command = str(args.get("command", ""))
-                    cwd = payload.get("cwd", str(self.root)) if isinstance(payload, dict) else str(self.root)
+                    cwd = (
+                        payload.get("cwd", str(self.root))
+                        if isinstance(payload, dict)
+                        else str(self.root)
+                    )
                     key = (command, cwd)
                     exit_code = exit_status(payload)
                     if command and (status == "failed" or exit_code not in (None, 0)):
@@ -318,9 +439,12 @@ class Capture:
                     elif command and status == "completed" and exit_code == 0:
                         self.failed_commands.pop(key, None)
                 if name == "start_background_task" or (
-                    name in {"spawn_agent", "resume_agent"} and args.get("run_in_background", True)
+                    name in {"spawn_agent", "resume_agent"}
+                    and args.get("run_in_background", True)
                 ):
-                    self.gaps.add("Background execution is outside this completion checkpoint.")
+                    self.gaps.add(
+                        "Background execution is outside this completion checkpoint."
+                    )
         except Exception:
             with self._lock:
                 self.gaps.add("A tool observation could not be captured.")
@@ -328,45 +452,73 @@ class Capture:
     def finish(self, answer, context=()):
         with self._lock:
             self._closed = True
-            items = [{"id": "task", "kind": "user_request", "text": self.task},
-                     {"id": "answer", "kind": "actor_answer", "text": answer}]
+            items = [
+                {"id": "task", "kind": "user_request", "text": self.task},
+                {"id": "answer", "kind": "actor_answer", "text": answer},
+            ]
             items.extend(context)
             items.extend(self.followups)
             items.extend(self.tools)
-        self.gaps.discard("A failed shell command has no observed successful rerun of that command.")
+        self.gaps.discard(
+            "A failed shell command has no observed successful rerun of that command."
+        )
         if self.failed_commands:
-            self.gaps.add("A failed shell command has no observed successful rerun of that command.")
+            self.gaps.add(
+                "A failed shell command has no observed successful rerun of that command."
+            )
         for i, path in enumerate(sorted(self.paths)):
             try:
                 state = file_state(path, self.root)
                 self.bindings[path] = state["revision"]
-                items.append({"id": f"file-{i + 1}", "kind": "current_file",
-                              "path": os.path.relpath(path, self.root), **state})
+                items.append(
+                    {
+                        "id": f"file-{i + 1}",
+                        "kind": "current_file",
+                        "path": os.path.relpath(path, self.root),
+                        **state,
+                    }
+                )
                 if state["truncated"]:
                     self.gaps.add("Some current file content was truncated.")
             except (OSError, ValueError) as exc:
-                self.gaps.add(f"Named-file inspection incomplete ({type(exc).__name__}).")
+                self.gaps.add(
+                    f"Named-file inspection incomplete ({type(exc).__name__})."
+                )
         self.after = self._git()
+        self.gaps.discard(_SHELL_COVERAGE_GAP)
         if self.after is None and self.shell_serial and not self.paths:
-            self.gaps.add("Shell-created artifacts outside Git require explicit file reads for coverage.")
+            self.gaps.add(_SHELL_COVERAGE_GAP)
         if self.after is not None:
             for label, snapshot in (("before", self.before), ("after", self.after)):
                 if snapshot is not None:
-                    items.append({"id": f"diff-{label}", "kind": "workspace_diff_vs_HEAD",
-                                  "phase": label, **{k: v for k, v in snapshot.items() if k != "untracked"}})
+                    items.append(
+                        {
+                            "id": f"diff-{label}",
+                            "kind": "workspace_diff_vs_HEAD",
+                            "phase": label,
+                            **{k: v for k, v in snapshot.items() if k != "untracked"},
+                        }
+                    )
                     if snapshot["truncated"]:
                         self.gaps.add("Workspace diff was truncated.")
                     if snapshot.get("untracked_omitted"):
-                        self.gaps.add("Some untracked artifacts could not be inspected within the safety/size limits.")
+                        self.gaps.add(
+                            "Some untracked artifacts could not be inspected within the safety/size limits."
+                        )
             for i, state in enumerate(self.after.get("untracked", [])):
-                items.append({"id": f"untracked-{i + 1}", "kind": "current_file", **state})
+                items.append(
+                    {"id": f"untracked-{i + 1}", "kind": "current_file", **state}
+                )
                 if state["truncated"]:
                     self.gaps.add("Some current file content was truncated.")
         return items
 
     def stale(self):
         try:
-            if any(file_state(path, self.root)["revision"] != rev for path, rev in self.bindings.items()):
+            if any(
+                file_state(path, self.root)["revision"] != rev
+                for path, rev in self.bindings.items()
+            ):
                 return True
             current = git_state(self.root)
             return (current or {}).get("revision") != (self.after or {}).get("revision")
