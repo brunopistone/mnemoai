@@ -10,20 +10,75 @@ client (no LLM/agent) and drive the worker synchronously.
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import AIMessage
 
 import mnemoai.client.client as client_mod
 from mnemoai.client.client import LangGraphClient
 from mnemoai.client.usage_tracker import UsageTracker
+from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
+
+
+@pytest.mark.parametrize("reasoning", [True, None])
+def test_memory_extraction_disables_ollama_thinking_without_changing_chat(
+    monkeypatch,
+    reasoning,
+):
+    requests = []
+
+    def invoke(model, messages):
+        requests.append((model._chat_params(messages), model.callbacks))
+        return AIMessage(
+            content='[{"action":"add","text":"prefers concise answers"}]',
+            usage_metadata={
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "total_tokens": 110,
+            },
+        )
+
+    monkeypatch.setattr(ChatOllamaWrapper, "invoke", invoke)
+    callback = BaseCallbackHandler()
+    chat = ChatOllamaWrapper(
+        model="fixture",
+        reasoning=reasoning,
+        callbacks=[callback],
+        num_ctx=131072,
+    )
+    client = LangGraphClient.__new__(LangGraphClient)
+    client.model = chat
+    client.agent = SimpleNamespace(usage=UsageTracker(), usage_model_name="fixture")
+
+    raw = client._invoke_model_once("Extract durable facts.")
+
+    assert client._parse_memory_ops(raw) == [
+        {"action": "add", "text": "prefers concise answers"},
+    ]
+    request, callbacks = requests[0]
+    assert request["think"] is False
+    assert request["options"]["num_ctx"] == 131072
+    assert callbacks is None
+    assert chat.reasoning is reasoning
+    assert chat.callbacks == [callback]
+    assert client.agent.usage.totals()["total_tokens"] == 110
 
 
 def test_auxiliary_memory_call_records_usage_and_extracts_text_blocks():
     client = LangGraphClient.__new__(LangGraphClient)
     client.agent = SimpleNamespace(usage=UsageTracker(), usage_model_name="fixture")
-    client.model = SimpleNamespace(invoke=Mock(return_value=AIMessage(
-        content=[{"type": "text", "text": '[{"action":"add","text":"fact"}]'}],
-        usage_metadata={"input_tokens": 100, "output_tokens": 5, "total_tokens": 105},
-    )))
+    client.model = SimpleNamespace(
+        invoke=Mock(
+            return_value=AIMessage(
+                content=[{"type": "text", "text": '[{"action":"add","text":"fact"}]'}],
+                usage_metadata={
+                    "input_tokens": 100,
+                    "output_tokens": 5,
+                    "total_tokens": 105,
+                },
+            )
+        )
+    )
     raw = client._invoke_model_once("fixture")
     assert client._parse_memory_ops(raw) == [{"action": "add", "text": "fact"}]
     assert client.agent.usage.totals()["calls"] == 1
@@ -33,7 +88,9 @@ def test_auxiliary_memory_call_records_usage_and_extracts_text_blocks():
 def test_failed_auxiliary_call_is_counted_without_an_unexpected_stream_retry():
     client = LangGraphClient.__new__(LangGraphClient)
     client.agent = SimpleNamespace(usage=UsageTracker(), usage_model_name="fixture")
-    client.model = SimpleNamespace(invoke=Mock(side_effect=OSError("provider unavailable")), stream=Mock())
+    client.model = SimpleNamespace(
+        invoke=Mock(side_effect=OSError("provider unavailable")), stream=Mock()
+    )
     assert client._invoke_model_once("fixture") == ""
     assert client.agent.usage.totals()["calls_without_usage"] == 1
     client.model.stream.assert_not_called()
@@ -42,11 +99,18 @@ def test_failed_auxiliary_call_is_counted_without_an_unexpected_stream_retry():
 def test_late_auxiliary_usage_cannot_pollute_a_cleared_session():
     client = LangGraphClient.__new__(LangGraphClient)
     client.agent = SimpleNamespace(usage=UsageTracker(), usage_model_name="fixture")
+
     def invoke(messages):
         client.agent.usage.reset()
-        return AIMessage(content="[]", usage_metadata={
-            "input_tokens": 100, "output_tokens": 5, "total_tokens": 105,
-        })
+        return AIMessage(
+            content="[]",
+            usage_metadata={
+                "input_tokens": 100,
+                "output_tokens": 5,
+                "total_tokens": 105,
+            },
+        )
+
     client.model = SimpleNamespace(invoke=invoke)
     assert client._invoke_model_once("fixture") == "[]"
     assert client.agent.usage.totals()["calls"] == 0
@@ -94,7 +158,8 @@ class TestAutoExtractGating:
         c = _bare_client()
         started = {"n": 0}
         monkeypatch.setattr(
-            c, "_auto_extract_memory_worker",
+            c,
+            "_auto_extract_memory_worker",
             lambda *a: started.__setitem__("n", started["n"] + 1),
         )
         c.auto_extract_memory("q", "r")
@@ -108,11 +173,13 @@ class TestAutoExtractGating:
             if k == "ENABLE_MEMORY_AUTO_EXTRACTION":
                 return False
             return d
+
         monkeypatch.setattr(client_mod.config, "get", _get)
         c = _bare_client()
         started = {"n": 0}
         monkeypatch.setattr(
-            c, "_auto_extract_memory_worker",
+            c,
+            "_auto_extract_memory_worker",
             lambda *a: started.__setitem__("n", started["n"] + 1),
         )
         c.auto_extract_memory("q", "r")
@@ -123,7 +190,8 @@ class TestAutoExtractGating:
         c = _bare_client()
         started = {"n": 0}
         monkeypatch.setattr(
-            c, "_auto_extract_memory_worker",
+            c,
+            "_auto_extract_memory_worker",
             lambda *a: started.__setitem__("n", started["n"] + 1),
         )
         c.auto_extract_memory("", "r")
@@ -135,7 +203,8 @@ class TestAutoExtractGating:
         c = _bare_client()
         seen = {}
         monkeypatch.setattr(
-            c, "_auto_extract_memory_worker",
+            c,
+            "_auto_extract_memory_worker",
             lambda q, r: seen.update(q=q, r=r),
         )
         # Run the thread body synchronously by making Thread.start call target.
@@ -156,7 +225,8 @@ class TestAutoExtractWorker:
     def test_applies_add_and_replace_ops(self, monkeypatch, tmp_path):
         # Prompt available; model returns two ops; both applied via MemoryStore.
         monkeypatch.setattr(
-            client_mod.config, "prompt",
+            client_mod.config,
+            "prompt",
             lambda k, d=None: "EXISTING:\n{existing_memory}\nEXCHANGE:\n{exchange}",
         )
         # Point MemoryStore at a temp file (its __init__ imports these lazily
@@ -167,13 +237,15 @@ class TestAutoExtractWorker:
         store_file = tmp_path / "MEMORY.md"
         monkeypatch.setattr(paths_mod, "memory_file_path", lambda: store_file)
         monkeypatch.setattr(
-            cfg_mod.config, "get",
+            cfg_mod.config,
+            "get",
             lambda k, d=None: {"MAX_CHARS": 5000} if k == "MEMORY" else d,
         )
 
         c = _bare_client()
         monkeypatch.setattr(
-            c, "_invoke_model_once",
+            c,
+            "_invoke_model_once",
             lambda prompt: '[{"action":"add","text":"[user] prefers pytest"}]',
         )
         c._auto_extract_memory_worker("what test runner?", "use pytest")
@@ -181,7 +253,8 @@ class TestAutoExtractWorker:
 
     def test_no_ops_writes_nothing(self, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            client_mod.config, "prompt",
+            client_mod.config,
+            "prompt",
             lambda k, d=None: "{existing_memory}{exchange}",
         )
         from mnemoai.utils import config as cfg_mod
@@ -200,7 +273,8 @@ class TestAutoExtractWorker:
         c = _bare_client()
         called = {"n": 0}
         monkeypatch.setattr(
-            c, "_invoke_model_once",
+            c,
+            "_invoke_model_once",
             lambda prompt: called.__setitem__("n", called["n"] + 1) or "[]",
         )
         c._auto_extract_memory_worker("q", "r")

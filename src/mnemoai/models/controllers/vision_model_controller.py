@@ -103,7 +103,7 @@ class VisionModelController(BaseModelController):
 
     def _initialize_ollama_model(self) -> None:
         """Initialize Ollama vision model using LangChain."""
-        from langchain_ollama import ChatOllama
+        from mnemoai.models.chat_models.chat_ollama_wrapper import ChatOllamaWrapper
 
         logger.debug("Initializing Ollama vision model via LangChain...")
 
@@ -119,7 +119,7 @@ class VisionModelController(BaseModelController):
         }
         kwargs.update(extra_params(self.model_id))
 
-        self.model = ChatOllama(**kwargs)
+        self.model = ChatOllamaWrapper(**kwargs)
 
     def _initialize_mlx_model(self) -> None:
         """Initialize a vision model served by a local MLX server.
@@ -162,7 +162,9 @@ class VisionModelController(BaseModelController):
         """Initialize an OpenAI-compatible Nebius vision model."""
         params, body = build_kwargs("VISION_MODEL_ID", "nebius", self)
         self.model = nebius.build_model(
-            self.model_id, params, body,
+            self.model_id,
+            params,
+            body,
             timeout=float((config.get("LLM", {}) or {}).get("REQUEST_TIMEOUT", 600)),
             max_retries=2,
         )

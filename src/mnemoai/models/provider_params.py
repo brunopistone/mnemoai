@@ -30,6 +30,7 @@ _TRUTHY_KEYS = {"STOP"}
 # the model's request body (model_kwargs). Universally supported so `/model`
 # pruning never strips it on a provider switch. See :func:`extra_params`.
 EXTRA_PARAMS_KEY = "EXTRA_PARAMS"
+DEFAULT_OLLAMA_NUM_BATCH = 2048
 
 
 def _p(config_key, attr, kwarg, dest="main"):
@@ -44,6 +45,7 @@ _LLM = {
             _p("TOP_P", "top_p", "top_p"),
             _p("TOP_K", "top_k", "top_k"),
             _p("MAX_TOKENS", "max_tokens", "num_predict"),
+            _p("NUM_BATCH", "num_batch", "num_batch"),
             _p("STOP", "stop", "stop"),
             _p("REPETITION_PENALTY", "repetition_penalty", "repeat_penalty"),
             _p("PRESENCE_PENALTY", "presence_penalty", "presence_penalty"),
@@ -61,11 +63,15 @@ _LLM = {
         ],
         "connection": {"REGION", "ENDPOINT_URL"},
         "special": {
-            "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
+            "REASONING",
+            "REASONING_EFFORT",
+            "THINKING_TOKENS",
+            "STREAM",
             # Prompt-cache breakpoints (models/prompt_cache.py): on by default
             # where supported, so these only ever opt out or lengthen the TTL.
             # Registered so a /model provider switch doesn't prune them.
-            "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+            "PROMPT_CACHE",
+            "PROMPT_CACHE_TTL",
         },
     },
     "mantle": {
@@ -76,9 +82,14 @@ _LLM = {
         "params": [],
         "connection": {"REGION", "API_PROTOCOL", "ENDPOINT_URL", "API_KEY"},
         "special": {
-            "TEMPERATURE", "MAX_TOKENS", "TOP_P", "STREAM", "REASONING_EFFORT",
+            "TEMPERATURE",
+            "MAX_TOKENS",
+            "TOP_P",
+            "STREAM",
+            "REASONING_EFFORT",
             # Only honored on API_PROTOCOL: anthropic (see prompt_cache.policy).
-            "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+            "PROMPT_CACHE",
+            "PROMPT_CACHE_TTL",
         },
     },
     "openai": {
@@ -87,7 +98,12 @@ _LLM = {
             _p("MAX_TOKENS", "max_tokens", "max_tokens"),
             _p("TOP_P", "top_p", "top_p"),
             _p("PRESENCE_PENALTY", "presence_penalty", "presence_penalty"),
-            _p("REASONING_EFFORT", "reasoning_effort", "reasoning_effort", "model_kwargs"),
+            _p(
+                "REASONING_EFFORT",
+                "reasoning_effort",
+                "reasoning_effort",
+                "model_kwargs",
+            ),
         ],
         # API_PROTOCOL selects chat_completions (default) vs the Responses API;
         # on `responses`, REASONING_EFFORT is sent as reasoning={effort, summary}
@@ -110,8 +126,12 @@ _LLM = {
         ],
         "connection": {"API_KEY", "ENDPOINT_URL"},
         "special": {
-            "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
-            "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+            "REASONING",
+            "REASONING_EFFORT",
+            "THINKING_TOKENS",
+            "STREAM",
+            "PROMPT_CACHE",
+            "PROMPT_CACHE_TTL",
         },
     },
     "sagemaker": {
@@ -131,11 +151,21 @@ _LLM = {
             _p("MAX_TOKENS", "max_tokens", "max_tokens"),
             _p("TOP_P", "top_p", "top_p"),
             _p("STOP", "stop", "stop", "model_kwargs"),
-            _p("REPETITION_PENALTY", "repetition_penalty", "repeat_penalty", "model_kwargs"),
+            _p(
+                "REPETITION_PENALTY",
+                "repetition_penalty",
+                "repeat_penalty",
+                "model_kwargs",
+            ),
             # LiteLLM's unified reasoning knob; it translates per backend
             # (effort enum for OpenAI, thinking budget for Anthropic). Passed via
             # model_kwargs since ChatLiteLLM has no top-level field for it.
-            _p("REASONING_EFFORT", "reasoning_effort", "reasoning_effort", "model_kwargs"),
+            _p(
+                "REASONING_EFFORT",
+                "reasoning_effort",
+                "reasoning_effort",
+                "model_kwargs",
+            ),
         ],
         "connection": {"API_BASE", "API_KEY"},
         "special": {"STREAM"},
@@ -158,7 +188,12 @@ _LLM = {
             _p("FREQUENCY_PENALTY", "frequency_penalty", "frequency_penalty"),
             _p("TOP_K", "top_k", "top_k", "extra_body"),
             _p("MIN_P", "min_p", "min_p", "extra_body"),
-            _p("REPETITION_PENALTY", "repetition_penalty", "repetition_penalty", "extra_body"),
+            _p(
+                "REPETITION_PENALTY",
+                "repetition_penalty",
+                "repetition_penalty",
+                "extra_body",
+            ),
         ],
         # API_BASE/API_KEY stay available for a non-default mount point or a
         # server behind auth; HOST/PORT is the ordinary path. ENDPOINT_URL is an
@@ -179,7 +214,12 @@ _LLM = {
             _p("STOP", "stop", "stop"),
             _p("PRESENCE_PENALTY", "presence_penalty", "presence_penalty"),
             _p("FREQUENCY_PENALTY", "frequency_penalty", "frequency_penalty"),
-            _p("REPETITION_PENALTY", "repetition_penalty", "repetition_penalty", "extra_body"),
+            _p(
+                "REPETITION_PENALTY",
+                "repetition_penalty",
+                "repetition_penalty",
+                "extra_body",
+            ),
             _p("REASONING_EFFORT", "reasoning_effort", "reasoning_effort"),
         ],
         "connection": {"API_BASE", "ENDPOINT_URL", "API_KEY"},
@@ -209,6 +249,7 @@ _VISION = {
             _p("TOP_P", "top_p", "top_p"),
             _p("TOP_K", "top_k", "top_k"),
             _p("MAX_TOKENS", "max_tokens", "num_predict"),
+            _p("NUM_BATCH", "num_batch", "num_batch"),
             _p("STOP", "stop", "stop"),
         ],
         "connection": {"HOST", "PORT"},
@@ -291,11 +332,14 @@ _VISION = {
 }
 
 # --- RAG.EMBED_MODEL_ID: mirrors embeddings_controller -----------------------
-# Embeddings take no inference params, only connection/identity. DIMENSION is an
-# optional vector-size override (fallback shape only); it's in `special` so it's
-# both kept by /model and tunable via /params.
+# Embeddings have runtime controls rather than generation/sampling parameters.
+# NUM_BATCH controls Ollama prompt processing, including embedding inputs.
 _EMBED = {
-    "ollama": {"params": [], "connection": {"HOST", "PORT"}, "special": {"DIMENSION"}},
+    "ollama": {
+        "params": [],
+        "connection": {"HOST", "PORT"},
+        "special": {"DIMENSION", "NUM_BATCH"},
+    },
     "bedrock": {"params": [], "connection": {"REGION"}, "special": {"DIMENSION"}},
     # API_BASE/ENDPOINT_URL + API_KEY point embeddings at an OpenAI-compatible
     # server (local llama-server / LM Studio / vLLM).
@@ -339,7 +383,9 @@ def providers(section: str) -> Tuple[str, ...]:
 
 def connection_keys(section: str) -> set:
     """All transport/auth keys; they must not leak across provider changes."""
-    return set().union(*(entry["connection"] for entry in _TABLES.get(section, {}).values()))
+    return set().union(
+        *(entry["connection"] for entry in _TABLES.get(section, {}).values())
+    )
 
 
 def supported_keys(section: str, provider: str) -> Optional[set]:

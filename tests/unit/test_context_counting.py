@@ -98,7 +98,7 @@ def test_native_and_normalized_tool_call_is_not_counted_twice():
 @pytest.mark.parametrize("replacement", ["load", "resume"])
 def test_pinned_footer_recounts_same_length_replaced_history(make_client, tmp_path, monkeypatch, replacement):
     client = make_client([HumanMessage(content="Hi"), AIMessage(content="OK")])
-    client.clear_context = lambda: None  # only bypass cleanup when the fake UI exits
+    client.clear_context = lambda **kw: None  # only bypass cleanup when the fake UI exits
     large = [HumanMessage(content="large document " * 10000), AIMessage(content="OK")]
     if replacement == "load":
         other = make_client(large)
@@ -142,7 +142,7 @@ def test_pinned_footer_retains_measured_count_while_requests_run(make_client, mo
     agent.__dict__.update(vars(client.agent))
     agent._messages = client.agent.messages
     client.agent = agent
-    client.clear_context = lambda: None
+    client.clear_context = lambda **kw: None
     client.conversation_manager.max_tokens = 1_000_000
     agent.callbacks = []
     agent._get_route_model = lambda state: object()

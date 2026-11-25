@@ -7,7 +7,7 @@ import numpy as np
 
 from mnemoai.models import nebius
 from mnemoai.models.controllers.base_model_controller import BaseModelController
-from mnemoai.models.provider_params import extra_params
+from mnemoai.models.provider_params import DEFAULT_OLLAMA_NUM_BATCH, extra_params
 from mnemoai.utils.config import config
 from mnemoai.utils.logger import logger
 from mnemoai.utils.tokenization import count_tokens
@@ -70,6 +70,12 @@ class EmbeddingsController(BaseModelController):
         )
         self.embed_model_type = self.embed_model_config.get("TYPE", "ollama")
         self.embed_model_name = self.embed_model_config.get("NAME", "mxbai-embed-large")
+        self.num_batch = self.embed_model_config.get("NUM_BATCH")
+        if self.embed_model_type == "ollama":
+            if self.num_batch is None:
+                self.num_batch = DEFAULT_OLLAMA_NUM_BATCH
+            if type(self.num_batch) is not int or self.num_batch <= 0:
+                raise ValueError("NUM_BATCH must be a positive integer")
         self.region = self.embed_model_config.get("REGION", "us-east-1")
         # Optional OpenAI-compatible connection (API_BASE, alias ENDPOINT_URL, +
         # API_KEY) so a local server can serve embeddings.
@@ -428,7 +434,12 @@ class EmbeddingsController(BaseModelController):
         # truncate=True asks the runner to clamp to context as a backstop; inputs
         # are already token-capped in _truncate (some runners honor this, some
         # EOF instead — the caller's shrink loop covers the latter).
-        resp = client.embed(model=self.embed_model_name, input=texts, truncate=True)
+        resp = client.embed(
+            model=self.embed_model_name,
+            input=texts,
+            truncate=True,
+            options={"num_batch": self.num_batch},
+        )
         emb = self._extract_embeddings_from_response(resp)
         return np.array(emb, dtype=np.float32)
 

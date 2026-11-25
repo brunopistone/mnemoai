@@ -33,6 +33,7 @@ from mnemoai.models.area_models import AREAS
 from mnemoai.models.area_models import CONFIG_SECTION as AREA_SECTION
 from mnemoai.models.area_models import DESCRIPTIONS as AREA_DESCRIPTIONS
 from mnemoai.models.provider_params import (
+    DEFAULT_OLLAMA_NUM_BATCH,
     providers,
     supported_keys,
     tunable_params,
@@ -57,8 +58,18 @@ except ImportError:
 # Provider key -> (template filename, human label, default chat model)
 _PROVIDERS = {
     "1": ("ollama", "config.yaml.example", "Ollama (local models)", "qwen3.5:4b"),
-    "2": ("bedrock", "config.yaml.bedrock.example", "AWS Bedrock", "global.anthropic.claude-opus-4-8"),
-    "3": ("mantle", "config.yaml.bedrock.mantle.example", "AWS Bedrock Mantle", "qwen.qwen3-32b"),
+    "2": (
+        "bedrock",
+        "config.yaml.bedrock.example",
+        "AWS Bedrock",
+        "global.anthropic.claude-opus-4-8",
+    ),
+    "3": (
+        "mantle",
+        "config.yaml.bedrock.mantle.example",
+        "AWS Bedrock Mantle",
+        "qwen.qwen3-32b",
+    ),
     # OpenAI / Anthropic / SageMaker / LiteLLM reuse the base template and
     # transform its model sections for the chosen provider (set TYPE, prune
     # Ollama-only keys, prompt provider-specific connection keys). A provider with
@@ -66,11 +77,36 @@ _PROVIDERS = {
     # mlx is what carries its sampler knobs, KEEP_ALIVE and the server-side
     # tool-call-parser note into the generated config.
     "4": ("openai", "config.yaml.example", "OpenAI", "gpt-5-mini"),
-    "5": ("anthropic", "config.yaml.example", "Anthropic (Claude API)", "claude-opus-4-8"),
-    "6": ("sagemaker", "config.yaml.example", "Amazon SageMaker AI", "your-endpoint-name"),
-    "7": ("litellm", "config.yaml.example", "LiteLLM (100+ providers)", "openai/your-model"),
-    "8": ("mlx", "config.yaml.mlx.example", "MLX server (local, Apple Silicon)", "qwen3-4b"),
-    "9": ("nebius", "config.yaml.nebius.example", "Nebius Token Factory", nebius.DEFAULT_CHAT_MODEL),
+    "5": (
+        "anthropic",
+        "config.yaml.example",
+        "Anthropic (Claude API)",
+        "claude-opus-4-8",
+    ),
+    "6": (
+        "sagemaker",
+        "config.yaml.example",
+        "Amazon SageMaker AI",
+        "your-endpoint-name",
+    ),
+    "7": (
+        "litellm",
+        "config.yaml.example",
+        "LiteLLM (100+ providers)",
+        "openai/your-model",
+    ),
+    "8": (
+        "mlx",
+        "config.yaml.mlx.example",
+        "MLX server (local, Apple Silicon)",
+        "qwen3-4b",
+    ),
+    "9": (
+        "nebius",
+        "config.yaml.nebius.example",
+        "Nebius Token Factory",
+        nebius.DEFAULT_CHAT_MODEL,
+    ),
 }
 
 # Human-facing menu label per provider TYPE (stored value is the canonical key).
@@ -107,6 +143,7 @@ _MANTLE_PROTOCOLS = {
     "2": ("responses", "OpenAI Responses (/openai/v1) — e.g. openai.gpt-5.x"),
     "3": ("anthropic", "Anthropic Messages (/anthropic) — Claude models"),
 }
+
 
 def _templates_dir() -> Path:
     """Directory holding the packaged config templates (next to this module)."""
@@ -153,7 +190,11 @@ def _find_section(lines: list, section: str) -> int:
     or -1 — so nested sections like ``RAG.EMBED_MODEL_ID`` are reachable."""
     for i, line in enumerate(lines):
         stripped = line.strip()
-        if stripped == f"{section}:" or stripped.startswith(f"{section}:") and not stripped.split(":", 1)[1].strip():
+        if (
+            stripped == f"{section}:"
+            or stripped.startswith(f"{section}:")
+            and not stripped.split(":", 1)[1].strip()
+        ):
             return i
     return -1
 
@@ -162,7 +203,7 @@ def _body_indent(lines: list, idx: int) -> int:
     """The direct-child indent of the section header at ``idx`` (taken from its
     first non-comment body line), or two past the header when it has no body."""
     header = _indent_of(lines[idx])
-    for line in lines[idx + 1:]:
+    for line in lines[idx + 1 :]:
         if line.strip() and _indent_of(line) <= header:
             break
         if line.strip() and not line.lstrip().startswith("#"):
@@ -177,7 +218,7 @@ def _get_field(text: str, section: str, key: str) -> Optional[str]:
     if idx < 0:
         return None
     header_indent = _indent_of(lines[idx])
-    for line in lines[idx + 1:]:
+    for line in lines[idx + 1 :]:
         if line.strip() and _indent_of(line) <= header_indent:
             break  # left the section body
         m = re.match(rf"\s+{re.escape(key)}:\s*(.*)$", line)
@@ -265,7 +306,7 @@ def _list_section_keys(text: str, section: str) -> list:
     header_indent = _indent_of(lines[idx])
     body_indent = None
     keys = []
-    for line in lines[idx + 1:]:
+    for line in lines[idx + 1 :]:
         if line.strip() and _indent_of(line) <= header_indent:
             break  # left the section body
         if not line.strip() or line.lstrip().startswith("#"):
@@ -367,7 +408,7 @@ def _ensure_embed_section(text: str) -> str:
     block = ["  EMBED_MODEL_ID:", "    NAME: ", "    TYPE: ollama"]
     rag_idx = _find_section(lines, "RAG")
     if rag_idx >= 0:
-        lines[rag_idx + 1:rag_idx + 1] = block  # first children of RAG:
+        lines[rag_idx + 1 : rag_idx + 1] = block  # first children of RAG:
     else:
         lines = ["RAG:", *block, *lines]  # no RAG block yet — prepend one
     return "\n".join(lines) + ("\n" if text.endswith("\n") else "")
@@ -409,7 +450,7 @@ def _ensure_area_section(text: str, area: str) -> str:
         # Match the existing children's indent — mixed sibling indents are a YAML
         # error, so this can't assume the two spaces we'd write ourselves.
         indent = _body_indent(lines, idx)
-        lines[idx + 1:idx + 1] = [
+        lines[idx + 1 : idx + 1] = [
             f"{' ' * indent}{area}:",
             f"{' ' * (indent + 2)}NAME: {name}",
         ]
@@ -527,8 +568,10 @@ def _is_tty() -> bool:
     """True on an interactive terminal (dialogs can render); else the ``_ask_*``
     helpers fall back to plain ``input()`` so scripted use never blocks."""
     return (
-        hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
-        and hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
+        hasattr(sys.stdin, "isatty")
+        and sys.stdin.isatty()
+        and hasattr(sys.stdout, "isatty")
+        and sys.stdout.isatty()
     )
 
 
@@ -630,6 +673,7 @@ def _dialog_input(
         _cancel()
 
     if allow_back:
+
         @kb.add("c-b")
         def _(event) -> None:
             _back()
@@ -698,6 +742,7 @@ def _dialog_radio(
         _cancel()
 
     if allow_back:
+
         @kb.add("c-b")
         def _(event) -> None:
             _back()
@@ -761,6 +806,7 @@ def _dialog_checkbox(title: str, options: list, checked: list, info: str = ""):
 def _dialog_yesno(title: str, default: bool, allow_back: bool = False):
     """Centered yes/no dialog (Y/N or ←/→ + Enter); True/False,
     ``_DIALOG_CANCEL`` on Esc (distinct from "No"), or ``_DIALOG_BACK``."""
+
     def _yes() -> None:
         get_app().exit(result=True)
 
@@ -807,6 +853,7 @@ def _dialog_yesno(title: str, default: bool, allow_back: bool = False):
         _cancel()
 
     if allow_back:
+
         @kb.add("c-b")
         def _(event) -> None:
             _back()
@@ -840,7 +887,10 @@ def _ask(
     """
     if _is_tty():
         val = _dialog_input(
-            prompt, default, suggestion=suggestion, required=required,
+            prompt,
+            default,
+            suggestion=suggestion,
+            required=required,
             allow_back=allow_back,
         )
         if val is _DIALOG_CANCEL:
@@ -871,8 +921,9 @@ def _ask_required(
     """Prompt for a value; empty input keeps ``default``, or (with no default)
     re-asks. Cancelling raises ``_Cancelled``; stepping back raises ``_GoBack``."""
     if _is_tty():
-        val = _dialog_input(prompt, default, required=default is None,
-                            allow_back=allow_back)
+        val = _dialog_input(
+            prompt, default, required=default is None, allow_back=allow_back
+        )
         if val is _DIALOG_CANCEL:
             raise _Cancelled()
         if val is _DIALOG_BACK:
@@ -910,8 +961,11 @@ def _ask_choice(
         # Preserve labels' insertion order.
         options = [(k, labels.get(k, k)) for k in labels if k in valid]
         chosen = _dialog_radio(
-            prompt, options, default=default if default in valid else None,
-            info=info, allow_back=allow_back,
+            prompt,
+            options,
+            default=default if default in valid else None,
+            info=info,
+            allow_back=allow_back,
         )
         if chosen is _DIALOG_CANCEL:
             raise _Cancelled()
@@ -923,8 +977,10 @@ def _ask_choice(
         answer = _ask_required(prompt, default, allow_back=allow_back)
         if answer in valid:
             return answer
-        print(f"  '{answer}' is not a valid choice; please pick one of: "
-              f"{', '.join(sorted(valid))}.")
+        print(
+            f"  '{answer}' is not a valid choice; please pick one of: "
+            f"{', '.join(sorted(valid))}."
+        )
 
 
 def _ask_number(
@@ -955,9 +1011,7 @@ def _ask_number(
         except ValueError:
             label = "a number" if kind == "float" else "an integer"
             # No scrollback in dialog mode → surface the error in the next title.
-            msg = f"'{answer}' is not {label}" + (
-                " (or 'none')" if allow_none else ""
-            )
+            msg = f"'{answer}' is not {label}" + (" (or 'none')" if allow_none else "")
             if _is_tty():
                 prompt = f"{prompt.split(' — ')[0]} — {msg}"
             else:
@@ -1039,12 +1093,13 @@ def _prompt_provider_type(section: str, current: str) -> str:
     default_key = str(options.index(current) + 1)
 
     labels = {
-        str(i): _PROVIDER_LABELS.get(prov, prov)
-        for i, prov in enumerate(options, 1)
+        str(i): _PROVIDER_LABELS.get(prov, prov) for i, prov in enumerate(options, 1)
     }
     valid = set(labels)
     if not _is_tty():
-        print(f"\n  Provider type for this model (current: {_PROVIDER_LABELS.get(current, current)})")
+        print(
+            f"\n  Provider type for this model (current: {_PROVIDER_LABELS.get(current, current)})"
+        )
         for k, lbl in labels.items():
             print(f"    {k}) {lbl}")
     choice = _ask_choice(
@@ -1061,14 +1116,19 @@ def _prompt_mantle_protocol(text: str, section: str, allow_back: bool = False) -
     ``chat_completions`` (the default) unwritten so Enter-through is a no-op."""
     existing = _get_field(text, section, "API_PROTOCOL")
     current = existing or "chat_completions"
-    default_key = next((k for k, (v, _) in _MANTLE_PROTOCOLS.items() if v == current), "1")
+    default_key = next(
+        (k for k, (v, _) in _MANTLE_PROTOCOLS.items() if v == current), "1"
+    )
     labels = {k: desc for k, (_, desc) in _MANTLE_PROTOCOLS.items()}
     if not _is_tty():
         print("  Mantle API protocol:")
         for k, lbl in labels.items():
             print(f"    {k}) {lbl}")
     choice = _ask_choice(
-        "Mantle API protocol", set(_MANTLE_PROTOCOLS), default_key, labels=labels,
+        "Mantle API protocol",
+        set(_MANTLE_PROTOCOLS),
+        default_key,
+        labels=labels,
         allow_back=allow_back,
     )
     chosen = _MANTLE_PROTOCOLS[choice][0]
@@ -1082,9 +1142,13 @@ def _optional_field_step(section: str, key: str, prompt: str, default: str = "")
     (blank keeps the current value / the provider's env default). ``default`` is
     the suggestion when nothing is configured yet. Returns
     ``fn(text, allow_back)``."""
+
     def _step(text: str, allow_back: bool) -> str:
-        v = _ask(prompt, _get_field(text, section, key) or default, allow_back=allow_back)
+        v = _ask(
+            prompt, _get_field(text, section, key) or default, allow_back=allow_back
+        )
         return _set_field(text, section, key, v) if v else text
+
     return _step
 
 
@@ -1102,52 +1166,130 @@ def _connection_steps(section: str, provider: str) -> list:
     if "PORT" in allowed:
         steps.append(_optional_field_step(section, "PORT", port_label, port_default))
     if "REGION" in allowed:
-        steps.append(lambda t, b: _set_field(
-            t, section, "REGION",
-            _ask("AWS region", _get_field(t, section, "REGION") or "us-east-1", allow_back=b)))
+        steps.append(
+            lambda t, b: _set_field(
+                t,
+                section,
+                "REGION",
+                _ask(
+                    "AWS region",
+                    _get_field(t, section, "REGION") or "us-east-1",
+                    allow_back=b,
+                ),
+            )
+        )
     if "INPUT_FORMAT" in allowed:
-        steps.append(lambda t, b: _set_field(
-            t, section, "INPUT_FORMAT",
-            _ask("Input format (openai_chat | huggingface)",
-                 _get_field(t, section, "INPUT_FORMAT") or "openai_chat", allow_back=b)
-            or "openai_chat"))
+        steps.append(
+            lambda t, b: _set_field(
+                t,
+                section,
+                "INPUT_FORMAT",
+                _ask(
+                    "Input format (openai_chat | huggingface)",
+                    _get_field(t, section, "INPUT_FORMAT") or "openai_chat",
+                    allow_back=b,
+                )
+                or "openai_chat",
+            )
+        )
     if "API_PROTOCOL" in allowed and provider == "mantle":
         # Mantle's protocol is a required 3-way choice; OpenAI's is an advanced
         # hand-set opt-in the configurator doesn't prompt for.
         steps.append(lambda t, b: _prompt_mantle_protocol(t, section, allow_back=b))
     if provider == "litellm":
         if "API_BASE" in allowed:
-            steps.append(_optional_field_step(section, "API_BASE", "LiteLLM API base URL (optional)"))
+            steps.append(
+                _optional_field_step(
+                    section, "API_BASE", "LiteLLM API base URL (optional)"
+                )
+            )
         if "API_KEY" in allowed:
-            steps.append(_optional_field_step(section, "API_KEY", "LiteLLM API key (optional, or via the provider's env var)"))
+            steps.append(
+                _optional_field_step(
+                    section,
+                    "API_KEY",
+                    "LiteLLM API key (optional, or via the provider's env var)",
+                )
+            )
     if provider == "anthropic":
         if "API_KEY" in allowed:
-            steps.append(_optional_field_step(section, "API_KEY", "Anthropic API key (optional, or via ANTHROPIC_API_KEY env var)"))
+            steps.append(
+                _optional_field_step(
+                    section,
+                    "API_KEY",
+                    "Anthropic API key (optional, or via ANTHROPIC_API_KEY env var)",
+                )
+            )
         if "ENDPOINT_URL" in allowed:
-            steps.append(_optional_field_step(section, "ENDPOINT_URL", "Anthropic base URL (optional, blank for api.anthropic.com)"))
+            steps.append(
+                _optional_field_step(
+                    section,
+                    "ENDPOINT_URL",
+                    "Anthropic base URL (optional, blank for api.anthropic.com)",
+                )
+            )
     if provider == "openai" and "API_BASE" in allowed:
         # Optional OpenAI-compatible server; blank keeps api.openai.com.
-        steps.append(_optional_field_step(section, "API_BASE", "OpenAI-compatible base URL (optional, blank for the OpenAI API)"))
+        steps.append(
+            _optional_field_step(
+                section,
+                "API_BASE",
+                "OpenAI-compatible base URL (optional, blank for the OpenAI API)",
+            )
+        )
         if "API_KEY" in allowed:
-            steps.append(_optional_field_step(section, "API_KEY", "API key (optional; blank uses OPENAI_API_KEY, local servers need none)"))
+            steps.append(
+                _optional_field_step(
+                    section,
+                    "API_KEY",
+                    "API key (optional; blank uses OPENAI_API_KEY, local servers need none)",
+                )
+            )
     if provider == "mlx":
         # HOST/PORT above is the ordinary path; these cover a server behind a
         # proxy/path or an auth layer, so both are optional (blank = unused).
         if "API_BASE" in allowed:
-            steps.append(_optional_field_step(section, "API_BASE", "MLX base URL (optional; blank uses http://HOST:PORT/v1)"))
+            steps.append(
+                _optional_field_step(
+                    section,
+                    "API_BASE",
+                    "MLX base URL (optional; blank uses http://HOST:PORT/v1)",
+                )
+            )
         if "API_KEY" in allowed:
-            steps.append(_optional_field_step(section, "API_KEY", "API key (optional; a local MLX server needs none)"))
+            steps.append(
+                _optional_field_step(
+                    section,
+                    "API_KEY",
+                    "API key (optional; a local MLX server needs none)",
+                )
+            )
     if provider == "nebius":
-        steps.append(_optional_field_step(
-            section, "API_BASE", "Nebius API base URL", nebius.DEFAULT_BASE_URL,
-        ))
-        steps.append(_optional_field_step(
-            section, "API_KEY", "Nebius API key (optional; blank uses NEBIUS_API_KEY)",
-        ))
+        steps.append(
+            _optional_field_step(
+                section,
+                "API_BASE",
+                "Nebius API base URL",
+                nebius.DEFAULT_BASE_URL,
+            )
+        )
+        steps.append(
+            _optional_field_step(
+                section,
+                "API_KEY",
+                "Nebius API key (optional; blank uses NEBIUS_API_KEY)",
+            )
+        )
 
     # Embeddings: optional real output dimension; blank uses runtime detection.
     if section == "EMBED_MODEL_ID":
-        steps.append(_optional_field_step(section, "DIMENSION", "Embedding dimension (optional; blank = auto-detect)"))
+        steps.append(
+            _optional_field_step(
+                section,
+                "DIMENSION",
+                "Embedding dimension (optional; blank = auto-detect)",
+            )
+        )
 
     return steps
 
@@ -1205,14 +1347,19 @@ def _build_config(
     if transform_from_base:
         text = _set_in_section(text, "MODEL_ID", "TYPE", provider)
         text = _prune_unsupported_params(text, "MODEL_ID", provider)
-        if provider in ("openai", "anthropic", "mlx") and _find_section(text.splitlines(), "VISION_MODEL_ID") >= 0:
+        if (
+            provider in ("openai", "anthropic", "mlx")
+            and _find_section(text.splitlines(), "VISION_MODEL_ID") >= 0
+        ):
             text = _set_in_section(text, "VISION_MODEL_ID", "TYPE", provider)
             text = _prune_unsupported_params(text, "VISION_MODEL_ID", provider)
 
     # --- Chat model --- (name → connection → max_tokens → context, all Back-able)
     def _name_step(t, b):
         # default_model is an example (suggestion, not prefilled); name is mandatory.
-        m = _ask("Chat model name", suggestion=default_model, required=True, allow_back=b)
+        m = _ask(
+            "Chat model name", suggestion=default_model, required=True, allow_back=b
+        )
         return _set_in_section(t, "MODEL_ID", "NAME", m) if m else t
 
     def _ctx_step(t, b):
@@ -1220,17 +1367,26 @@ def _build_config(
         ctx = _ask_number(
             "Max context window",
             default=_get_top_level(t, "MAX_CONVERSATION_TOKENS") or "65536",
-            kind="int", allow_back=b,
+            kind="int",
+            allow_back=b,
         )
         t = _set_top_level_or_add(t, "MAX_CONVERSATION_TOKENS", ctx or "65536")
         return _sync_doc_max_tokens(t)
 
-    text = _run_steps(text, [
-        _name_step,
-        *_connection_steps("MODEL_ID", provider),
-        lambda t, b: _prompt_max_tokens(t, "MODEL_ID", allow_back=b),
-        _ctx_step,
-    ])
+    text = _run_steps(
+        text,
+        [
+            _name_step,
+            *_connection_steps("MODEL_ID", provider),
+            lambda t, b: _prompt_max_tokens(t, "MODEL_ID", allow_back=b),
+            *(
+                [lambda t, b: _prompt_num_batch(t, "MODEL_ID", allow_back=b)]
+                if provider == "ollama"
+                else []
+            ),
+            _ctx_step,
+        ],
+    )
 
     # --- Vision model (optional) ---
     # Full section flow (provider choice + connection + Back), same as /model — so
@@ -1259,8 +1415,22 @@ def _build_config(
         text = _set_bool(text, "ENABLE_WEB_SEARCH", False)
 
     # --- Other feature toggles (default from the template) ---
-    text = _set_bool(text, "ENABLE_RAG", _ask_bool("Enable RAG (document indexing & search)?", _truthy(_get_top_level(text, "ENABLE_RAG"))))
-    text = _set_bool(text, "ENABLE_EPISODIC_MEMORY", _ask_bool("Enable episodic memory (learn from past tasks)?", _truthy(_get_top_level(text, "ENABLE_EPISODIC_MEMORY"))))
+    text = _set_bool(
+        text,
+        "ENABLE_RAG",
+        _ask_bool(
+            "Enable RAG (document indexing & search)?",
+            _truthy(_get_top_level(text, "ENABLE_RAG")),
+        ),
+    )
+    text = _set_bool(
+        text,
+        "ENABLE_EPISODIC_MEMORY",
+        _ask_bool(
+            "Enable episodic memory (learn from past tasks)?",
+            _truthy(_get_top_level(text, "ENABLE_EPISODIC_MEMORY")),
+        ),
+    )
     learning = _ask_bool(
         "Enable local playbook learning (no extra model calls)?",
         _truthy(_get_top_level(text, "ENABLE_PLAYBOOK")),
@@ -1271,22 +1441,49 @@ def _build_config(
         _explicit_bool(_get_top_level(text, "ENABLE_REVIEW")),
     )
     text = _set_bool(text, "ENABLE_REVIEW", reviewing)
-    memory = _ask_bool("Enable persistent memory (agent curates MEMORY.md)?", _truthy(_get_top_level(text, "ENABLE_MEMORY")))
+    memory = _ask_bool(
+        "Enable persistent memory (agent curates MEMORY.md)?",
+        _truthy(_get_top_level(text, "ENABLE_MEMORY")),
+    )
     text = _set_bool(text, "ENABLE_MEMORY", memory)
     if memory:
         # Auto-extraction defaults OFF (writes without a confirmation prompt), so
         # an absent key means "not yet chosen" -> default the prompt to No.
-        text = _set_bool(text, "ENABLE_MEMORY_AUTO_EXTRACTION", _ask_bool(
-            "Auto-extract durable facts to MEMORY.md after each turn (no prompt)?",
-            _explicit_bool(_get_top_level(text, "ENABLE_MEMORY_AUTO_EXTRACTION")),
-        ))
-    text = _set_bool(text, "ENABLE_SKILLS", _ask_bool("Enable agent skills (SKILL.md instruction packs)?", _truthy(_get_top_level(text, "ENABLE_SKILLS"))))
-    text = _set_bool(text, "ENABLE_WEB_CRAWL", _ask_bool("Enable web crawler (fetch URLs)?", _truthy(_get_top_level(text, "ENABLE_WEB_CRAWL"))))
+        text = _set_bool(
+            text,
+            "ENABLE_MEMORY_AUTO_EXTRACTION",
+            _ask_bool(
+                "Auto-extract durable facts to MEMORY.md after each turn (no prompt)?",
+                _explicit_bool(_get_top_level(text, "ENABLE_MEMORY_AUTO_EXTRACTION")),
+            ),
+        )
+    text = _set_bool(
+        text,
+        "ENABLE_SKILLS",
+        _ask_bool(
+            "Enable agent skills (SKILL.md instruction packs)?",
+            _truthy(_get_top_level(text, "ENABLE_SKILLS")),
+        ),
+    )
+    text = _set_bool(
+        text,
+        "ENABLE_WEB_CRAWL",
+        _ask_bool(
+            "Enable web crawler (fetch URLs)?",
+            _truthy(_get_top_level(text, "ENABLE_WEB_CRAWL")),
+        ),
+    )
 
-    routing = _ask_bool("Enable query routing (route queries to tool subsets)?", _truthy(_get_top_level(text, "ENABLE_ROUTING")))
+    routing = _ask_bool(
+        "Enable query routing (route queries to tool subsets)?",
+        _truthy(_get_top_level(text, "ENABLE_ROUTING")),
+    )
     text = _set_bool(text, "ENABLE_ROUTING", routing)
     if routing:
-        orchestration = _ask_bool("Enable orchestration (decompose complex tasks)?", _truthy(_get_top_level(text, "ENABLE_ORCHESTRATION")))
+        orchestration = _ask_bool(
+            "Enable orchestration (decompose complex tasks)?",
+            _truthy(_get_top_level(text, "ENABLE_ORCHESTRATION")),
+        )
     else:
         orchestration = False
     text = _set_bool(text, "ENABLE_ORCHESTRATION", orchestration)
@@ -1298,7 +1495,8 @@ def _build_config(
     # model), so Enter-through leaves the template exactly as it was. SUMMARY has
     # no toggle to hang off, so it stays a /model-only choice.
     for area, enabled in (
-        ("ROUTER", routing), ("ORCHESTRATOR", orchestration),
+        ("ROUTER", routing),
+        ("ORCHESTRATOR", orchestration),
         ("REVIEWER", reviewing),
     ):
         if enabled:
@@ -1306,14 +1504,50 @@ def _build_config(
     if reviewing:
         text = _prompt_review_settings(text)
 
-    text = _set_bool(text, "USE_PROFILING", _ask_bool("Enable user profiling (personalized responses)?", _truthy(_get_in_section(text, "PROFILE", "USE_PROFILING"))), section="PROFILE")
+    text = _set_bool(
+        text,
+        "USE_PROFILING",
+        _ask_bool(
+            "Enable user profiling (personalized responses)?",
+            _truthy(_get_in_section(text, "PROFILE", "USE_PROFILING")),
+        ),
+        section="PROFILE",
+    )
 
-    text = _set_bool(text, "REQUIRE_BASH_CONFIRMATION", _ask_bool("Ask for confirmation before each shell command (execute_bash)?", _truthy(_get_top_level(text, "REQUIRE_BASH_CONFIRMATION"))))
-    text = _set_bool(text, "REQUIRE_WRITE_CONFIRMATION", _ask_bool("Ask for confirmation before each file write (fs_write/file_edit)?", _truthy(_get_top_level(text, "REQUIRE_WRITE_CONFIRMATION"))))
+    text = _set_bool(
+        text,
+        "REQUIRE_BASH_CONFIRMATION",
+        _ask_bool(
+            "Ask for confirmation before each shell command (execute_bash)?",
+            _truthy(_get_top_level(text, "REQUIRE_BASH_CONFIRMATION")),
+        ),
+    )
+    text = _set_bool(
+        text,
+        "REQUIRE_WRITE_CONFIRMATION",
+        _ask_bool(
+            "Ask for confirmation before each file write (fs_write/file_edit)?",
+            _truthy(_get_top_level(text, "REQUIRE_WRITE_CONFIRMATION")),
+        ),
+    )
     # Memory-write confirmation defaults OFF (the agent auto-saves), so an absent
     # key means "not chosen" -> default the prompt to No.
-    text = _set_bool(text, "REQUIRE_MEMORY_CONFIRMATION", _ask_bool("Ask for confirmation before each memory write?", _explicit_bool(_get_top_level(text, "REQUIRE_MEMORY_CONFIRMATION"))))
-    text = _set_bool(text, "REQUIRE_GIT_CONFIRMATION", _ask_bool("Ask for confirmation before overriding a git safety refusal?", _truthy(_get_top_level(text, "REQUIRE_GIT_CONFIRMATION"))))
+    text = _set_bool(
+        text,
+        "REQUIRE_MEMORY_CONFIRMATION",
+        _ask_bool(
+            "Ask for confirmation before each memory write?",
+            _explicit_bool(_get_top_level(text, "REQUIRE_MEMORY_CONFIRMATION")),
+        ),
+    )
+    text = _set_bool(
+        text,
+        "REQUIRE_GIT_CONFIRMATION",
+        _ask_bool(
+            "Ask for confirmation before overriding a git safety refusal?",
+            _truthy(_get_top_level(text, "REQUIRE_GIT_CONFIRMATION")),
+        ),
+    )
 
     return text
 
@@ -1347,7 +1581,9 @@ def _run_configurator(dest: Path) -> Optional[Path]:
     print(f"\n  Config written to:\n    {dest}")
     # Env-based auth reminder survives to scrollback after the restart.
     _print_credential_note(provider)
-    print(f"\n  This file lives in the config/ folder of your app home ({dest.parent.parent}),")
+    print(
+        f"\n  This file lives in the config/ folder of your app home ({dest.parent.parent}),"
+    )
     print("  which also holds the rest of your runtime data (plans, tasks,")
     print("  conversations, RAG indexes, episodic memory, the ACE playbook, and")
     print("  an mcp/ folder for external MCP servers).")
@@ -1389,7 +1625,13 @@ def run_first_run_setup() -> Optional[Path]:
 
 _PLAYBOOK_SETTINGS = {
     "MAX_ENTRIES": ("Active notes before archival (at least 1)", 500, "int", 1, None),
-    "MAX_INJECT": ("Candidate notes per turn (0 = none; at most 2 per outcome)", 10, "int", 0, None),
+    "MAX_INJECT": (
+        "Candidate notes per turn (0 = none; at most 2 per outcome)",
+        10,
+        "int",
+        0,
+        None,
+    ),
 }
 
 
@@ -1408,14 +1650,29 @@ def _settings_options(text: str, section: str) -> dict:
 def _set_settings_option(text: str, section: str, key: str, value: str) -> str:
     """Edit a direct child only, retaining unrelated fields and block comments."""
     lines = text.splitlines()
-    idx = next((i for i, line in enumerate(lines) if re.match(rf"^{re.escape(section)}\s*:", line)), -1)
+    idx = next(
+        (
+            i
+            for i, line in enumerate(lines)
+            if re.match(rf"^{re.escape(section)}\s*:", line)
+        ),
+        -1,
+    )
     if idx < 0:
-        return text + ("" if text.endswith("\n") else "\n") + f"{section}:\n  {key}: {value}\n"
+        return (
+            text
+            + ("" if text.endswith("\n") else "\n")
+            + f"{section}:\n  {key}: {value}\n"
+        )
     tail = lines[idx].split(":", 1)[1].split(" #", 1)[0].strip()
     if tail and not tail.startswith("#"):
         # A flow mapping needs expansion before individual fields can be edited.
-        if tail not in ("{}", "null", "~") and not (tail.startswith("{") and tail.endswith("}")):
-            raise ValueError(f"Expand {section} into a block mapping before editing its settings")
+        if tail not in ("{}", "null", "~") and not (
+            tail.startswith("{") and tail.endswith("}")
+        ):
+            raise ValueError(
+                f"Expand {section} into a block mapping before editing its settings"
+            )
         options = _settings_options(text, section)
         options[key] = yaml.safe_load(value)
         expanded = yaml.safe_dump({section: options}, sort_keys=False)
@@ -1423,26 +1680,41 @@ def _set_settings_option(text: str, section: str, key: str, value: str) -> str:
         comment = lines[idx].partition(" #")[2]
         if comment:
             expanded_lines[0] += f" #{comment}"
-        lines[idx:idx + 1] = expanded_lines
+        lines[idx : idx + 1] = expanded_lines
     else:
         end = idx + 1
         while end < len(lines):
-            if lines[end].strip() and not lines[end].lstrip().startswith("#") and _indent_of(lines[end]) == 0:
+            if (
+                lines[end].strip()
+                and not lines[end].lstrip().startswith("#")
+                and _indent_of(lines[end]) == 0
+            ):
                 break
             end += 1
         indent = min(
-            (_indent_of(line) for line in lines[idx + 1:end]
-             if line.strip() and not line.lstrip().startswith("#")),
+            (
+                _indent_of(line)
+                for line in lines[idx + 1 : end]
+                if line.strip() and not line.lstrip().startswith("#")
+            ),
             default=2,
         )
-        found = next((j for j in range(idx + 1, end)
-                      if _indent_of(lines[j]) == indent
-                      and re.match(rf"\s*{re.escape(key)}:", lines[j])), None)
+        found = next(
+            (
+                j
+                for j in range(idx + 1, end)
+                if _indent_of(lines[j]) == indent
+                and re.match(rf"\s*{re.escape(key)}:", lines[j])
+            ),
+            None,
+        )
         if found is None:
             lines.insert(idx + 1, f"{' ' * indent}{key}: {value}")
         else:
             last = found + 1
-            while last < end and lines[last].strip() and _indent_of(lines[last]) > indent:
+            while (
+                last < end and lines[last].strip() and _indent_of(lines[last]) > indent
+            ):
                 last += 1
             comment = lines[found].partition(" #")[2]
             lines[found:last] = [
@@ -1454,9 +1726,13 @@ def _set_settings_option(text: str, section: str, key: str, value: str) -> str:
 def _prompt_playbook_settings(text: str) -> str:
     current = _get_top_level(text, "ENABLE_PLAYBOOK")
     enabled = _truthy(current) if current is not None else True
-    selected = _ask_bool("Enable local playbook learning (no extra model calls)?", enabled)
+    selected = _ask_bool(
+        "Enable local playbook learning (no extra model calls)?", enabled
+    )
     if selected != enabled:
-        text = _set_top_level_or_add(text, "ENABLE_PLAYBOOK", "true" if selected else "false")
+        text = _set_top_level_or_add(
+            text, "ENABLE_PLAYBOOK", "true" if selected else "false"
+        )
     return _prompt_scoped_settings(text, "PLAYBOOK", _PLAYBOOK_SETTINGS)
 
 
@@ -1467,6 +1743,7 @@ def _prompt_review_settings(text: str) -> str:
 def _prompt_scoped_settings(text: str, section: str, specs: dict) -> str:
     steps = []
     for key, spec in specs.items():
+
         def step(current, back, key=key, spec=spec):
             label, default, kind, minimum, maximum = spec
             options = _settings_options(current, section)
@@ -1486,6 +1763,7 @@ def _prompt_scoped_settings(text: str, section: str, specs: dict) -> str:
                     return _set_settings_option(current, section, key, literal)
                 hint = str(default)
                 label = spec[0] + " — value outside the allowed range"
+
         steps.append(step)
     return _run_steps(text, steps)
 
@@ -1532,12 +1810,16 @@ def _save_config_update(dest: Path, original: Optional[str], updated: str) -> bo
         with file_lock(str(target) + ".lock"):
             current = target.read_text() if target.exists() else None
             if current != original:
-                print_error("Configuration changed while the dialog was open; please try again.")
+                print_error(
+                    "Configuration changed while the dialog was open; please try again."
+                )
                 return False
             atomic_write_text(str(target), updated, preserve_mode=True)
         return True
     except (OSError, ValueError, yaml.YAMLError) as exc:
-        print_error(f"Could not save configuration ({type(exc).__name__}); original preserved.")
+        print_error(
+            f"Could not save configuration ({type(exc).__name__}); original preserved."
+        )
         return False
 
 
@@ -1554,9 +1836,13 @@ def run_reconfigure() -> Optional[Path]:
         print("  Reconfigure Mnemo AI")
         print("=" * 64)
         if dest.is_file():
-            print(f"  WARNING: this will OVERWRITE your existing config at:\n    {dest}")
+            print(
+                f"  WARNING: this will OVERWRITE your existing config at:\n    {dest}"
+            )
             print("  Your current settings will be replaced by the answers you give")
-            print("  now. (Other runtime data — conversations, memory, etc. — is kept.)")
+            print(
+                "  now. (Other runtime data — conversations, memory, etc. — is kept.)"
+            )
         else:
             print(f"  No config found yet; this will create one at:\n    {dest}")
 
@@ -1588,7 +1874,11 @@ _MODEL_SECTIONS = {
     # partial MODEL_ID, so they reuse the chat model's provider table; the job
     # wording is the area registry's, so /model and /doctor say the same thing.
     "4": ("ROUTER", f"Router model — {AREA_DESCRIPTIONS['ROUTER']}", False),
-    "5": ("ORCHESTRATOR", f"Orchestrator model — {AREA_DESCRIPTIONS['ORCHESTRATOR']}", False),
+    "5": (
+        "ORCHESTRATOR",
+        f"Orchestrator model — {AREA_DESCRIPTIONS['ORCHESTRATOR']}",
+        False,
+    ),
     "6": ("SUMMARY", f"Summary model — {AREA_DESCRIPTIONS['SUMMARY']}", False),
     "8": ("REVIEWER", f"Reviewer model — {AREA_DESCRIPTIONS['REVIEWER']}", False),
 }
@@ -1744,7 +2034,7 @@ def _copy_chat_to_vision(text: str) -> str:
 
     allowed = supported_keys("VISION_MODEL_ID", chat_type) or set()
     # NAME + the connection/param keys vision honors; TYPE already set above.
-    for key in ({"NAME"} | allowed):
+    for key in {"NAME"} | allowed:
         val = _get_field(text, "MODEL_ID", key)
         if val is not None:
             text = _set_field(text, "VISION_MODEL_ID", key, val)
@@ -1815,13 +2105,17 @@ def _prompt_model_section(
     steps = [_name_step, *_connection_steps(section, new_type)]
     if section in ("MODEL_ID", "VISION_MODEL_ID") or section in AREAS:
         steps.append(lambda t, b: _prompt_max_tokens(t, section, allow_back=b))
+    if new_type == "ollama":
+        steps.append(lambda t, b: _prompt_num_batch(t, section, allow_back=b))
     if is_llm:
         # Context window (feeds num_ctx + compaction budget); defaults to 65536.
         def _ctx_step(t, b):
-            ctx = _ask_number("Max context window", default="65536", kind="int",
-                              allow_back=b)
+            ctx = _ask_number(
+                "Max context window", default="65536", kind="int", allow_back=b
+            )
             t = _set_top_level_or_add(t, "MAX_CONVERSATION_TOKENS", ctx or "65536")
             return _sync_doc_max_tokens(t)
+
         steps.append(_ctx_step)
 
     text = _run_steps(text, steps)
@@ -1839,13 +2133,18 @@ def _prompt_model_section(
 # --- /params: tune a model's inference parameters ---------------------------
 # (kind, hint) per tunable key — kind drives validation, hint is the prompt.
 # Which keys are offered comes from the registry's tunable set; this only says
-# how to prompt/validate each. kind: float | int | bool | list | enum:a,b,c
+# how to prompt/validate each. kind: float | int | positive_int | bool | list | enum:a,b,c
 _PARAM_META = {
     "TEMPERATURE": ("float", "sampling temperature, e.g. 0.7"),
     "TOP_P": ("float", "nucleus sampling, 0-1"),
     "TOP_K": ("int", "top-k sampling, e.g. 40"),
     "MIN_P": ("float", "min-p sampling, e.g. 0.05 (0 disables)"),
     "MAX_TOKENS": ("int", "max output tokens"),
+    "NUM_BATCH": (
+        "positive_int",
+        f"Ollama prompt-processing batch size; default {DEFAULT_OLLAMA_NUM_BATCH}; "
+        "smaller values can reduce memory use",
+    ),
     "MAX_INPUT_TOKENS": ("int", "embedding input token limit"),
     "MAX_INPUT_CHARS": ("int", "embedding input character limit"),
     "PRESENCE_PENALTY": ("float", "e.g. 0.0-2.0"),
@@ -1868,22 +2167,38 @@ _PARAM_META = {
         "duration",
         "how long the server keeps the model loaded, e.g. 30m | 0 (unload now) | -1 (pin)",
     ),
-    "DIMENSION": ("int", "embedding vector size (match your embedder; for the fallback)"),
+    "DIMENSION": (
+        "int",
+        "embedding vector size (match your embedder; for the fallback)",
+    ),
 }
 
 # Order params are prompted in (registry membership decides which appear).
 _PARAM_ORDER = [
-    "TEMPERATURE", "TOP_P", "TOP_K", "MIN_P", "MAX_TOKENS",
-    "MAX_INPUT_TOKENS", "MAX_INPUT_CHARS",
-    "PRESENCE_PENALTY", "FREQUENCY_PENALTY", "REPETITION_PENALTY",
-    "STOP", "REASONING", "REASONING_EFFORT", "THINKING_TOKENS", "STREAM",
-    "PROMPT_CACHE", "PROMPT_CACHE_TTL",
+    "TEMPERATURE",
+    "TOP_P",
+    "TOP_K",
+    "MIN_P",
+    "MAX_TOKENS",
+    "NUM_BATCH",
+    "MAX_INPUT_TOKENS",
+    "MAX_INPUT_CHARS",
+    "PRESENCE_PENALTY",
+    "FREQUENCY_PENALTY",
+    "REPETITION_PENALTY",
+    "STOP",
+    "REASONING",
+    "REASONING_EFFORT",
+    "THINKING_TOKENS",
+    "STREAM",
+    "PROMPT_CACHE",
+    "PROMPT_CACHE_TTL",
     "KEEP_ALIVE",
     "DIMENSION",
 ]
 
-# /params-tunable sections: key -> (config section, label). Embeddings exposes
-# only DIMENSION; chat/vision expose the generation knobs.
+# /params-tunable sections: key -> (config section, label). Provider membership
+# decides which generation and runtime controls each section exposes.
 _PARAM_SECTIONS = {
     "1": ("MODEL_ID", "Chat model (LLM)"),
     "2": ("VISION_MODEL_ID", "Vision model"),
@@ -1907,9 +2222,11 @@ def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
             return raw
         except ValueError:
             return None
-    if kind == "int":
+    if kind in ("int", "positive_int"):
         try:
-            int(raw)
+            value = int(raw)
+            if kind == "positive_int":
+                return str(value) if value > 0 else None
             return raw
         except ValueError:
             return None
@@ -1941,6 +2258,13 @@ def _validate_param(key: str, kind: str, raw: str) -> Optional[str]:
     return raw
 
 
+def _prompt_num_batch(text: str, section: str, allow_back: bool = False) -> str:
+    """Use the same optional Ollama setting in /config, /model and /params."""
+    return _prompt_one_param(
+        text, section, "NUM_BATCH", *_PARAM_META["NUM_BATCH"], allow_back=allow_back
+    )
+
+
 def _prompt_one_param(
     text: str, section: str, key: str, kind: str, hint: str, allow_back: bool = False
 ) -> str:
@@ -1948,6 +2272,8 @@ def _prompt_one_param(
     patch ``text``: unchanged/empty keeps it, ``none`` clears it, a valid value
     sets it (re-asks on invalid), Esc cancels, Ctrl+B steps back."""
     current = _get_field(text, section, key)
+    if key == "NUM_BATCH" and (current is None or current.lower() in ("null", "~")):
+        current = str(DEFAULT_OLLAMA_NUM_BATCH)
     base_hint = hint
     if kind.startswith("enum:"):
         base_hint = f"{hint} ({kind.split(':', 1)[1].replace(',', ' | ')})"
@@ -1957,7 +2283,8 @@ def _prompt_one_param(
     prompt_hint = base_hint
     while True:
         answer = _ask(
-            f"{key} [{prompt_hint}] ('none' to clear)", default=current,
+            f"{key} [{prompt_hint}] ('none' to clear)",
+            default=current,
             allow_back=allow_back,
         )
         if answer is None:
@@ -1970,7 +2297,10 @@ def _prompt_one_param(
         value = _validate_param(key, kind, answer)
         if value is None:
             # Surface the error in the next prompt (a dialog hides any print()).
-            err = f"'{answer}' is not a valid {kind.split(':', 1)[0]} value"
+            kind_label = (
+                "positive integer" if kind == "positive_int" else kind.split(":", 1)[0]
+            )
+            err = f"'{answer}' is not a valid {kind_label} value"
             if _is_tty():
                 prompt_hint = f"{base_hint} — {err}, try again"
             else:
@@ -2030,9 +2360,7 @@ def run_params_override() -> Optional[ParamsOverride]:
         if section in AREAS:
             available[key] = _area_configured(text, section)
 
-    labels = {
-        k: label for k, (_, label) in _PARAM_SECTIONS.items() if available.get(k)
-    }
+    labels = {k: label for k, (_, label) in _PARAM_SECTIONS.items() if available.get(k)}
     # On a TTY the picker dialog carries the title + overview (info=), so only
     # the non-TTY fallback prints them here.
     if not _is_tty():
@@ -2088,6 +2416,7 @@ def _prompt_enable_embedding_features(text: str) -> str:
     skipped only when the feature is EXPLICITLY on (an absent key is treated as
     off, so we still ask). ``_Cancelled`` (Esc) propagates to the caller, which
     leaves the whole change untouched."""
+
     def _explicitly_on(key: str) -> bool:
         val = _get_top_level(text, key)
         return val is not None and val.strip().lower() in ("true", "yes", "on", "1")
@@ -2191,13 +2520,14 @@ def run_model_override() -> Optional[ModelOverride]:
     follows_chat = section in AREAS and not _area_configured(new_text, section)
     effective_section = "MODEL_ID" if follows_chat else section
     changed = ModelOverride(
-        dest, section, enabled_feature,
+        dest,
+        section,
+        enabled_feature,
         label=label.split(" — ")[0],
         model_name=_get_field(new_text, effective_section, "NAME") or "",
         model_type=_effective_type(new_text, effective_section),
         parameters_reset=(
-            not follows_chat
-            and _parameters_were_reset(text, new_text, section)
+            not follows_chat and _parameters_were_reset(text, new_text, section)
         ),
         follows_chat=follows_chat,
     )
@@ -2241,9 +2571,7 @@ def _prompt_feature_dependencies(text: str, newly_on: set) -> str:
     if "ENABLE_WEB_SEARCH" in newly_on and _is_placeholder_brave_key(
         _get_top_level(text, "BRAVE_API_KEY")
     ):
-        key = _ask(
-            "Brave Search API key (from brave.com/search/api; blank to skip)"
-        )
+        key = _ask("Brave Search API key (from brave.com/search/api; blank to skip)")
         if key:
             text = _set_top_level_or_add(text, "BRAVE_API_KEY", key)
         else:
@@ -2279,6 +2607,7 @@ def run_features_override() -> Optional[FeatureOverride]:
         return None
 
     text = dest.read_text()
+
     # Local learning is on by default; other toggles keep their existing defaults.
     def _on(key: str) -> bool:
         val = _get_top_level(text, key)
@@ -2296,7 +2625,9 @@ def run_features_override() -> Optional[FeatureOverride]:
 
     try:
         result = _dialog_checkbox(
-            "Features — enable/disable", options, checked,
+            "Features — enable/disable",
+            options,
+            checked,
             info="  Space toggles a feature; Enter saves.",
         )
         if result is _DIALOG_CANCEL:

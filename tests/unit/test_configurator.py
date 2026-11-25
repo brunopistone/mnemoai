@@ -431,10 +431,9 @@ def test_provider_params_registry_shape():
     assert set(providers("EMBED_MODEL_ID")) == {
         "ollama", "bedrock", "openai", "sagemaker", "litellm", "mlx", "nebius"
     }
-    # Embeddings take no inference params — only connection keys, the optional
-    # DIMENSION override, and EXTRA_PARAMS.
+    # Ollama embeddings also expose the prompt-processing batch size.
     assert supported_keys("EMBED_MODEL_ID", "ollama") == {
-        "HOST", "PORT", "DIMENSION", "EXTRA_PARAMS"
+        "HOST", "PORT", "DIMENSION", "NUM_BATCH", "EXTRA_PARAMS"
     }
     # openai embeddings can target a local OpenAI-compatible server.
     assert supported_keys("EMBED_MODEL_ID", "openai") == {
@@ -509,9 +508,8 @@ def test_tunable_params_excludes_connection_keys():
         assert tunable_params("MODEL_ID", prov) == expected
     # EXTRA_PARAMS is supported but never tunable via /params.
     assert "EXTRA_PARAMS" not in tunable_params("MODEL_ID", "openai")
-    # Embeddings expose only DIMENSION as a tunable (the vector-size override);
-    # connection keys (HOST/PORT/REGION/API_BASE/…) are still excluded.
-    assert tunable_params("EMBED_MODEL_ID", "ollama") == {"DIMENSION"}
+    # Embeddings expose runtime controls; connection keys stay excluded.
+    assert tunable_params("EMBED_MODEL_ID", "ollama") == {"DIMENSION", "NUM_BATCH"}
     assert tunable_params("EMBED_MODEL_ID", "openai") == {"DIMENSION"}
     assert "HOST" not in tunable_params("EMBED_MODEL_ID", "ollama")
     assert "API_BASE" not in tunable_params("EMBED_MODEL_ID", "openai")
@@ -565,6 +563,107 @@ def test_every_tunable_key_has_prompt_metadata():
             keys |= tunable_params(section, prov) or set()
     assert keys <= set(_PARAM_META)
     assert keys <= set(_PARAM_ORDER)
+
+
+def test_num_batch_is_only_offered_for_ollama():
+    from mnemoai.models.provider_params import providers, tunable_params
+    from mnemoai.utils.configurator import _prune_unsupported_params
+
+    for section in ("MODEL_ID", "VISION_MODEL_ID", "EMBED_MODEL_ID"):
+        for provider in providers(section):
+            assert ("NUM_BATCH" in tunable_params(section, provider)) == (provider == "ollama")
+    text = "MODEL_ID:\n  TYPE: bedrock\n  NAME: model\n  NUM_BATCH: 512\n"
+    assert "NUM_BATCH" not in _prune_unsupported_params(text, "MODEL_ID", "bedrock")
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "1.5", "true", "nope", ""])
+def test_num_batch_validation_rejects_nonpositive_and_noninteger_values(raw):
+    from mnemoai.utils.configurator import _validate_param
+
+    assert _validate_param("NUM_BATCH", "positive_int", raw) is None
+
+
+def test_num_batch_prompt_validates_and_can_clear(monkeypatch):
+    from mnemoai.utils import configurator as C
+
+    answers = iter(["0", "-1", "1.5", "0512"])
+    monkeypatch.setattr(C, "_ask", lambda *a, **k: next(answers))
+    text = "MODEL_ID:\n  TYPE: ollama\n  NAME: model\n"
+    changed = C._prompt_num_batch(text, "MODEL_ID")
+    assert yaml.safe_load(changed)["MODEL_ID"]["NUM_BATCH"] == 512
+    monkeypatch.setattr(C, "_ask", lambda *a, **k: "none")
+    assert C._prompt_num_batch(changed, "MODEL_ID") == text
+    monkeypatch.setattr(C, "_ask", lambda *a, **k: "")
+    assert C._prompt_num_batch(text, "MODEL_ID") == text
+
+
+@pytest.mark.parametrize("setting", ["", "  NUM_BATCH: null\n", "  NUM_BATCH: ~\n"])
+def test_num_batch_prompt_shows_2048_when_unconfigured(monkeypatch, setting):
+    from mnemoai.utils import configurator as C
+
+    def answer(prompt, default=None, **kwargs):
+        assert default == "2048"
+        assert "default 2048" in prompt
+        return default
+
+    monkeypatch.setattr(C, "_ask", answer)
+    text = "MODEL_ID:\n  TYPE: ollama\n  NAME: model\n" + setting
+    assert C._prompt_num_batch(text, "MODEL_ID") == text
+
+@pytest.mark.parametrize(
+    "section,choice",
+    [("MODEL_ID", "1"), ("VISION_MODEL_ID", "2"), ("EMBED_MODEL_ID", "3"), ("ROUTER", "4")],
+)
+@pytest.mark.parametrize("answer,expected", [("512", "512"), ("none", None)])
+def test_params_saves_or_clears_num_batch(
+    monkeypatch, tmp_path, section, choice, answer, expected
+):
+    from mnemoai.utils import configurator as C
+
+    text = NESTED + "AREA_MODELS:\n  ROUTER:\n    NAME: small\n"
+    text = C._set_field(text, section, "NUM_BATCH", "2048")
+    dest = tmp_path / "config.yaml"
+    dest.write_text(text)
+    monkeypatch.setattr(C, "_config_to_edit", lambda: dest)
+    monkeypatch.setattr(C, "_is_tty", lambda: False)
+    monkeypatch.setattr(C, "_ask_choice", lambda *a, **k: choice)
+    monkeypatch.setattr(
+        C, "_ask",
+        lambda prompt, default=None, **k: answer if prompt.startswith("NUM_BATCH") else (default or ""),
+    )
+    result = C.run_params_override()
+    assert result == C.ParamsOverride(dest, section)
+    assert C._get_field(dest.read_text(), section, "NUM_BATCH") == expected
+    assert C._get_field(dest.read_text(), "MODEL_ID", "NAME") == "qwen3.5:4b"
+    assert C._get_field(dest.read_text(), "MODEL_ID", "HOST") == "localhost"
+
+
+def test_config_wizard_offers_num_batch_for_each_ollama_model(monkeypatch):
+    from mnemoai.utils import configurator as C
+
+    seen = []
+
+    def answer(prompt, default=None, **kwargs):
+        if prompt.startswith("NUM_BATCH"):
+            seen.append(prompt)
+            return "512"
+        if "name" in prompt.lower():
+            return "test-model"
+        return default or ""
+
+    monkeypatch.setattr(C, "_ask", answer)
+    monkeypatch.setattr(C, "_ask_bool", lambda prompt, *a, **k: prompt.startswith("Configure a"))
+    monkeypatch.setattr(C, "_prompt_provider_type", lambda *a, **k: "ollama")
+    monkeypatch.setattr(
+        C, "_ask_number",
+        lambda *a, default=None, **k: None if default == "none" else default,
+    )
+    template = (C._templates_dir() / "config.yaml.example").read_text()
+    data = yaml.safe_load(C._build_config("ollama", "test-model", template))
+    assert len(seen) == 3
+    assert data["MODEL_ID"]["NUM_BATCH"] == 512
+    assert data["VISION_MODEL_ID"]["NUM_BATCH"] == 512
+    assert data["RAG"]["EMBED_MODEL_ID"]["NUM_BATCH"] == 512
 
 
 def test_set_field_replaces_multiline_list_with_inline_scalar():

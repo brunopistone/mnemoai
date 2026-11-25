@@ -141,7 +141,8 @@ class TestOllamaHost:
             def __init__(self, host=None):
                 captured["host"] = host
 
-            def embed(self, model, input, truncate=None):
+            def embed(self, model, input, truncate=None, options=None):
+                assert options == {"num_batch": 2048}
                 return {"embeddings": [[0.1, 0.2, 0.3]] * len(input)}
 
         monkeypatch.setattr("ollama.Client", _FakeOllamaClient)
@@ -208,7 +209,8 @@ class TestOllamaRetryAndTruncation:
             def __init__(self, host=None):
                 pass
 
-            def embed(self, model, input, truncate=None):
+            def embed(self, model, input, truncate=None, options=None):
+                assert options == {"num_batch": 2048}
                 state["calls"] += 1
                 if state["calls"] <= fail_times:
                     raise (
@@ -411,7 +413,8 @@ class TestTokenCapAndOverflow:
             def __init__(self, host=None):
                 pass
 
-            def embed(self, model, input, truncate=None):
+            def embed(self, model, input, truncate=None, options=None):
+                assert options == {"num_batch": 2048}
                 state["calls"] += 1
                 raise RuntimeError("the input length exceeds the context length")
 

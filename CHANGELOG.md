@@ -9,6 +9,24 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.33.0] — 2026-11-25
+
+### Added
+
+- Configure Ollama prompt-processing batch size with `NUM_BATCH` through
+  `/params`, `/config`, `/model`, or YAML for chat, vision, embeddings and
+  auxiliary chat models. The default is 2048; explicit positive integer values
+  override it. Chat changes apply without restarting the conversation.
+
+### Fixed
+
+- Start a separate session transcript after `/clear`, so resume titles, turn
+  counts and restored history belong to the new topic. Preserve the previous
+  conversation, reset its custom label for the new chat, and avoid creating
+  extra transcripts during shutdown.
+- Disable reasoning for automatic memory-extraction calls using an independent
+  model copy, preserving the chat model's reasoning and callback settings.
+
 ## [1.32.1] — 2026-11-23
 
 ### Security
@@ -5644,7 +5662,8 @@ all]`), the full command/plan echoes to scrollback above it just once, and the
   memory, ACE playbook, user-profile learning, RAG, web search/crawl, vision,
   and a `prompt_toolkit` chat UI with `/config` / `/model` configurators.
 
-[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.32.1...HEAD
+[Unreleased]: https://github.com/brunopistone/mnemoai/compare/v1.33.0...HEAD
+[1.33.0]: https://github.com/brunopistone/mnemoai/compare/v1.32.1...v1.33.0
 [1.32.1]: https://github.com/brunopistone/mnemoai/compare/v1.32.0...v1.32.1
 [1.32.0]: https://github.com/brunopistone/mnemoai/compare/v1.31.3...v1.32.0
 [1.31.3]: https://github.com/brunopistone/mnemoai/compare/v1.31.2...v1.31.3
