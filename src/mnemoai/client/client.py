@@ -36,7 +36,10 @@ from mnemoai.client.agent.message_codec import (
     convert_langchain_messages_to_strands,
     convert_strands_messages_to_langchain,
 )
-from mnemoai.client.agent.reasoning_utils import extract_visible_text
+from mnemoai.client.agent.reasoning_utils import (
+    extract_visible_text,
+    without_reasoning,
+)
 from mnemoai.client.agent.router import ROUTE_TOOLS, QueryRouter
 from mnemoai.client.managers.agent_conversation_manager import (
     AgentConversationManager,
@@ -1527,12 +1530,16 @@ class LangGraphClient:
         """Run a single, isolated model call for ``prompt`` and return its text.
 
         Used for background side-tasks (memory extraction) — deliberately does NOT
-        touch the agent's conversation state. Supports both the LangChain
-        (``invoke``) and Strands (``stream``) model shapes.
+        touch the agent's conversation state. Use a reasoning-disabled copy when
+        supported, preserving the visible chat model's settings. Supports both
+        the LangChain (``invoke``) and Strands (``stream``) model shapes.
         """
         model = self.model
         if model is None:
             return ""
+        auxiliary_model = without_reasoning(model)
+        if auxiliary_model is not None:
+            model = auxiliary_model
         try:
             model = model.model_copy(update={"callbacks": None})
         except (AttributeError, TypeError):
@@ -1688,11 +1695,18 @@ class LangGraphClient:
             f"\n\033[90m[Context: {estimate_mark}{self._count_context_tokens()} tokens]\033[0m"
         )
 
-    def clear_context(self) -> None:
-        """Clear conversation history but keep system prompt."""
+    def clear_context(self, *, start_new_session: bool = True) -> None:
+        """Clear conversation history and start a separate resumable conversation.
+
+        Shutdown uses ``start_new_session=False``: it needs the same in-memory
+        and artifact cleanup, but must not create another transcript on the way
+        out.
+        """
         self._playbook_task = ""
         if self.agent:
             self.agent.clear_messages()
+            if start_new_session:
+                self._reset_session_recording()
 
         # Flush THIS session's RAG/chunk artifacts (capture the id before we mint
         # a new one) — never a wildcard sweep, which would delete other live
@@ -1731,6 +1745,22 @@ class LangGraphClient:
         ledger = getattr(self.agent, "files", None) if self.agent else None
         if ledger is not None:
             ledger.reset()
+
+    def _reset_session_recording(self) -> None:
+        """Detach the old conversation before opening its successor's transcript."""
+        if self.agent is None:
+            return
+        previous = getattr(self.agent, "session_log", None)
+        # Clear these first: if opening a new log fails, later turns must never
+        # fall back to appending to the conversation the user just cleared.
+        self.agent.session_log = None
+        self.agent.provenance = None
+        if previous is not None:
+            try:
+                previous.discard_if_empty()
+            except Exception as e:  # noqa: BLE001 — recording is best-effort
+                logger.debug(f"Empty session cleanup failed: {e}")
+        self._attach_session_log()
 
     def _new_session_id(self) -> str:
         """Delegates to :func:`session_artifacts.new_session_id`."""
@@ -2037,12 +2067,18 @@ class LangGraphClient:
         """
         if not self.agent or self._session_max_age_days() <= 0:
             return
+        # Keep subsequent /clear conversations in the original launch directory,
+        # even if a caller has since changed this process's working directory.
+        if not getattr(self, "_session_log_cwd", None):
+            self._session_log_cwd = os.getcwd()
         try:
-            self.agent.session_log = SessionLog(model=self.model_name_for_log())
+            self.agent.session_log = SessionLog(
+                cwd=self._session_log_cwd, model=self.model_name_for_log()
+            )
         except Exception as e:  # noqa: BLE001 — never block startup
             logger.debug(f"Session log unavailable: {e}")
         try:
-            self.agent.provenance = provenance.ProvenanceLog()
+            self.agent.provenance = provenance.ProvenanceLog(cwd=self._session_log_cwd)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Change index unavailable: {e}")
 

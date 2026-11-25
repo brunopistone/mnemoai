@@ -23,6 +23,8 @@ the tuple doubles as the readable list of what a controller supports.
 
 from typing import Any, Dict, Tuple
 
+from mnemoai.models.provider_params import DEFAULT_OLLAMA_NUM_BATCH
+
 
 class BaseModelController:
     """Provider dispatch + common config init for the model controllers.
@@ -53,11 +55,12 @@ class BaseModelController:
         LLM's reasoning/penalty knobs, the vision controller's
         ``INPUT_FORMAT``/``API_BASE``) stay in its ``__init__``.
 
-        The ``None`` defaults are load-bearing, not laziness:
-        ``provider_params.build_kwargs`` omits any param that is ``None``, so an
-        unset knob is never sent to the provider. That matters for
+        Most inference params default to ``None``:
+        ``provider_params.build_kwargs`` omits any param that is ``None``, so
+        unset sampling knobs are not sent to the provider. That matters for
         ``temperature`` in particular — newer Bedrock Claude models reject it as
         deprecated, so it must only appear when explicitly configured.
+        Ollama's ``NUM_BATCH`` uses MnemoAI's documented runtime default instead.
 
         Args:
             model_id: The model config block (``MODEL_ID``/``VISION_MODEL_ID``).
@@ -76,6 +79,9 @@ class BaseModelController:
         self.endpoint_url = model_id.get("ENDPOINT_URL", None)
         self.region = model_id.get("REGION", "us-east-1")
         self.max_tokens = model_id.get("MAX_TOKENS", None)
+        self.num_batch = model_id.get("NUM_BATCH", None)
+        if self.model_type == "ollama" and self.num_batch is None:
+            self.num_batch = DEFAULT_OLLAMA_NUM_BATCH
         self.max_conversation_tokens = max_conversation_tokens
         self.temperature = model_id.get("TEMPERATURE", None)
         self.top_p = model_id.get("TOP_P", None)

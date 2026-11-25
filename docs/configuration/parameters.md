@@ -34,7 +34,7 @@ discard your current conversation, or claim those saved values are already live.
 This is the full reference for what you can put under `MODEL_ID`,
 `VISION_MODEL_ID`, and `RAG.EMBED_MODEL_ID`. Only `NAME` and `TYPE` are
 required; everything else is optional and omitted keys fall back to the
-provider/model default. The interactive configurator (`/config`, `/model`)
+documented MnemoAI default or the provider/model default. The interactive configurator (`/config`, `/model`)
 sets the common ones — use this reference to hand-tune `config.yaml` for
 anything else a provider or model supports.
 
@@ -58,11 +58,11 @@ anything else a provider or model supports.
 
 ## Inference parameters { #inference-parameters }
 
-Optional generation settings. The **Honored by** column lists the providers that
+Optional generation and runtime settings. The **Honored by** column lists the providers that
 actually send each one (others ignore it). These apply to `MODEL_ID` and
 `VISION_MODEL_ID`; **`EMBED_MODEL_ID` takes no generation params** (embeddings
 only use `NAME`/`TYPE` + connection, plus `DIMENSION`, and `KEEP_ALIVE` on
-`mlx` — an embedder is worth keeping resident, not sampled).
+`mlx`, or `NUM_BATCH` on `ollama`).
 
 This table is derived from `models/provider_params.py` — the single source of
 truth that the controllers build their client kwargs from — so it reflects
@@ -72,6 +72,7 @@ exactly what each provider's init path forwards. (`mantle` reads
 | Parameter            | Description                                                                                                    | Honored by (`MODEL_ID`)                                             |
 | -------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
 | `MAX_TOKENS`         | Max output tokens to generate                                                                                  | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm, mlx |
+| `NUM_BATCH`          | Positive integer: maximum tokens processed per prompt-evaluation batch; default `2048`                         | ollama (chat, vision and embeddings)                                |
 | `TEMPERATURE`        | Sampling temperature                                                                                           | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm, mlx |
 | `TOP_P`              | Top-p (nucleus) sampling                                                                                       | ollama, bedrock, mantle, openai, anthropic, sagemaker, litellm, mlx |
 | `TOP_K`              | Top-k sampling                                                                                                 | ollama, anthropic, sagemaker, mlx                                   |
@@ -91,7 +92,7 @@ exactly what each provider's init path forwards. (`mantle` reads
 `VISION_MODEL_ID` supports the same eight providers as `MODEL_ID`. It accepts a
 subset of params: `MAX_TOKENS`/`TEMPERATURE`/`TOP_P` across providers, plus
 `TOP_K` on ollama/anthropic/sagemaker, `STOP` on ollama/sagemaker/mlx, and
-`KEEP_ALIVE` on mlx. Connection keys follow the provider (host/port, region,
+`NUM_BATCH` on ollama or `KEEP_ALIVE` on mlx. Connection keys follow the provider (host/port, region,
 Mantle protocol, SageMaker `INPUT_FORMAT`, LiteLLM/Anthropic/MLX
 `API_BASE`/`API_KEY`/base URL). `TOP_K` is deliberately **not** offered for
 `mlx` vision: that server's multimodal path never passes it to the sampler, so
@@ -129,6 +130,45 @@ setting it would look effective and do nothing.
 > in encrypted form, at every effort and summary setting, so you get the benefit of
 > the reasoning without a `Thought for Ns…` block. That is the provider's policy,
 > not a missing feature — Claude on Bedrock does show its thinking.
+
+### Ollama prompt-processing batch size
+
+Use `/params` → select an Ollama model → `NUM_BATCH`, or set it during
+`/config` model setup. `/model` also offers it when configuring an Ollama model.
+Enter a positive integer such as `512`; enter `none` in `/params` to remove the
+override and restore MnemoAI's default of **2048**. Omitted or YAML `null`
+values also use 2048. MnemoAI sends this value in the request, overriding a
+different Modelfile batch size.
+
+```yaml
+MODEL_ID:
+  TYPE: ollama
+  NAME: your-chat-model
+  NUM_BATCH: 2048
+VISION_MODEL_ID:
+  TYPE: ollama
+  NAME: your-vision-model
+  NUM_BATCH: 2048
+RAG:
+  EMBED_MODEL_ID:
+    TYPE: ollama
+    NAME: qwen3-embedding:0.6b
+    NUM_BATCH: 2048
+```
+
+Each model section has its own setting. Auxiliary chat models inherit the chat
+setting unless their `AREA_MODELS` entry overrides it. Other providers ignore this
+Ollama-only option.
+
+`NUM_BATCH` controls prompt-processing batches. It does not change the context
+window (`MAX_CONVERSATION_TOKENS`), output-token limit (`MAX_TOKENS`), number of
+agents, or number of documents sent for embedding. Smaller values can reduce
+temporary memory use; larger values can improve prompt-processing throughput
+when the server has sufficient memory.
+
+Chat and auxiliary-chat changes apply to subsequent requests without restarting
+MnemoAI. Vision and embedding changes are saved and require a restart, as described
+above. Ollama may reload a model when its runtime options change.
 
 ### `PROMPT_CACHE` — reuse the prompt prefix instead of re-paying for it { #prompt_cache-reuse-the-prompt-prefix-instead-of-re-paying-for-it }
 

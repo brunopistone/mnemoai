@@ -4,6 +4,7 @@ MODEL_ID:
   HOST: localhost
   PORT: 11434
   MAX_TOKENS: 8192
+  NUM_BATCH: 2048  # prompt-processing batch size; smaller values can reduce memory use
   TEMPERATURE: 0.6
   # Keep penalties low for reasoning models. High presence/frequency penalties
   # push the model away from the structured tokens needed to commit to a tool
@@ -34,6 +35,7 @@ VISION_MODEL_ID:
   TYPE: ollama
   HOST: localhost
   PORT: 11434
+  NUM_BATCH: 2048  # independent of the chat model's batch size
   TEMPERATURE: 0.3
 # Model parameters
 MAX_CONVERSATION_TOKENS: 65536
@@ -67,6 +69,7 @@ RAG:
     TYPE: ollama
     HOST: localhost
     PORT: 11434
+    NUM_BATCH: 2048  # prompt-processing batch size, not number of documents
     # MAX_INPUT_TOKENS: 8192   # cap embed input to the model's context; omit to
     #                          # auto-resolve (Ollama context probe, else a safe default)
   CHUNK_TOKENS: 1024

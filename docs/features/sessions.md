@@ -91,6 +91,22 @@ means a resume you didn't ask anything in won't appear as a duplicate of the
 session it restored. If this directory has no sessions yet, `--resume` says so
 and starts a normal session.
 
+## Starting a new conversation
+
+`/clear` clears the live context and starts a separate session transcript.
+The previous conversation remains available in `--resume`; the next topic gets
+its own title from its first prompt, a fresh turn count and no inherited
+`/rename` label. Resuming that new topic does not bring back the cleared messages
+or compaction summary.
+
+For example, a Las Vegas conversation followed by `/clear` and a Gemma question
+appears as two separate conversations in the picker. Clearing repeatedly without
+sending a message does not create empty picker entries.
+
+This separates conversations recorded after the fix. Older transcripts that
+already combined topics contain no recorded clear boundary, so they cannot be
+automatically split reliably. `/rename` can update their displayed title.
+
 ## Naming a session { #naming-a-session }
 
 The picker labels every session with its opening prompt, which stops being enough

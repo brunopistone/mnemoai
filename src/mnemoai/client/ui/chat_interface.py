@@ -1030,14 +1030,14 @@ class ChatInterface:
                     continue
                 print("\nExiting...")
                 try:
-                    self.client.clear_context()
+                    self.client.clear_context(start_new_session=False)
                 except KeyboardInterrupt:
                     pass
                 break
 
             if self._dispatch(query) is self._EXIT:
                 try:
-                    self.client.clear_context()
+                    self.client.clear_context(start_new_session=False)
                 except KeyboardInterrupt:
                     pass
                 break
@@ -1298,7 +1298,7 @@ class ChatInterface:
                 print("\nExiting...")
                 break
         try:
-            self.client.clear_context()
+            self.client.clear_context(start_new_session=False)
         except KeyboardInterrupt:
             pass
 
