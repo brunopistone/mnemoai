@@ -177,6 +177,7 @@ _PRISTINE_BUNDLED_SKILL_HASHES = {
 # other hash means the user customized it, and we never touch it. **Maintenance:**
 # when the bundled ``prompts.yaml`` changes, append its PREVIOUS shipped hash here.
 _PRISTINE_BUNDLED_PROMPTS_HASHES = {
+    "6710c8d41a6481bdb07cce60d1170c97cd2849d7dc227a5c6fa1b30841da229e",  # 1.32.1–1.33.0, before Tavily guidance
     "d5569e02ce5ce51c9c01a17a9972c3d7f3a47c8773d6bae1b28d15bbb0b433ca",  # 1.31.1–1.32.0, before auxiliary request framing
     "f4ad2eb24078a5177f9c3d388713c7523ed7dec3e53ce6fa0bddfca0a1176355",  # 1.31.0, before selective delegation
     "a64bc452dd2363452dfe5126a63c172cc37b323bf8c061f0ca0254e9531025f6",  # 1.30.2–1.30.3, before task continuation guidance

@@ -369,6 +369,7 @@ def test_route_table_has_no_orphans_or_stale_refs():
         "memory", "search_in_documents", "start_background_task",
         "todo_clear", "todo_read", "todo_write", "use_skill", "wait_for_task",
         "web_crawler", "web_search",
+        "tavily_extract", "tavily_crawl", "tavily_map",
     }
     meta = LangGraphAgent._ALWAYS_AVAILABLE_TOOLS
 

@@ -10,8 +10,23 @@ from mnemoai.client.agent.plan_policy import is_readonly_bash
 from mnemoai.utils.shell_syntax import simple_command_tokens
 from mnemoai.utils.tool_results import is_error_result, is_unchanged_result
 
-_READS = {"fs_read", "glob_search", "grep_search", "web_search", "web_crawl"}
-_POLLING = {"get_task_status", "get_task_output", "list_background_tasks", "wait_for_task"}
+_READS = {
+    "fs_read",
+    "glob_search",
+    "grep_search",
+    "web_search",
+    "web_crawl",
+    "web_crawler",
+    "tavily_extract",
+    "tavily_crawl",
+    "tavily_map",
+}
+_POLLING = {
+    "get_task_status",
+    "get_task_output",
+    "list_background_tasks",
+    "wait_for_task",
+}
 REPEAT_LIMIT = 3
 RECOVERY_LIMIT = 3
 
@@ -26,14 +41,17 @@ def _waiting(result):
     active = ("running", "queued", "pending", "starting")
     tasks = data.get("tasks")
     return data.get("status") in active or (
-        isinstance(tasks, list) and any(
+        isinstance(tasks, list)
+        and any(
             isinstance(task, dict) and task.get("status") in active for task in tasks
         )
     )
 
 
 def _digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).digest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, default=str).encode()
+    ).digest()
 
 
 def _arguments(name, args):
@@ -43,8 +61,12 @@ def _arguments(name, args):
         result.pop("summary", None)
     if name == "fs_read":
         for key, default in {
-            "mode": "Line", "start_line": 1, "end_line": -1,
-            "pattern": "", "context_lines": 2, "depth": 0,
+            "mode": "Line",
+            "start_line": 1,
+            "end_line": -1,
+            "pattern": "",
+            "context_lines": 2,
+            "depth": 0,
         }.items():
             if result.get(key) == default:
                 result.pop(key)
@@ -68,8 +90,15 @@ def _observed(name, result):
         return data
     data = {k: v for k, v in data.items() if k not in {"summary", "progress_notice"}}
     if name == "fs_read" and not is_error_result(data) and "content" in data:
-        for key in ("start_line", "end_line", "lines_processed", "lines_requested",
-                    "tokens", "max_tokens", "message"):
+        for key in (
+            "start_line",
+            "end_line",
+            "lines_processed",
+            "lines_requested",
+            "tokens",
+            "max_tokens",
+            "message",
+        ):
             data.pop(key, None)
     return data
 
@@ -82,7 +111,13 @@ def _version(name, args):
         return None
     try:
         info = os.stat(os.path.expanduser(path))
-        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+        return (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        )
     except (OSError, ValueError):
         return None
 
@@ -106,9 +141,12 @@ class ToolProgressGuard:
     def repeated(self, name, args):
         if not isinstance(args, dict):
             return False
-        previous = self.observations.get(self.requests.get(_digest([name, _arguments(name, args)])))
+        previous = self.observations.get(
+            self.requests.get(_digest([name, _arguments(name, args)]))
+        )
         return (
-            previous is not None and previous.count >= REPEAT_LIMIT
+            previous is not None
+            and previous.count >= REPEAT_LIMIT
             and previous.version == _version(name, args)
             and previous.revision == self.revision
         )
@@ -127,7 +165,9 @@ class ToolProgressGuard:
     def observe(self, name, args, result, outcome="completed"):
         if outcome in {"cancelled", "stalled"} or not isinstance(args, dict):
             return
-        failed = outcome not in {"completed", "client_result"} or is_error_result(result)
+        failed = outcome not in {"completed", "client_result"} or is_error_result(
+            result
+        )
         if name in _POLLING and _waiting(result):
             return
         unchanged = is_unchanged_result(result)
@@ -142,7 +182,11 @@ class ToolProgressGuard:
             self.refusals = 0
             return
         arguments = _arguments(name, args)
-        key, fingerprint, version = _digest([name, arguments]), _digest(_observed(name, result)), _version(name, args)
+        key, fingerprint, version = (
+            _digest([name, arguments]),
+            _digest(_observed(name, result)),
+            _version(name, args),
+        )
         scope = arguments.get("file_path" if name == "file_edit" else "path", arguments)
         observed = _digest([name, scope, fingerprint.hex(), version])
         previous = self.observations.get(observed)

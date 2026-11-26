@@ -66,12 +66,12 @@ parameter names differ: `fs_write` takes `path`, `file_edit` takes `file_path`.
 
 ### `fs_write` commands
 
-| `command`       | Requires                 | Behavior                                                                                             |
-| --------------- | ------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `"create"`      | `file_text`              | Creates parent directories and **overwrites** an existing file.                                      |
-| `"str_replace"` | `old_str`, `new_str`     | Fails if the text is absent, and fails if it appears more than once. There is no `replace_all` here. |
+| `command`       | Requires                                | Behavior                                                                                             |
+| --------------- | --------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `"create"`      | `file_text`                             | Creates parent directories and **overwrites** an existing file.                                      |
+| `"str_replace"` | `old_str`, `new_str`                    | Fails if the text is absent, and fails if it appears more than once. There is no `replace_all` here. |
 | `"insert"`      | `insert_line`, `new_str` or `file_text` | Inserts **after** the given line. `0` prepends; the maximum is the file's line count.                |
-| `"append"`      | `new_str` or `file_text` | Appends, inserting a leading newline if the file doesn't end with one.                               |
+| `"append"`      | `new_str` or `file_text`                | Appends, inserting a leading newline if the file doesn't end with one.                               |
 
 For `fs_write`, use `file_text` for `create`, and explicit `old_str` plus
 `new_str` for `str_replace` (`new_str: ""` deletes the matched text).
@@ -280,29 +280,33 @@ terminal. Concurrency is capped by `LLM.SUBAGENT_MAX_CONCURRENCY` (`4`).
 These register only when their feature is on. A tool that isn't registered is
 invisible to the model.
 
-| Tool                                                       | Enabled by                                               | Default |
-| ---------------------------------------------------------- | -------------------------------------------------------- | ------- |
-| `memory`                                                   | `ENABLE_MEMORY`                                          | **on**  |
-| `use_skill`                                                | `ENABLE_SKILLS`                                          | **on**  |
-| `list_documents`, `search_in_documents`, `clear_documents` | `ENABLE_RAG`                                             | **off** |
-| `web_search`                                               | `ENABLE_WEB_SEARCH` **and** a `BRAVE_API_KEY`            | off     |
-| `web_crawler`                                              | `ENABLE_WEB_CRAWL`                                       | off     |
-| `describe_image`                                           | a working `VISION_MODEL_ID` — there is no `ENABLE_` flag | off     |
+| Tool                                                       | Enabled by                                                                                | Default |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------- |
+| `memory`                                                   | `ENABLE_MEMORY`                                                                           | **on**  |
+| `use_skill`                                                | `ENABLE_SKILLS`                                                                           | **on**  |
+| `list_documents`, `search_in_documents`, `clear_documents` | `ENABLE_RAG`                                                                              | **off** |
+| `web_search`                                               | `ENABLE_WEB_SEARCH` and the selected provider's key (`BRAVE_API_KEY` or `TAVILY_API_KEY`) | off     |
+| `tavily_extract`, `tavily_crawl`, `tavily_map`             | Tavily selected, its key set, and both `ENABLE_WEB_SEARCH` and `ENABLE_WEB_CRAWL`         | off     |
+| `web_crawler`                                              | `ENABLE_WEB_CRAWL`                                                                        | off     |
+| `describe_image`                                           | a working `VISION_MODEL_ID` — there is no `ENABLE_` flag                                  | off     |
 
 The defaults above are what the **code** does when a key is absent from
 `config.yaml`. The setup wizard writes a different, more generous set — see the
 toggle table in [Usage](../guides/usage.md).
 
-| Tool                  | Parameters                                                                                                                   | Purpose                                                    |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `memory`              | `action` **(required)**, `text` = `""`, `old_text` = `""`                                                                    | Maintain `MEMORY.md`: `add`, `replace`, or `remove`.       |
-| `use_skill`           | `name` **(required)**, `arguments` = `""`                                                                                    | Load a skill's full instructions into context.             |
-| `search_in_documents` | `query` **(required)**, `top_k` = `8`                                                                                        | Hybrid semantic + keyword search over indexed documents.   |
-| `list_documents`      | _(none)_                                                                                                                     | Indexed document ids and chunk counts.                     |
-| `clear_documents`     | _(none)_                                                                                                                     | Drop all vectors and the keyword index.                    |
-| `web_search`          | `query` **(required)**, `search_lang` = `"en"`, `num_results` = `10`, `freshness` = `""`, `country` = `""`, `ui_lang` = `""` | Brave Search results.                                      |
-| `web_crawler`         | `url` **(required)**                                                                                                         | Fetch a page as markdown, or index it into RAG when large. |
-| `describe_image`      | `image_path` **(required)**, `question` = `"Describe this image in detail."`                                                 | Answer a question about an image.                          |
+| Tool                  | Parameters                                                                                                                                                 | Purpose                                                                                            |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `memory`              | `action` **(required)**, `text` = `""`, `old_text` = `""`                                                                                                  | Maintain `MEMORY.md`: `add`, `replace`, or `remove`.                                               |
+| `use_skill`           | `name` **(required)**, `arguments` = `""`                                                                                                                  | Load a skill's full instructions into context.                                                     |
+| `search_in_documents` | `query` **(required)**, `top_k` = `8`                                                                                                                      | Hybrid semantic + keyword search over indexed documents.                                           |
+| `list_documents`      | _(none)_                                                                                                                                                   | Indexed document ids and chunk counts.                                                             |
+| `clear_documents`     | _(none)_                                                                                                                                                   | Drop all vectors and the keyword index.                                                            |
+| `web_search`          | `query` **(required)**, `search_lang` = `"en"`, `num_results` = `10`, `freshness` = `""`, `country` = `""`, `ui_lang` = `""`; Tavily adds advanced filters | Brave or Tavily results; [full parameters](../guides/knowledge-and-web.md#tavily-advanced-search). |
+| `tavily_extract`      | `urls` **(required)**; optional query, extraction depth, format, chunks, images, favicon, timeout                                                          | Read known URLs remotely.                                                                          |
+| `tavily_crawl`        | `url` **(required)**; instructions, traversal limits, regex filters, extraction controls                                                                   | Explore and read a website.                                                                        |
+| `tavily_map`          | `url` **(required)**; instructions, traversal limits, regex filters                                                                                        | Discover website URLs.                                                                             |
+| `web_crawler`         | `url` **(required)**                                                                                                                                       | Fetch a page as markdown, or index it into RAG when large.                                         |
+| `describe_image`      | `image_path` **(required)**, `question` = `"Describe this image in detail."`                                                                               | Answer a question about an image.                                                                  |
 
 Notes on the ones with sharp edges:
 
@@ -311,7 +315,9 @@ Notes on the ones with sharp edges:
   is a hard cap — an add that would overflow it fails and asks for consolidation.
 - **`web_search`** clamps `num_results` to **1–20**. `freshness` accepts `pd`,
   `pw`, `pm`, `py`, or a `YYYY-MM-DDtoYYYY-MM-DD` range; it, `country`, and
-  `ui_lang` are only sent when non-empty. Safe search is off.
+  `ui_lang` are only sent to Brave when non-empty. Brave safe search is off.
+  Tavily maps recency/country/language parameters and exposes additional controls
+  described in [Knowledge & web tools](../guides/knowledge-and-web.md).
 - **`web_crawler`** checks the URL against the [SSRF
   policy](../guides/safety.md#understand-the-safety-floor) _before_ fetching.
   Large pages return no `content` at all — instead you get a chunk count and a

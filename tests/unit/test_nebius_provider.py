@@ -629,7 +629,11 @@ def test_first_run_setup_uses_complete_nebius_template(settings, monkeypatch, tm
         lambda prompt, valid, default=None, **kw: (
             "9"
             if prompt == "Choose your LLM provider"
-            else next(k for k, label in kw["labels"].items() if label == "nebius")
+            else (
+                "off"
+                if prompt == "Web search provider"
+                else next(k for k, label in kw["labels"].items() if label == "nebius")
+            )
         ),
     )
     monkeypatch.setattr(

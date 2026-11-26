@@ -57,6 +57,7 @@ from mnemoai.utils.configurator import (
     run_playbook_settings,
     run_reconfigure,
     run_review_settings,
+    run_search_settings,
 )
 from mnemoai.utils.console import print_error
 from mnemoai.utils.logger import logger, one_line
@@ -199,7 +200,7 @@ class ChatInterface:
         (
             "Configure",
             [
-                ("/config", "Full setup; /config playbook|review for limits"),
+                ("/config", "Full setup; /config search|playbook|review"),
                 ("/model", "Override one model (LLM/vision/embeds/router…)"),
                 ("/params", "Tune inference params (temp, top_p, …)"),
                 ("/features", "Enable/disable features (RAG, memory, web, …)"),
@@ -223,7 +224,7 @@ class ChatInterface:
     # Slash commands for autocomplete — the actual insertable tokens (the
     # welcome-box labels carry arg hints / alternates instead).
     _COMMANDS = [
-        ("/config", "Full setup (/config playbook|review for limits)"),
+        ("/config", "Full setup (/config search|playbook|review)"),
         ("/model", "Override one model (LLM, vision, embeddings, router, …)"),
         ("/params", "Tune model inference params (temperature, top_p, …)"),
         ("/features", "Enable/disable features (RAG, memory, web search, …)"),
@@ -1564,6 +1565,9 @@ class ChatInterface:
             section = query[len("/config") :].strip().lower()
             if section.startswith("review "):
                 self._review_command(section[len("review") :])
+            elif section == "search":
+                if run_search_settings() is not None:
+                    self._restart_in_place()
             elif section == "review":
                 if run_review_settings() is not None:
                     if self.client.reload_review_settings():
@@ -1575,7 +1579,7 @@ class ChatInterface:
                             "Settings saved, but could not be applied; restart to retry."
                         )
             elif section != "playbook":
-                print_error("Usage: /config [playbook|review]")
+                print_error("Usage: /config [search|playbook|review]")
             elif run_playbook_settings() is not None:
                 if self.client.reload_playbook_settings():
                     print("\nPlaybook settings applied. This conversation continues.\n")

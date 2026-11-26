@@ -13,6 +13,7 @@ import asyncio
 import json
 import sys
 import threading
+from functools import partial
 
 import pytest
 
@@ -24,9 +25,9 @@ class _CapturingMCP:
     def __init__(self):
         self.registered = {}
 
-    def tool(self):
+    def tool(self, name=None):
         def decorator(func):
-            self.registered[func.__name__] = func
+            self.registered[name or func.__name__] = func
             return func
 
         return decorator
@@ -82,7 +83,7 @@ def web_search(monkeypatch):
     monkeypatch.setattr("brave_search_python_client.WebSearchRequest", _fake_request)
     mcp = _CapturingMCP()
     ws.register_web_search_tools(mcp)
-    fn = mcp.registered["web_search"]
+    fn = partial(mcp.registered["web_search"])
     fn._captured = captured  # expose for assertions
     return fn
 

@@ -41,6 +41,8 @@ import sys
 import textwrap
 from pathlib import Path
 
+import pytest
+
 REASON = "vision init must stay lazy: torch+faiss in one process aborts (OMP #15)"
 
 # Makes the tools package think vision is configured, and replaces the heavy
@@ -93,12 +95,14 @@ def _last_line(proc: subprocess.CompletedProcess) -> str:
     return proc.stdout.strip().splitlines()[-1].strip()
 
 
-def test_enabled_tools_register_without_loading_optional_sdks_or_tokenizer():
+@pytest.mark.parametrize("provider", ["brave", "tavily"])
+def test_enabled_tools_register_without_loading_optional_sdks_or_tokenizer(provider):
     proc = _run("""
         import asyncio, tiktoken
         settings = {
             "ENABLE_WEB_CRAWL": True, "ENABLE_WEB_SEARCH": True,
             "ENABLE_RAG": True, "BRAVE_API_KEY": "unused-test-key",
+            "WEB_SEARCH_PROVIDER": "SELECTED_PROVIDER", "TAVILY_API_KEY": "unused-test-key",
         }
         before = cfgmod.config.get
         cfgmod.config.get = lambda k, d=None: settings[k] if k in settings else before(k, d)
@@ -109,9 +113,11 @@ def test_enabled_tools_register_without_loading_optional_sdks_or_tokenizer():
         server = create_server()
         names = {tool.name for tool in asyncio.run(server.list_tools())}
         assert {"web_search", "web_crawler", "fs_read", "describe_image"} <= names
-        assert not {"crawl4ai", "brave_search_python_client", "pypdf", "docx"} & sys.modules.keys()
+        assert not {"crawl4ai", "brave_search_python_client", "tavily", "pypdf", "docx"} & sys.modules.keys()
+        if settings["WEB_SEARCH_PROVIDER"] == "tavily":
+            assert {"tavily_extract", "tavily_crawl", "tavily_map"} <= names
         print("ok")
-        """)
+        """.replace("SELECTED_PROVIDER", provider))
     assert _last_line(proc) == "ok"
 
 

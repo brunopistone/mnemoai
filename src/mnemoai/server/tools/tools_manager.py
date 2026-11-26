@@ -8,13 +8,9 @@ import tiktoken
 
 from mnemoai.server.tools.shell_state import resolve_path as normalize_path
 from mnemoai.utils.config import config
+from mnemoai.utils.logger import logger
 from mnemoai.utils.tokenization import count_tokens
-
-# Load configuration from centralized config
-BRAVE_API_KEY = config.get("BRAVE_API_KEY", None)
-
-if config.get("ENABLE_WEB_SEARCH", None) and BRAVE_API_KEY:
-    os.environ["BRAVE_API_KEY"] = BRAVE_API_KEY
+from mnemoai.utils.web_search_config import api_key_for, provider_for
 
 # Tiktoken parameters
 MODEL_ID = "gpt-4"  # Default model for token counting
@@ -211,17 +207,29 @@ class ToolManager:
             register_rag_tools(mcp)
 
         # Gated imports for the same reason, one tier down: crawl4ai and the
-        # Brave client are only ever reached by these two tools, so an install
+        # search clients are only ever reached by these tools, so an install
         # with the features off shouldn't load either.
         if config.get("ENABLE_WEB_CRAWL", None):
             from .web_crawler import register_web_crawler_tools
 
             register_web_crawler_tools(mcp)
 
-        if config.get("ENABLE_WEB_SEARCH", None) and BRAVE_API_KEY:
-            from .web_search import register_web_search_tools
+        if config.get("ENABLE_WEB_SEARCH", False):
+            try:
+                provider = provider_for(config)
+            except ValueError as exc:
+                logger.warning("%s; web search disabled. Use /config search.", exc)
+            else:
+                key = api_key_for(provider, config)
+                if key:
+                    from .web_search import register_web_search_tools
 
-            register_web_search_tools(mcp)
+                    register_web_search_tools(
+                        mcp,
+                        provider,
+                        key,
+                        include_web_tools=bool(config.get("ENABLE_WEB_CRAWL", False)),
+                    )
 
     def validate_file_path(self, file_path: str) -> tuple[bool, str, dict]:
         """Validate and normalize file path.

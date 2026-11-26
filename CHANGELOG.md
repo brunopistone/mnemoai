@@ -9,6 +9,18 @@ from 1.0.0 on, breaking changes to the public surface (config keys, the
 
 ## [Unreleased]
 
+## [1.34.0] — 2026-11-26
+
+### Added
+
+- Select Brave Search or Tavily with `/config search` or first-run setup.
+  Existing configurations keep Brave. A shared web-search controller selects
+  separate provider adapters and exposes their full tool descriptions to the LLM.
+- Tavily advanced search, news/finance topics, domain/date/language filters,
+  optional answers/content/images, and bounded Extract/Crawl/Map tools.
+  Provider keys, diagnostics, research routing, read-only mode and configuration
+  examples support both services.
+
 ## [1.33.0] — 2026-11-25
 
 ### Added

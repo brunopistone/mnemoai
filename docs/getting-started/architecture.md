@@ -93,7 +93,7 @@ MCP server that provides tools to the LLM.
     - `bash_policy.py`: `classify_shell_command` — blocks catastrophic shell commands (shared by `execute_bash` + `start_background_task`)
     - `path_policy.py`: `classify_write_path` — blocks writes into system directories (shared by `fs_write` + `file_edit`)
   - `todo_manager.py`: Todo list management for multi-step tasks
-  - `web_search.py`: Brave Search integration
+  - `web_search.py`: MCP registration through `WebSearchController`; separate `WebSearchProvider` adapters for Brave and Tavily under `web_search_providers/`
   - `web_crawler.py`: Web page content extraction with RAG integration
   - `describe_image.py`: Vision model image analysis
   - `rag_tool.py`: RAG tools registration

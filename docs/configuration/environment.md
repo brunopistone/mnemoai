@@ -14,6 +14,7 @@ Mnemo AI reads a handful of environment variables. Provider API keys can be set 
 | `AWS_BEARER_TOKEN_BEDROCK`   | Bedrock API key for **standard** Bedrock (`TYPE: bedrock`) | Read automatically by `langchain-aws`                                                                                                                           |
 | `BEDROCK_API_KEY`            | Bedrock API key for **Mantle** (`TYPE: mantle`)            | Or `MODEL_ID.API_KEY`; else a token is minted from AWS creds                                                                                                    |
 | `BRAVE_API_KEY`              | Brave Search API key for web search                        | Can also be the top-level `BRAVE_API_KEY` config key                                                                                                            |
+| `TAVILY_API_KEY`             | Tavily search and Extract/Crawl/Map key                    | Select `WEB_SEARCH_PROVIDER: tavily`; can also be the top-level `TAVILY_API_KEY` config key                                                                     |
 
 ```yaml
 # Set provider keys/vars without touching your shell:
