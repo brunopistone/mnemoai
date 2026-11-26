@@ -91,7 +91,8 @@ def register_rag_tools(mcp: FastMCP) -> None:
 
             method = (
                 " (BM25 keyword matching only; semantic retrieval unavailable)"
-                if any(meta.get("retrieval_method") == "bm25" for meta in metas) else ""
+                if any(meta.get("retrieval_method") == "bm25" for meta in metas)
+                else ""
             )
             result = f"Found {len(metas)} relevant chunks{method}:\n\n"
             for i, (score, meta) in enumerate(zip(scores, metas), 1):
