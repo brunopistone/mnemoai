@@ -27,7 +27,7 @@ Optional, depending on features you enable:
 
 - **Embedding model** — needed for semantic RAG and episodic memory. Playbook learning runs locally without embeddings.
 - **Vision model** — needed for image analysis.
-- **Brave Search API key** — needed for web search.
+- **Brave Search or Tavily API key** — needed for web search; select the provider in setup or `/config search`.
 - **ripgrep** — recommended for fast content search.
 
 ## 2. Install Mnemo AI

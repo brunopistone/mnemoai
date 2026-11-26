@@ -253,8 +253,11 @@ LLM:
   # Must exceed the longest tool-level timeout (execute_bash allows up to 120s).
   MCP_CALL_TIMEOUT: 300
 # Web search Configuration
+# Select brave (default) or tavily; change later with /config search.
 ENABLE_WEB_SEARCH: true
+WEB_SEARCH_PROVIDER: brave
 BRAVE_API_KEY: your_brave_api_key
+TAVILY_API_KEY: your_tavily_api_key
 # Web crawl Configuration
 ENABLE_WEB_CRAWL: true
 # File system paths

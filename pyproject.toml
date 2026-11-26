@@ -8,7 +8,7 @@ build-backend = "hatchling.build"
 # "mnemoai-assistant" — but the import package and CLI command stay "mnemoai"
 # (pip install mnemoai-assistant → import mnemoai / run `mnemoai`).
 name = "mnemoai-assistant"
-version = "1.33.0"
+version = "1.34.0"
 description = "Mnemo AI — a local agentic AI assistant (LangGraph + MCP) that learns and remembers, with multi-provider model support."
 readme = "README.md"
 requires-python = ">=3.11.5"
@@ -75,6 +75,7 @@ dependencies = [
     "qdrant-client>=1.17.1",
     "soupsieve>=4.0.0",
     "tiktoken>=0.12.0",
+    "tavily-python>=0.8.5",
     "urllib3>=2.8.0",
 ]
 

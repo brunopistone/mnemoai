@@ -3068,6 +3068,9 @@ class LangGraphAgent:
         labels = {
             "web_crawler": "Crawling the page",
             "web_search": "Searching the web",
+            "tavily_extract": "Reading web pages",
+            "tavily_crawl": "Exploring the website",
+            "tavily_map": "Finding website pages",
             "describe_image": "Analyzing image",
             "start_background_task": "Starting background task",
         }

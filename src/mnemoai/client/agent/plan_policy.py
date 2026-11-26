@@ -58,20 +58,57 @@ def write_target(args) -> str:
         return ""  # conflicting targets → refuse to pick one
     return next(iter(found), "")
 
+
 # Leading programs allowed in plan mode (subject to is_readonly_bash checks).
 READONLY_BASH_CMDS = {
-    "ls", "cat", "head", "tail", "pwd", "echo", "find",
-    "grep", "rg", "egrep", "fgrep", "wc", "stat", "file", "tree", "du",
-    "df", "which", "type", "whoami", "printenv",
-    "ps", "uname", "id", "diff", "cut", "sed",
-    "realpath", "readlink", "basename", "dirname", "git",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "pwd",
+    "echo",
+    "find",
+    "grep",
+    "rg",
+    "egrep",
+    "fgrep",
+    "wc",
+    "stat",
+    "file",
+    "tree",
+    "du",
+    "df",
+    "which",
+    "type",
+    "whoami",
+    "printenv",
+    "ps",
+    "uname",
+    "id",
+    "diff",
+    "cut",
+    "sed",
+    "realpath",
+    "readlink",
+    "basename",
+    "dirname",
+    "git",
 }
 # Shell operators that could chain/redirect a mutation → treat as non-read-only.
 BASH_MUTATION_OPS = (">", ">>", "|", ";", "&&", "||", "`", "$(", "&")
 # git subcommands that are unambiguously read-only (others can mutate → blocked).
 READONLY_GIT_SUBCMDS = {
-    "status", "log", "diff", "show", "rev-parse", "describe", "blame",
-    "ls-files", "ls-tree", "cat-file", "shortlog",
+    "status",
+    "log",
+    "diff",
+    "show",
+    "rev-parse",
+    "describe",
+    "blame",
+    "ls-files",
+    "ls-tree",
+    "cat-file",
+    "shortlog",
 }
 # Per-program flags that make an allowlisted command mutating (keyed by program
 # since `-i` means in-place for sed but is read-only for grep/ls).
@@ -84,12 +121,32 @@ BASH_MUTATING_FLAGS = {
 }
 
 PLAN_ALLOWED_TOOLS = {
-    "fs_read", "glob_search", "grep_search", "memory", "use_skill",
-    "web_search", "web_crawler", "describe_image", "git_status_safe",
-    "list_documents", "search_in_documents", "get_task_status", "get_task_output",
-    "list_background_tasks", "wait_for_task", "todo_read", "todo_write", "todo_clear",
+    "fs_read",
+    "glob_search",
+    "grep_search",
+    "memory",
+    "use_skill",
+    "web_search",
+    "web_crawler",
+    "describe_image",
+    "git_status_safe",
+    "tavily_extract",
+    "tavily_crawl",
+    "tavily_map",
+    "list_documents",
+    "search_in_documents",
+    "get_task_status",
+    "get_task_output",
+    "list_background_tasks",
+    "wait_for_task",
+    "todo_read",
+    "todo_write",
+    "todo_clear",
     "cancel_background_task",
-    "spawn_agent", "resume_agent", "exit_plan_mode", "ask_user_question",
+    "spawn_agent",
+    "resume_agent",
+    "exit_plan_mode",
+    "ask_user_question",
 }
 
 
@@ -143,7 +200,11 @@ def is_plan_file(path: str) -> bool:
 
 
 def is_blocked_by_plan_mode(
-    tool_name: str, tool_args: dict = None, *, plan_active: bool, readonly_hint: bool = False
+    tool_name: str,
+    tool_args: dict = None,
+    *,
+    plan_active: bool,
+    readonly_hint: bool = False,
 ) -> bool:
     """True when plan mode is active and this tool/call would mutate.
 

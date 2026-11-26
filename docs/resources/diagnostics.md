@@ -55,7 +55,7 @@ problem comes with the command that fixes it. What it covers:
   connected. A server that **failed** is a warning rather than being reported as "not
   configured", which is the distinction that sends you looking in the right place.
 - **Features** — for each feature you switched on, whether what it needs is present:
-  the vector store package for RAG, a `BRAVE_API_KEY` for web search.
+  the vector store package for RAG, the selected provider’s `BRAVE_API_KEY` or `TAVILY_API_KEY` for web search.
 - **State** — the files that grow and then bite: `MEMORY.md` near its cap (it starts
   dropping older entries), steering files and the size each one injects **every**
   turn, how many sessions this directory has recorded, and where the app log is

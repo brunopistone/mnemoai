@@ -84,7 +84,7 @@ with the package manager/environment that installed them.
 - **🧠 User Profile Learning**: Personalized responses learned from interactions
 - **🧩 Episodic Memory**: Learns from successful task completions and retrieves similar solutions
 - **📖 Local Playbook Learning**: Records tool failures, recoveries and check results, and reuses task-relevant notes. On by default; no extra LLM or embedding calls. Toggle it in `/features` or `/config playbook`.
-- **🔍 Web Search & 🌐 Crawler**: Brave Search API + web page extraction with RAG ingestion
+- **🔍 Web Search & 🌐 Crawler**: Brave or Tavily search; Tavily advanced search, Extract/Crawl/Map, plus local web extraction with RAG ingestion
 - **🖼️ Vision Support**: Image analysis with vision models
 - **📁 File Operations & ✏️ Precise Editing**: Read/write/edit text, CSV, JSON, PDF, DOCX
 - **🔎 Fast Search**: Glob + ripgrep content search (10-100x faster)

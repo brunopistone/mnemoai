@@ -6,6 +6,7 @@ templates' comments and prompt blocks are preserved.
 """
 
 import getpass
+import json
 import math
 import re
 import sys
@@ -45,6 +46,15 @@ from mnemoai.utils.file_lock import file_lock
 from mnemoai.utils.logger import logger
 from mnemoai.utils.paths import config_path
 from mnemoai.utils.radio_select import commit_paging, highlighted_value
+from mnemoai.utils.web_search_config import (
+    KEY_NAMES,
+    api_key_for,
+    provider_for,
+    usable_key,
+)
+from mnemoai.utils.web_search_config import (
+    PROVIDERS as SEARCH_PROVIDERS,
+)
 
 # Importing readline (stdlib) is enough to give the built-in input() proper
 # line-editing: arrow keys, history, and backspace work instead of leaking raw
@@ -1406,13 +1416,8 @@ def _build_config(
     if profile:
         text = _set_in_section(text, "PROFILE", "NAME", profile)
 
-    # --- Web search (Brave) ---
-    brave = _ask("Brave Search API key (optional, press Enter to skip)", "")
-    if brave:
-        text = _set_top_level(text, "BRAVE_API_KEY", brave)
-        text = _set_bool(text, "ENABLE_WEB_SEARCH", True)
-    else:
-        text = _set_bool(text, "ENABLE_WEB_SEARCH", False)
+    # --- Web search provider (independent of the chat model) ---
+    text = _prompt_search_settings(text)
 
     # --- Other feature toggles (default from the template) ---
     text = _set_bool(
@@ -1776,6 +1781,38 @@ def run_playbook_settings() -> Optional[Path]:
 def run_review_settings() -> Optional[Path]:
     """Tune only review budgets; keep the session and its on/off choice."""
     return _run_scoped_settings("review", _prompt_review_settings)
+
+
+def run_search_settings() -> Optional[Path]:
+    """Select a search provider and key without rewriting model configuration."""
+    return _run_scoped_settings("search", _prompt_search_settings)
+
+
+def _prompt_search_settings(text: str) -> str:
+    settings = yaml.safe_load(text) or {}
+    current = str(settings.get("WEB_SEARCH_PROVIDER") or "brave").lower()
+    provider = _ask_choice(
+        "Web search provider",
+        {"brave", "tavily", "off"},
+        default=current if current in SEARCH_PROVIDERS else "brave",
+        labels={**SEARCH_PROVIDERS, "off": "Disable web search"},
+        info="Tavily also offers advanced search and Extract/Crawl/Map. API credits apply.",
+    )
+    if provider == "off":
+        return _set_top_level_or_add(text, "ENABLE_WEB_SEARCH", "false")
+    text = _set_top_level_or_add(text, "WEB_SEARCH_PROVIDER", provider)
+    key_name = KEY_NAMES[provider]
+    existing = api_key_for(provider, settings)
+    replace = existing and _ask_bool(f"Replace the saved {SEARCH_PROVIDERS[provider]} API key?", False)
+    if not existing or replace:
+        key = usable_key(_ask(f"{SEARCH_PROVIDERS[provider]} API key (blank to keep existing or skip)", ""))
+        if key:
+            # Quote the scalar so punctuation can never change the YAML structure.
+            text = _set_top_level_or_add(text, key_name, json.dumps(key))
+            existing = key
+    if not existing:
+        print(f"  No {key_name} set — web search remains disabled.")
+    return _set_top_level_or_add(text, "ENABLE_WEB_SEARCH", "true" if existing else "false")
 
 
 def _run_scoped_settings(label, prompt) -> Optional[Path]:
@@ -2545,7 +2582,7 @@ _FEATURE_TOGGLES = [
     ("ENABLE_EPISODIC_MEMORY", "Episodic memory — recall similar past tasks"),
     ("ENABLE_PLAYBOOK", "Local playbook learning — no extra model calls"),
     ("ENABLE_REVIEW", "Peer review — coding/document strategies and changes"),
-    ("ENABLE_WEB_SEARCH", "Web search (needs a Brave API key)"),
+    ("ENABLE_WEB_SEARCH", "Web search — Brave or Tavily API key"),
     ("ENABLE_WEB_CRAWL", "Web crawler — fetch & read pages"),
     ("ENABLE_ROUTING", "Query routing — per-query tool subsets"),
     ("ENABLE_ORCHESTRATION", "Orchestrator — decompose complex tasks"),
@@ -2557,25 +2594,25 @@ _FEATURE_TOGGLES = [
 
 def _is_placeholder_brave_key(val: Optional[str]) -> bool:
     """True if the Brave key is missing or still the template placeholder."""
-    return not val or val.strip().lower() in ("", "your_brave_api_key", "none")
+    return not usable_key(val)
 
 
 def _prompt_feature_dependencies(text: str, newly_on: set) -> str:
     """For each feature just turned ON that needs extra info, gather it inline.
 
-    - Web search → a Brave API key (top-level ``BRAVE_API_KEY``) if not already set.
+    - Web search → choose Brave or Tavily and supply its key if not already set.
     - RAG / episodic memory → an embeddings model (``RAG.EMBED_MODEL_ID``) if none
       is configured; reuses the normal embeddings section flow.
     ``_Cancelled`` (Esc) propagates so the whole change is left untouched.
     """
-    if "ENABLE_WEB_SEARCH" in newly_on and _is_placeholder_brave_key(
-        _get_top_level(text, "BRAVE_API_KEY")
-    ):
-        key = _ask("Brave Search API key (from brave.com/search/api; blank to skip)")
-        if key:
-            text = _set_top_level_or_add(text, "BRAVE_API_KEY", key)
-        else:
-            print("  No key set — web search stays off until BRAVE_API_KEY is set.")
+    if "ENABLE_WEB_SEARCH" in newly_on:
+        settings = yaml.safe_load(text) or {}
+        try:
+            ready = api_key_for(provider_for(settings), settings)
+        except ValueError:
+            ready = False
+        if not ready:
+            text = _prompt_search_settings(text)
 
     needs_embed = {"ENABLE_RAG", "ENABLE_EPISODIC_MEMORY"} & newly_on
     if needs_embed and not _get_field(text, "EMBED_MODEL_ID", "NAME"):
@@ -2599,7 +2636,7 @@ class FeatureOverride(NamedTuple):
 def run_features_override() -> Optional[FeatureOverride]:
     """Enable/disable app features (``/features``): a checklist of the ENABLE_*
     toggles, writing just those keys back. Prompts for any info a newly-enabled
-    feature needs (Brave key, embeddings model). Returns the written path and
+    feature needs (search-provider key, embeddings model). Returns the written path and
     changed toggle names, or None if cancelled or unchanged."""
     dest = _config_to_edit()
     if not dest.is_file():

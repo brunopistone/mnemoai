@@ -45,6 +45,7 @@ def answers(monkeypatch, **values):
             if label.startswith(spec[0]):
                 return str(values.get(key, default))
         return default
+
     monkeypatch.setattr(C, "_ask_number", answer)
 
 
@@ -52,29 +53,40 @@ def test_scoped_settings_preserve_everything_else(config_file, monkeypatch):
     answers(monkeypatch, TIMEOUT=60, MAX_INPUT_TOKENS=8000)
     assert C.run_review_settings() == config_file
     data = yaml.safe_load(config_file.read_text())
-    assert data["REVIEW"] == {"TIMEOUT": 60, "MAX_INPUT_TOKENS": 8000,
-                              "MAX_ROUNDS": 2, "TOTAL_TIMEOUT": 180,
-                              "MAX_STRATEGY_ROUNDS": 1, "MAX_CHANGE_REVIEWS": 2,
-                              "CUSTOM": {"TIMEOUT": 900}}
+    assert data["REVIEW"] == {
+        "TIMEOUT": 60,
+        "MAX_INPUT_TOKENS": 8000,
+        "MAX_ROUNDS": 2,
+        "TOTAL_TIMEOUT": 180,
+        "MAX_STRATEGY_ROUNDS": 1,
+        "MAX_CHANGE_REVIEWS": 2,
+        "CUSTOM": {"TIMEOUT": 900},
+    }
     assert data["MODEL_ID"] == yaml.safe_load(CFG)["MODEL_ID"]
     assert data["ENABLE_REVIEW"] is False
     assert "# preserve comment" in config_file.read_text()
 
 
-def test_cancel_unchanged_and_concurrent_edits_do_not_overwrite(config_file, monkeypatch):
+def test_cancel_unchanged_and_concurrent_edits_do_not_overwrite(
+    config_file, monkeypatch
+):
     answers(monkeypatch)
     assert C.run_review_settings() is None
     monkeypatch.setattr(C, "_ask_number", Mock(side_effect=C._Cancelled()))
     assert C.run_review_settings() is None and config_file.read_text() == CFG
+
     def changed(*args, **kwargs):
         config_file.write_text(CFG + "USER_EDIT: true\n")
         return CFG.replace("TIMEOUT: 45", "TIMEOUT: 60")
+
     monkeypatch.setattr(C, "_prompt_review_settings", changed)
     assert C.run_review_settings() is None
     assert "USER_EDIT: true" in config_file.read_text()
 
 
-@pytest.mark.parametrize("section", ["", "REVIEW: {}", "REVIEW: {TIMEOUT: 45, CUSTOM: yes}"])
+@pytest.mark.parametrize(
+    "section", ["", "REVIEW: {}", "REVIEW: {TIMEOUT: 45, CUSTOM: yes}"]
+)
 def test_missing_and_inline_sections_are_editable(section, monkeypatch):
     answers(monkeypatch, TIMEOUT=60)
     result = C._prompt_review_settings("MODEL_ID:\n  NAME: fixture\n" + section + "\n")
@@ -96,12 +108,23 @@ def test_features_enabling_review_offers_model_and_limits(config_file, monkeypat
 
 def test_full_setup_offers_review_when_selected(monkeypatch):
     seen = []
-    monkeypatch.setattr(C, "_ask", lambda prompt, default=None, **kw: default or "fixture")
-    monkeypatch.setattr(C, "_ask_number",
-                        lambda *a, **kw: None if kw.get("allow_none") else kw.get("default"))
-    monkeypatch.setattr(C, "_ask_bool", lambda prompt, *args, **kw: "peer review" in prompt)
-    monkeypatch.setattr(C, "_prompt_model_section",
-                        lambda text, section, **kw: seen.append(section) or text)
+    monkeypatch.setattr(C, "_ask_choice", lambda *a, **k: k["default"])
+    monkeypatch.setattr(
+        C, "_ask", lambda prompt, default=None, **kw: default or "fixture"
+    )
+    monkeypatch.setattr(
+        C,
+        "_ask_number",
+        lambda *a, **kw: None if kw.get("allow_none") else kw.get("default"),
+    )
+    monkeypatch.setattr(
+        C, "_ask_bool", lambda prompt, *args, **kw: "peer review" in prompt
+    )
+    monkeypatch.setattr(
+        C,
+        "_prompt_model_section",
+        lambda text, section, **kw: seen.append(section) or text,
+    )
     data = yaml.safe_load(C._build_config("ollama", "fixture", CFG))
     assert "REVIEWER" in seen and data["ENABLE_REVIEW"] is True
 
@@ -111,8 +134,13 @@ def test_model_picker_wires_reviewer_and_feature(config_file, monkeypatch):
     monkeypatch.setattr(C, "_ask_choice", lambda *a, **kw: "8")
     monkeypatch.setattr(C, "_ask_bool", lambda prompt, **kw: "same model" not in prompt)
     monkeypatch.setattr(C, "_prompt_provider_type", lambda *a: "ollama")
-    monkeypatch.setattr(C, "_ask", lambda prompt, default=None, **kw:
-                        "review-fixture" if prompt == "Model name" else default or "")
+    monkeypatch.setattr(
+        C,
+        "_ask",
+        lambda prompt, default=None, **kw: (
+            "review-fixture" if prompt == "Model name" else default or ""
+        ),
+    )
     monkeypatch.setattr(C, "_ask_number", lambda *a, **kw: None)
     result = C.run_model_override()
     data = yaml.safe_load(config_file.read_text())
@@ -125,8 +153,13 @@ def test_params_changes_only_the_reviewer(config_file, monkeypatch):
     config_file.write_text(CFG + "AREA_MODELS:\n  REVIEWER: review-fixture\n")
     monkeypatch.setattr(C, "_is_tty", lambda: False)
     monkeypatch.setattr(C, "_ask_choice", lambda *a, **kw: "8")
-    monkeypatch.setattr(C, "_prompt_one_param", lambda text, section, key, *args:
-                        C._set_field(text, section, key, "0.2") if key == "TEMPERATURE" else text)
+    monkeypatch.setattr(
+        C,
+        "_prompt_one_param",
+        lambda text, section, key, *args: (
+            C._set_field(text, section, key, "0.2") if key == "TEMPERATURE" else text
+        ),
+    )
     written = C.run_params_override()
     assert written.path == config_file and written.section == "REVIEWER"
     data = yaml.safe_load(config_file.read_text())
@@ -135,12 +168,16 @@ def test_params_changes_only_the_reviewer(config_file, monkeypatch):
 
 
 def test_dispatch_controls_and_scoped_reload_do_not_restart(monkeypatch):
-    client = SimpleNamespace(reviewer=review.Reviewer(), reload_review_settings=Mock(return_value=True))
+    client = SimpleNamespace(
+        reviewer=review.Reviewer(), reload_review_settings=Mock(return_value=True)
+    )
     ui = ChatInterface.__new__(ChatInterface)
     ui.client = client
     ui._restart_in_place = Mock(side_effect=AssertionError("must not restart"))
-    monkeypatch.setattr("mnemoai.client.ui.chat_interface.run_review_settings",
-                        lambda: Path("/temporary/config.yaml"))
+    monkeypatch.setattr(
+        "mnemoai.client.ui.chat_interface.run_review_settings",
+        lambda: Path("/temporary/config.yaml"),
+    )
     ui._dispatch("/review on")
     assert client.reviewer.enabled
     ui._dispatch("/config review")
@@ -150,19 +187,26 @@ def test_dispatch_controls_and_scoped_reload_do_not_restart(monkeypatch):
 
 
 @pytest.mark.parametrize("filename", ["review.md", "Review.md"])
-def test_legacy_review_macro_keeps_priority_and_controls_have_an_alias(tmp_path, monkeypatch, filename):
+def test_legacy_review_macro_keeps_priority_and_controls_have_an_alias(
+    tmp_path, monkeypatch, filename
+):
     (tmp_path / filename).write_text("Legacy review: $ARGUMENTS")
     ui = ChatInterface.__new__(ChatInterface)
     ui._user_commands = UserCommandStore(root=tmp_path)
     ui.client = SimpleNamespace(
-        reviewer=review.Reviewer(), query=Mock(return_value="answer"),
-        episodic_memory=None, reflector=None, agent=SimpleNamespace(files=None),
+        reviewer=review.Reviewer(),
+        query=Mock(return_value="answer"),
+        episodic_memory=None,
+        reflector=None,
+        agent=SimpleNamespace(files=None),
     )
     ui._wrap_up_spinner = lambda on: None
     ui._files_mark = lambda: 0
     ui._turn_end_line = lambda *a, **kw: "done"
     ui._expand_mentions = lambda value: value
-    monkeypatch.setattr("mnemoai.client.ui.chat_interface.notify.notify_turn_end", lambda *a: None)
+    monkeypatch.setattr(
+        "mnemoai.client.ui.chat_interface.notify.notify_turn_end", lambda *a: None
+    )
     ui._dispatch("/review on")
     ui.client.query.assert_called_once_with("Legacy review: on")
     assert not ui.client.reviewer.enabled
@@ -172,14 +216,21 @@ def test_legacy_review_macro_keeps_priority_and_controls_have_an_alias(tmp_path,
 
 
 @pytest.mark.parametrize("command", ["/review last", "/config review last"])
-def test_explicit_details_use_the_pane_without_dispatching_model_input(command, tmp_path, capsys):
+def test_explicit_details_use_the_pane_without_dispatching_model_input(
+    command, tmp_path, capsys
+):
     ui = ChatInterface.__new__(ChatInterface)
     ui._user_commands = UserCommandStore(root=tmp_path)
     if command.startswith("/config"):
         (tmp_path / "review.md").write_text("An existing user macro")
     reviewer = review.Reviewer(enabled=True)
-    reviewer.last = {"verdict": "pass", "reviewer": "fixture", "summary": "FULL REPORT",
-                     "findings": [], "coverage_gaps": []}
+    reviewer.last = {
+        "verdict": "pass",
+        "reviewer": "fixture",
+        "summary": "FULL REPORT",
+        "findings": [],
+        "coverage_gaps": [],
+    }
     ui.client = SimpleNamespace(reviewer=reviewer, query=Mock())
     ui._pinned_reader = SimpleNamespace(show_review_details=Mock(return_value=True))
     ui._dispatch(command)
@@ -189,15 +240,20 @@ def test_explicit_details_use_the_pane_without_dispatching_model_input(command, 
     ui.client.query.assert_not_called()
 
 
-@pytest.mark.parametrize("command,inline", [
-    ("/config review last", True),
-    ("/CONFIG  REVIEW  ON", True),
-    ("/config review off", True),
-    ("/config review", False),
-    ("/config", False),
-    ("/config review invalid", False),
-])
-def test_review_controls_do_not_exit_the_pinned_app_for_a_settings_dialog(command, inline):
+@pytest.mark.parametrize(
+    "command,inline",
+    [
+        ("/config review last", True),
+        ("/CONFIG  REVIEW  ON", True),
+        ("/config review off", True),
+        ("/config review", False),
+        ("/config", False),
+        ("/config review invalid", False),
+    ],
+)
+def test_review_controls_do_not_exit_the_pinned_app_for_a_settings_dialog(
+    command, inline
+):
     assert ChatInterface._is_review_control(command) is inline
 
 
@@ -205,8 +261,13 @@ def test_explicit_details_keep_a_grey_off_tty_fallback(tmp_path, capsys):
     ui = ChatInterface.__new__(ChatInterface)
     ui._user_commands = UserCommandStore(root=tmp_path)
     reviewer = review.Reviewer(enabled=True)
-    reviewer.last = {"verdict": "pass", "reviewer": "fixture", "summary": "FULL REPORT",
-                     "findings": [], "coverage_gaps": []}
+    reviewer.last = {
+        "verdict": "pass",
+        "reviewer": "fixture",
+        "summary": "FULL REPORT",
+        "findings": [],
+        "coverage_gaps": [],
+    }
     ui.client = SimpleNamespace(reviewer=reviewer)
     ui._dispatch("/review last")
     output = capsys.readouterr().out
@@ -225,12 +286,20 @@ def test_reload_keeps_actor_model_history_and_session_toggle(monkeypatch):
 
 def test_enabling_reviewer_in_model_picker_applies_without_restart(monkeypatch):
     ui = ChatInterface.__new__(ChatInterface)
-    ui.client = SimpleNamespace(reviewer=review.Reviewer(), reload_area_models=Mock(return_value=True))
-    ui._restart_in_place = Mock(side_effect=AssertionError("review activation needs no restart"))
-    monkeypatch.setattr("mnemoai.client.ui.chat_interface.run_model_override",
-                        lambda: SimpleNamespace(section="REVIEWER", enabled_feature=True))
-    monkeypatch.setattr("mnemoai.client.ui.chat_interface.render_model_update",
-                        lambda *a, **kw: "applied in place")
+    ui.client = SimpleNamespace(
+        reviewer=review.Reviewer(), reload_area_models=Mock(return_value=True)
+    )
+    ui._restart_in_place = Mock(
+        side_effect=AssertionError("review activation needs no restart")
+    )
+    monkeypatch.setattr(
+        "mnemoai.client.ui.chat_interface.run_model_override",
+        lambda: SimpleNamespace(section="REVIEWER", enabled_feature=True),
+    )
+    monkeypatch.setattr(
+        "mnemoai.client.ui.chat_interface.render_model_update",
+        lambda *a, **kw: "applied in place",
+    )
     ui._dispatch("/model")
     assert ui.client.reviewer.enabled
     ui.client.reload_area_models.assert_called_once()
@@ -239,20 +308,27 @@ def test_enabling_reviewer_in_model_picker_applies_without_restart(monkeypatch):
 def test_unconfigured_reviewer_gets_an_isolated_bounded_model(monkeypatch):
     client = LangGraphClient.__new__(LangGraphClient)
     client._area_model_cache = {}
-    client.llm_controller = SimpleNamespace(build_model_variant=Mock(return_value="REVIEW"),
-                                            model_name="main")
+    client.llm_controller = SimpleNamespace(
+        build_model_variant=Mock(return_value="REVIEW"), model_name="main"
+    )
     monkeypatch.setitem(area_models.config._config_data, "AREA_MODELS", {})
     assert client._area_model("REVIEWER") == "REVIEW"
     client.llm_controller.build_model_variant.assert_called_once_with(
-        {"MAX_TOKENS": 2048}, callbacks=[], non_reasoning=True,
+        {"MAX_TOKENS": 2048},
+        callbacks=[],
+        non_reasoning=True,
     )
 
 
 def test_explicit_reviewer_failure_cannot_fall_back_to_actor(monkeypatch):
     client = LangGraphClient.__new__(LangGraphClient)
     client._area_model_cache, client.model = {}, "ACTOR"
-    client.llm_controller = SimpleNamespace(build_model_variant=Mock(side_effect=RuntimeError("offline")))
-    monkeypatch.setitem(area_models.config._config_data, "AREA_MODELS", {"REVIEWER": "side-model"})
+    client.llm_controller = SimpleNamespace(
+        build_model_variant=Mock(side_effect=RuntimeError("offline"))
+    )
+    monkeypatch.setitem(
+        area_models.config._config_data, "AREA_MODELS", {"REVIEWER": "side-model"}
+    )
     assert client._area_model("REVIEWER") is None
     assert client._area_model("REVIEWER") is None
     client.llm_controller.build_model_variant.assert_called_once()
@@ -260,7 +336,9 @@ def test_explicit_reviewer_failure_cannot_fall_back_to_actor(monkeypatch):
 
 @pytest.mark.parametrize("value", [False, [], 3, {"NAME": False}, {"TYPE": []}])
 def test_invalid_explicit_override_is_not_treated_as_no_override(value, monkeypatch):
-    monkeypatch.setitem(area_models.config._config_data, "AREA_MODELS", {"REVIEWER": value})
+    monkeypatch.setitem(
+        area_models.config._config_data, "AREA_MODELS", {"REVIEWER": value}
+    )
     with pytest.raises(ValueError):
         area_models.reviewer_overrides()
 

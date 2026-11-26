@@ -654,6 +654,7 @@ def test_config_wizard_offers_num_batch_for_each_ollama_model(monkeypatch):
     monkeypatch.setattr(C, "_ask", answer)
     monkeypatch.setattr(C, "_ask_bool", lambda prompt, *a, **k: prompt.startswith("Configure a"))
     monkeypatch.setattr(C, "_prompt_provider_type", lambda *a, **k: "ollama")
+    monkeypatch.setattr(C, "_ask_choice", lambda *a, **k: k["default"])
     monkeypatch.setattr(
         C, "_ask_number",
         lambda *a, default=None, **k: None if default == "none" else default,
@@ -932,6 +933,8 @@ def _run_build(provider, default_model, answers, template_file="config.yaml.exam
     text = (C._templates_dir() / template_file).read_text()
     it = iter(answers)
     def answer(prompt=""):
+        if "Web search provider" in prompt:
+            return "brave"
         if "Reflector — use the same model" in prompt:
             return "y"
         if "Reflection wait" in prompt:
@@ -1665,6 +1668,8 @@ class TestFeaturesToggles:
 
     def test_web_search_prompts_for_brave_key(self, monkeypatch):
         from mnemoai.utils import configurator as C
+        monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        monkeypatch.setattr(C, "_ask_choice", lambda *a, **k: "brave")
         monkeypatch.setattr(C, "_ask", lambda *a, **k: "BSA-realkey")
         out = C._prompt_feature_dependencies(self.CFG, {"ENABLE_WEB_SEARCH"})
         d = yaml.safe_load(out)

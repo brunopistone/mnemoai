@@ -580,18 +580,27 @@ def _feature_checks() -> List[Check]:
     for store in sorted(stores):
         module = "faiss" if "faiss" in store else "chromadb"
         out.append(_import_check("Features", f"{module} ({store})", module))
-    if config.get("ENABLE_WEB_SEARCH", False) and not (
-        config.get("BRAVE_API_KEY") or os.environ.get("BRAVE_API_KEY")
-    ):
-        out.append(
-            Check(
-                "Features",
-                "web search",
-                WARN,
-                "ENABLE_WEB_SEARCH is on but no BRAVE_API_KEY is set",
-                "Add BRAVE_API_KEY to config.yaml, or turn the feature off in /features.",
+    if config.get("ENABLE_WEB_SEARCH", False):
+        from mnemoai.utils.web_search_config import KEY_NAMES, api_key_for, provider_for
+
+        try:
+            provider = provider_for(config)
+        except ValueError as exc:
+            out.append(
+                Check("Features", "web search", WARN, str(exc), "Use /config search.")
             )
-        )
+        else:
+            if not api_key_for(provider, config):
+                name = KEY_NAMES[provider]
+                out.append(
+                    Check(
+                        "Features",
+                        "web search",
+                        WARN,
+                        f"ENABLE_WEB_SEARCH is on but no {name} is set",
+                        f"Add {name} to config.yaml or the environment; use /config search to select a provider.",
+                    )
+                )
     return out
 
 

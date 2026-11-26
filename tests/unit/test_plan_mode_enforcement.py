@@ -22,7 +22,14 @@ BLOCKED = [
     "clear_completed_tasks",
     "clear_documents",
 ]
-ALLOWED = ["fs_read", "glob_search", "grep_search", "memory", "web_search", "cancel_background_task"]
+ALLOWED = [
+    "fs_read",
+    "glob_search",
+    "grep_search",
+    "memory",
+    "web_search",
+    "cancel_background_task",
+]
 
 
 def _agent(plan_active):
@@ -55,7 +62,7 @@ def test_default_provider_is_inactive():
     # An agent built without a provider must default to plan mode OFF (no
     # accidental blocking when the feature isn't wired).
     a = LangGraphAgent.__new__(LangGraphAgent)
-    a._plan_mode_provider = (lambda: False)
+    a._plan_mode_provider = lambda: False
     assert a._is_blocked_by_plan_mode("execute_bash") is False
 
 
@@ -80,7 +87,7 @@ READONLY_CMDS = [
 MUTATING_CMDS = [
     "env touch example",
     "ls\ntouch example",
-    'awk \'BEGIN {system("touch example")}\'',
+    "awk 'BEGIN {system(\"touch example\")}'",
     "git diff --output=example",
     "sed -n 'w example' input",
     "rg --pre=script pattern",
@@ -137,18 +144,35 @@ def test_external_tools_need_a_readonly_declaration_in_plan_mode():
 
 def test_every_registered_builtin_has_exactly_one_plan_policy():
     import ast
+    import asyncio
     from pathlib import Path
 
+    from mcp.server.fastmcp import FastMCP
+
     import mnemoai
+    from mnemoai.server.tools.web_search_controller import (
+        _ADAPTERS,
+        WebSearchController,
+    )
 
     registered = set()
     for path in (Path(mnemoai.__file__).parent / "server" / "tools").rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-                isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
-                and d.func.attr == "tool" for d in node.decorator_list
+                isinstance(d, ast.Call)
+                and isinstance(d.func, ast.Attribute)
+                and d.func.attr == "tool"
+                for d in node.decorator_list
             ):
                 registered.add(node.name)
+    # Provider adapters register bound methods rather than decorated functions.
+    # Include the actual MCP surface for every provider, with optional tools on.
+    for provider in _ADAPTERS:
+        mcp = FastMCP("policy-audit")
+        WebSearchController(provider, "unused-test-key").register(
+            mcp, include_web_tools=True
+        )
+        registered.update(tool.name for tool in asyncio.run(mcp.list_tools()))
     assert registered == plan_policy.PLAN_ALLOWED_TOOLS | plan_policy.PLAN_BLOCKED_TOOLS
     assert not plan_policy.PLAN_ALLOWED_TOOLS & plan_policy.PLAN_BLOCKED_TOOLS
 
@@ -159,13 +183,16 @@ def test_external_mcp_annotation_reaches_the_actual_agent_policy():
     from mcp.types import Tool, ToolAnnotations
 
     agent = _agent(True)
-    agent.tools = [SimpleNamespace(
-        name="external_read",
-        mcp_tool=Tool(
-            name="external_read", inputSchema={"type": "object"},
-            annotations=ToolAnnotations(readOnlyHint=True),
-        ),
-    )]
+    agent.tools = [
+        SimpleNamespace(
+            name="external_read",
+            mcp_tool=Tool(
+                name="external_read",
+                inputSchema={"type": "object"},
+                annotations=ToolAnnotations(readOnlyHint=True),
+            ),
+        )
+    ]
     assert not agent._is_blocked_by_plan_mode("external_read")
     assert agent._is_blocked_by_plan_mode("external_unknown")
 
@@ -185,9 +212,7 @@ def test_non_plan_file_write_blocked(tool):
         a._is_blocked_by_plan_mode(tool, {"path": str(plans_dir() / "x.txt")}) is True
     )
     # Plausible plan name but outside the plans dir.
-    assert (
-        a._is_blocked_by_plan_mode(tool, {"path": "/tmp/elsewhere/plan.md"}) is True
-    )
+    assert a._is_blocked_by_plan_mode(tool, {"path": "/tmp/elsewhere/plan.md"}) is True
     # No path at all.
     assert a._is_blocked_by_plan_mode(tool, {}) is True
 

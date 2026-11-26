@@ -34,9 +34,9 @@ _IMAGE_EXT_RE = re.compile(
 _URL_RE = re.compile(r"https?://", re.IGNORECASE)
 # A filesystem-ish path or code file reference -> code route.
 _PATH_RE = re.compile(
-    r"(?:^|\s)(?:~|\.{1,2})?/[\w./\-]+"            # /abs, ./rel, ~/home paths
+    r"(?:^|\s)(?:~|\.{1,2})?/[\w./\-]+"  # /abs, ./rel, ~/home paths
     r"|[\w\-./]+\.(?:py|js|ts|tsx|jsx|go|rs|java|c|cpp|h|hpp|rb|php|sh|"
-    r"yaml|yml|toml|json|md|txt|cfg|ini|sql)\b",   # bare code/config filenames
+    r"yaml|yml|toml|json|md|txt|cfg|ini|sql)\b",  # bare code/config filenames
     re.IGNORECASE,
 )
 # Document formats handled by the knowledge route's readers.
@@ -67,6 +67,7 @@ def is_trivial_query(query: str) -> bool:
     # Word-count gate: short prompts are chit-chat / clarifications. Real
     # decomposable tasks are longer and more specific.
     return len(q.split()) <= 6
+
 
 # Route definitions: maps route names to tool name lists.
 # None means all tools (fallback).
@@ -99,6 +100,9 @@ ROUTE_TOOLS: Dict[str, Optional[List[str]]] = {
     "research": [
         "web_search",
         "web_crawler",
+        "tavily_extract",
+        "tavily_crawl",
+        "tavily_map",
         "search_in_documents",
         "list_documents",
     ],
@@ -264,20 +268,26 @@ class QueryRouter:
         the streamed turn beside it recovered on its second attempt.
         """
         llm = config.get("LLM", {})
+
         def invoke():
             response = None
             attempted = False
             record = usage_tracker.recorder(self.usage, model, self.usage_model_name)
+
             def call():
                 nonlocal attempted
                 attempted = True
                 return model.invoke(messages, config={"callbacks": []})
+
             try:
-                response = stream_policy.cancellable_call(call, getattr(self, "cancel_event", None))
+                response = stream_policy.cancellable_call(
+                    call, getattr(self, "cancel_event", None)
+                )
                 return response
             finally:
                 if attempted:
                     record(response)
+
         return stream_policy.call_with_transient_retry(
             invoke,
             attempts=stream_policy.aux_attempts(llm.get("MAX_RETRIES", 2)),

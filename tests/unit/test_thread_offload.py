@@ -13,6 +13,7 @@ import ast
 import asyncio
 import inspect
 import pathlib
+import textwrap
 import threading
 import time
 
@@ -269,7 +270,7 @@ class TestNoToolReintroducesTheBug:
 
     @staticmethod
     def _tool_functions():
-        """Every ``@mcp.tool()``-decorated function in server/tools, by AST."""
+        """Decorated tools plus registered provider methods; never load SDKs."""
         for path, node in _walk_server_tools():
             decorated = any(
                 (isinstance(d, ast.Call) and getattr(d.func, "attr", "") == "tool")
@@ -278,6 +279,19 @@ class TestNoToolReintroducesTheBug:
             )
             if decorated:
                 yield path.name, node
+        from mnemoai.server.tools.web_search_controller import (
+            _ADAPTERS,
+            WebSearchController,
+        )
+
+        for provider in _ADAPTERS:
+            adapter = WebSearchController(provider, "unused-test-key").provider
+            methods = [("web_search", adapter.search)]
+            methods.extend((name, getattr(adapter, name)) for name in adapter.web_tools)
+            for name, method in methods:
+                node = ast.parse(textwrap.dedent(inspect.getsource(method))).body[0]
+                node.name = name
+                yield pathlib.Path(inspect.getfile(method)).name, node
 
     def test_the_scan_finds_the_tools(self):
         found = {name for _, node in self._tool_functions() for name in [node.name]}

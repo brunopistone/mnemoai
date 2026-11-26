@@ -73,6 +73,9 @@ _READONLY_TOOLS = [
     "git_status_safe",
     "web_search",
     "web_crawler",
+    "tavily_extract",
+    "tavily_crawl",
+    "tavily_map",
     "describe_image",
 ]
 
@@ -183,6 +186,7 @@ _BUILTIN_SUBAGENTS = [
     ),
 ]
 
+
 def _parse_tools(raw) -> Optional[List[str]]:
     """Normalize a frontmatter ``tools`` value to an allowlist, or None (= all).
 
@@ -251,10 +255,14 @@ def _load_custom_subagents(root: Optional[Path] = None) -> List[SubAgentType]:
         try:
             front, body = _parse_frontmatter(text)
         except yaml.YAMLError as e:
-            print_error(f"Agent '{entry.name}': invalid YAML frontmatter ({e}); skipping.")
+            print_error(
+                f"Agent '{entry.name}': invalid YAML frontmatter ({e}); skipping."
+            )
             continue
         if not front:
-            print_error(f"Agent '{entry.name}': no YAML frontmatter (--- block); skipping.")
+            print_error(
+                f"Agent '{entry.name}': no YAML frontmatter (--- block); skipping."
+            )
             continue
         description = str(front.get("description", "")).strip()
         if not description:
@@ -262,7 +270,9 @@ def _load_custom_subagents(root: Optional[Path] = None) -> List[SubAgentType]:
             continue
         body = body.strip()
         if not body:
-            print_error(f"Agent '{entry.name}': empty body (no system prompt); skipping.")
+            print_error(
+                f"Agent '{entry.name}': empty body (no system prompt); skipping."
+            )
             continue
         name = str(front.get("name", "") or entry.stem).strip().lower()
         # Optional per-agent denylist (accept hyphen or underscore) and model
@@ -287,8 +297,11 @@ def _load_custom_subagents(root: Optional[Path] = None) -> List[SubAgentType]:
             )
         )
     if agents:
-        logger.debug("Loaded %d custom sub-agent(s): %s",
-                     len(agents), ", ".join(a.name for a in agents))
+        logger.debug(
+            "Loaded %d custom sub-agent(s): %s",
+            len(agents),
+            ", ".join(a.name for a in agents),
+        )
     return agents
 
 
